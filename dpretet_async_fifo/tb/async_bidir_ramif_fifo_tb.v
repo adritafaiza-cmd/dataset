@@ -157,12 +157,13 @@ module async_bidir_ramif_fifo_tb;
         a_winc = 0;
 
         wait (b_empty == 0);
-        @(negedge b_clk);
+        repeat (8) @(posedge b_clk);
+        check_data(b_rdata, 8'h5A);
+
+	@(negedge b_clk);
         b_rinc = 1;
 
         @(negedge b_clk);
-        @(negedge b_clk);
-        check_data(b_rdata, 8'h5A);
         b_rinc = 0;
 
         #100;
@@ -185,12 +186,12 @@ module async_bidir_ramif_fifo_tb;
         b_winc = 0;
 
         wait (a_empty == 0);
-        @(negedge a_clk);
-        a_rinc = 1;
+        repeat (8) @(posedge a_clk);
+        check_data(a_rdata, 8'hC3);
 
         @(negedge a_clk);
+        a_rinc = 1;
         @(negedge a_clk);
-        check_data(a_rdata, 8'hC3);
         a_rinc = 0;
 
         #100;
