@@ -419,6 +419,6 @@ module axidma_assert;
         $finish;
     end
 endmodule
-endmodule
+
 
 `default_nettype wire

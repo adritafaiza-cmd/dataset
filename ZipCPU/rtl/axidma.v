@@ -198,7 +198,7 @@ module	axidma #(
 `ifdef	AXI3
 		output	reg	[C_AXI_ID_WIDTH-1:0]	M_AXI_WID,
 `endif
-		output	reg	[C_AXI_DATA_WIDTH-1:0]	M_AXI_WDATA,
+		output	wire	[C_AXI_DATA_WIDTH-1:0]	M_AXI_WDATA,
 		output	reg [C_AXI_DATA_WIDTH/8-1:0]	M_AXI_WSTRB,
 		output	reg				M_AXI_WLAST,
 		//
@@ -1686,7 +1686,7 @@ module	axidma #(
 `ifdef	AXI3
 			readlen_w[LGLENW:4],
 `else
-			readlen_w[LGLENW:8],
+			readlen_w[8:LGLENW],
 `endif
 			writelen_b[ADDRLSB-1:0], readlen_b[ADDRLSB-1:0],
 			read_distance_to_boundary_b
