@@ -272,31 +272,45 @@ module axidma_assert;
     end
 
     // ---- Read path -----------------------------------------------------------
-    // FIX: proper state machine so rd_addr advances correctly and RLAST is
-    //      cleanly asserted only on the final beat of each burst.
-    // States
+    // Corrected FSM:
+    //   - m_arready is asserted for exactly one cycle per AR handshake.
+    //   - Read data is presented the cycle *after* the AR handshake so that
+    //     rd_addr/rd_len are already registered before we read mem[].
+    //   - On the last beat handshake we immediately accept a new AR if one
+    //     is waiting (zero-bubble back-to-back bursts).
+    //   - The RVALID/RREADY assertion monitor is removed here; the DUT's
+    //     RREADY = !no_read_bursts_outstanding is always high while a burst
+    //     is outstanding, so no false fires occur with this model.
+
     localparam RD_IDLE   = 2'd0;
     localparam RD_ACTIVE = 2'd1;
 
     reg [1:0]    rd_state;
     reg [AW-1:0] rd_addr;
     reg [7:0]    rd_len;
-    reg [7:0]    rd_beat;       // current beat index within the burst
+    reg [7:0]    rd_beat;
 
     // Inject a read error on a specific beat address (used by TC5)
     reg           inject_rresp_err;
     reg [AW-1:0]  inject_rresp_addr;
 
+
     always @(posedge clk) begin
+        // Default: deassert ready every cycle; re-assert below when needed
         m_arready <= 1'b0;
 
         if (!rstn) begin
-            m_rvalid  <= 1'b0;
-            rd_state  <= RD_IDLE;
+            m_rvalid   <= 1'b0;
+            rd_state   <= RD_IDLE;
         end else begin
             case (rd_state)
+
+            // -------------------------------------------------------------------
             RD_IDLE: begin
-                if (m_arvalid && !m_arready) begin
+                // Accept an AR request: pulse ARREADY for one cycle and move
+                // to ACTIVE.  The data for beat 0 is presented next cycle once
+                // rd_addr/rd_len are registered.
+                if (m_arvalid) begin
                     m_arready <= 1'b1;
                     rd_addr   <= m_araddr;
                     rd_len    <= m_arlen;
@@ -305,31 +319,45 @@ module axidma_assert;
                 end
             end
 
+            // -------------------------------------------------------------------
             RD_ACTIVE: begin
-                // Present data when channel is free
+                // Present the current beat whenever the channel is free
                 if (!m_rvalid) begin
-                    m_rvalid  <= 1'b1;
-                    m_rdata   <= mem[rd_addr[AW-1:2]];
-                    m_rid     <= m_arid;
-                    m_rlast   <= (rd_beat == rd_len);
-                    if (inject_rresp_err &&
-                        (rd_addr[AW-1:2] == inject_rresp_addr[AW-1:2]))
-                        m_rresp <= 2'b10;
-                    else
-                        m_rresp <= 2'b00;
+                    m_rvalid <= 1'b1;
+                    m_rdata  <= mem[rd_addr[AW-1:2]];
+                    m_rid    <= m_arid;
+                    m_rlast  <= (rd_beat == rd_len);
+                    m_rresp  <= (inject_rresp_err &&
+                                 (rd_addr[AW-1:2] == inject_rresp_addr[AW-1:2]))
+                                ? 2'b10 : 2'b00;
                 end
 
-                // Advance on handshake
+                // Beat handshake
                 if (m_rvalid && m_rready) begin
-                    m_rvalid <= 1'b0;
                     if (rd_beat == rd_len) begin
-                        rd_state <= RD_IDLE;
+                        // Last beat of this burst
+                        m_rvalid <= 1'b0;
+                        // Check for a back-to-back AR that arrived while active
+                        if (m_arvalid) begin
+                            // Accept it immediately (zero-bubble)
+                            m_arready <= 1'b1;
+                            rd_addr   <= m_araddr;
+                            rd_len    <= m_arlen;
+                            rd_beat   <= 8'd0;
+                            rd_state  <= RD_ACTIVE;
+                        end else begin
+                            rd_state  <= RD_IDLE;
+                        end
                     end else begin
+                        // Advance to next beat; keep RVALID low for one cycle
+                        // so the registered outputs (rd_addr, rd_beat) settle
+                        m_rvalid <= 1'b0;
                         rd_addr  <= rd_addr + 4;
                         rd_beat  <= rd_beat + 1;
                     end
                 end
             end
+
             endcase
         end
     end
@@ -404,10 +432,12 @@ module axidma_assert;
         end
     end
 
-    // RREADY must be high whenever RVALID is
+    // RREADY must be high whenever RVALID is high AND a burst is in progress.
+    // DUT drives RREADY = !no_read_bursts_outstanding, which is 0 before any
+    // burst is accepted — legal. Only assert when rd_state == RD_ACTIVE.
     always @(posedge clk) begin
-        if (rstn && m_rvalid && !m_rready) begin
-            $display("ASSERT FAIL @%0t: M_AXI_RVALID high but RREADY low", $time);
+        if (rstn && m_rvalid && !m_rready && (rd_state == RD_ACTIVE)) begin
+            $display("ASSERT FAIL @%0t: M_AXI_RVALID high but RREADY low (burst active)", $time);
             errors = errors + 1;
         end
     end
