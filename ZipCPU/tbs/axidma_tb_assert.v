@@ -21,7 +21,7 @@
 //   TC6  – Write-error response        (BRESP=SLVERR, check r_err set)
 // =============================================================================
 
-module axidma_tb;
+module axidma_assert;
 
     // -------------------------------------------------------------------------
     // Parameters (must match DUT instantiation below)
