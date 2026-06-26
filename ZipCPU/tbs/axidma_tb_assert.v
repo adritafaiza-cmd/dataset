@@ -43,7 +43,7 @@ module axidma_assert;
 
     // -------------------------------------------------------------------------
     // Clock & reset
-    // -------------------------------------------------------------------------
+    
     reg clk  = 0;
     reg rstn = 0;
     always #5 clk = ~clk;
@@ -51,9 +51,8 @@ module axidma_assert;
     integer errors = 0;
     integer i;
 
-    // -------------------------------------------------------------------------
-    // AXI-Lite slave-side signals (driven by TB)
-    // -------------------------------------------------------------------------
+ // AXI-Lite slave-side signals (driven by TB)
+    
     reg        s_awvalid;
     wire       s_awready;
     reg  [4:0] s_awaddr;
@@ -80,7 +79,7 @@ module axidma_assert;
 
     // -------------------------------------------------------------------------
     // AXI master-side signals (DUT → memory model)
-    // -------------------------------------------------------------------------
+ 
     wire            m_awvalid;
     reg             m_awready;
     wire [IW-1:0]   m_awid;
@@ -125,9 +124,9 @@ module axidma_assert;
 
     wire o_int;
 
-    // -------------------------------------------------------------------------
+    
     // DUT instantiation
-    // -------------------------------------------------------------------------
+    
     axidma #(
         .C_AXI_ID_WIDTH (IW),
         .C_AXI_ADDR_WIDTH(AW),
@@ -210,9 +209,8 @@ module axidma_assert;
         .o_int         (o_int)
     );
 
-    // =========================================================================
-    // Memory model
-    // =========================================================================
+
+    // Memory model   
     reg [DW-1:0]  mem [0:63];   // 64 words × 4 B = 256 B (fits AW=8)
 
     // ---- Write path ----------------------------------------------------------
@@ -272,18 +270,26 @@ module axidma_assert;
     end
 
     // ---- Read path -----------------------------------------------------------
-    // Corrected FSM:
-    //   - m_arready is asserted for exactly one cycle per AR handshake.
-    //   - Read data is presented the cycle *after* the AR handshake so that
-    //     rd_addr/rd_len are already registered before we read mem[].
-    //   - On the last beat handshake we immediately accept a new AR if one
-    //     is waiting (zero-bubble back-to-back bursts).
-    //   - The RVALID/RREADY assertion monitor is removed here; the DUT's
-    //     RREADY = !no_read_bursts_outstanding is always high while a burst
-    //     is outstanding, so no false fires occur with this model.
+    // Read path FSM — 3 states:
+    //
+    //   RD_IDLE   : waiting for M_AXI_ARVALID. Accept with ARREADY pulse and
+    //               latch addr/len, move to RD_WAIT.
+    //
+    //   RD_WAIT   : one-cycle pipeline bubble.
+    //               The DUT sets phantom_read on the AR-handshake cycle and only
+    //               clears no_read_bursts_outstanding (→ RREADY=1) the cycle
+    //               after phantom_read. We must not present RVALID until RREADY
+    //               is already high, so we stall here for exactly one cycle.
+    //
+    //   RD_ACTIVE : present beats one at a time. Between beats RVALID is
+    //               deasserted for one cycle so rd_addr/rd_beat settle before
+    //               the next beat is loaded. On RLAST handshake, if a new AR is
+    //               already waiting we accept it and go back to RD_WAIT
+    //               (another pipeline bubble), otherwise back to RD_IDLE.
 
     localparam RD_IDLE   = 2'd0;
-    localparam RD_ACTIVE = 2'd1;
+    localparam RD_WAIT   = 2'd1;   // ← new pipeline-bubble state
+    localparam RD_ACTIVE = 2'd2;
 
     reg [1:0]    rd_state;
     reg [AW-1:0] rd_addr;
@@ -294,34 +300,35 @@ module axidma_assert;
     reg           inject_rresp_err;
     reg [AW-1:0]  inject_rresp_addr;
 
-
     always @(posedge clk) begin
-        // Default: deassert ready every cycle; re-assert below when needed
-        m_arready <= 1'b0;
+        m_arready <= 1'b0;   // default: deasserted
 
         if (!rstn) begin
-            m_rvalid   <= 1'b0;
-            rd_state   <= RD_IDLE;
+            m_rvalid <= 1'b0;
+            rd_state <= RD_IDLE;
         end else begin
             case (rd_state)
 
-            // -------------------------------------------------------------------
+            
             RD_IDLE: begin
-                // Accept an AR request: pulse ARREADY for one cycle and move
-                // to ACTIVE.  The data for beat 0 is presented next cycle once
-                // rd_addr/rd_len are registered.
                 if (m_arvalid) begin
-                    m_arready <= 1'b1;
+                    m_arready <= 1'b1;          // pulse ARREADY
                     rd_addr   <= m_araddr;
                     rd_len    <= m_arlen;
                     rd_beat   <= 8'd0;
-                    rd_state  <= RD_ACTIVE;
+                    rd_state  <= RD_WAIT;       // bubble before first RVALID
                 end
             end
 
-            // -------------------------------------------------------------------
+            // One idle cycle: DUT phantom_read has fired, RREADY will be 1
+            // from the next cycle onward.  Do NOT assert RVALID here.
+            RD_WAIT: begin
+                rd_state <= RD_ACTIVE;
+            end
+
+            
             RD_ACTIVE: begin
-                // Present the current beat whenever the channel is free
+                // Load next beat when R channel is free
                 if (!m_rvalid) begin
                     m_rvalid <= 1'b1;
                     m_rdata  <= mem[rd_addr[AW-1:2]];
@@ -334,26 +341,22 @@ module axidma_assert;
 
                 // Beat handshake
                 if (m_rvalid && m_rready) begin
+                    m_rvalid <= 1'b0;
                     if (rd_beat == rd_len) begin
-                        // Last beat of this burst
-                        m_rvalid <= 1'b0;
-                        // Check for a back-to-back AR that arrived while active
+                        // Last beat — check for back-to-back AR
                         if (m_arvalid) begin
-                            // Accept it immediately (zero-bubble)
                             m_arready <= 1'b1;
                             rd_addr   <= m_araddr;
                             rd_len    <= m_arlen;
                             rd_beat   <= 8'd0;
-                            rd_state  <= RD_ACTIVE;
+                            rd_state  <= RD_WAIT;   // pipeline bubble again
                         end else begin
                             rd_state  <= RD_IDLE;
                         end
                     end else begin
-                        // Advance to next beat; keep RVALID low for one cycle
-                        // so the registered outputs (rd_addr, rd_beat) settle
-                        m_rvalid <= 1'b0;
-                        rd_addr  <= rd_addr + 4;
-                        rd_beat  <= rd_beat + 1;
+                        // Advance; one-cycle bubble keeps rd_addr settled
+                        rd_addr <= rd_addr + 4;
+                        rd_beat <= rd_beat + 1;
                     end
                 end
             end
@@ -362,9 +365,9 @@ module axidma_assert;
         end
     end
 
-    // =========================================================================
+
     // AXI handshake protocol assertions (continuous monitors)
-    // =========================================================================
+
 
     // — Valid-stable: once VALID is asserted it must not drop until READY —
     //
@@ -456,9 +459,10 @@ module axidma_assert;
         end
     end
 
-    // =========================================================================
+    // 
+
     // Tasks
-    // =========================================================================
+
 
     // ---- check ---------------------------------------------------------------
     task check;
@@ -598,9 +602,9 @@ module axidma_assert;
         end
     endtask
 
-    // =========================================================================
+
     // Stimulus
-    // =========================================================================
+
 
     reg [31:0] status;
 
@@ -622,11 +626,11 @@ module axidma_assert;
         rstn = 1'b1;
         repeat (5) @(posedge clk);
 
-        // =====================================================================
+
         // TC1 – Aligned single-burst copy (4 words = 16 bytes)
         // Source  : 0x00 (mem[0..3]  = 0x11111111 .. 0x44444444)
         // Dest    : 0x40 (mem[16..19])
-        // =====================================================================
+ 
         $display("\n--- TC1: Aligned single-burst copy ---");
         mem_init();
         mem[0] = 32'h11111111;
@@ -649,12 +653,11 @@ module axidma_assert;
         check(mem[18] == 32'h33333333, "TC1: word 2 copied correctly");
         check(mem[19] == 32'h44444444, "TC1: word 3 copied correctly");
 
-        // =====================================================================
+
         // TC2 – Multi-burst copy (8 words = 32 bytes, 2 bursts of 4)
         // Source  : 0x00  (mem[0..7])
         // Dest    : 0x80  (mem[32..39])   — needs AW=8, fits in 256 B space
-        // Note: dest 0x80 = mem[32], last word mem[39] = 0x9C which is < 64*4=256
-        // =====================================================================
+      
         $display("\n--- TC2: Multi-burst copy (8 words) ---");
         mem_init();
         for (i = 0; i < 8; i = i + 1)
@@ -679,9 +682,9 @@ module axidma_assert;
             check(ok, "TC2: All 8 words copied correctly");
         end
 
-        // =====================================================================
+
         // TC3 – Back-to-back transfers (two sequential DMAs, no gap)
-        // =====================================================================
+   
         $display("\n--- TC3: Back-to-back transfers ---");
         mem_init();
         mem[0] = 32'hDEADBEEF;
@@ -710,10 +713,10 @@ module axidma_assert;
         check(mem[34] == 32'h01234567, "TC3: 2nd transfer word 2");
         check(mem[35] == 32'h89ABCDEF, "TC3: 2nd transfer word 3");
 
-        // =====================================================================
+
         // TC4 – Abort via ABORT_KEY
         // Start a long transfer and inject abort mid-flight.
-        // =====================================================================
+
         $display("\n--- TC4: Abort via ABORT_KEY ---");
         mem_init();
         for (i = 0; i < 32; i = i + 1)
@@ -740,9 +743,9 @@ module axidma_assert;
         // Clear abort flag for next test by writing start=0 err=0 abort=0
         axil_write(CTRL_ADDR, 32'h00000000);
 
-        // =====================================================================
+
         // TC5 – Read error response (RRESP = SLVERR)
-        // =====================================================================
+      
         $display("\n--- TC5: Read error (RRESP=SLVERR) ---");
         mem_init();
         mem[0] = 32'hAAAAAAAA;
@@ -771,10 +774,10 @@ module axidma_assert;
         axil_read(CTRL_ADDR, status);
         check(status[4] == 1'b0, "TC5: Error flag cleared");
 
-        // =====================================================================
+
         // TC6 – Write error response (BRESP = SLVERR)
-        // =====================================================================
-        $display("\n--- TC6: Write error (BRESP=SLVERR) ---");
+
+                $display("\n--- TC6: Write error (BRESP=SLVERR) ---");
         mem_init();
         mem[0] = 32'hCCCCCCCC;
         mem[1] = 32'hDDDDDDDD;
@@ -801,9 +804,8 @@ module axidma_assert;
         axil_read(CTRL_ADDR, status);
         check(status[4] == 1'b0, "TC6: Error flag cleared");
 
-        // =====================================================================
         // Results
-        // =====================================================================
+
         repeat (10) @(posedge clk);
         $display("\n========================================");
         if (errors == 0)
