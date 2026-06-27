@@ -29,7 +29,7 @@ module axilxbar_assert;
   wire [NS*3-1:0]  m_awprot, m_arprot;
   wire [NS-1:0] m_awvalid, m_wvalid, m_bready, m_arvalid, m_rready;
 
-  reg [NS-1:0] m_awready, m_wready, m_bvalid, m_arready, m_rvalid;
+  reg  [NS-1:0] m_awready, m_wready, m_bvalid, m_arready, m_rvalid;
   wire [NS*DW-1:0] m_wdata;
   wire [NS*DW/8-1:0] m_wstrb;
 
@@ -124,11 +124,11 @@ module axilxbar_assert;
       s_wstrb[0 +: DW/8] = 4'hf;
 
       s_awvalid[0] = 1'b1;
-      s_wvalid[0] = 1'b1;
-      s_bready[0] = 1'b1;
+      s_wvalid[0]  = 1'b1;
+      s_bready[0]  = 1'b1;
 
       m_awready[slave] = 1'b1;
-      m_wready[slave] = 1'b1;
+      m_wready[slave]  = 1'b1;
 
       wait (m_awvalid[slave]);
       check(m_awaddr[slave*AW +: AW] == addr, "xbar routed write address");
@@ -140,9 +140,9 @@ module axilxbar_assert;
 
       @(negedge clk);
       s_awvalid[0] = 1'b0;
-      s_wvalid[0] = 1'b0;
+      s_wvalid[0]  = 1'b0;
       m_awready[slave] = 1'b0;
-      m_wready[slave] = 1'b0;
+      m_wready[slave]  = 1'b0;
 
       @(negedge clk);
       m_bresp[slave*2 +: 2] = 2'b00;
@@ -154,6 +154,8 @@ module axilxbar_assert;
       @(negedge clk);
       m_bvalid[slave] = 1'b0;
       s_bready[0] = 1'b0;
+
+      repeat (3) @(posedge clk);
     end
   endtask
 
@@ -167,7 +169,7 @@ module axilxbar_assert;
       @(negedge clk);
       s_araddr[AW +: AW] = addr;
       s_arvalid[1] = 1'b1;
-      s_rready[1] = 1'b1;
+      s_rready[1]  = 1'b1;
 
       m_arready[slave] = 1'b1;
 
@@ -191,28 +193,30 @@ module axilxbar_assert;
       @(negedge clk);
       m_rvalid[slave] = 1'b0;
       s_rready[1] = 1'b0;
+
+      repeat (3) @(posedge clk);
     end
   endtask
 
   initial begin
     s_awvalid = 0;
-    s_wvalid = 0;
-    s_bready = 0;
+    s_wvalid  = 0;
+    s_bready  = 0;
     s_arvalid = 0;
-    s_rready = 0;
+    s_rready  = 0;
 
     s_awaddr = 0;
     s_araddr = 0;
     s_awprot = 0;
     s_arprot = 0;
-    s_wdata = 0;
-    s_wstrb = 0;
+    s_wdata  = 0;
+    s_wstrb  = 0;
 
     m_awready = 0;
-    m_wready = 0;
-    m_bvalid = 0;
+    m_wready  = 0;
+    m_bvalid  = 0;
     m_arready = 0;
-    m_rvalid = 0;
+    m_rvalid  = 0;
 
     m_bresp = 0;
     m_rresp = 0;
@@ -226,10 +230,16 @@ module axilxbar_assert;
     $display("TEST AXILXBAR");
 
     axil_write_m0(8'h04, 32'h11112222);
+    repeat (5) @(posedge clk);
+
     axil_write_m0(8'h84, 32'h33334444);
+    repeat (5) @(posedge clk);
 
     axil_read_m1(8'h08, 32'h55556666);
+    repeat (5) @(posedge clk);
+
     axil_read_m1(8'h88, 32'h77778888);
+    repeat (5) @(posedge clk);
 
     if (errors == 0) begin
       $display("ALL TESTS PASSED");
