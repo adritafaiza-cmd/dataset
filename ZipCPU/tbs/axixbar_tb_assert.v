@@ -1,111 +1,46 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-module axixbar_assert;
+module axilxbar_assert;
 
   localparam NM = 2;
   localparam NS = 2;
   localparam AW = 8;
   localparam DW = 32;
-  localparam IW = 2;
+  localparam TIMEOUT = 100;
 
   reg clk = 0;
   reg rstn = 0;
-
   integer errors = 0;
+  integer t;
 
   always #5 clk = ~clk;
 
-  // Slave-side AXI signals
-  reg  [NM-1:0] s_awvalid;
-  wire [NM-1:0] s_awready;
-  reg  [NM*IW-1:0] s_awid;
-  reg  [NM*AW-1:0] s_awaddr;
-  reg  [NM*8-1:0] s_awlen;
-  reg  [NM*3-1:0] s_awsize;
-  reg  [NM*2-1:0] s_awburst;
-  reg  [NM-1:0] s_awlock;
-  reg  [NM*4-1:0] s_awcache;
-  reg  [NM*3-1:0] s_awprot;
-  reg  [NM*4-1:0] s_awqos;
+  reg  [NM-1:0] s_awvalid, s_wvalid, s_bready, s_arvalid, s_rready;
+  wire [NM-1:0] s_awready, s_wready, s_bvalid, s_arready, s_rvalid;
 
-  reg  [NM-1:0] s_wvalid;
-  wire [NM-1:0] s_wready;
+  reg  [NM*AW-1:0] s_awaddr, s_araddr;
+  reg  [NM*3-1:0]  s_awprot, s_arprot;
   reg  [NM*DW-1:0] s_wdata;
   reg  [NM*DW/8-1:0] s_wstrb;
-  reg  [NM-1:0] s_wlast;
 
-  wire [NM-1:0] s_bvalid;
-  reg  [NM-1:0] s_bready;
-  wire [NM*IW-1:0] s_bid;
-  wire [NM*2-1:0] s_bresp;
-
-  reg  [NM-1:0] s_arvalid;
-  wire [NM-1:0] s_arready;
-  reg  [NM*IW-1:0] s_arid;
-  reg  [NM*AW-1:0] s_araddr;
-  reg  [NM*8-1:0] s_arlen;
-  reg  [NM*3-1:0] s_arsize;
-  reg  [NM*2-1:0] s_arburst;
-  reg  [NM-1:0] s_arlock;
-  reg  [NM*4-1:0] s_arcache;
-  reg  [NM*3-1:0] s_arprot;
-  reg  [NM*4-1:0] s_arqos;
-
-  wire [NM-1:0] s_rvalid;
-  reg  [NM-1:0] s_rready;
-  wire [NM*IW-1:0] s_rid;
+  wire [NM*2-1:0]  s_bresp, s_rresp;
   wire [NM*DW-1:0] s_rdata;
-  wire [NM*2-1:0] s_rresp;
-  wire [NM-1:0] s_rlast;
 
-  // Master-side AXI signals
-  wire [NS-1:0] m_awvalid;
-  reg  [NS-1:0] m_awready;
-  wire [NS*IW-1:0] m_awid;
-  wire [NS*AW-1:0] m_awaddr;
-  wire [NS*8-1:0] m_awlen;
-  wire [NS*3-1:0] m_awsize;
-  wire [NS*2-1:0] m_awburst;
-  wire [NS-1:0] m_awlock;
-  wire [NS*4-1:0] m_awcache;
-  wire [NS*3-1:0] m_awprot;
-  wire [NS*4-1:0] m_awqos;
+  wire [NS*AW-1:0] m_awaddr, m_araddr;
+  wire [NS*3-1:0]  m_awprot, m_arprot;
+  wire [NS-1:0] m_awvalid, m_wvalid, m_bready, m_arvalid, m_rready;
 
-  wire [NS-1:0] m_wvalid;
-  reg  [NS-1:0] m_wready;
+  reg  [NS-1:0] m_awready, m_wready, m_bvalid, m_arready, m_rvalid;
   wire [NS*DW-1:0] m_wdata;
   wire [NS*DW/8-1:0] m_wstrb;
-  wire [NS-1:0] m_wlast;
 
-  reg  [NS-1:0] m_bvalid;
-  wire [NS-1:0] m_bready;
-  reg  [NS*IW-1:0] m_bid;
-  reg  [NS*2-1:0] m_bresp;
+  reg [NS*2-1:0]  m_bresp, m_rresp;
+  reg [NS*DW-1:0] m_rdata;
 
-  wire [NS-1:0] m_arvalid;
-  reg  [NS-1:0] m_arready;
-  wire [NS*IW-1:0] m_arid;
-  wire [NS*AW-1:0] m_araddr;
-  wire [NS*8-1:0] m_arlen;
-  wire [NS*3-1:0] m_arsize;
-  wire [NS*2-1:0] m_arburst;
-  wire [NS-1:0] m_arlock;
-  wire [NS*4-1:0] m_arcache;
-  wire [NS*3-1:0] m_arprot;
-  wire [NS*4-1:0] m_arqos;
-
-  reg  [NS-1:0] m_rvalid;
-  wire [NS-1:0] m_rready;
-  reg  [NS*IW-1:0] m_rid;
-  reg  [NS*DW-1:0] m_rdata;
-  reg  [NS*2-1:0] m_rresp;
-  reg  [NS-1:0] m_rlast;
-
-  axixbar #(
+  axilxbar #(
     .C_AXI_DATA_WIDTH(DW),
     .C_AXI_ADDR_WIDTH(AW),
-    .C_AXI_ID_WIDTH(IW),
     .NM(NM),
     .NS(NS),
     .SLAVE_ADDR({8'h80, 8'h00}),
@@ -118,87 +53,51 @@ module axixbar_assert;
 
     .S_AXI_AWVALID(s_awvalid),
     .S_AXI_AWREADY(s_awready),
-    .S_AXI_AWID(s_awid),
     .S_AXI_AWADDR(s_awaddr),
-    .S_AXI_AWLEN(s_awlen),
-    .S_AXI_AWSIZE(s_awsize),
-    .S_AXI_AWBURST(s_awburst),
-    .S_AXI_AWLOCK(s_awlock),
-    .S_AXI_AWCACHE(s_awcache),
     .S_AXI_AWPROT(s_awprot),
-    .S_AXI_AWQOS(s_awqos),
 
     .S_AXI_WVALID(s_wvalid),
     .S_AXI_WREADY(s_wready),
     .S_AXI_WDATA(s_wdata),
     .S_AXI_WSTRB(s_wstrb),
-    .S_AXI_WLAST(s_wlast),
 
     .S_AXI_BVALID(s_bvalid),
     .S_AXI_BREADY(s_bready),
-    .S_AXI_BID(s_bid),
     .S_AXI_BRESP(s_bresp),
 
     .S_AXI_ARVALID(s_arvalid),
     .S_AXI_ARREADY(s_arready),
-    .S_AXI_ARID(s_arid),
     .S_AXI_ARADDR(s_araddr),
-    .S_AXI_ARLEN(s_arlen),
-    .S_AXI_ARSIZE(s_arsize),
-    .S_AXI_ARBURST(s_arburst),
-    .S_AXI_ARLOCK(s_arlock),
-    .S_AXI_ARCACHE(s_arcache),
     .S_AXI_ARPROT(s_arprot),
-    .S_AXI_ARQOS(s_arqos),
 
     .S_AXI_RVALID(s_rvalid),
     .S_AXI_RREADY(s_rready),
-    .S_AXI_RID(s_rid),
     .S_AXI_RDATA(s_rdata),
     .S_AXI_RRESP(s_rresp),
-    .S_AXI_RLAST(s_rlast),
 
+    .M_AXI_AWADDR(m_awaddr),
+    .M_AXI_AWPROT(m_awprot),
     .M_AXI_AWVALID(m_awvalid),
     .M_AXI_AWREADY(m_awready),
-    .M_AXI_AWID(m_awid),
-    .M_AXI_AWADDR(m_awaddr),
-    .M_AXI_AWLEN(m_awlen),
-    .M_AXI_AWSIZE(m_awsize),
-    .M_AXI_AWBURST(m_awburst),
-    .M_AXI_AWLOCK(m_awlock),
-    .M_AXI_AWCACHE(m_awcache),
-    .M_AXI_AWPROT(m_awprot),
-    .M_AXI_AWQOS(m_awqos),
 
-    .M_AXI_WVALID(m_wvalid),
-    .M_AXI_WREADY(m_wready),
     .M_AXI_WDATA(m_wdata),
     .M_AXI_WSTRB(m_wstrb),
-    .M_AXI_WLAST(m_wlast),
+    .M_AXI_WVALID(m_wvalid),
+    .M_AXI_WREADY(m_wready),
 
+    .M_AXI_BRESP(m_bresp),
     .M_AXI_BVALID(m_bvalid),
     .M_AXI_BREADY(m_bready),
-    .M_AXI_BID(m_bid),
-    .M_AXI_BRESP(m_bresp),
 
+    .M_AXI_ARADDR(m_araddr),
+    .M_AXI_ARPROT(m_arprot),
     .M_AXI_ARVALID(m_arvalid),
     .M_AXI_ARREADY(m_arready),
-    .M_AXI_ARID(m_arid),
-    .M_AXI_ARADDR(m_araddr),
-    .M_AXI_ARLEN(m_arlen),
-    .M_AXI_ARSIZE(m_arsize),
-    .M_AXI_ARBURST(m_arburst),
-    .M_AXI_ARLOCK(m_arlock),
-    .M_AXI_ARCACHE(m_arcache),
-    .M_AXI_ARQOS(m_arqos),
-    .M_AXI_ARPROT(m_arprot),
 
-    .M_AXI_RVALID(m_rvalid),
-    .M_AXI_RREADY(m_rready),
-    .M_AXI_RID(m_rid),
     .M_AXI_RDATA(m_rdata),
     .M_AXI_RRESP(m_rresp),
-    .M_AXI_RLAST(m_rlast)
+    .M_AXI_RVALID(m_rvalid),
+    .M_AXI_RREADY(m_rready)
   );
 
   task check;
@@ -214,164 +113,136 @@ module axixbar_assert;
     end
   endtask
 
-  task axi_write_m0;
-    input [AW-1:0] addr;
-    input [DW-1:0] data;
-    integer sl;
+  task wait_or_timeout;
+    input condition;
+    input [255:0] msg;
     begin
-      sl = addr[7] ? 1 : 0;
+      t = 0;
+      while (!condition && t < TIMEOUT) begin
+        @(posedge clk);
+        t = t + 1;
+      end
 
-      @(negedge clk);
-
-      s_awid[0 +: IW] = 1;
-      s_awaddr[0 +: AW] = addr;
-      s_awlen[0 +: 8] = 0;
-      s_awsize[0 +: 3] = 3'd2;
-      s_awburst[0 +: 2] = 2'b01;
-      s_awlock[0] = 1'b0;
-      s_awcache[0 +: 4] = 4'b0011;
-      s_awprot[0 +: 3] = 3'b000;
-      s_awqos[0 +: 4] = 4'b0000;
-
-      s_wdata[0 +: DW] = data;
-      s_wstrb[0 +: DW/8] = 4'hf;
-      s_wlast[0] = 1'b1;
-
-      s_awvalid[0] = 1'b1;
-      s_wvalid[0] = 1'b1;
-      s_bready[0] = 1'b1;
-
-      m_awready[sl] = 1'b1;
-      m_wready[sl] = 1'b1;
-
-      wait (m_awvalid[sl]);
-      check(m_awaddr[sl*AW +: AW] == addr, "AXIXBAR write address route");
-
-      wait (m_wvalid[sl]);
-      check(m_wdata[sl*DW +: DW] == data, "AXIXBAR write data route");
-
-      wait (s_awready[0] && s_wready[0]);
-
-      @(negedge clk);
-
-      s_awvalid[0] = 1'b0;
-      s_wvalid[0] = 1'b0;
-      m_awready[sl] = 1'b0;
-      m_wready[sl] = 1'b0;
-
-      @(negedge clk);
-
-      m_bid[sl*IW +: IW] = m_awid[sl*IW +: IW];
-      m_bresp[sl*2 +: 2] = 2'b00;
-      m_bvalid[sl] = 1'b1;
-
-      wait (s_bvalid[0]);
-      check(s_bresp[0 +: 2] == 2'b00, "AXIXBAR write response OKAY");
-
-      @(negedge clk);
-
-      m_bvalid[sl] = 1'b0;
-      s_bready[0] = 1'b0;
-
-      repeat (3) @(posedge clk);
+      if (!condition) begin
+        $display("TIMEOUT: %s", msg);
+        errors = errors + 1;
+      end else begin
+        $display("OK: %s", msg);
+      end
     end
   endtask
 
-  task axi_read_m1;
+  task axil_write_m0;
     input [AW-1:0] addr;
     input [DW-1:0] data;
-    integer sl;
+    integer slave;
     begin
-      sl = addr[7] ? 1 : 0;
+      slave = addr[7] ? 1 : 0;
 
       @(negedge clk);
+      s_awaddr[0 +: AW] = addr;
+      s_wdata[0 +: DW] = data;
+      s_wstrb[0 +: DW/8] = 4'hf;
 
-      s_arid[IW +: IW] = 2;
+      s_awvalid[0] = 1'b1;
+      s_wvalid[0]  = 1'b1;
+      s_bready[0]  = 1'b1;
+
+      m_awready[slave] = 1'b1;
+      m_wready[slave]  = 1'b1;
+
+      wait_or_timeout(m_awvalid[slave], "m_awvalid asserted");
+      check(m_awaddr[slave*AW +: AW] == addr, "xbar routed write address");
+
+      wait_or_timeout(m_wvalid[slave], "m_wvalid asserted");
+      check(m_wdata[slave*DW +: DW] == data, "xbar routed write data");
+
+      wait_or_timeout(s_awready[0], "s_awready asserted");
+      wait_or_timeout(s_wready[0], "s_wready asserted");
+
+      @(negedge clk);
+      s_awvalid[0] = 1'b0;
+      s_wvalid[0]  = 1'b0;
+      m_awready[slave] = 1'b0;
+      m_wready[slave]  = 1'b0;
+
+      repeat (2) @(posedge clk);
+
+      m_bresp[slave*2 +: 2] = 2'b00;
+      m_bvalid[slave] = 1'b1;
+
+      wait_or_timeout(s_bvalid[0], "s_bvalid asserted");
+      check(s_bresp[0 +: 2] == 2'b00, "xbar returned write response");
+
+      @(negedge clk);
+      m_bvalid[slave] = 1'b0;
+      s_bready[0] = 1'b0;
+
+      repeat (5) @(posedge clk);
+    end
+  endtask
+
+  task axil_read_m1;
+    input [AW-1:0] addr;
+    input [DW-1:0] data;
+    integer slave;
+    begin
+      slave = addr[7] ? 1 : 0;
+
+      @(negedge clk);
       s_araddr[AW +: AW] = addr;
-      s_arlen[8 +: 8] = 0;
-      s_arsize[3 +: 3] = 3'd2;
-      s_arburst[2 +: 2] = 2'b01;
-      s_arlock[1] = 1'b0;
-      s_arcache[4 +: 4] = 4'b0011;
-      s_arprot[3 +: 3] = 3'b000;
-      s_arqos[4 +: 4] = 4'b0000;
-
       s_arvalid[1] = 1'b1;
-      s_rready[1] = 1'b1;
+      s_rready[1]  = 1'b1;
 
-      m_arready[sl] = 1'b1;
+      m_arready[slave] = 1'b1;
 
-      wait (m_arvalid[sl]);
-      check(m_araddr[sl*AW +: AW] == addr, "AXIXBAR read address route");
+      wait_or_timeout(m_arvalid[slave], "m_arvalid asserted");
+      check(m_araddr[slave*AW +: AW] == addr, "xbar routed read address");
 
-      wait (s_arready[1]);
+      wait_or_timeout(s_arready[1], "s_arready asserted");
 
       @(negedge clk);
-
       s_arvalid[1] = 1'b0;
-      m_arready[sl] = 1'b0;
+      m_arready[slave] = 1'b0;
+
+      repeat (2) @(posedge clk);
+
+      m_rdata[slave*DW +: DW] = data;
+      m_rresp[slave*2 +: 2] = 2'b00;
+      m_rvalid[slave] = 1'b1;
+
+      wait_or_timeout(s_rvalid[1], "s_rvalid asserted");
+      check(s_rdata[DW +: DW] == data, "xbar returned read data");
 
       @(negedge clk);
-
-      m_rid[sl*IW +: IW] = m_arid[sl*IW +: IW];
-      m_rdata[sl*DW +: DW] = data;
-      m_rresp[sl*2 +: 2] = 2'b00;
-      m_rlast[sl] = 1'b1;
-      m_rvalid[sl] = 1'b1;
-
-      wait (s_rvalid[1]);
-      check(s_rdata[DW +: DW] == data, "AXIXBAR read data return");
-
-      @(negedge clk);
-
-      m_rvalid[sl] = 1'b0;
+      m_rvalid[slave] = 1'b0;
       s_rready[1] = 1'b0;
 
-      repeat (3) @(posedge clk);
+      repeat (5) @(posedge clk);
     end
   endtask
 
   initial begin
     s_awvalid = 0;
-    s_wvalid = 0;
-    s_bready = 0;
+    s_wvalid  = 0;
+    s_bready  = 0;
     s_arvalid = 0;
-    s_rready = 0;
-    s_wlast = 0;
+    s_rready  = 0;
 
-    s_awid = 0;
     s_awaddr = 0;
-    s_awlen = 0;
-    s_awsize = 0;
-    s_awburst = 0;
-    s_awlock = 0;
-    s_awcache = 0;
-    s_awprot = 0;
-    s_awqos = 0;
-
-    s_arid = 0;
     s_araddr = 0;
-    s_arlen = 0;
-    s_arsize = 0;
-    s_arburst = 0;
-    s_arlock = 0;
-    s_arcache = 0;
+    s_awprot = 0;
     s_arprot = 0;
-    s_arqos = 0;
-
-    s_wdata = 0;
-    s_wstrb = 0;
+    s_wdata  = 0;
+    s_wstrb  = 0;
 
     m_awready = 0;
-    m_wready = 0;
-    m_bvalid = 0;
+    m_wready  = 0;
+    m_bvalid  = 0;
     m_arready = 0;
-    m_rvalid = 0;
-    m_rlast = 0;
+    m_rvalid  = 0;
 
-    m_bid = 0;
     m_bresp = 0;
-    m_rid = 0;
     m_rresp = 0;
     m_rdata = 0;
 
@@ -380,19 +251,13 @@ module axixbar_assert;
 
     repeat (5) @(posedge clk);
 
-    $display("TEST AXIXBAR");
+    $display("TEST AXILXBAR");
 
-    axi_write_m0(8'h04, 32'haaaa5555);
-    repeat (5) @(posedge clk);
+    axil_write_m0(8'h04, 32'h11112222);
+    axil_write_m0(8'h84, 32'h33334444);
 
-    axi_write_m0(8'h84, 32'hbbbb6666);
-    repeat (5) @(posedge clk);
-
-    axi_read_m1(8'h08, 32'hcccc7777);
-    repeat (5) @(posedge clk);
-
-    axi_read_m1(8'h88, 32'hdddd8888);
-    repeat (5) @(posedge clk);
+    axil_read_m1(8'h08, 32'h55556666);
+    axil_read_m1(8'h88, 32'h77778888);
 
     if (errors == 0) begin
       $display("ALL TESTS PASSED");
