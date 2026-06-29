@@ -207,13 +207,60 @@ module axixbar_assert;
 
     repeat (5) @(posedge clk);
     rstn = 1'b1;
+    // -----------------------------
+// TEST 1: Simple write
+// Master 0 writes one word
+// -----------------------------
+$display("TEST 1: Simple AXI write");
 
+// slave side is ready to accept address/data
+m_awready[0] = 1'b1;
+m_wready[0]  = 1'b1;
+
+// master 0 sends write address + data
+s_awaddr[0*AW +: AW] = 8'h10;
+s_wdata [0*DW +: DW] = 32'hDEADBEEF;
+s_wstrb [0*(DW/8) +: (DW/8)] = 4'hF;
+
+s_awvalid[0] = 1'b1;
+s_wvalid[0]  = 1'b1;
+s_bready[0]  = 1'b1;
+
+// wait until crossbar sends AWVALID and WVALID to slave 0
+repeat (10) @(posedge clk);
+
+check(m_awvalid[0] == 1'b1, "m_awvalid[0] should go high");
+check(m_wvalid[0]  == 1'b1, "m_wvalid[0] should go high");
+check(m_awaddr[0*AW +: AW] == 8'h10, "write address should be 0x10");
+check(m_wdata [0*DW +: DW] == 32'hDEADBEEF, "write data should match");
+
+// accept address/data
+@(posedge clk);
+s_awvalid[0] = 1'b0;
+s_wvalid[0]  = 1'b0;
+
+// slave sends write response
+m_bvalid[0] = 1'b1;
+m_bresp[0*2 +: 2] = 2'b00;
+
+repeat (5) @(posedge clk);
+
+check(s_bvalid[0] == 1'b1, "s_bvalid[0] should go high");
+
+@(posedge clk);
+m_bvalid[0] = 1'b0;
+s_bready[0] = 1'b0;
+
+$display("TEST 1 DONE");
     repeat (5) @(posedge clk);
 
     $display("TEST AXIXBAR");
     $display("TB restored. Add functional tests after axilxbar is fixed.");
 
-    $display("ALL TESTS PASSED");
+    if (errors == 0)
+  $display("ALL TESTS PASSED");
+else
+  $display("TESTS FAILED: %0d errors", errors);
     $finish;
   end
 
