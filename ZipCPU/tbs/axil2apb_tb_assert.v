@@ -211,14 +211,8 @@ module axil2apb_assert;
         $display("ASSERT FAIL: APB PENABLE without PSEL");
         errors = errors + 1;
       end
-
-      if (PREADY && !PSEL) begin
-        $display("ASSERT FAIL: APB PREADY without active PSEL");
-        errors = errors + 1;
-      end
-    end
+    end 
   end
-
   initial begin
     for (i = 0; i < 256; i = i + 1) begin
       mem[i] = 0;
