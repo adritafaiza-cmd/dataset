@@ -26,7 +26,12 @@ module axidma_assert;
     // -------------------------------------------------------------------------
     // Parameters (must match DUT instantiation below)
     // -------------------------------------------------------------------------
-    localparam AW       = 8;    // address width
+    // NOTE: AW must be >= 10 for DW=32.  The DUT slices readlen_w[7:0] and
+    // write_burst_length[7:0] to form the 8-bit AXI4 ARLEN/AWLEN fields, and
+    // those vectors are only (LGLEN-ADDRLSB+1) bits wide.  With AW=LGLEN=8
+    // the slices are out of bounds, ARLEN/AWLEN become 8'hxx in simulation,
+    // and the read-burst model never terminates.
+    localparam AW       = 10;   // address width (>= 10, see note above)
     localparam DW       = 32;   // data width
     localparam IW       = 1;    // ID width
     localparam LGMAXB   = 2;    // log2(max burst) → 4 beats
@@ -211,12 +216,14 @@ module axidma_assert;
 
 
     // Memory model   
-    reg [DW-1:0]  mem [0:63];   // 64 words × 4 B = 256 B (fits AW=8)
+    localparam MEMWORDS = (1 << (AW-2));    // full AW address space in words
+    reg [DW-1:0]  mem [0:MEMWORDS-1];
 
     // ---- Write path ----------------------------------------------------------
     // FIX: latch AW address & ID at the AW handshake; only accept W data after
     //      the address has been registered (wr_addr_valid).
     reg [AW-1:0]  wr_addr;
+    reg [AW-1:0]  wr_burst_addr;    // burst start address (for error inject)
     reg [IW-1:0]  wr_id_lat;
     reg           wr_addr_valid;    // true once AW handshake has occurred
 
@@ -232,18 +239,25 @@ module axidma_assert;
             m_bvalid      <= 1'b0;
             wr_addr_valid <= 1'b0;
         end else begin
-            // AW handshake — latch address + ID
-            if (m_awvalid && !m_awready) begin
+            // AW handshake — latch address + ID.  Do not accept a new AW
+            // while a burst is still in flight (wr_addr_valid).
+            if (m_awvalid && !m_awready && !wr_addr_valid) begin
                 m_awready     <= 1'b1;
                 wr_addr       <= m_awaddr;
+                wr_burst_addr <= m_awaddr;      // remember burst start
                 wr_id_lat     <= m_awid;        // FIX: latch ID here
                 wr_addr_valid <= 1'b1;
             end
 
-            // W data — only accepted once address is valid
-            // FIX: guard with wr_addr_valid
-            if (m_wvalid && wr_addr_valid) begin
+            // WREADY generation: ready once the burst address is known
+            if (m_wvalid && wr_addr_valid)
                 m_wready <= 1'b1;
+
+            // W data — commit ONLY on a true handshake (WVALID && WREADY).
+            // FIX: the previous model wrote memory on WVALID alone, which
+            // double-writes the first beat of every burst (WREADY is
+            // registered and still low on the first WVALID cycle).
+            if (m_wvalid && m_wready && wr_addr_valid) begin
                 if (m_wstrb[0]) mem[wr_addr[AW-1:2]][7:0]   <= m_wdata[7:0];
                 if (m_wstrb[1]) mem[wr_addr[AW-1:2]][15:8]  <= m_wdata[15:8];
                 if (m_wstrb[2]) mem[wr_addr[AW-1:2]][23:16] <= m_wdata[23:16];
@@ -254,13 +268,16 @@ module axidma_assert;
                     m_bvalid      <= 1'b1;
                     // FIX: use latched ID, not m_awid (which may have moved on)
                     m_bid         <= wr_id_lat;
-                    // Inject error if requested for this burst
+                    // Inject error if requested for this burst; compare
+                    // against the latched burst START address, since wr_addr
+                    // has advanced past it by the time WLAST arrives.
                     if (inject_wresp_err &&
-                        (wr_addr[AW-1:2] == inject_wresp_addr[AW-1:2]))
+                        (wr_burst_addr[AW-1:2] == inject_wresp_addr[AW-1:2]))
                         m_bresp <= 2'b10;   // SLVERR
                     else
                         m_bresp <= 2'b00;   // OKAY
                     wr_addr_valid <= 1'b0;
+                    m_wready      <= 1'b0;  // burst done, drop ready
                 end
             end
 
@@ -597,7 +614,7 @@ module axidma_assert;
     task mem_init;
         integer k;
         begin
-            for (k = 0; k < 64; k = k + 1)
+            for (k = 0; k < MEMWORDS; k = k + 1)
                 mem[k] = 32'h0;
         end
     endtask
@@ -656,7 +673,7 @@ module axidma_assert;
 
         // TC2 – Multi-burst copy (8 words = 32 bytes, 2 bursts of 4)
         // Source  : 0x00  (mem[0..7])
-        // Dest    : 0x80  (mem[32..39])   — needs AW=8, fits in 256 B space
+        // Dest    : 0x80  (mem[32..39])
       
         $display("\n--- TC2: Multi-burst copy (8 words) ---");
         mem_init();
