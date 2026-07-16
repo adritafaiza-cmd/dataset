@@ -1525,7 +1525,7 @@ module axisafety #(
 		// {{{
 		always @(*)
 			M_AXI_ARESETN = S_AXI_ARESETN;
-		assign	clear_fault = 0;
+		//reg	clear_fault = 0;
 		// }}}
 	end endgenerate
 	// }}}
