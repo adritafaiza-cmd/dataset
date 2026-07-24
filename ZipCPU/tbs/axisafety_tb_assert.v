@@ -271,23 +271,20 @@ module axisafety_assert;
 
       while ((!aw_done || !w_done) && timeout < 100) begin
         @(posedge clk);
+        #1;
 
-        if (!aw_done && s_awvalid && s_awready)
+        if (!aw_done && s_awvalid && s_awready) begin
           aw_done = 1'b1;
+          s_awvalid = 1'b0;
+        end
 
-        if (!w_done && s_wvalid && s_wready)
+        if (!w_done && s_wvalid && s_wready) begin
           w_done = 1'b1;
+          s_wvalid = 1'b0;
+        end
 
         timeout = timeout + 1;
       end
-
-      @(negedge clk);
-
-      if (aw_done)
-        s_awvalid = 1'b0;
-
-      if (w_done)
-        s_wvalid = 1'b0;
 
       check(aw_done, "write address accepted");
       check(w_done,  "write data accepted");
@@ -358,6 +355,11 @@ module axisafety_assert;
         timeout = timeout + 1;
       end
 
+      $display("READ DEBUG: s_rvalid=%b s_rdata=%h s_rresp=%b s_rlast=%b",
+               s_rvalid, s_rdata, s_rresp, s_rlast);
+      $display("READ DEBUG: m_rvalid=%b m_rready=%b m_rdata=%h m_rresp=%b",
+               m_rvalid, m_rready, m_rdata, m_rresp);
+
       check(s_rvalid, "read response returned");
       check(s_rdata == 32'hCAFE_BABE, "read data matches");
       check(s_rresp == 2'b00, "read response is OKAY");
@@ -413,32 +415,32 @@ module axisafety_assert;
       prev_m_w_wait  <= 1'b0;
       prev_m_ar_wait <= 1'b0;
     end else begin
-      if (prev_s_aw_wait && !s_awvalid) begin
+      if (prev_s_aw_wait && !s_awvalid && !s_awready) begin
         $display("ASSERT FAIL: S_AWVALID dropped before S_AWREADY");
         errors = errors + 1;
       end
 
-      if (prev_s_w_wait && !s_wvalid) begin
+      if (prev_s_w_wait && !s_wvalid && !s_wready) begin
         $display("ASSERT FAIL: S_WVALID dropped before S_WREADY");
         errors = errors + 1;
       end
 
-      if (prev_s_ar_wait && !s_arvalid) begin
+      if (prev_s_ar_wait && !s_arvalid && !s_arready) begin
         $display("ASSERT FAIL: S_ARVALID dropped before S_ARREADY");
         errors = errors + 1;
       end
 
-      if (prev_m_aw_wait && !m_awvalid) begin
+      if (prev_m_aw_wait && !m_awvalid && !m_awready) begin
         $display("ASSERT FAIL: M_AWVALID dropped before M_AWREADY");
         errors = errors + 1;
       end
 
-      if (prev_m_w_wait && !m_wvalid) begin
+      if (prev_m_w_wait && !m_wvalid && !m_wready) begin
         $display("ASSERT FAIL: M_WVALID dropped before M_WREADY");
         errors = errors + 1;
       end
 
-      if (prev_m_ar_wait && !m_arvalid) begin
+      if (prev_m_ar_wait && !m_arvalid && !m_arready) begin
         $display("ASSERT FAIL: M_ARVALID dropped before M_ARREADY");
         errors = errors + 1;
       end
