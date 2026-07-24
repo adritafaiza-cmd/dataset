@@ -241,10 +241,14 @@ module axisafety_assert;
 
   task good_write;
     integer timeout;
-    reg aw_done;
-    reg w_done;
+    reg s_aw_done;
+    reg s_w_done;
+    reg m_aw_done;
+    reg m_w_done;
+    reg b_done;
     begin
-      $display("\nTEST: good AXI write");
+      $display("
+TEST: good AXI write");
 
       @(negedge clk);
 
@@ -261,41 +265,67 @@ module axisafety_assert;
       s_wvalid  = 1'b1;
 
       s_bready  = 1'b1;
-
       m_awready = 1'b1;
       m_wready  = 1'b1;
 
-      aw_done = 1'b0;
-      w_done  = 1'b0;
-      timeout = 0;
+      s_aw_done = 1'b0;
+      s_w_done  = 1'b0;
+      m_aw_done = 1'b0;
+      m_w_done  = 1'b0;
+      timeout   = 0;
 
-      while ((!aw_done || !w_done) && timeout < 100) begin
+      while ((!s_aw_done || !s_w_done ||
+              !m_aw_done || !m_w_done) &&
+              timeout < 100) begin
         @(posedge clk);
-        #1;
 
-        if (!aw_done && s_awvalid && s_awready) begin
-          aw_done = 1'b1;
-          s_awvalid = 1'b0;
-        end
+        if (s_awvalid && s_awready)
+          s_aw_done = 1'b1;
 
-        if (!w_done && s_wvalid && s_wready) begin
-          w_done = 1'b1;
-          s_wvalid = 1'b0;
-        end
+        if (s_wvalid && s_wready)
+          s_w_done = 1'b1;
+
+        if (m_awvalid && m_awready)
+          m_aw_done = 1'b1;
+
+        if (m_wvalid && m_wready)
+          m_w_done = 1'b1;
 
         timeout = timeout + 1;
       end
 
-      check(aw_done, "write address accepted");
-      check(w_done,  "write data accepted");
-
       @(negedge clk);
+      if (s_aw_done)
+        s_awvalid = 1'b0;
+      if (s_w_done)
+        s_wvalid = 1'b0;
+
       m_awready = 1'b0;
       m_wready  = 1'b0;
 
+      check(s_aw_done, "write address accepted upstream");
+      check(s_w_done,  "write data accepted upstream");
+      check(m_aw_done, "write address forwarded downstream");
+      check(m_w_done,  "write data forwarded downstream");
+
+      @(negedge clk);
       m_bid    = 0;
       m_bresp  = 2'b00;
       m_bvalid = 1'b1;
+
+      b_done  = 1'b0;
+      timeout = 0;
+
+      while (!b_done && timeout < 100) begin
+        @(posedge clk);
+
+        if (m_bvalid && m_bready)
+          b_done = 1'b1;
+
+        timeout = timeout + 1;
+      end
+
+      check(b_done, "downstream write response accepted");
 
       timeout = 0;
       while (!s_bvalid && timeout < 100) begin
@@ -303,7 +333,7 @@ module axisafety_assert;
         timeout = timeout + 1;
       end
 
-      check(s_bvalid, "write response returned");
+      check(s_bvalid, "write response returned upstream");
       check(s_bresp == 2'b00, "write response is OKAY");
 
       @(negedge clk);
@@ -316,8 +346,12 @@ module axisafety_assert;
 
   task good_read;
     integer timeout;
+    reg s_ar_done;
+    reg m_ar_done;
+    reg r_done;
     begin
-      $display("\nTEST: good AXI read");
+      $display("
+TEST: good AXI read");
 
       @(negedge clk);
 
@@ -331,23 +365,51 @@ module axisafety_assert;
 
       m_arready = 1'b1;
 
-      timeout = 0;
-      while (!s_arready && timeout < 100) begin
+      s_ar_done = 1'b0;
+      m_ar_done = 1'b0;
+      timeout   = 0;
+
+      while ((!s_ar_done || !m_ar_done) &&
+              timeout < 100) begin
         @(posedge clk);
+
+        if (s_arvalid && s_arready)
+          s_ar_done = 1'b1;
+
+        if (m_arvalid && m_arready)
+          m_ar_done = 1'b1;
+
         timeout = timeout + 1;
       end
 
-      check(s_arready, "read address accepted");
-
       @(negedge clk);
-      s_arvalid = 1'b0;
+      if (s_ar_done)
+        s_arvalid = 1'b0;
       m_arready = 1'b0;
 
+      check(s_ar_done, "read address accepted upstream");
+      check(m_ar_done, "read address forwarded downstream");
+
+      @(negedge clk);
       m_rid    = 0;
       m_rdata  = 32'hCAFE_BABE;
       m_rresp  = 2'b00;
       m_rlast  = 1'b1;
       m_rvalid = 1'b1;
+
+      r_done  = 1'b0;
+      timeout = 0;
+
+      while (!r_done && timeout < 100) begin
+        @(posedge clk);
+
+        if (m_rvalid && m_rready)
+          r_done = 1'b1;
+
+        timeout = timeout + 1;
+      end
+
+      check(r_done, "downstream read response accepted");
 
       timeout = 0;
       while (!s_rvalid && timeout < 100) begin
@@ -360,7 +422,7 @@ module axisafety_assert;
       $display("READ DEBUG: m_rvalid=%b m_rready=%b m_rdata=%h m_rresp=%b",
                m_rvalid, m_rready, m_rdata, m_rresp);
 
-      check(s_rvalid, "read response returned");
+      check(s_rvalid, "read response returned upstream");
       check(s_rdata == 32'hCAFE_BABE, "read data matches");
       check(s_rresp == 2'b00, "read response is OKAY");
       check(s_rlast, "read response asserted RLAST");
