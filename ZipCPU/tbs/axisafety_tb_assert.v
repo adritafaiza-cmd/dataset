@@ -271,20 +271,23 @@ module axisafety_assert;
 
       while ((!aw_done || !w_done) && timeout < 100) begin
         @(posedge clk);
-        #1;
 
-        if (!aw_done && s_awvalid && s_awready) begin
+        if (!aw_done && s_awvalid && s_awready)
           aw_done = 1'b1;
-          s_awvalid = 1'b0;
-        end
 
-        if (!w_done && s_wvalid && s_wready) begin
+        if (!w_done && s_wvalid && s_wready)
           w_done = 1'b1;
-          s_wvalid = 1'b0;
-        end
 
         timeout = timeout + 1;
       end
+
+      @(negedge clk);
+
+      if (aw_done)
+        s_awvalid = 1'b0;
+
+      if (w_done)
+        s_wvalid = 1'b0;
 
       check(aw_done, "write address accepted");
       check(w_done,  "write data accepted");
