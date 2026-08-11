@@ -1,0 +1,8 @@
+# JasperGold CDC run: async_fifo (dpretet_async_fifo)
+# Run:  DS=/home/afsara/CDC/dataset jaspergold jg/async_fifo.tcl
+set TOP       async_fifo
+set RTL_FILES [glob $env(DS)/dpretet_async_fifo/rtl/*.v]
+set SDC_FILE  $env(DS)/dpretet_async_fifo/sdc/async_fifo.sdc
+set HDL_STD   -v2k
+source $env(DS)/jg/lib/cdc_run.tcl
+cdc_run $TOP $RTL_FILES $SDC_FILE $HDL_STD
