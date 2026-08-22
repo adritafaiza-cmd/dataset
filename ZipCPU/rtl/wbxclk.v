@@ -108,9 +108,10 @@ module	wbxclk #(
 	// Verilator lint_on  SYNCASYNCNET
 	//
 	wire		req_stb, req_fifo_empty;
-	reg		xclk_err_state, ign_ackfifo_stall;
-	reg		xck_reset;
-	reg [NFF-2:0]	xck_reset_pipe;
+	reg		xclk_err_state;
+	wire		ign_ackfifo_stall;
+	wire		wb_fifo_reset, x_fifo_reset;
+	wire		xck_reset;
 	wire		req_we;
 	wire [AW-1:0]	req_addr;
 	wire [DW-1:0]	req_data;
@@ -153,6 +154,17 @@ module	wbxclk #(
 	//
 	// The request FIFO itself
 	// {{{
+	cdc_reset_sync #(.NFF(NFF)) wb_fifo_reset_sync(
+		.i_clk(i_wb_clk), .i_async_reset(bus_abort),
+		.o_reset(wb_fifo_reset));
+
+	cdc_reset_sync #(.NFF(NFF)) x_fifo_reset_sync(
+		.i_clk(i_xclk_clk), .i_async_reset(bus_abort),
+		.o_reset(x_fifo_reset));
+
+	// Retain the original internal name for the formal properties below.
+	assign	xck_reset = x_fifo_reset;
+
 	afifo #(
 `ifdef	FORMAL
 		.OPT_REGISTER_READS(0),
@@ -160,12 +172,12 @@ module	wbxclk #(
 `endif
 		.NFF(NFF), .LGFIFO(LGFIFO),
 		.WIDTH(2+AW+DW+(DW/8))
-	) reqfifo(.i_wclk(i_wb_clk), .i_wr_reset_n(!bus_abort),
+	) reqfifo(.i_wclk(i_wb_clk), .i_wr_reset_n(!wb_fifo_reset),
 		.i_wr((i_wb_stb&&!o_wb_stall) || (wb_active && !i_wb_cyc)),
 		.i_wr_data({ i_wb_stb, i_wb_we, i_wb_addr, i_wb_data, i_wb_sel }),
 		.o_wr_full(req_fifo_stall),
 		//
-		.i_rclk(i_xclk_clk), .i_rd_reset_n(!xck_reset),
+		.i_rclk(i_xclk_clk), .i_rd_reset_n(!x_fifo_reset),
 		.i_rd(!o_xclk_stb || !i_xclk_stall),
 		.o_rd_data({ req_stb, req_we, req_addr, req_data, req_sel }),
 		.o_rd_empty(req_fifo_empty)
@@ -178,28 +190,20 @@ module	wbxclk #(
 	//
 	// Downstream bus--issuing requests
 	// {{{
-	initial	{ xck_reset, xck_reset_pipe } = -1;
-	always	@(posedge i_xclk_clk or posedge bus_abort)
-	if (bus_abort)
-		{ xck_reset, xck_reset_pipe } <= -1;
-	else
-		{ xck_reset, xck_reset_pipe } <= { xck_reset_pipe, 1'b0 };
-`ifdef	FORMAL
-	always @(*)
-	if (xck_reset_pipe)
-		assert(xck_reset);
-`endif
-
 	initial	xclk_err_state = 1'b0;
-	always @(posedge i_xclk_clk)
-	if (xck_reset || (!req_fifo_empty && !req_stb))
+	always @(posedge i_xclk_clk or posedge x_fifo_reset)
+	if (x_fifo_reset)
+		xclk_err_state <= 1'b0;
+	else if (!req_fifo_empty && !req_stb)
 		xclk_err_state <= 1'b0;
 	else if (o_xclk_cyc && i_xclk_err)
 		xclk_err_state <= 1'b1;
 
 	initial	o_xclk_cyc = 1'b0;
-	always @(posedge i_xclk_clk)
-	if (xck_reset || (o_xclk_cyc && i_xclk_err))
+	always @(posedge i_xclk_clk or posedge x_fifo_reset)
+	if (x_fifo_reset)
+		o_xclk_cyc <= 1'b0;
+	else if (o_xclk_cyc && i_xclk_err)
 		o_xclk_cyc <= 1'b0;
 	else if (!req_fifo_empty && !req_stb)
 		o_xclk_cyc <= 1'b0;
@@ -207,8 +211,10 @@ module	wbxclk #(
 		o_xclk_cyc <= req_stb;
 
 	initial	o_xclk_stb = 1'b0;
-	always @(posedge i_xclk_clk)
-	if (xck_reset || (o_xclk_cyc && i_xclk_err) || xclk_err_state)
+	always @(posedge i_xclk_clk or posedge x_fifo_reset)
+	if (x_fifo_reset)
+		o_xclk_stb <= 1'b0;
+	else if ((o_xclk_cyc && i_xclk_err) || xclk_err_state)
 		o_xclk_stb <= 1'b0;
 	else if (!o_xclk_stb || !i_xclk_stall)
 		o_xclk_stb <= req_stb && !req_fifo_empty;
@@ -233,9 +239,19 @@ module	wbxclk #(
 	initial	acks_outstanding = 0;
 	initial	ackfifo_single = 0;
 	initial	ackfifo_empty  = 1;
-	initial	ackfifo_full   = 0;
-	always @(posedge i_wb_clk)
-	if (i_reset || !i_wb_cyc || o_wb_err)
+	initial	ackfifo_full   = 1;
+	always @(posedge i_wb_clk or posedge wb_fifo_reset)
+	if (wb_fifo_reset)
+	begin
+		acks_outstanding <= 0;
+		ackfifo_single   <= 0;
+		ackfifo_empty    <= 1;
+		ackfifo_full     <= 1;
+	end else if (ackfifo_full && acks_outstanding == 0)
+	begin
+		// Release the reset stall on the first local clock after reset.
+		ackfifo_full <= 0;
+	end else if (i_reset || !i_wb_cyc || o_wb_err)
 	begin
 		acks_outstanding <= 0;
 		ackfifo_single   <= 0;
@@ -259,6 +275,7 @@ module	wbxclk #(
 
 `ifdef	FORMAL
 	always @(*)
+	if (!wb_fifo_reset && !(ackfifo_full && acks_outstanding == 0))
 	begin
 		assert(ackfifo_single == (acks_outstanding == 1));
 		assert(ackfifo_empty == (acks_outstanding == 0));
@@ -267,7 +284,7 @@ module	wbxclk #(
 	end
 `endif
 
-	assign	o_wb_stall = ackfifo_full || bus_abort || req_fifo_stall;
+	assign	o_wb_stall = ackfifo_full;
 	// }}}
 
 	//
@@ -280,12 +297,12 @@ module	wbxclk #(
 `ifdef	FORMAL
 		, .F_OPT_DATA_STB(1'b0)
 `endif
-	) ackfifo(.i_wclk(i_xclk_clk), .i_wr_reset_n(!xck_reset),
+	) ackfifo(.i_wclk(i_xclk_clk), .i_wr_reset_n(!x_fifo_reset),
 		.i_wr(o_xclk_cyc && ( i_xclk_ack || i_xclk_err )),
 		.i_wr_data({ i_xclk_ack, i_xclk_err, i_xclk_data }),
 		.o_wr_full(ign_ackfifo_stall),
 		//
-		.i_rclk(i_wb_clk), .i_rd_reset_n(!bus_abort),
+		.i_rclk(i_wb_clk), .i_rd_reset_n(!wb_fifo_reset),
 		.i_rd(!no_returns),
 		.o_rd_data({ ack_stb, err_stb, ret_wb_data }),
 		.o_rd_empty(no_returns)
@@ -299,8 +316,10 @@ module	wbxclk #(
 	// Final return processing
 	// {{{
 	initial	{ o_wb_ack, o_wb_err } = 2'b00;
-	always @(posedge i_wb_clk)
-	if (i_reset || bus_abort || !i_wb_cyc || no_returns || o_wb_err)
+	always @(posedge i_wb_clk or posedge wb_fifo_reset)
+	if (wb_fifo_reset)
+		{ o_wb_ack, o_wb_err } <=  2'b00;
+	else if (i_reset || !i_wb_cyc || no_returns || o_wb_err)
 		{ o_wb_ack, o_wb_err } <=  2'b00;
 	else
 		{ o_wb_ack, o_wb_err } <= { ack_stb, err_stb };
@@ -635,7 +654,7 @@ module	wbxclk #(
 			if (reqfifo_fill > (o_xclk_stb ? 1:0))
 				assert(!req_stb || xck_reset);
 			assert(reqfifo_fill <= 1);
-			if (xck_reset && !xck_reset_pipe)
+			if (xck_reset)
 				assert(!o_xclk_cyc);
 		end else begin
 			// ???

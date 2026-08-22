@@ -97,11 +97,12 @@ module axixclk_assert;
             @(negedge s_clk); S_AXI_ARID=2; S_AXI_ARADDR=addr; S_AXI_ARLEN=len; S_AXI_ARSIZE=3'b010; S_AXI_ARBURST=2'b01; S_AXI_ARVALID=1; S_AXI_RREADY=1;
             wait(S_AXI_ARREADY); @(negedge s_clk); S_AXI_ARVALID=0;
             for (n=0; n<=len; n=n+1) begin
-                wait(S_AXI_RVALID); if (S_AXI_RDATA !== base+n) begin $display("FAIL read addr=%h beat=%0d actual=%h expected=%h", addr,n,S_AXI_RDATA,base+n); errors=errors+1; end else $display("PASS read beat %0d data=%h", n, S_AXI_RDATA);
+                @(posedge s_clk);
+                while (!S_AXI_RVALID) @(posedge s_clk);
+                if (S_AXI_RDATA !== base+n) begin $display("FAIL read addr=%h beat=%0d actual=%h expected=%h", addr,n,S_AXI_RDATA,base+n); errors=errors+1; end else $display("PASS read beat %0d data=%h", n, S_AXI_RDATA);
                 if ((n==len) && !S_AXI_RLAST) begin $display("FAIL missing RLAST"); errors=errors+1; end
-                @(negedge s_clk);
             end
-            S_AXI_RREADY=0;
+            @(negedge s_clk); S_AXI_RREADY=0;
         end
     endtask
 
@@ -123,35 +124,54 @@ module axixclk_assert;
 
 
   // ---------------- Assertion monitors ----------------
-  // AXI VALID must remain asserted while waiting for READY
-  reg prev_aw_wait, prev_w_wait, prev_ar_wait;
+  // AXI VALID must remain asserted while waiting for READY.
+  reg s_prev_aw_wait, s_prev_w_wait, s_prev_ar_wait;
   always @(posedge s_clk) begin
-    if (!S_AXI_ARESETN) begin
-      prev_aw_wait <= 1'b0; prev_w_wait <= 1'b0; prev_ar_wait <= 1'b0;
+    if (!s_rstn) begin
+      s_prev_aw_wait <= 1'b0;
+      s_prev_w_wait  <= 1'b0;
+      s_prev_ar_wait <= 1'b0;
     end else begin
-      if (prev_aw_wait) if (!(S_AXI_AWVALID) else begin $display("ASSERT FAIL: AXI AWVALID dropped before AWREADY")) begin $display("ASSERT FAIL: S_AXI_AWVALID) else begin $display("ASSERT FAIL: AXI AWVALID dropped before AWREADY""); errors = errors + 1; end errors = errors + 1; end
-      if (prev_w_wait)  if (!(S_AXI_WVALID)  else begin $display("ASSERT FAIL: AXI WVALID dropped before WREADY")) begin $display("ASSERT FAIL: S_AXI_WVALID)  else begin $display("ASSERT FAIL: AXI WVALID dropped before WREADY""); errors = errors + 1; end errors = errors + 1; end
-      if (prev_ar_wait) if (!(S_AXI_ARVALID) else begin $display("ASSERT FAIL: AXI ARVALID dropped before ARREADY")) begin $display("ASSERT FAIL: S_AXI_ARVALID) else begin $display("ASSERT FAIL: AXI ARVALID dropped before ARREADY""); errors = errors + 1; end errors = errors + 1; end
-      prev_aw_wait <= (S_AXI_AWVALID && !S_AXI_AWREADY);
-      prev_w_wait  <= (S_AXI_WVALID  && !S_AXI_WREADY);
-      prev_ar_wait <= (S_AXI_ARVALID && !S_AXI_ARREADY);
+      if (s_prev_aw_wait && !S_AXI_AWVALID) begin
+        $display("ASSERT FAIL: S_AXI_AWVALID dropped before AWREADY");
+        errors = errors + 1;
+      end
+      if (s_prev_w_wait && !S_AXI_WVALID) begin
+        $display("ASSERT FAIL: S_AXI_WVALID dropped before WREADY");
+        errors = errors + 1;
+      end
+      if (s_prev_ar_wait && !S_AXI_ARVALID) begin
+        $display("ASSERT FAIL: S_AXI_ARVALID dropped before ARREADY");
+        errors = errors + 1;
+      end
+      s_prev_aw_wait <= S_AXI_AWVALID && !S_AXI_AWREADY;
+      s_prev_w_wait  <= S_AXI_WVALID  && !S_AXI_WREADY;
+      s_prev_ar_wait <= S_AXI_ARVALID && !S_AXI_ARREADY;
     end
   end
 
-
-  // ---------------- Assertion monitors ----------------
-  // AXI VALID must remain asserted while waiting for READY
-  reg prev_aw_wait, prev_w_wait, prev_ar_wait;
+  reg m_prev_aw_wait, m_prev_w_wait, m_prev_ar_wait;
   always @(posedge m_clk) begin
     if (!M_AXI_ARESETN) begin
-      prev_aw_wait <= 1'b0; prev_w_wait <= 1'b0; prev_ar_wait <= 1'b0;
+      m_prev_aw_wait <= 1'b0;
+      m_prev_w_wait  <= 1'b0;
+      m_prev_ar_wait <= 1'b0;
     end else begin
-      if (prev_aw_wait) if (!(M_AXI_AWVALID) else begin $display("ASSERT FAIL: AXI AWVALID dropped before AWREADY")) begin $display("ASSERT FAIL: M_AXI_AWVALID) else begin $display("ASSERT FAIL: AXI AWVALID dropped before AWREADY""); errors = errors + 1; end errors = errors + 1; end
-      if (prev_w_wait)  if (!(M_AXI_WVALID)  else begin $display("ASSERT FAIL: AXI WVALID dropped before WREADY")) begin $display("ASSERT FAIL: M_AXI_WVALID)  else begin $display("ASSERT FAIL: AXI WVALID dropped before WREADY""); errors = errors + 1; end errors = errors + 1; end
-      if (prev_ar_wait) if (!(M_AXI_ARVALID) else begin $display("ASSERT FAIL: AXI ARVALID dropped before ARREADY")) begin $display("ASSERT FAIL: M_AXI_ARVALID) else begin $display("ASSERT FAIL: AXI ARVALID dropped before ARREADY""); errors = errors + 1; end errors = errors + 1; end
-      prev_aw_wait <= (M_AXI_AWVALID && !M_AXI_AWREADY);
-      prev_w_wait  <= (M_AXI_WVALID  && !M_AXI_WREADY);
-      prev_ar_wait <= (M_AXI_ARVALID && !M_AXI_ARREADY);
+      if (m_prev_aw_wait && !M_AXI_AWVALID) begin
+        $display("ASSERT FAIL: M_AXI_AWVALID dropped before AWREADY");
+        errors = errors + 1;
+      end
+      if (m_prev_w_wait && !M_AXI_WVALID) begin
+        $display("ASSERT FAIL: M_AXI_WVALID dropped before WREADY");
+        errors = errors + 1;
+      end
+      if (m_prev_ar_wait && !M_AXI_ARVALID) begin
+        $display("ASSERT FAIL: M_AXI_ARVALID dropped before ARREADY");
+        errors = errors + 1;
+      end
+      m_prev_aw_wait <= M_AXI_AWVALID && !M_AXI_AWREADY;
+      m_prev_w_wait  <= M_AXI_WVALID  && !M_AXI_WREADY;
+      m_prev_ar_wait <= M_AXI_ARVALID && !M_AXI_ARREADY;
     end
   end
 

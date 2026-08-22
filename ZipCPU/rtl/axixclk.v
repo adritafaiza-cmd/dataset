@@ -151,7 +151,17 @@ module axixclk #(
 		// }}}
 	);
 
-	reg	[2:0]	mreset;
+	reg	[2:0]	sreset, mreset;
+	wire		S_AXI_ARESETN_SYNC;
+
+	(* ASYNC_REG = "TRUE" *) initial	sreset = 3'b000;
+	always @(posedge S_AXI_ACLK, negedge S_AXI_ARESETN)
+	if (!S_AXI_ARESETN)
+		sreset <= 3'b000;
+	else
+		sreset <= { sreset[1:0], 1'b1 };
+
+	assign	S_AXI_ARESETN_SYNC = sreset[2];
 
 	(* ASYNC_REG = "TRUE" *) initial	mreset = 3'b000;
 	always @(posedge M_AXI_ACLK, negedge S_AXI_ARESETN)
@@ -201,7 +211,7 @@ module axixclk #(
 			.NFF(XCLOCK_FFS),
 			.WIDTH(C_S_AXI_ID_WIDTH + C_S_AXI_ADDR_WIDTH
 				+ 8 + 3 + 2 + 1 + 4 + 3 + 4))
-		awfifo(S_AXI_ACLK, S_AXI_ARESETN, S_AXI_AWVALID&& S_AXI_AWREADY,
+		awfifo(S_AXI_ACLK, S_AXI_ARESETN_SYNC, S_AXI_AWVALID&& S_AXI_AWREADY,
 			{ S_AXI_AWID, S_AXI_AWADDR,
 				S_AXI_AWLEN, S_AXI_AWSIZE, S_AXI_AWBURST,
 				S_AXI_AWLOCK,
@@ -220,7 +230,7 @@ module axixclk #(
 		afifo #(.LGFIFO(LGFIFO),
 			.NFF(XCLOCK_FFS),
 			.WIDTH(C_S_AXI_DATA_WIDTH + C_S_AXI_DATA_WIDTH/8 + 1))
-		wfifo(S_AXI_ACLK, S_AXI_ARESETN, S_AXI_WVALID&& S_AXI_WREADY,
+		wfifo(S_AXI_ACLK, S_AXI_ARESETN_SYNC, S_AXI_WVALID&& S_AXI_WREADY,
 			{ S_AXI_WDATA, S_AXI_WSTRB, S_AXI_WLAST },
 			wfull,
 			M_AXI_ACLK, M_AXI_ARESETN, M_AXI_WREADY,
@@ -235,7 +245,7 @@ module axixclk #(
 			.WIDTH(C_S_AXI_ID_WIDTH + 2))
 		bfifo(M_AXI_ACLK, M_AXI_ARESETN, M_AXI_BVALID&& M_AXI_BREADY,
 			{ M_AXI_BID, M_AXI_BRESP }, bfull,
-			S_AXI_ACLK, S_AXI_ARESETN, S_AXI_BREADY,
+			S_AXI_ACLK, S_AXI_ARESETN_SYNC, S_AXI_BREADY,
 			{ S_AXI_BID, S_AXI_BRESP }, bempty);
 
 		assign	S_AXI_BVALID = !bempty;
@@ -276,7 +286,7 @@ module axixclk #(
 			.NFF(XCLOCK_FFS),
 			.WIDTH(C_S_AXI_ID_WIDTH + C_S_AXI_ADDR_WIDTH
 				+ 8 + 3 + 2 + 1 + 4 + 3 + 4))
-		arfifo(S_AXI_ACLK, S_AXI_ARESETN, S_AXI_ARVALID&& S_AXI_ARREADY,
+		arfifo(S_AXI_ACLK, S_AXI_ARESETN_SYNC, S_AXI_ARVALID&& S_AXI_ARREADY,
 			{ S_AXI_ARID, S_AXI_ARADDR,
 				S_AXI_ARLEN, S_AXI_ARSIZE, S_AXI_ARBURST,
 				S_AXI_ARLOCK,
@@ -299,7 +309,7 @@ module axixclk #(
 		rfifo(M_AXI_ACLK, M_AXI_ARESETN, M_AXI_RVALID&& M_AXI_RREADY,
 			{ M_AXI_RID, M_AXI_RDATA, M_AXI_RLAST, M_AXI_RRESP },
 			rfull,
-			S_AXI_ACLK, S_AXI_ARESETN, S_AXI_RREADY,
+			S_AXI_ACLK, S_AXI_ARESETN_SYNC, S_AXI_RREADY,
 			{ S_AXI_RID, S_AXI_RDATA, S_AXI_RLAST, S_AXI_RRESP },
 			rempty);
 

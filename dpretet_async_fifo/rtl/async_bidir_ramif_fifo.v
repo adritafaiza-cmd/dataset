@@ -69,6 +69,29 @@ module async_bidir_ramif_fifo
   wire [ASIZE-1:0]             a_waddr, a_raddr, b_waddr, b_raddr;
   wire [  ASIZE:0]             a_wptr, b_rptr, a2b_wptr, b2a_rptr;
   wire [  ASIZE:0]             a_rptr, b_wptr, a2b_rptr, b2a_wptr;
+  wire                         a_rst_n_sync, b_rst_n_sync;
+
+  (* async_reg = "true" *) reg [1:0] a_rst_sync_ff;
+  (* async_reg = "true" *) reg [1:0] b_rst_sync_ff;
+
+  // Asynchronous assertion, synchronous deassertion in the A domain.
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_rst_sync_ff <= 2'b00;
+    else
+      a_rst_sync_ff <= {a_rst_sync_ff[0], 1'b1};
+  end
+
+  // Asynchronous assertion, synchronous deassertion in the B domain.
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_rst_sync_ff <= 2'b00;
+    else
+      b_rst_sync_ff <= {b_rst_sync_ff[0], 1'b1};
+  end
+
+  assign a_rst_n_sync = a_rst_sync_ff[1];
+  assign b_rst_n_sync = b_rst_sync_ff[1];
 
   assign a_addr = a_dir ? a_waddr : a_raddr;
   assign b_addr = b_dir ? b_waddr : b_raddr;
@@ -82,7 +105,7 @@ module async_bidir_ramif_fifo
   sync_b2a_wptr
     (
      .dest_clk   (a_clk),
-     .dest_rst_n (a_rst_n),
+     .dest_rst_n (a_rst_n_sync),
      .src_ptr    (b_wptr),
      .dest_ptr   (b2a_wptr)
      );
@@ -92,7 +115,7 @@ module async_bidir_ramif_fifo
   sync_b2a_rptr
     (
      .dest_clk   (a_clk),
-     .dest_rst_n (a_rst_n),
+     .dest_rst_n (a_rst_n_sync),
      .src_ptr    (b_rptr),
      .dest_ptr   (b2a_rptr)
      );
@@ -103,7 +126,7 @@ module async_bidir_ramif_fifo
   a_wptr_inst
     (
      .wclk     (a_clk),
-     .wrst_n   (a_rst_n),
+     .wrst_n   (a_rst_n_sync),
      .winc     (a_winc),
      .wq2_rptr (b2a_rptr),
      .awfull   (a_afull),
@@ -117,7 +140,7 @@ module async_bidir_ramif_fifo
   a_rptr_inst
     (
      .rclk     (a_clk),
-     .rrst_n   (a_rst_n),
+     .rrst_n   (a_rst_n_sync),
      .rinc     (a_rinc),
      .rq2_wptr (b2a_wptr),
      .arempty  (a_aempty),
@@ -135,7 +158,7 @@ module async_bidir_ramif_fifo
   sync_a2b_wptr
     (
      .dest_clk   (b_clk),
-     .dest_rst_n (b_rst_n),
+     .dest_rst_n (b_rst_n_sync),
      .src_ptr    (a_wptr),
      .dest_ptr   (a2b_wptr)
      );
@@ -145,7 +168,7 @@ module async_bidir_ramif_fifo
   sync_a2b_rptr
     (
      .dest_clk   (b_clk),
-     .dest_rst_n (b_rst_n),
+     .dest_rst_n (b_rst_n_sync),
      .src_ptr    (a_rptr),
      .dest_ptr   (a2b_rptr)
      );
@@ -156,7 +179,7 @@ module async_bidir_ramif_fifo
   b_wptr_inst
     (
      .wclk     (b_clk),
-     .wrst_n   (b_rst_n),
+     .wrst_n   (b_rst_n_sync),
      .winc     (b_winc),
      .wq2_rptr (a2b_rptr),
      .awfull   (b_afull),
@@ -170,7 +193,7 @@ module async_bidir_ramif_fifo
   b_rptr_inst
     (
      .rclk     (b_clk),
-     .rrst_n   (b_rst_n),
+     .rrst_n   (b_rst_n_sync),
      .rinc     (b_rinc),
      .rq2_wptr (a2b_wptr),
      .arempty  (b_aempty),

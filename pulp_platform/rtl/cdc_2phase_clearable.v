@@ -73,6 +73,34 @@ module cdc_2phase_clearable #(
   input  dst_ready_i
 );
 
+  // Coordinate asynchronous reset assertion across the protocol. Each side
+  // then releases reset through its own two-stage synchronizer. One-sided warm
+  // clearing remains available through src_clear_i and dst_clear_i.
+  wire common_rst_ni;
+  wire src_rst_sync_ni;
+  wire dst_rst_sync_ni;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] src_rst_sync_q;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] dst_rst_sync_q;
+
+  assign common_rst_ni = src_rst_ni & dst_rst_ni;
+
+  always @(posedge src_clk_i or negedge common_rst_ni) begin
+    if (!common_rst_ni)
+      src_rst_sync_q <= 2'b00;
+    else
+      src_rst_sync_q <= {src_rst_sync_q[0], 1'b1};
+  end
+
+  always @(posedge dst_clk_i or negedge common_rst_ni) begin
+    if (!common_rst_ni)
+      dst_rst_sync_q <= 2'b00;
+    else
+      dst_rst_sync_q <= {dst_rst_sync_q[0], 1'b1};
+  end
+
+  assign src_rst_sync_ni = src_rst_sync_q[1];
+  assign dst_rst_sync_ni = dst_rst_sync_q[1];
+
   wire s_src_clear_req;
   reg  s_src_clear_ack_q;
   wire s_src_ready;
@@ -93,7 +121,7 @@ module cdc_2phase_clearable #(
     .WIDTH(WIDTH),
     .SYNC_STAGES(SYNC_STAGES)
   ) i_src (
-    .rst_ni       (src_rst_ni),
+    .rst_ni       (src_rst_sync_ni),
     .clk_i        (src_clk_i),
     .clear_i      (s_src_clear_req),
     .data_i       (src_data_i),
@@ -110,7 +138,7 @@ module cdc_2phase_clearable #(
     .WIDTH(WIDTH),
     .SYNC_STAGES(SYNC_STAGES)
   ) i_dst (
-    .rst_ni       (dst_rst_ni),
+    .rst_ni       (dst_rst_sync_ni),
     .clk_i        (dst_clk_i),
     .clear_i      (s_dst_clear_req),
     .data_o       (dst_data_o),
@@ -127,7 +155,7 @@ module cdc_2phase_clearable #(
     .SYNC_STAGES(SYNC_STAGES-1)
   ) i_cdc_reset_ctrlr (
     .a_clk_i         (src_clk_i),
-    .a_rst_ni        (src_rst_ni),
+    .a_rst_ni        (src_rst_sync_ni),
     .a_clear_i       (src_clear_i),
     .a_clear_o       (s_src_clear_req),
     .a_clear_ack_i   (s_src_clear_ack_q),
@@ -135,7 +163,7 @@ module cdc_2phase_clearable #(
     .a_isolate_ack_i (s_src_isolate_ack_q),
 
     .b_clk_i         (dst_clk_i),
-    .b_rst_ni        (dst_rst_ni),
+    .b_rst_ni        (dst_rst_sync_ni),
     .b_clear_i       (dst_clear_i),
     .b_clear_o       (s_dst_clear_req),
     .b_clear_ack_i   (s_dst_clear_ack_q),
@@ -143,8 +171,8 @@ module cdc_2phase_clearable #(
     .b_isolate_ack_i (s_dst_isolate_ack_q)
   );
 
-  always @(posedge src_clk_i or negedge src_rst_ni) begin
-    if (!src_rst_ni) begin
+  always @(posedge src_clk_i or negedge src_rst_sync_ni) begin
+    if (!src_rst_sync_ni) begin
       s_src_isolate_ack_q <= 1'b0;
       s_src_clear_ack_q   <= 1'b0;
     end else begin
@@ -153,8 +181,8 @@ module cdc_2phase_clearable #(
     end
   end
 
-  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
-    if (!dst_rst_ni) begin
+  always @(posedge dst_clk_i or negedge dst_rst_sync_ni) begin
+    if (!dst_rst_sync_ni) begin
       s_dst_isolate_ack_q <= 1'b0;
       s_dst_clear_ack_q   <= 1'b0;
     end else begin

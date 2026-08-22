@@ -35,10 +35,29 @@ module wbxclk_assert;
 
 
   // ---------------- Assertion monitors ----------------
-  // Wishbone ACK/ERR/STALL sanity checks
-  always @(posedge i_clk) begin
-    if (i_reset == 1'b0) begin
-      if (!(!(i_wb_ack && !o_wb_cyc)) else begin $display("ASSERT FAIL: ACK without CYC")) begin $display("ASSERT FAIL: !(i_wb_ack && !o_wb_cyc)) else begin $display("ASSERT FAIL: ACK without CYC""); errors = errors + 1; end errors = errors + 1; end
+  // Wishbone responses are valid only during an active bus cycle.
+  always @(posedge wb_clk) begin
+    if (!reset) begin
+      if (ack && !cyc) begin
+        $display("ASSERT FAIL: ACK without CYC");
+        errors = errors + 1;
+      end
+      if (err && !cyc) begin
+        $display("ASSERT FAIL: ERR without CYC");
+        errors = errors + 1;
+      end
+      if (ack && err) begin
+        $display("ASSERT FAIL: ACK and ERR asserted together");
+        errors = errors + 1;
+      end
+    end
+  end
+
+  // Downstream responses are likewise valid only during an active cycle.
+  always @(posedge xclk) begin
+    if (!reset && (x_ack || x_err) && !x_cyc) begin
+      $display("ASSERT FAIL: downstream response without CYC");
+      errors = errors + 1;
     end
   end
 

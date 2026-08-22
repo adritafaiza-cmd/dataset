@@ -71,6 +71,7 @@ module	apbxclk #(
 
 	// Local declarations
 	// {{{
+	reg			s_reset_pipe, s_resetn;
 	reg			reset_pipe, full_reset_pipe, full_reset;
 
 	reg			s_request, s_tfr_request;
@@ -86,6 +87,12 @@ module	apbxclk #(
 	//
 	// Synchronize resets
 	// {{{
+	always @(posedge S_APB_PCLK or negedge S_PRESETn)
+	if (!S_PRESETn)
+		{ s_resetn, s_reset_pipe } <= 0;
+	else
+		{ s_resetn, s_reset_pipe } <= { s_reset_pipe, 1'b1 };
+
 	always @(posedge M_APB_PCLK or negedge S_PRESETn)
 	if (!S_PRESETn)
 		{ M_PRESETn, reset_pipe } <= 0;
@@ -107,8 +114,8 @@ module	apbxclk #(
 	// {{{
 	// Step 1: Register the request
 	//	Always register anything before moving cross clock domains
-	always @(posedge S_APB_PCLK or negedge S_PRESETn)
-	if (!S_PRESETn)
+	always @(posedge S_APB_PCLK or negedge s_resetn)
+	if (!s_resetn)
 		s_request <= 0;
 	else if (S_APB_PREADY)
 		s_request <= 0;
@@ -120,8 +127,8 @@ module	apbxclk #(
 	// {{{
 	// Step 2: Forward requests--but only when the downstream handshake
 	//	is ready to accept them
-	always @(posedge S_APB_PCLK or negedge S_PRESETn)
-	if (!S_PRESETn)
+	always @(posedge S_APB_PCLK or negedge s_resetn)
+	if (!s_resetn)
 		s_tfr_request <= 0;
 	else if (S_APB_PREADY)
 		s_tfr_request <= 0;
@@ -171,8 +178,8 @@ module	apbxclk #(
 
 	// s_ack, s_ack_pipe
 	// {{{
-	always @(posedge S_APB_PCLK or negedge S_PRESETn)
-	if (!S_PRESETn)
+	always @(posedge S_APB_PCLK or negedge s_resetn)
+	if (!s_resetn)
 		{ s_ack, s_ack_pipe } <= 0;
 	else
 		{ s_ack, s_ack_pipe } <= { s_ack_pipe, m_ack };
@@ -180,8 +187,8 @@ module	apbxclk #(
 
 	// S_APB_PREADY
 	// {{{
-	always @(posedge S_APB_PCLK or negedge S_PRESETn)
-	if (!S_PRESETn)
+	always @(posedge S_APB_PCLK or negedge s_resetn)
+	if (!s_resetn)
 		S_APB_PREADY <= 0;
 	else
 		S_APB_PREADY <= !S_APB_PREADY && s_tfr_request && s_ack;
@@ -238,8 +245,8 @@ module	apbxclk #(
 		assign	M_APB_PWSTRB = m_pwstrb;
 		assign	M_APB_PPROT  = m_pprot;
 
-		always @(posedge S_APB_PCLK or negedge S_PRESETn)
-		if (!S_PRESETn)
+		always @(posedge S_APB_PCLK or negedge s_resetn)
+		if (!s_resetn)
 			s_pslverr <= 1'b0;
 		else if (s_tfr_request && s_ack
 					&& (!S_APB_PREADY || !S_APB_PENABLE))

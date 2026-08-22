@@ -56,12 +56,40 @@ module cdc_2phase #(
   input  dst_ready_i
 );
 
+  // The two-phase protocol requires coordinated reset assertion. Either
+  // external reset therefore resets both sides; deassertion is synchronized
+  // independently to each local clock.
+  wire common_rst_ni;
+  wire src_rst_sync_ni;
+  wire dst_rst_sync_ni;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] src_rst_sync_q;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] dst_rst_sync_q;
+
+  assign common_rst_ni = src_rst_ni & dst_rst_ni;
+
+  always @(posedge src_clk_i or negedge common_rst_ni) begin
+    if (!common_rst_ni)
+      src_rst_sync_q <= 2'b00;
+    else
+      src_rst_sync_q <= {src_rst_sync_q[0], 1'b1};
+  end
+
+  always @(posedge dst_clk_i or negedge common_rst_ni) begin
+    if (!common_rst_ni)
+      dst_rst_sync_q <= 2'b00;
+    else
+      dst_rst_sync_q <= {dst_rst_sync_q[0], 1'b1};
+  end
+
+  assign src_rst_sync_ni = src_rst_sync_q[1];
+  assign dst_rst_sync_ni = dst_rst_sync_q[1];
+
   wire async_req;
   wire async_ack;
   wire [WIDTH-1:0] async_data;
 
   cdc_2phase_src #(.WIDTH(WIDTH)) i_src (
-    .rst_ni       (src_rst_ni),
+    .rst_ni       (src_rst_sync_ni),
     .clk_i        (src_clk_i),
     .data_i       (src_data_i),
     .valid_i      (src_valid_i),
@@ -72,7 +100,7 @@ module cdc_2phase #(
   );
 
   cdc_2phase_dst #(.WIDTH(WIDTH)) i_dst (
-    .rst_ni       (dst_rst_ni),
+    .rst_ni       (dst_rst_sync_ni),
     .clk_i        (dst_clk_i),
     .data_o       (dst_data_o),
     .valid_o      (dst_valid_o),

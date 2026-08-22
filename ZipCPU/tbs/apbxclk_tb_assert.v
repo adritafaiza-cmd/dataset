@@ -30,21 +30,18 @@ module apbxclk_assert;
 
 
   // ---------------- Assertion monitors ----------------
-  // APB enable phase must only occur after/select phase
-  always @(posedge S_PCLK) begin
-    if (S_PRESETn) begin
-      if (!(!S_PENABLE || S_PSEL) else begin $display("ASSERT FAIL: APB PENABLE without PSEL")) begin $display("ASSERT FAIL: !S_PENABLE || S_PSEL) else begin $display("ASSERT FAIL: APB PENABLE without PSEL""); errors = errors + 1; end errors = errors + 1; end
-      if (!(!S_PREADY || S_PSEL) else begin $display("ASSERT FAIL: APB PREADY without active PSEL")) begin $display("ASSERT FAIL: !S_PREADY || S_PSEL) else begin $display("ASSERT FAIL: APB PREADY without active PSEL""); errors = errors + 1; end errors = errors + 1; end
+  // APB enable phase is only valid while its peripheral is selected.
+  always @(posedge SCLK) begin
+    if (RSTN && S_PENABLE && !S_PSEL) begin
+      $display("ASSERT FAIL: slave PENABLE without PSEL");
+      errors = errors + 1;
     end
   end
 
-
-  // ---------------- Assertion monitors ----------------
-  // APB enable phase must only occur after/select phase
-  always @(posedge M_PCLK) begin
-    if (M_PRESETn) begin
-      if (!(!M_PENABLE || M_PSEL) else begin $display("ASSERT FAIL: APB PENABLE without PSEL")) begin $display("ASSERT FAIL: !M_PENABLE || M_PSEL) else begin $display("ASSERT FAIL: APB PENABLE without PSEL""); errors = errors + 1; end errors = errors + 1; end
-      if (!(!M_PREADY || M_PSEL) else begin $display("ASSERT FAIL: APB PREADY without active PSEL")) begin $display("ASSERT FAIL: !M_PREADY || M_PSEL) else begin $display("ASSERT FAIL: APB PREADY without active PSEL""); errors = errors + 1; end errors = errors + 1; end
+  always @(posedge MCLK) begin
+    if (M_PRESETn && M_PENABLE && !M_PSEL) begin
+      $display("ASSERT FAIL: master PENABLE without PSEL");
+      errors = errors + 1;
     end
   end
 

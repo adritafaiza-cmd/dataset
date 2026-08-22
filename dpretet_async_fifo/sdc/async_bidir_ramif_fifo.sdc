@@ -12,6 +12,16 @@
 create_clock -name a_clk -period 10.000 [get_ports a_clk]
 create_clock -name b_clk -period 14.000 [get_ports b_clk]
 
+create_generated_clock -name o_ram_a_clk \
+    -source [get_ports a_clk] \
+    -divide_by 1 \
+    [get_ports o_ram_a_clk]
+
+create_generated_clock -name o_ram_b_clk \
+    -source [get_ports b_clk] \
+    -divide_by 1 \
+    [get_ports o_ram_b_clk]
+
 set_clock_groups -asynchronous \
-    -group {a_clk} \
-    -group {b_clk}
+    -group {a_clk o_ram_a_clk} \
+    -group {b_clk o_ram_b_clk}
