@@ -1,0 +1,135 @@
+module apbxclk #(
+  parameter C_APB_ADDR_WIDTH = 12,
+  parameter C_APB_DATA_WIDTH = 32,
+  parameter [0:0] OPT_REGISTERED = 1'b0
+)(
+  input  wire                         S_APB_PCLK,
+  input  wire                         S_PRESETn,
+  input  wire                         S_APB_PSEL,
+  input  wire                         S_APB_PENABLE,
+  output reg                          S_APB_PREADY,
+  input  wire [C_APB_ADDR_WIDTH-1:0]  S_APB_PADDR,
+  input  wire                         S_APB_PWRITE,
+  input  wire [C_APB_DATA_WIDTH-1:0]  S_APB_PWDATA,
+  input  wire [C_APB_DATA_WIDTH/8-1:0] S_APB_PWSTRB,
+  input  wire [2:0]                   S_APB_PPROT,
+  output wire [C_APB_DATA_WIDTH-1:0]  S_APB_PRDATA,
+  output wire                         S_APB_PSLVERR,
+
+  input  wire                         M_APB_PCLK,
+  output reg                          M_PRESETn,
+  output reg                          M_APB_PSEL,
+  output reg                          M_APB_PENABLE,
+  input  wire                         M_APB_PREADY,
+  output wire [C_APB_ADDR_WIDTH-1:0]  M_APB_PADDR,
+  output wire                         M_APB_PWRITE,
+  output wire [C_APB_DATA_WIDTH-1:0]  M_APB_PWDATA,
+  output wire [C_APB_DATA_WIDTH/8-1:0] M_APB_PWSTRB,
+  output wire [2:0]                   M_APB_PPROT,
+  input  wire [C_APB_DATA_WIDTH-1:0]  M_APB_PRDATA,
+  input  wire                         M_APB_PSLVERR
+);
+
+reg [C_APB_DATA_WIDTH-1:0] S_APB_PRDATA_reg;
+reg S_APB_PSLVERR_reg;
+
+reg [C_APB_DATA_WIDTH-1:0] M_APB_PRDATA_reg;
+reg S_APB_PSLVERR_reg;
+
+reg [C_APB_ADDR_WIDTH-1:0] M_APB_PADDR_reg;
+reg M_APB_PWRITE_reg;
+reg [C_APB_DATA_WIDTH-1:0] M_APB_PWDATA_reg;
+reg [C_APB_DATA_WIDTH/8-1:0] M_APB_PWSTRB_reg;
+reg [2:0] M_APB_PPROT_reg;
+
+reg [C_APB_ADDR_WIDTH-1:0] S_APB_PADDR_reg;
+reg S_APB_PWRITE_reg;
+reg [C_APB_DATA_WIDTH-1:0] S_APB_PWDATA_reg;
+reg [C_APB_DATA_WIDTH/8-1:0] S_APB_PWSTRB_reg;
+reg [2:0] S_APB_PPROT_reg;
+
+reg [1:0] state;
+
+always @(posedge S_APB_PCLK) begin
+  if (!S_PRESETn) begin
+    S_APB_PREADY <= 1'b0;
+    S_APB_PRDATA_reg <= 0;
+    S_APB_PSLVERR_reg <= 1'b0;
+    state <= 2'b00;
+  end else begin
+    case (state)
+      2'b00: begin // Idle
+        if (S_APB_PSEL && S_APB_PENABLE) begin
+          S_APB_PREADY <= 1'b1;
+          S_APB_PRDATA_reg <= M_APB_PRDATA_reg;
+          S_APB_PSLVERR_reg <= S_APB_PSLVERR_reg;
+          state <= 2'b01;
+        end
+      end
+      2'b01: begin // Setup phase
+        if (M_APB_PREADY) begin
+          M_APB_PSEL <= 1'b1;
+          M_APB_PENABLE <= 1'b1;
+          M_APB_PADDR_reg <= S_APB_PADDR;
+          M_APB_PWRITE_reg <= S_APB_PWRITE;
+          M_APB_PWDATA_reg <= S_APB_PWDATA;
+          M_APB_PWSTRB_reg <= S_APB_PWSTRB;
+          M_APB_PPROT_reg <= S_APB_PPROT;
+          state <= 2'b10;
+        end
+      end
+      2'b10: begin // Access phase
+        if (M_APB_PREADY) begin
+          M_APB_PSEL <= 1'b0;
+          M_APB_PENABLE <= 1'b0;
+          S_APB_PREADY <= 1'b0;
+          state <= 2'b00;
+        end
+      end
+    endcase
+  end
+end
+
+always @(posedge M_APB_PCLK) begin
+  if (!M_PRESETn) begin
+    M_APB_PSEL <= 1'b0;
+    M_APB_PENABLE <= 1'b0;
+    M_APB_PADDR_reg <= 0;
+    M_APB_PWRITE_reg <= 1'b0;
+    M_APB_PWDATA_reg <= 0;
+    M_APB_PWSTRB_reg <= 0;
+    M_APB_PPROT_reg <= 0;
+    M_APB_PRDATA_reg <= 0;
+    S_APB_PSLVERR_reg <= 1'b0;
+  end else begin
+    M_APB_PADDR <= M_APB_PADDR_reg;
+    M_APB_PWRITE <= M_APB_PWRITE_reg;
+    M_APB_PWDATA <= M_APB_PWDATA_reg;
+    M_APB_PWSTRB <= M_APB_PWSTRB_reg;
+    M_APB_PPROT <= M_APB_PPROT_reg;
+    M_APB_PRDATA_reg <= M_APB_PRDATA;
+    S_APB_PSLVERR_reg <= M_APB_PSLVERR;
+  end
+end
+
+always @(posedge S_APB_PCLK) begin
+  if (!S_PRESETn) begin
+    S_APB_PADDR_reg <= 0;
+    S_APB_PWRITE_reg <= 1'b0;
+    S_APB_PWDATA_reg <= 0;
+    S_APB_PWSTRB_reg <= 0;
+    S_APB_PPROT_reg <= 0;
+  end else begin
+    S_APB_PADDR_reg <= S_APB_PADDR;
+    S_APB_PWRITE_reg <= S_APB_PWRITE;
+    S_APB_PWDATA_reg <= S_APB_PWDATA;
+    S_APB_PWSTRB_reg <= S_APB_PWSTRB;
+    S_APB_PPROT_reg <= S_APB_PPROT;
+  end
+end
+
+assign S_APB_PRDATA = OPT_REGISTERED ? S_APB_PRDATA_reg : M_APB_PRDATA;
+assign S_APB_PSLVERR = OPT_REGISTERED ? S_APB_PSLVERR_reg : M_APB_PSLVERR;
+
+
+endmodule
