@@ -1,0 +1,78 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input                  src_rst_ni,
+  input                  src_clk_i,
+  input      [WIDTH-1:0] src_data_i,
+  input                  src_valid_i,
+  output                 src_ready_o,
+
+  input                  dst_rst_ni,
+  input                  dst_clk_i,
+  output     [WIDTH-1:0] dst_data_o,
+  output                 dst_valid_o,
+  input                  dst_ready_i
+);
+
+  reg [WIDTH-1:0] src_data_r;
+  reg [WIDTH-1:0] dst_data_r;
+  reg [1:0] src_state;
+  reg [1:0] dst_state;
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (~src_rst_ni) begin
+      src_data_r <= 0;
+      src_state <= 2'b00;
+      src_ready_o <= 1'b1;
+    end else begin
+      case (src_state)
+        2'b00: begin
+          if (src_valid_i && dst_ready_i) begin
+            src_data_r <= src_data_i;
+            src_state <= 2'b01;
+          end else begin
+            src_ready_o <= 1'b0;
+          end
+        end
+        2'b01: begin
+          dst_data_o <= src_data_r;
+          dst_valid_o <= 1'b1;
+          src_state <= 2'b10;
+        end
+        2'b10: begin
+          dst_valid_o <= 1'b0;
+          src_state <= 2'b00;
+        end
+      endcase
+    end
+  end
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (~dst_rst_ni) begin
+      dst_data_r <= 0;
+      dst_state <= 2'b00;
+      dst_valid_o <= 1'b0;
+    end else begin
+      case (dst_state)
+        2'b00: begin
+          if (src_ready_i && src_valid_i) begin
+            dst_data_r <= src_data_i;
+            dst_state <= 2'b01;
+          end else begin
+            dst_valid_o <= 1'b0;
+          end
+        end
+        2'b01: begin
+          dst_valid_o <= 1'b1;
+          dst_state <= 2'b10;
+        end
+        2'b10: begin
+          dst_valid_o <= 1'b0;
+          dst_state <= 2'b00;
+        end
+      endcase
+    end
+  end
+
+
+endmodule
