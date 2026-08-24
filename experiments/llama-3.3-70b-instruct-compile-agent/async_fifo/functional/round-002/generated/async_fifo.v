@@ -1,0 +1,105 @@
+module async_fifo #(
+  parameter DSIZE = 8,
+  parameter ASIZE = 4,
+  parameter FALLTHROUGH = "TRUE"
+)(
+  input  wire             wclk,
+  input  wire             wrst_n,
+  input  wire             winc,
+  input  wire [DSIZE-1:0] wdata,
+  output wire             wfull,
+  output wire             awfull,
+
+  input  wire             rclk,
+  input  wire             rrst_n,
+  input  wire             rinc,
+  output wire [DSIZE-1:0] rdata,
+  output wire             rempty,
+  output wire             arempty
+);
+
+  reg [DSIZE-1:0] mem [2**ASIZE-1:0];
+  reg [ASIZE-1:0] wptr, rptr;
+  reg [ASIZE-1:0] wcnt, rcnt;
+  reg [ASIZE-1:0] wcnt_gray, rcnt_gray;
+  reg [ASIZE-1:0] wcnt_bin, rcnt_bin;
+  reg [ASIZE-1:0] wcnt_bin_r, rcnt_bin_w;
+  reg wfull_int, rempty_int;
+  reg awfull_int, arempty_int;
+  reg [DSIZE-1:0] rdata_int;
+
+  assign wfull = wfull_int;
+  assign awfull = awfull_int;
+  assign rempty = rempty_int;
+  assign arempty = arempty_int;
+  assign rdata = rdata_int;
+
+  always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+      wptr <= 0;
+      wcnt <= 0;
+      wcnt_gray <= 0;
+      wcnt_bin <= 0;
+      wfull_int <= 0;
+      awfull_int <= 0;
+    end else if (winc &&!wfull_int) begin
+      mem[wptr] <= wdata;
+      wptr <= wptr + 1;
+      wcnt <= wcnt + 1;
+      wcnt_gray <= wcnt_gray + 1;
+      wcnt_bin <= wcnt_bin + 1;
+      if (wcnt == 2**ASIZE - 2) begin
+        awfull_int <= 1;
+      end else if (wcnt == 2**ASIZE - 1) begin
+        wfull_int <= 1;
+      end else if (wcnt == 2**ASIZE) begin
+        wcnt <= 0;
+        wcnt_gray <= 0;
+        wcnt_bin <= 0;
+        wfull_int <= 0;
+        awfull_int <= 0;
+      end
+    end
+  end
+
+  always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+      rptr <= 0;
+      rcnt <= 0;
+      rcnt_gray <= 0;
+      rcnt_bin <= 0;
+      rempty_int <= 1;
+      arempty_int <= 1;
+      rdata_int <= 0;
+    end else if (rinc &&!rempty_int) begin
+      rptr <= rptr + 1;
+      rcnt <= rcnt + 1;
+      rcnt_gray <= rcnt_gray + 1;
+      rcnt_bin <= rcnt_bin + 1;
+      if (rcnt == 2**ASIZE - 2) begin
+        arempty_int <= 0;
+      end else if (rcnt == 2**ASIZE - 1) begin
+        rempty_int <= 0;
+      end else if (rcnt == 2**ASIZE) begin
+        rcnt <= 0;
+        rcnt_gray <= 0;
+        rcnt_bin <= 0;
+        rempty_int <= 1;
+        arempty_int <= 1;
+      end
+    end else if (!rempty_int) begin
+      if (FALLTHROUGH == "TRUE") begin
+        rdata_int <= mem[rptr];
+      end
+    end
+  end
+
+  always @(posedge wclk) begin
+    wcnt_bin_r <= wcnt_bin;
+  end
+
+  always @(posedge rclk) begin
+    rcnt_bin_w <= rcnt_bin;
+  end
+
+endmodule

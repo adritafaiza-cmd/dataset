@@ -1,0 +1,145 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input                  src_rst_ni,
+  input                  src_clk_i,
+  input      [WIDTH-1:0] src_data_i,
+  input                  src_valid_i,
+  output                 src_ready_o,
+
+  input                  dst_rst_ni,
+  input                  dst_clk_i,
+  output     [WIDTH-1:0] dst_data_o,
+  output                 dst_valid_o,
+  input                  dst_ready_i
+);
+
+  // Intermediate signals
+  logic [WIDTH-1:0] src_to_dst_data;
+  logic             src_to_dst_valid;
+  logic             src_to_dst_ready;
+
+  // Synchronizers for src_valid_i and src_data_i to dst_clk_i domain
+  synchronizer #(.WIDTH(WIDTH)) sync (
+    .src_clk_i(src_clk_i),
+    .src_rst_ni(src_rst_ni),
+    .src_data_i(src_data_i),
+    .src_valid_i(src_valid_i),
+    .dst_clk_i(dst_clk_i),
+    .dst_rst_ni(dst_rst_ni),
+    .dst_data_o(src_to_dst_data),
+    .dst_valid_o(src_to_dst_valid)
+  );
+
+  // FSM states for destination side
+  typedef enum logic [1:0] {
+    IDLE,
+    TRANSFER,
+    WAIT_READY
+  } state_t;
+
+  state_t state, next_state;
+
+  // Destination side FSM
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      state <= IDLE;
+      dst_valid_o <= 1'b0;
+      dst_data_o <= '0;
+    end else begin
+      state <= next_state;
+      case (next_state)
+        IDLE: begin
+          dst_valid_o <= 1'b0;
+        end
+        TRANSFER: begin
+          dst_valid_o <= 1'b1;
+          dst_data_o <= src_to_dst_data;
+        end
+        WAIT_READY: begin
+          dst_valid_o <= 1'b1;
+        end
+      endcase
+    end
+  end
+
+  // Next state logic for destination side FSM
+  always_comb begin
+    next_state = state;
+    case (state)
+      IDLE: begin
+        if (src_to_dst_valid) begin
+          next_state = TRANSFER;
+        end
+      end
+      TRANSFER: begin
+        if (dst_ready_i) begin
+          next_state = IDLE;
+        end else begin
+          next_state = WAIT_READY;
+        end
+      end
+      WAIT_READY: begin
+        if (dst_ready_i) begin
+          next_state = IDLE;
+        end
+      end
+    endcase
+  end
+
+  // Source ready signal
+  assign src_ready_o = src_to_dst_ready;
+
+  // Ready signal back to synchronizer
+  assign src_to_dst_ready = (state == IDLE);
+
+endmodule
+
+// Synchronizer module
+module synchronizer #(
+  parameter WIDTH = 1
+)(
+  input                  src_clk_i,
+  input                  src_rst_ni,
+  input      [WIDTH-1:0] src_data_i,
+  input                  src_valid_i,
+  input                  dst_clk_i,
+  input                  dst_rst_ni,
+  output     [WIDTH-1:0] dst_data_o,
+  output                 dst_valid_o
+);
+
+  // Metastability protection using double flops
+  logic [WIDTH-1:0] meta_data;
+  logic             meta_valid;
+
+  // Flip-flops in source clock domain
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      meta_data <= '0;
+      meta_valid <= 1'b0;
+    end else begin
+      meta_data <= src_data_i;
+      meta_valid <= src_valid_i;
+    end
+  end
+
+  // Flip-flops in destination clock domain
+  logic [WIDTH-1:0] sync_data;
+  logic             sync_valid;
+
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      sync_data <= '0;
+      sync_valid <= 1'b0;
+    end else begin
+      sync_data <= meta_data;
+      sync_valid <= meta_valid;
+    end
+  end
+
+  // Output assignments
+  assign dst_data_o = sync_data;
+  assign dst_valid_o = sync_valid;
+
+endmodule

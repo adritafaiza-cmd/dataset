@@ -6,7 +6,7 @@ reset domain crossings.
 
 ## Pilot dataset
 
-The current pilot contains 11 circuits:
+The Jasper-verified pilot contains 11 circuits:
 
 - Asynchronous FIFOs: `async_fifo`, `async_bidir_fifo`,
   `async_bidir_ramif_fifo`
@@ -14,6 +14,11 @@ The current pilot contains 11 circuits:
 - AXI-Stream FIFOs: `axis_async_fifo`, `axis_async_fifo_adapter`
 - Handshake CDCs: `cdc_2phase`, `cdc_4phase`,
   `cdc_2phase_clearable`
+
+An additional 33 catalog circuits are imported under `benchmarks/` with
+Verilog RTL, testbenches, SDC constraints, and JasperGold scripts. Their
+manifests remain `imported_unverified` and specifications remain draft.
+They are not part of the frozen 3-circuit generation pilot.
 
 Each directory under `benchmarks/` contains:
 
