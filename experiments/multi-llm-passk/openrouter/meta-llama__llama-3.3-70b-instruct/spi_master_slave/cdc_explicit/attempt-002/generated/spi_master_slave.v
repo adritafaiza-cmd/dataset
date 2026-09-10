@@ -1,0 +1,147 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+reg [N-1:0] shift_reg;
+reg [N-1:0] capture_reg;
+reg [3:0] sclk_cnt;
+reg [3:0] pclk_cnt;
+reg [1:0] state;
+reg [1:0] next_state;
+reg spi_sck_r;
+reg spi_sck_f;
+reg spi_ssel_r;
+reg spi_ssel_f;
+reg di_req_r;
+reg di_req_f;
+reg wr_ack_r;
+reg wr_ack_f;
+reg do_valid_r;
+reg do_valid_f;
+
+always @(posedge sclk_i or posedge rst_i) begin
+    if (rst_i) begin
+        spi_sck_r <= 1'b0;
+        spi_sck_f <= 1'b0;
+        spi_ssel_r <= 1'b1;
+        spi_ssel_f <= 1'b1;
+        sclk_cnt <= 4'b0;
+    end else begin
+        spi_sck_r <= spi_sck_f;
+        spi_ssel_r <= spi_ssel_f;
+        if (spi_ssel_r == 1'b0) begin
+            if (sclk_cnt == 4'b0) begin
+                spi_sck_f <= ~spi_sck_r;
+                sclk_cnt <= sclk_cnt + 1'b1;
+            end else if (sclk_cnt == 4'b1) begin
+                spi_sck_f <= spi_sck_r;
+                sclk_cnt <= sclk_cnt + 1'b1;
+            end else if (sclk_cnt == 4'b10) begin
+                spi_sck_f <= ~spi_sck_r;
+                sclk_cnt <= 4'b0;
+            end else begin
+                spi_sck_f <= spi_sck_r;
+                sclk_cnt <= sclk_cnt + 1'b1;
+            end
+        end else begin
+            spi_sck_f <= 1'b0;
+            sclk_cnt <= 4'b0;
+        end
+    end
+end
+
+always @(posedge pclk_i or posedge rst_i) begin
+    if (rst_i) begin
+        di_req_r <= 1'b0;
+        wr_ack_r <= 1'b0;
+        do_valid_r <= 1'b0;
+        pclk_cnt <= 4'b0;
+        state <= 2'b0;
+        next_state <= 2'b0;
+        shift_reg <= {N{1'b0}};
+        capture_reg <= {N{1'b0}};
+    end else begin
+        di_req_r <= di_req_f;
+        wr_ack_r <= wr_ack_f;
+        do_valid_r <= do_valid_f;
+        state <= next_state;
+        if (state == 2'b0) begin
+            if (di_req_r == 1'b0) begin
+                di_req_f <= 1'b1;
+                next_state <= 2'b0;
+            end else if (wren_i == 1'b1) begin
+                shift_reg <= di_i;
+                capture_reg <= {N{1'b0}};
+                wr_ack_f <= 1'b1;
+                next_state <= 2'b1;
+            end else begin
+                wr_ack_f <= 1'b0;
+                next_state <= 2'b0;
+            end
+        end else if (state == 2'b1) begin
+            if (pclk_cnt == 4'b0) begin
+                spi_ssel_f <= 1'b0;
+                pclk_cnt <= pclk_cnt + 1'b1;
+                next_state <= 2'b1;
+            end else if (pclk_cnt == N) begin
+                spi_ssel_f <= 1'b1;
+                pclk_cnt <= 4'b0;
+                next_state <= 2'b2;
+            end else begin
+                pclk_cnt <= pclk_cnt + 1'b1;
+                next_state <= 2'b1;
+            end
+        end else if (state == 2'b2) begin
+            do_valid_f <= 1'b1;
+            do_o <= capture_reg;
+            next_state <= 2'b0;
+        end
+    end
+end
+
+always @(posedge sclk_i or posedge rst_i) begin
+    if (rst_i) begin
+        spi_mosi_o <= 1'b0;
+    end else begin
+        if (spi_ssel_r == 1'b0) begin
+            spi_mosi_o <= shift_reg[N-1];
+            shift_reg <= {shift_reg[N-2:0], 1'b0};
+        end else begin
+            spi_mosi_o <= 1'b0;
+        end
+    end
+end
+
+always @(posedge sclk_i or posedge rst_i) begin
+    if (rst_i) begin
+        capture_reg <= {N{1'b0}};
+    end else begin
+        if (spi_ssel_r == 1'b0) begin
+            capture_reg <= {capture_reg[N-2:0], spi_miso_i};
+        end else begin
+            capture_reg <= {N{1'b0}};
+        end
+    end
+end
+
+assign spi_sck_o = spi_sck_r;
+assign spi_ssel_o = spi_ssel_r;
+assign di_req_o = di_req_r;
+assign wr_ack_o = wr_ack_r;
+
+endmodule

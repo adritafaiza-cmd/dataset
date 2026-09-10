@@ -1,0 +1,243 @@
+module uart_top (
+    wb_clk_i,
+    wb_rst_i, 
+    wb_adr_i, 
+    wb_dat_i, 
+    wb_dat_o, 
+    wb_we_i, 
+    wb_stb_i, 
+    wb_cyc_i, 
+    wb_ack_o, 
+    wb_sel_i,
+    int_o,
+    stx_pad_o, 
+    srx_pad_i,
+    rts_pad_o, 
+    cts_pad_i, 
+    dtr_pad_o, 
+    dsr_pad_i, 
+    ri_pad_i, 
+    dcd_pad_i
+);
+
+input         wb_clk_i;
+input         wb_rst_i;
+input  [7:0]  wb_adr_i;
+input  [7:0]  wb_dat_i;
+output [7:0]  wb_dat_o;
+input         wb_we_i;
+input         wb_stb_i;
+input         wb_cyc_i;
+output        wb_ack_o;
+input  [3:0]  wb_sel_i;
+output        int_o;
+output        stx_pad_o;
+input         srx_pad_i;
+output        rts_pad_o;
+input         cts_pad_i;
+output        dtr_pad_o;
+input         dsr_pad_i;
+input         ri_pad_i;
+input         dcd_pad_i;
+
+reg [7:0]     wb_dat_o;
+reg           wb_ack_o;
+reg           int_o;
+reg           stx_pad_o;
+reg           rts_pad_o;
+reg           dtr_pad_o;
+
+reg [7:0]     rbr; // Receive Buffer Register
+reg [7:0]     thr; // Transmit Hold Register
+reg [7:0]     ier; // Interrupt Enable Register
+reg [7:0]     iir; // Interrupt Identification Register
+reg [7:0]     fcr; // FIFO Control Register
+reg [7:0]     lcr; // Line Control Register
+reg [7:0]     mcr; // Modem Control Register
+reg [7:0]     lsr; // Line Status Register
+reg [7:0]     msr; // Modem Status Register
+reg [7:0]     scr; // Scratch Register
+
+reg [7:0]     baud_div;
+reg           baud_en;
+reg           tx_empty;
+reg           rx_full;
+reg           tx_int;
+reg           rx_int;
+reg           modem_int;
+
+reg [7:0]     tx_fifo [15:0];
+reg [7:0]     rx_fifo [15:0];
+reg [3:0]     tx_fifo_ptr;
+reg [3:0]     rx_fifo_ptr;
+reg [3:0]     tx_fifo_cnt;
+reg [3:0]     rx_fifo_cnt;
+
+always @(posedge wb_clk_i or posedge wb_rst_i) begin
+    if (wb_rst_i) begin
+        wb_dat_o <= 8'h00;
+        wb_ack_o <= 1'b0;
+        int_o <= 1'b0;
+        stx_pad_o <= 1'b0;
+        rts_pad_o <= 1'b0;
+        dtr_pad_o <= 1'b0;
+        rbr <= 8'h00;
+        thr <= 8'h00;
+        ier <= 8'h00;
+        iir <= 8'h01;
+        fcr <= 8'h00;
+        lcr <= 8'h00;
+        mcr <= 8'h00;
+        lsr <= 8'h20;
+        msr <= 8'h00;
+        scr <= 8'h00;
+        baud_div <= 8'h00;
+        baud_en <= 1'b0;
+        tx_empty <= 1'b1;
+        rx_full <= 1'b0;
+        tx_int <= 1'b0;
+        rx_int <= 1'b0;
+        modem_int <= 1'b0;
+        tx_fifo <= '{default: 8'h00};
+        rx_fifo <= '{default: 8'h00};
+        tx_fifo_ptr <= 4'h0;
+        rx_fifo_ptr <= 4'h0;
+        tx_fifo_cnt <= 4'h0;
+        rx_fifo_cnt <= 4'h0;
+    end else begin
+        if (wb_stb_i && wb_cyc_i) begin
+            case (wb_adr_i)
+                8'h00: begin // RBR
+                    if (wb_we_i) begin
+                        rbr <= wb_dat_i;
+                    end else begin
+                        wb_dat_o <= rbr;
+                    end
+                end
+                8'h04: begin // THR
+                    if (wb_we_i) begin
+                        thr <= wb_dat_i;
+                        tx_empty <= 1'b0;
+                    end else begin
+                        wb_dat_o <= thr;
+                    end
+                end
+                8'h08: begin // IER
+                    if (wb_we_i) begin
+                        ier <= wb_dat_i;
+                    end else begin
+                        wb_dat_o <= ier;
+                    end
+                end
+                8'h0c: begin // IIR
+                    if (wb_we_i) begin
+                        iir <= wb_dat_i;
+                    end else begin
+                        wb_dat_o <= iir;
+                    end
+                end
+                8'h10: begin // FCR
+                    if (wb_we_i) begin
+                        fcr <= wb_dat_i;
+                    end else begin
+                        wb_dat_o <= fcr;
+                    end
+                end
+                8'h14: begin // LCR
+                    if (wb_we_i) begin
+                        lcr <= wb_dat_i;
+                    end else begin
+                        wb_dat_o <= lcr;
+                    end
+                end
+                8'h18: begin // MCR
+                    if (wb_we_i) begin
+                        mcr <= wb_dat_i;
+                    end else begin
+                        wb_dat_o <= mcr;
+                    end
+                end
+                8'h1c: begin // LSR
+                    if (wb_we_i) begin
+                        lsr <= wb_dat_i;
+                    end else begin
+                        wb_dat_o <= lsr;
+                    end
+                end
+                8'h20: begin // MSR
+                    if (wb_we_i) begin
+                        msr <= wb_dat_i;
+                    end else begin
+                        wb_dat_o <= msr;
+                    end
+                end
+                8'h24: begin // SCR
+                    if (wb_we_i) begin
+                        scr <= wb_dat_i;
+                    end else begin
+                        wb_dat_o <= scr;
+                    end
+                end
+            endcase
+            wb_ack_o <= 1'b1;
+        end else begin
+            wb_ack_o <= 1'b0;
+        end
+
+        if (tx_empty && ~tx_int) begin
+            if (tx_fifo_cnt > 4'h0) begin
+                thr <= tx_fifo[tx_fifo_ptr];
+                tx_fifo_ptr <= tx_fifo_ptr + 1;
+                tx_fifo_cnt <= tx_fifo_cnt - 1;
+                tx_empty <= 1'b0;
+            end
+        end
+
+        if (rx_full && ~rx_int) begin
+            rbr <= rx_fifo[rx_fifo_ptr];
+            rx_fifo_ptr <= rx_fifo_ptr + 1;
+            rx_fifo_cnt <= rx_fifo_cnt - 1;
+            rx_full <= 1'b0;
+        end
+
+        if (srx_pad_i && ~rx_full) begin
+            rx_fifo[rx_fifo_ptr] <= srx_pad_i;
+            rx_fifo_ptr <= rx_fifo_ptr + 1;
+            rx_fifo_cnt <= rx_fifo_cnt + 1;
+            rx_full <= 1'b1;
+        end
+
+        if (tx_int) begin
+            stx_pad_o <= thr;
+            tx_int <= 1'b0;
+        end
+
+        if (rx_int) begin
+            rbr <= rx_fifo[rx_fifo_ptr];
+            rx_int <= 1'b0;
+        end
+
+        if (modem_int) begin
+            int_o <= 1'b1;
+            modem_int <= 1'b0;
+        end
+
+        if (cts_pad_i && ~tx_empty) begin
+            tx_int <= 1'b1;
+        end
+
+        if (dsr_pad_i && ~rx_full) begin
+            rx_int <= 1'b1;
+        end
+
+        if (ri_pad_i) begin
+            modem_int <= 1'b1;
+        end
+
+        if (dcd_pad_i) begin
+            modem_int <= 1'b1;
+        end
+    end
+end
+
+endmodule

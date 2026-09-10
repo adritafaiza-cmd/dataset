@@ -1,0 +1,233 @@
+```verilog
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    reg [2:0] state;
+    reg [6:0] address;
+    reg [7:0] data;
+    reg [15:0] scl_counter;
+    reg [15:0] scl_prescale;
+    reg scl_high;
+    reg scl_low;
+    reg sda_high;
+    reg sda_low;
+    reg start;
+    reg stop;
+    reg read;
+    reg write;
+    reg write_multiple;
+    reg ack;
+    reg busy_reg;
+    reg bus_control_reg;
+    reg bus_active_reg;
+    reg missed_ack_reg;
+    reg s_axis_cmd_ready_reg;
+    reg s_axis_data_tready_reg;
+    reg m_axis_data_tvalid_reg;
+    reg m_axis_data_tlast_reg;
+
+    assign scl_o = scl_high ? 1'b1 : 1'b0;
+    assign scl_t = scl_low ? 1'b0 : 1'bz;
+    assign sda_o = sda_high ? 1'b1 : 1'b0;
+    assign sda_t = sda_low ? 1'b0 : 1'bz;
+    assign busy = busy_reg;
+    assign bus_control = bus_control_reg;
+    assign bus_active = bus_active_reg;
+    assign missed_ack = missed_ack_reg;
+    assign s_axis_cmd_ready = s_axis_cmd_ready_reg;
+    assign s_axis_data_tready = s_axis_data_tready_reg;
+    assign m_axis_data_tdata = data;
+    assign m_axis_data_tvalid = m_axis_data_tvalid_reg;
+    assign m_axis_data_tlast = m_axis_data_tlast_reg;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= 0;
+            address <= 0;
+            data <= 0;
+            scl_counter <= 0;
+            scl_prescale <= 0;
+            scl_high <= 0;
+            scl_low <= 0;
+            sda_high <= 0;
+            sda_low <= 0;
+            start <= 0;
+            stop <= 0;
+            read <= 0;
+            write <= 0;
+            write_multiple <= 0;
+            ack <= 0;
+            busy_reg <= 0;
+            bus_control_reg <= 0;
+            bus_active_reg <= 0;
+            missed_ack_reg <= 0;
+            s_axis_cmd_ready_reg <= 0;
+            s_axis_data_tready_reg <= 0;
+            m_axis_data_tvalid_reg <= 0;
+            m_axis_data_tlast_reg <= 0;
+        end else begin
+            case (state)
+                0: begin
+                    if (s_axis_cmd_valid) begin
+                        address <= s_axis_cmd_address;
+                        start <= s_axis_cmd_start;
+                        stop <= s_axis_cmd_stop;
+                        read <= s_axis_cmd_read;
+                        write <= s_axis_cmd_write;
+                        write_multiple <= s_axis_cmd_write_multiple;
+                        state <= 1;
+                    end
+                end
+                1: begin
+                    if (start) begin
+                        scl_high <= 0;
+                        scl_low <= 1;
+                        sda_high <= 0;
+                        sda_low <= 1;
+                        state <= 2;
+                    end else if (stop) begin
+                        scl_high <= 1;
+                        scl_low <= 0;
+                        sda_high <= 1;
+                        sda_low <= 0;
+                        state <= 0;
+                    end else if (read) begin
+                        scl_high <= 1;
+                        scl_low <= 0;
+                        sda_high <= 1;
+                        sda_low <= 0;
+                        state <= 3;
+                    end else if (write) begin
+                        scl_high <= 1;
+                        scl_low <= 0;
+                        sda_high <= 1;
+                        sda_low <= 0;
+                        state <= 4;
+                    end
+                end
+                2: begin
+                    if (scl_counter == prescale) begin
+                        scl_counter <= 0;
+                        scl_high <= 1;
+                        scl_low <= 0;
+                        state <= 3;
+                    end else begin
+                        scl_counter <= scl_counter + 1;
+                    end
+                end
+                3: begin
+                    if (scl_counter == prescale) begin
+                        scl_counter <= 0;
+                        scl_high <= 0;
+                        scl_low <= 1;
+                        if (sda_i) begin
+                            data <= data + (1 << (7 - scl_counter));
+                        end
+                        state <= 4;
+                    end else begin
+                        scl_counter <= scl_counter + 1;
+                    end
+                end
+                4: begin
+                    if (scl_counter == prescale) begin
+                        scl_counter <= 0;
+                        scl_high <= 1;
+                        scl_low <= 0;
+                        if (write_multiple) begin
+                            state <= 3;
+                        end else begin
+                            state <= 0;
+                        end
+                    end else begin
+                        scl_counter <= scl_counter + 1;
+                    end
+                end
+            endcase
+            if (s_axis_data_tvalid && s_axis_data_tready_reg) begin
+                data <= s_axis_data_tdata;
+            end
+            if (m_axis_data_tvalid_reg && m_axis_data_tready) begin
+                m_axis_data_tvalid_reg <= 0;
+            end
+            if (s_axis_cmd_valid && s_axis_cmd_ready_reg) begin
+                s_axis_cmd_ready_reg <= 0;
+            end
+            if (s_axis_data_tvalid && s_axis_data_tready_reg) begin
+                s_axis_data_tready_reg <= 0;
+            end
+            if (state == 1) begin
+                s_axis_cmd_ready_reg <= 1;
+            end
+            if (state == 3) begin
+                m_axis_data_tvalid_reg <= 1;
+            end
+            if (state == 4) begin
+                s_axis_data_tready_reg <= 1;
+            end
+            if (state != 0) begin
+                busy_reg <= 1;
+            end else begin
+                busy_reg <= 0;
+            end
+            if (state == 2 || state == 3 || state == 4) begin
+                bus_control_reg <= 1;
+            end else begin
+                bus_control_reg <= 0;
+            end
+            if (state != 0) begin
+                bus_active_reg <= 1;
+            end else begin
+                bus_active_reg <= 0;
+            end
+            if (state == 3 && sda_i) begin
+                missed_ack_reg <= 1;
+            end else begin
+                missed_ack_reg <= 0;
+            end
+        end
+    end
+
+endmodule
+```

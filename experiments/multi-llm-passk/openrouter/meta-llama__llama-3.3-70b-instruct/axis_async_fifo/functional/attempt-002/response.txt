@@ -1,0 +1,229 @@
+```verilog
+module axis_async_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    /*
+     * AXI input
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   s_pause_req,
+    output wire                   s_pause_ack,
+    input  wire                   m_pause_req,
+    output wire                   m_pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] s_status_depth,
+    output wire [$clog2(DEPTH):0] s_status_depth_commit,
+    output wire                   s_status_overflow,
+    output wire                   s_status_bad_frame,
+    output wire                   s_status_good_frame,
+    output wire [$clog2(DEPTH):0] m_status_depth,
+    output wire [$clog2(DEPTH):0] m_status_depth_commit,
+    output wire                   m_status_overflow,
+    output wire                   m_status_bad_frame,
+    output wire                   m_status_good_frame
+);
+
+    reg [DATA_WIDTH-1:0]          fifo_data [DEPTH-1:0];
+    reg [KEEP_WIDTH-1:0]          fifo_keep [DEPTH-1:0];
+    reg [ID_WIDTH-1:0]            fifo_id [DEPTH-1:0];
+    reg [DEST_WIDTH-1:0]          fifo_dest [DEPTH-1:0];
+    reg [USER_WIDTH-1:0]          fifo_user [DEPTH-1:0];
+    reg [$clog2(DEPTH):0]         read_ptr;
+    reg [$clog2(DEPTH):0]         write_ptr;
+    reg [$clog2(DEPTH):0]         count;
+    reg                         full;
+    reg                         empty;
+    reg                         overflow;
+    reg                         underflow;
+    reg                         bad_frame;
+    reg                         good_frame;
+    reg                         s_pause;
+    reg                         m_pause;
+
+    assign s_axis_tready = ~full & ~s_pause;
+    assign m_axis_tvalid = ~empty & ~m_pause;
+
+    always @(posedge s_clk)
+    begin
+        if (s_rst)
+        begin
+            read_ptr <= 0;
+            write_ptr <= 0;
+            count <= 0;
+            full <= 0;
+            empty <= 1;
+            overflow <= 0;
+            underflow <= 0;
+            bad_frame <= 0;
+            good_frame <= 0;
+            s_pause <= 0;
+        end
+        else if (s_axis_tvalid & s_axis_tready)
+        begin
+            fifo_data[write_ptr] <= s_axis_tdata;
+            fifo_keep[write_ptr] <= s_axis_tkeep;
+            fifo_id[write_ptr] <= s_axis_tid;
+            fifo_dest[write_ptr] <= s_axis_tdest;
+            fifo_user[write_ptr] <= s_axis_tuser;
+            if (write_ptr == DEPTH-1)
+            begin
+                write_ptr <= 0;
+            end
+            else
+            begin
+                write_ptr <= write_ptr + 1;
+            end
+            count <= count + 1;
+            if (count == DEPTH)
+            begin
+                full <= 1;
+                empty <= 0;
+            end
+            else if (count == DEPTH-1)
+            begin
+                full <= 1;
+            end
+            else
+            begin
+                full <= 0;
+            end
+            if (s_axis_tlast)
+            begin
+                if (fifo_user[write_ptr] == USER_BAD_FRAME_VALUE)
+                begin
+                    bad_frame <= 1;
+                end
+                else
+                begin
+                    good_frame <= 1;
+                end
+            end
+        end
+        else if (s_pause_req)
+        begin
+            s_pause <= 1;
+        end
+        else if (~s_pause_req)
+        begin
+            s_pause <= 0;
+        end
+    end
+
+    always @(posedge m_clk)
+    begin
+        if (m_rst)
+        begin
+            read_ptr <= 0;
+            count <= 0;
+            empty <= 1;
+            underflow <= 0;
+            m_pause <= 0;
+        end
+        else if (m_axis_tready & m_axis_tvalid)
+        begin
+            if (read_ptr == DEPTH-1)
+            begin
+                read_ptr <= 0;
+            end
+            else
+            begin
+                read_ptr <= read_ptr + 1;
+            end
+            count <= count - 1;
+            if (count == 1)
+            begin
+                empty <= 1;
+                full <= 0;
+            end
+            else if (count == 0)
+            begin
+                empty <= 1;
+            end
+            else
+            begin
+                empty <= 0;
+            end
+        end
+        else if (m_pause_req)
+        begin
+            m_pause <= 1;
+        end
+        else if (~m_pause_req)
+        begin
+            m_pause <= 0;
+        end
+    end
+
+    assign m_axis_tdata = fifo_data[read_ptr];
+    assign m_axis_tkeep = fifo_keep[read_ptr];
+    assign m_axis_tlast = (read_ptr == write_ptr-1) | (read_ptr == 0 & write_ptr == DEPTH-1);
+    assign m_axis_tid = fifo_id[read_ptr];
+    assign m_axis_tdest = fifo_dest[read_ptr];
+    assign m_axis_tuser = fifo_user[read_ptr];
+
+    assign s_status_depth = count;
+    assign s_status_depth_commit = count;
+    assign s_status_overflow = overflow;
+    assign s_status_bad_frame = bad_frame;
+    assign s_status_good_frame = good_frame;
+    assign m_status_depth = count;
+    assign m_status_depth_commit = count;
+    assign m_status_overflow = overflow;
+    assign m_status_bad_frame = bad_frame;
+    assign m_status_good_frame = good_frame;
+
+    assign s_pause_ack = s_pause;
+    assign m_pause_ack = m_pause;
+
+endmodule
+```

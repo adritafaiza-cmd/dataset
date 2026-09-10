@@ -1,0 +1,26 @@
+module rstgen (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic test_mode_i,
+    output logic rst_no,
+    output logic init_no
+);
+
+logic rst_sync;
+
+always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+        rst_sync <= 1'b0;
+        init_no <= 1'b0;
+    end else if (test_mode_i) begin
+        rst_sync <= 1'b1;
+        init_no <= 1'b0;
+    end else begin
+        rst_sync <= 1'b1;
+        init_no <= rst_sync && !rst_no;
+    end
+end
+
+assign rst_no = test_mode_i ? rst_ni : rst_sync;
+
+endmodule

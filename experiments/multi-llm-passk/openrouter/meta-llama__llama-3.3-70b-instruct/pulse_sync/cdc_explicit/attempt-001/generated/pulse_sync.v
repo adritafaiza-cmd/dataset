@@ -1,0 +1,51 @@
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+reg [STAGES-1:0] sync_reg_a;
+reg [STAGES-1:0] sync_reg_b;
+reg busy_reg;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (~rstn_a) begin
+        sync_reg_a <= {STAGES{1'b0}};
+        busy_reg <= 1'b0;
+    end else begin
+        sync_reg_a[0] <= pulseA_i;
+        for (int i = 1; i < STAGES; i++) begin
+            sync_reg_a[i] <= sync_reg_a[i-1];
+        end
+        if (pulseA_i && ~busy_reg) begin
+            busy_reg <= 1'b1;
+        end
+    end
+end
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (~rstn_b) begin
+        sync_reg_b <= {STAGES{1'b0}};
+        pulseB_o <= 1'b0;
+    end else begin
+        sync_reg_b[0] <= sync_reg_a[STAGES-1];
+        for (int i = 1; i < STAGES; i++) begin
+            sync_reg_b[i] <= sync_reg_b[i-1];
+        end
+        if (sync_reg_b[STAGES-1]) begin
+            pulseB_o <= 1'b1;
+        end else begin
+            pulseB_o <= 1'b0;
+        end
+    end
+end
+
+assign busy_o = busy_reg;
+
+endmodule

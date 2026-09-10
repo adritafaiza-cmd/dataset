@@ -1,0 +1,91 @@
+module cdc_fifo_gray #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 2
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+
+    reg [WIDTH-1:0]             fifo [DEPTH-1:0];
+    reg [LOG_DEPTH-1:0]         src_ptr;
+    reg [LOG_DEPTH-1:0]         dst_ptr;
+    reg [LOG_DEPTH-1:0]         gray_src_ptr;
+    reg [LOG_DEPTH-1:0]         gray_dst_ptr;
+    reg [LOG_DEPTH-1:0]         sync_gray_src_ptr [SYNC_STAGES-1:0];
+    reg                         src_empty;
+    reg                         dst_full;
+    reg                         src_ready;
+    reg                         dst_valid;
+
+    assign src_ready_o = src_ready;
+    assign dst_valid_o = dst_valid;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_ptr <= 0;
+            gray_src_ptr <= 0;
+            src_empty <= 1'b1;
+            src_ready <= 1'b1;
+        end else if (src_valid_i && src_ready) begin
+            fifo[src_ptr] <= src_data_i;
+            src_ptr <= src_ptr + 1;
+            gray_src_ptr <= {src_ptr[LOG_DEPTH-1], src_ptr[LOG_DEPTH-2:0]};
+            if (src_ptr == DEPTH - 1) begin
+                src_empty <= 1'b0;
+                src_ready <= 1'b0;
+            end
+        end else if (!src_valid_i && !src_empty) begin
+            src_ready <= 1'b1;
+        end
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_ptr <= 0;
+            gray_dst_ptr <= 0;
+            dst_full <= 1'b0;
+            dst_valid <= 1'b0;
+        end else if (dst_ready_i && dst_valid) begin
+            dst_ptr <= dst_ptr + 1;
+            gray_dst_ptr <= {dst_ptr[LOG_DEPTH-1], dst_ptr[LOG_DEPTH-2:0]};
+            if (dst_ptr == DEPTH - 1) begin
+                dst_full <= 1'b1;
+                dst_valid <= 1'b0;
+            end
+        end else if (!dst_ready_i && dst_full) begin
+            dst_valid <= 1'b1;
+        end
+    end
+
+    always @(posedge src_clk_i) begin
+        sync_gray_src_ptr[0] <= gray_src_ptr;
+        for (genvar i = 1; i < SYNC_STAGES; i++) begin
+            sync_gray_src_ptr[i] <= sync_gray_src_ptr[i-1];
+        end
+    end
+
+    always @(posedge dst_clk_i) begin
+        if (dst_rst_ni) begin
+            dst_data_o <= fifo[dst_ptr];
+            dst_valid <= (dst_ptr != sync_gray_src_ptr[SYNC_STAGES-1]);
+        end
+    end
+
+    always @(posedge src_clk_i) begin
+        if (src_rst_ni) begin
+            src_ready <= !(dst_ptr == sync_gray_src_ptr[SYNC_STAGES-1]);
+        end
+    end
+
+endmodule

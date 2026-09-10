@@ -1,0 +1,109 @@
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    // Write domain logic
+    reg [ADDR_WIDTH-1:0] wptr;
+    reg [ADDR_WIDTH-1:0] wptr_gray;
+    reg [ADDR_WIDTH-1:0] wptr_gray_sync;
+    reg [DATA_WIDTH-1:0] mem [2**ADDR_WIDTH-1:0];
+    reg [ADDR_WIDTH-1:0] rptr_sync;
+    reg [ADDR_WIDTH-1:0] rptr_sync_gray;
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (~wrst_n) begin
+            wptr <= 0;
+            wptr_gray <= 0;
+        end else if (winc && ~wfull) begin
+            wptr <= wptr + 1;
+            wptr_gray <= gray_encode(wptr);
+        end
+    end
+
+    always @(posedge wclk) begin
+        if (winc && ~wfull) begin
+            mem[wptr] <= wdata;
+        end
+    end
+
+    // Gray code encoding
+    function [ADDR_WIDTH-1:0] gray_encode;
+        input [ADDR_WIDTH-1:0] bin;
+        reg [ADDR_WIDTH-1:0] gray;
+        integer i;
+        begin
+            gray = bin;
+            for (i = 1; i < ADDR_WIDTH; i = i + 1) begin
+                gray[ADDR_WIDTH-1-i] = bin[ADDR_WIDTH-1-i] ^ bin[ADDR_WIDTH-i];
+            end
+            gray_encode = gray;
+        end
+    endfunction
+
+    // Synchronization of wptr_gray to read domain
+    reg [ADDR_WIDTH-1:0] wptr_gray_sync_reg [SYNC_STAGES-1:0];
+    always @(posedge rclk) begin
+        wptr_gray_sync_reg[0] <= wptr_gray;
+        for (int i = 1; i < SYNC_STAGES; i = i + 1) begin
+            wptr_gray_sync_reg[i] <= wptr_gray_sync_reg[i-1];
+        end
+        wptr_gray_sync <= wptr_gray_sync_reg[SYNC_STAGES-1];
+    end
+
+    // Read domain logic
+    reg [ADDR_WIDTH-1:0] rptr;
+    reg [ADDR_WIDTH-1:0] rptr_gray;
+    reg [ADDR_WIDTH-1:0] rptr_gray_sync;
+    reg [ADDR_WIDTH-1:0] wptr_sync;
+    reg [ADDR_WIDTH-1:0] wptr_sync_gray;
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (~rrst_n) begin
+            rptr <= 0;
+            rptr_gray <= 0;
+        end else if (rinc && ~rempty) begin
+            rptr <= rptr + 1;
+            rptr_gray <= gray_encode(rptr);
+        end
+    end
+
+    always @(posedge rclk) begin
+        if (rinc && ~rempty) begin
+            rdata <= mem[rptr];
+        end
+    end
+
+    // Synchronization of rptr_gray to write domain
+    reg [ADDR_WIDTH-1:0] rptr_gray_sync_reg [SYNC_STAGES-1:0];
+    always @(posedge wclk) begin
+        rptr_gray_sync_reg[0] <= rptr_gray;
+        for (int i = 1; i < SYNC_STAGES; i = i + 1) begin
+            rptr_gray_sync_reg[i] <= rptr_gray_sync_reg[i-1];
+        end
+        rptr_sync <= rptr_gray_sync_reg[SYNC_STAGES-1];
+    end
+
+    // Full and empty flags
+    assign wfull = (wptr_gray_sync + 1) == rptr_sync;
+    assign rempty = wptr_sync == rptr_gray_sync;
+
+    // Debug outputs
+    assign waddr = {1'b0, wptr};
+    assign raddr = {1'b0, rptr};
+
+endmodule

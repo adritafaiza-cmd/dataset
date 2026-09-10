@@ -1,0 +1,81 @@
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+reg [DATA_WIDTH-1:0] fifo [2**ADDR_WIDTH-1:0];
+reg [ADDR_WIDTH-1:0] wptr, rptr;
+reg [ADDR_WIDTH:0] wcnt, rcnt;
+reg [SYNC_STAGES-1:0] winc_sync, rinc_sync;
+reg [SYNC_STAGES-1:0] wrst_n_sync, rrst_n_sync;
+
+always @(posedge wclk) begin
+    if (~wrst_n) begin
+        wptr <= 0;
+        wcnt <= 0;
+    end else if (winc && ~wfull) begin
+        fifo[wptr] <= wdata;
+        wptr <= wptr + 1;
+        wcnt <= wcnt + 1;
+    end
+end
+
+always @(posedge rclk) begin
+    if (~rrst_n) begin
+        rptr <= 0;
+        rcnt <= 0;
+    end else if (rinc && ~rempty) begin
+        rdata <= fifo[rptr];
+        rptr <= rptr + 1;
+        rcnt <= rcnt - 1;
+    end
+end
+
+always @(posedge wclk) begin
+    winc_sync[0] <= winc;
+    for (int i = 1; i < SYNC_STAGES; i++) begin
+        winc_sync[i] <= winc_sync[i-1];
+    end
+end
+
+always @(posedge rclk) begin
+    rinc_sync[0] <= rinc;
+    for (int i = 1; i < SYNC_STAGES; i++) begin
+        rinc_sync[i] <= rinc_sync[i-1];
+    end
+end
+
+always @(posedge wclk) begin
+    wrst_n_sync[0] <= wrst_n;
+    for (int i = 1; i < SYNC_STAGES; i++) begin
+        wrst_n_sync[i] <= wrst_n_sync[i-1];
+    end
+end
+
+always @(posedge rclk) begin
+    rrst_n_sync[0] <= rrst_n;
+    for (int i = 1; i < SYNC_STAGES; i++) begin
+        rrst_n_sync[i] <= rrst_n_sync[i-1];
+    end
+end
+
+assign wfull = (wcnt == 2**ADDR_WIDTH);
+assign rempty = (rcnt == 0);
+assign waddr = {wcnt, wptr};
+assign raddr = {rcnt, rptr};
+
+endmodule

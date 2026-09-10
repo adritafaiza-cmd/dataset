@@ -1,0 +1,145 @@
+```verilog
+module wbxclk #(
+	parameter	AW=32,
+				DW=32,
+				LGFIFO = 5
+	) (
+		input	wire			i_wb_clk, i_reset,
+		input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+		input	wire	[(AW-1):0]	i_wb_addr,
+		input	wire	[(DW-1):0]	i_wb_data,
+		input	wire	[(DW/8-1):0]	i_wb_sel,
+		output	wire			o_wb_stall,
+		output	reg			o_wb_ack,
+		output	reg	[(DW-1):0]	o_wb_data,
+		output	reg			o_wb_err,
+		input	wire			i_xclk_clk,
+		output	reg			o_xclk_cyc,
+		output	reg			o_xclk_stb,
+		output	reg			o_xclk_we,
+		output	reg	[(AW-1):0]	o_xclk_addr,
+		output	reg	[(DW-1):0]	o_xclk_data,
+		output	reg	[(DW/8-1):0]	o_xclk_sel,
+		input	wire			i_xclk_stall,
+		input	wire			i_xclk_ack,
+		input	wire	[(DW-1):0]	i_xclk_data,
+		input	wire			i_xclk_err
+	);
+
+	reg	[AW-1:0]	fifo_addr[2**LGFIFO-1:0];
+	reg	[(DW-1):0]	fifo_data[2**LGFIFO-1:0];
+	reg	[(DW/8-1):0]	fifo_sel[2**LGFIFO-1:0];
+	reg			fifo_we[2**LGFIFO-1:0];
+	reg			fifo_valid[2**LGFIFO-1:0];
+	reg	[2**LGFIFO-1:0]	fifo_empty;
+	reg	[2**LGFIFO-1:0]	fifo_full;
+	reg			fifo_push;
+	reg			fifo_pop;
+	reg			fifo_valid_out;
+	reg			o_wb_stall_reg;
+	reg			o_xclk_cyc_reg;
+	reg			o_xclk_stb_reg;
+	reg			o_xclk_we_reg;
+	reg	[AW-1:0]	o_xclk_addr_reg;
+	reg	[(DW-1):0]	o_xclk_data_reg;
+	reg	[(DW/8-1):0]	o_xclk_sel_reg;
+
+	assign o_wb_stall = o_wb_stall_reg;
+	assign o_xclk_cyc = o_xclk_cyc_reg;
+	assign o_xclk_stb = o_xclk_stb_reg;
+	assign o_xclk_we = o_xclk_we_reg;
+	assign o_xclk_addr = o_xclk_addr_reg;
+	assign o_xclk_data = o_xclk_data_reg;
+	assign o_xclk_sel = o_xclk_sel_reg;
+
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			o_wb_ack <= 1'b0;
+			o_wb_data <= {(DW){1'b0}};
+			o_wb_err <= 1'b0;
+			o_wb_stall_reg <= 1'b0;
+			o_xclk_cyc_reg <= 1'b0;
+			o_xclk_stb_reg <= 1'b0;
+			o_xclk_we_reg <= 1'b0;
+			o_xclk_addr_reg <= {(AW){1'b0}};
+			o_xclk_data_reg <= {(DW){1'b0}};
+			o_xclk_sel_reg <= {(DW/8){1'b0}};
+			fifo_push <= 1'b0;
+			fifo_pop <= 1'b0;
+			fifo_valid_out <= 1'b0;
+		end else begin
+			if (i_wb_cyc && i_wb_stb && !o_wb_stall_reg) begin
+				fifo_push <= 1'b1;
+				fifo_addr[0] <= i_wb_addr;
+				fifo_data[0] <= i_wb_data;
+				fifo_sel[0] <= i_wb_sel;
+				fifo_we[0] <= i_wb_we;
+				fifo_valid[0] <= 1'b1;
+			end else begin
+				fifo_push <= 1'b0;
+			end
+
+			if (i_xclk_ack) begin
+				fifo_pop <= 1'b1;
+				o_wb_ack <= 1'b1;
+				o_wb_data <= i_xclk_data;
+				o_wb_err <= i_xclk_err;
+			end else begin
+				fifo_pop <= 1'b0;
+				o_wb_ack <= 1'b0;
+				o_wb_err <= 1'b0;
+			end
+
+			if (fifo_valid_out && !i_xclk_stall) begin
+				o_xclk_cyc_reg <= 1'b1;
+				o_xclk_stb_reg <= 1'b1;
+				o_xclk_we_reg <= fifo_we[0];
+				o_xclk_addr_reg <= fifo_addr[0];
+				o_xclk_data_reg <= fifo_data[0];
+				o_xclk_sel_reg <= fifo_sel[0];
+			end else begin
+				o_xclk_cyc_reg <= 1'b0;
+				o_xclk_stb_reg <= 1'b0;
+				o_xclk_we_reg <= 1'b0;
+			end
+
+			if (fifo_push && !fifo_full[0]) begin
+				fifo_empty[0] <= 1'b0;
+				fifo_full[0] <= 1'b1;
+			end else if (fifo_pop && !fifo_empty[0]) begin
+				fifo_empty[0] <= 1'b1;
+				fifo_full[0] <= 1'b0;
+			end
+
+			if (fifo_full[0]) begin
+				o_wb_stall_reg <= 1'b1;
+			end else begin
+				o_wb_stall_reg <= 1'b0;
+			end
+
+			if (fifo_empty[0] && i_xclk_ack) begin
+				fifo_valid_out <= 1'b0;
+			end else if (fifo_valid[0] && !fifo_empty[0]) begin
+				fifo_valid_out <= 1'b1;
+			end
+		end
+	end
+
+	always @(posedge i_xclk_clk) begin
+		if (i_reset) begin
+			o_xclk_cyc_reg <= 1'b0;
+			o_xclk_stb_reg <= 1'b0;
+			o_xclk_we_reg <= 1'b0;
+			o_xclk_addr_reg <= {(AW){1'b0}};
+			o_xclk_data_reg <= {(DW){1'b0}};
+			o_xclk_sel_reg <= {(DW/8){1'b0}};
+		end else begin
+			if (o_xclk_cyc_reg && i_xclk_ack) begin
+				o_xclk_cyc_reg <= 1'b0;
+				o_xclk_stb_reg <= 1'b0;
+				o_xclk_we_reg <= 1'b0;
+			end
+		end
+	end
+endmodule
+```

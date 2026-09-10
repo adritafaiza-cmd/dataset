@@ -1,0 +1,164 @@
+```verilog
+module axis_adapter #
+(
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    /*
+     * AXI input
+     */
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser
+);
+
+reg [S_DATA_WIDTH-1:0] fifo_data[S_DATA_WIDTH/M_DATA_WIDTH];
+reg [S_KEEP_WIDTH-1:0] fifo_keep[S_DATA_WIDTH/M_DATA_WIDTH];
+reg [ID_WIDTH-1:0] fifo_id;
+reg [DEST_WIDTH-1:0] fifo_dest;
+reg [USER_WIDTH-1:0] fifo_user;
+reg [S_DATA_WIDTH/M_DATA_WIDTH:0] fifo_count;
+reg [S_DATA_WIDTH/M_DATA_WIDTH:0] fifo_count_next;
+reg s_axis_tready_reg;
+reg m_axis_tvalid_reg;
+reg m_axis_tlast_reg;
+reg [M_DATA_WIDTH-1:0] m_axis_tdata_reg;
+reg [M_KEEP_WIDTH-1:0] m_axis_tkeep_reg;
+reg [ID_WIDTH-1:0] m_axis_tid_reg;
+reg [DEST_WIDTH-1:0] m_axis_tdest_reg;
+reg [USER_WIDTH-1:0] m_axis_tuser_reg;
+
+integer i;
+
+always @(posedge clk or posedge rst)
+begin
+    if (rst)
+    begin
+        s_axis_tready_reg <= 1'b0;
+        m_axis_tvalid_reg <= 1'b0;
+        m_axis_tlast_reg <= 1'b0;
+        m_axis_tdata_reg <= {M_DATA_WIDTH{1'b0}};
+        m_axis_tkeep_reg <= {M_KEEP_WIDTH{1'b0}};
+        m_axis_tid_reg <= {ID_WIDTH{1'b0}};
+        m_axis_tdest_reg <= {DEST_WIDTH{1'b0}};
+        m_axis_tuser_reg <= {USER_WIDTH{1'b0}};
+        fifo_count <= {S_DATA_WIDTH/M_DATA_WIDTH+1{1'b0}};
+        for (i = 0; i < S_DATA_WIDTH/M_DATA_WIDTH; i = i + 1)
+        begin
+            fifo_data[i] <= {S_DATA_WIDTH{1'b0}};
+            fifo_keep[i] <= {S_KEEP_WIDTH{1'b0}};
+        end
+        fifo_id <= {ID_WIDTH{1'b0}};
+        fifo_dest <= {DEST_WIDTH{1'b0}};
+        fifo_user <= {USER_WIDTH{1'b0}};
+    end
+    else
+    begin
+        s_axis_tready_reg <= s_axis_tvalid && (fifo_count == {S_DATA_WIDTH/M_DATA_WIDTH+1{1'b0}} || s_axis_tlast);
+        if (s_axis_tvalid && s_axis_tready_reg)
+        begin
+            if (s_axis_tlast)
+            begin
+                fifo_count <= {S_DATA_WIDTH/M_DATA_WIDTH+1{1'b0}};
+                fifo_id <= s_axis_tid;
+                fifo_dest <= s_axis_tdest;
+                fifo_user <= s_axis_tuser;
+                for (i = 0; i < S_DATA_WIDTH/M_DATA_WIDTH; i = i + 1)
+                begin
+                    if (i == S_DATA_WIDTH/M_DATA_WIDTH - 1)
+                    begin
+                        fifo_data[i] <= s_axis_tdata[(i*M_DATA_WIDTH)+:M_DATA_WIDTH];
+                        fifo_keep[i] <= s_axis_tkeep[(i*S_KEEP_ENABLE)+:S_KEEP_ENABLE];
+                    end
+                    else
+                    begin
+                        fifo_data[i] <= {S_DATA_WIDTH{1'b0}};
+                        fifo_keep[i] <= {S_KEEP_WIDTH{1'b0}};
+                    end
+                end
+            end
+            else
+            begin
+                fifo_count <= fifo_count + 1'b1;
+                for (i = 0; i < S_DATA_WIDTH/M_DATA_WIDTH; i = i + 1)
+                begin
+                    if (i == S_DATA_WIDTH/M_DATA_WIDTH - 1)
+                    begin
+                        fifo_data[i] <= s_axis_tdata[(i*M_DATA_WIDTH)+:M_DATA_WIDTH];
+                        fifo_keep[i] <= s_axis_tkeep[(i*S_KEEP_ENABLE)+:S_KEEP_ENABLE];
+                    end
+                    else
+                    begin
+                        fifo_data[i] <= fifo_data[i+1];
+                        fifo_keep[i] <= fifo_keep[i+1];
+                    end
+                end
+            end
+        end
+        m_axis_tvalid_reg <= (fifo_count != {S_DATA_WIDTH/M_DATA_WIDTH+1{1'b0}}) && m_axis_tready;
+        m_axis_tlast_reg <= (fifo_count == {S_DATA_WIDTH/M_DATA_WIDTH+1{1'b0}} - 1'b1);
+        m_axis_tdata_reg <= fifo_data[0];
+        m_axis_tkeep_reg <= fifo_keep[0];
+        m_axis_tid_reg <= fifo_id;
+        m_axis_tdest_reg <= fifo_dest;
+        m_axis_tuser_reg <= fifo_user;
+        if (m_axis_tvalid_reg && m_axis_tready)
+        begin
+            for (i = 0; i < S_DATA_WIDTH/M_DATA_WIDTH; i = i + 1)
+            begin
+                if (i == S_DATA_WIDTH/M_DATA_WIDTH - 1)
+                begin
+                    fifo_data[i] <= {S_DATA_WIDTH{1'b0}};
+                    fifo_keep[i] <= {S_KEEP_WIDTH{1'b0}};
+                end
+                else
+                begin
+                    fifo_data[i] <= fifo_data[i+1];
+                    fifo_keep[i] <= fifo_keep[i+1];
+                end
+            end
+            fifo_count <= fifo_count - 1'b1;
+        end
+    end
+end
+
+assign s_axis_tready = s_axis_tready_reg;
+assign m_axis_tvalid = m_axis_tvalid_reg;
+assign m_axis_tlast = m_axis_tlast_reg;
+assign m_axis_tdata = m_axis_tdata_reg;
+assign m_axis_tkeep = m_axis_tkeep_reg;
+assign m_axis_tid = m_axis_tid_reg;
+assign m_axis_tdest = m_axis_tdest_reg;
+assign m_axis_tuser = m_axis_tuser_reg;
+
+endmodule
+```

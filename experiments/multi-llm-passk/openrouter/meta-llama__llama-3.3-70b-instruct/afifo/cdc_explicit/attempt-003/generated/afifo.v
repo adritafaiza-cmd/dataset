@@ -1,0 +1,102 @@
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	reg [WIDTH-1:0] fifo [2**LGFIFO-1:0];
+	reg [LGFIFO-1:0] wptr, rptr;
+	reg [LGFIFO-1:0] wptr_gray, rptr_gray;
+	reg [LGFIFO-1:0] wptr_gray_sync [NFF-1:0];
+	reg [LGFIFO-1:0] rptr_gray_sync [NFF-1:0];
+
+	wire wfull, rempty;
+	wire [LGFIFO-1:0] wptr_bin, rptr_bin;
+
+	assign wfull = (wptr_gray == {LGFIFO{1'b1}}) && (rptr_gray == {LGFIFO{1'b1}});
+	assign rempty = (wptr_gray == rptr_gray);
+
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wptr <= 0;
+			wptr_gray <= 0;
+		end else if (i_wr && !wfull) begin
+			wptr <= wptr + 1;
+			fifo[wptr] <= i_wr_data;
+		end
+	end
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rptr <= 0;
+			rptr_gray <= 0;
+			o_rd_empty <= 1'b1;
+		end else if (i_rd && !rempty) begin
+			rptr <= rptr + 1;
+			if (OPT_REGISTER_READS) begin
+				o_rd_data <= fifo[rptr];
+			end
+			o_rd_empty <= 1'b0;
+		end
+	end
+
+	always @(posedge i_rclk) begin
+		if (OPT_REGISTER_READS) begin
+			o_rd_data <= fifo[rptr];
+		end
+	end
+
+	always @(posedge i_wclk) begin
+		wptr_gray <= wptr;
+	end
+
+	always @(posedge i_rclk) begin
+		rptr_gray <= rptr;
+	end
+
+	generate
+		for (genvar i = 0; i < NFF; i = i + 1) begin : sync_wptr
+			if (i == 0) begin
+				always @(posedge i_rclk) begin
+					wptr_gray_sync[i] <= wptr_gray;
+				end
+			end else begin
+				always @(posedge i_rclk) begin
+					wptr_gray_sync[i] <= wptr_gray_sync[i-1];
+				end
+			end
+		end
+	endgenerate
+
+	generate
+		for (genvar i = 0; i < NFF; i = i + 1) begin : sync_rptr
+			if (i == 0) begin
+				always @(posedge i_wclk) begin
+					rptr_gray_sync[i] <= rptr_gray;
+				end
+			end else begin
+				always @(posedge i_wclk) begin
+					rptr_gray_sync[i] <= rptr_gray_sync[i-1];
+				end
+			end
+		end
+	endgenerate
+
+	always @(posedge i_wclk) begin
+		o_wr_full <= wfull;
+	end
+
+	always @(posedge i_rclk) begin
+		o_rd_empty <= rempty;
+	end
+
+endmodule

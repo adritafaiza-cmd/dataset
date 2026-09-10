@@ -30,13 +30,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from evaluate_generated import evaluate  # noqa: E402
+from evaluate_generated import evaluate, manifest_scalar  # noqa: E402
 from evaluate_pass_at_n import JG_BIN, XRUN_BIN, run_jasper, simulate  # noqa: E402
 from generate_openrouter import extract_verilog  # noqa: E402
 
-CIRCUITS = ("cdc_2phase", "async_fifo", "apbxclk")
 PROMPT_TYPES = ("functional", "cdc_explicit")
 DEFAULT_OUT = "experiments/multi-llm-passk"
+PROMPT_DIR = ROOT / "experiments" / "prompts"
+
+
+def available_circuits() -> tuple[str, ...]:
+    names = sorted(
+        p.name[: -len(".functional.md")]
+        for p in PROMPT_DIR.glob("*.functional.md")
+        if (PROMPT_DIR / f"{p.name[: -len('.functional.md')]}.cdc_explicit.md").exists()
+    )
+    return tuple(names)
+
+
+CIRCUITS = available_circuits() or ("cdc_2phase", "async_fifo", "apbxclk")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENAI_URL = "https://api.openai.com/v1/responses"
 
@@ -384,6 +396,13 @@ def main() -> int:
     )
     prompt = prompt_path.read_text()
     prompt_sha256 = hashlib.sha256(prompt.encode()).hexdigest()
+    benchmark_status = manifest_scalar(args.circuit, "status")
+    if benchmark_status != "pilot_verified":
+        print(
+            f"WARNING: {args.circuit} is marked {benchmark_status}; "
+            "treat its scores as provisional until the benchmark is verified.",
+            file=sys.stderr,
+        )
     output_root = ROOT / args.output_root
     provider_root = output_root / args.provider
     provider_root.mkdir(parents=True, exist_ok=True)
@@ -392,6 +411,7 @@ def main() -> int:
         "provider": args.provider,
         "models": args.model,
         "circuit": args.circuit,
+        "benchmark_status": benchmark_status,
         "prompt_type": args.prompt_type,
         "prompt_file": str(prompt_path.relative_to(ROOT)),
         "prompt_sha256": prompt_sha256,

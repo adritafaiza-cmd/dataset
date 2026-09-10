@@ -1,0 +1,184 @@
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    reg [6:0]  address;
+    reg [7:0]  data;
+    reg        start;
+    reg        read;
+    reg        write;
+    reg        write_multiple;
+    reg        stop;
+    reg        valid;
+    reg        ready;
+    reg [7:0]  tdata;
+    reg        tvalid;
+    reg        tlast;
+    reg        tready;
+    reg        scl;
+    reg        sda;
+    reg        busy_reg;
+    reg        bus_control_reg;
+    reg        bus_active_reg;
+    reg        missed_ack_reg;
+    reg [15:0] counter;
+    reg [15:0] prescale_reg;
+    reg        stop_on_idle_reg;
+
+    assign s_axis_cmd_ready = ready;
+    assign s_axis_data_tready = tready;
+    assign m_axis_data_tdata = tdata;
+    assign m_axis_data_tvalid = tvalid;
+    assign m_axis_data_tlast = tlast;
+    assign scl_o = scl;
+    assign scl_t = ~scl;
+    assign sda_o = sda;
+    assign sda_t = ~sda;
+    assign busy = busy_reg;
+    assign bus_control = bus_control_reg;
+    assign bus_active = bus_active_reg;
+    assign missed_ack = missed_ack_reg;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            address <= 7'b0;
+            data <= 8'b0;
+            start <= 1'b0;
+            read <= 1'b0;
+            write <= 1'b0;
+            write_multiple <= 1'b0;
+            stop <= 1'b0;
+            valid <= 1'b0;
+            ready <= 1'b0;
+            tdata <= 8'b0;
+            tvalid <= 1'b0;
+            tlast <= 1'b0;
+            tready <= 1'b0;
+            scl <= 1'b1;
+            sda <= 1'b1;
+            busy_reg <= 1'b0;
+            bus_control_reg <= 1'b0;
+            bus_active_reg <= 1'b0;
+            missed_ack_reg <= 1'b0;
+            counter <= 16'b0;
+            prescale_reg <= 16'b0;
+            stop_on_idle_reg <= 1'b0;
+        end else begin
+            if (s_axis_cmd_valid && ready) begin
+                address <= s_axis_cmd_address;
+                start <= s_axis_cmd_start;
+                read <= s_axis_cmd_read;
+                write <= s_axis_cmd_write;
+                write_multiple <= s_axis_cmd_write_multiple;
+                stop <= s_axis_cmd_stop;
+                valid <= 1'b1;
+                ready <= 1'b0;
+            end else if (!s_axis_cmd_valid) begin
+                ready <= 1'b1;
+            end
+
+            if (s_axis_data_tvalid && tready) begin
+                data <= s_axis_data_tdata;
+                tdata <= data;
+                tvalid <= 1'b1;
+                tlast <= s_axis_data_tlast;
+                tready <= 1'b0;
+            end else if (!s_axis_data_tvalid) begin
+                tready <= 1'b1;
+            end
+
+            if (m_axis_data_tready && tvalid) begin
+                tvalid <= 1'b0;
+                tlast <= 1'b0;
+            end
+
+            if (start) begin
+                scl <= 1'b0;
+                sda <= 1'b0;
+                busy_reg <= 1'b1;
+                bus_control_reg <= 1'b1;
+                bus_active_reg <= 1'b1;
+                counter <= 16'b0;
+                prescale_reg <= prescale;
+                stop_on_idle_reg <= stop_on_idle;
+            end else if (stop) begin
+                scl <= 1'b1;
+                sda <= 1'b1;
+                busy_reg <= 1'b0;
+                bus_control_reg <= 1'b0;
+                bus_active_reg <= 1'b0;
+            end else if (read) begin
+                scl <= 1'b1;
+                sda <= 1'b1;
+                if (counter == prescale_reg) begin
+                    counter <= 16'b0;
+                    scl <= 1'b0;
+                end else begin
+                    counter <= counter + 1'b1;
+                end
+            end else if (write) begin
+                scl <= 1'b0;
+                sda <= data[0];
+                if (counter == prescale_reg) begin
+                    counter <= 16'b0;
+                    scl <= 1'b1;
+                    data <= {data[6:0], 1'b0};
+                end else begin
+                    counter <= counter + 1'b1;
+                end
+            end else if (write_multiple) begin
+                scl <= 1'b0;
+                sda <= data[0];
+                if (counter == prescale_reg) begin
+                    counter <= 16'b0;
+                    scl <= 1'b1;
+                    data <= {data[6:0], 1'b0};
+                end else begin
+                    counter <= counter + 1'b1;
+                end
+            end else if (stop_on_idle_reg) begin
+                scl <= 1'b1;
+                sda <= 1'b1;
+                busy_reg <= 1'b0;
+                bus_control_reg <= 1'b0;
+                bus_active_reg <= 1'b0;
+            end
+
+            if (sda_i == 1'b0 && sda == 1'b1) begin
+                missed_ack_reg <= 1'b1;
+            end else begin
+                missed_ack_reg <= 1'b0;
+            end
+        end
+    end
+
+endmodule

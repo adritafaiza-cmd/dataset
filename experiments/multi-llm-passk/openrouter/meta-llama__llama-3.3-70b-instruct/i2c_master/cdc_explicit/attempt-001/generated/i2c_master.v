@@ -1,0 +1,257 @@
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    reg [2:0] state;
+    reg [2:0] next_state;
+    reg [6:0] address;
+    reg [7:0] data;
+    reg [15:0] scl_counter;
+    reg [15:0] scl_prescale;
+    reg scl_high;
+    reg scl_low;
+    reg sda_high;
+    reg sda_low;
+    reg start;
+    reg stop;
+    reg read;
+    reg write;
+    reg write_multiple;
+    reg ack;
+    reg missed_ack_reg;
+    reg busy_reg;
+    reg bus_control_reg;
+    reg bus_active_reg;
+
+    assign scl_o = scl_low ? 1'b0 : 1'bz;
+    assign scl_t = scl_low ? 1'b0 : 1'b1;
+    assign sda_o = sda_low ? 1'b0 : 1'bz;
+    assign sda_t = sda_low ? 1'b0 : 1'b1;
+
+    assign busy = busy_reg;
+    assign bus_control = bus_control_reg;
+    assign bus_active = bus_active_reg;
+    assign missed_ack = missed_ack_reg;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= 3'b000;
+            scl_counter <= 16'b0;
+            scl_prescale <= prescale;
+            scl_high <= 1'b0;
+            scl_low <= 1'b0;
+            sda_high <= 1'b0;
+            sda_low <= 1'b0;
+            start <= 1'b0;
+            stop <= 1'b0;
+            read <= 1'b0;
+            write <= 1'b0;
+            write_multiple <= 1'b0;
+            ack <= 1'b0;
+            missed_ack_reg <= 1'b0;
+            busy_reg <= 1'b0;
+            bus_control_reg <= 1'b0;
+            bus_active_reg <= 1'b0;
+            s_axis_cmd_ready <= 1'b0;
+            s_axis_data_tready <= 1'b0;
+            m_axis_data_tvalid <= 1'b0;
+            m_axis_data_tlast <= 1'b0;
+        end else begin
+            case (state)
+                3'b000: begin // IDLE
+                    if (s_axis_cmd_valid) begin
+                        state <= 3'b001;
+                        address <= s_axis_cmd_address;
+                        start <= s_axis_cmd_start;
+                        stop <= s_axis_cmd_stop;
+                        read <= s_axis_cmd_read;
+                        write <= s_axis_cmd_write;
+                        write_multiple <= s_axis_cmd_write_multiple;
+                        scl_counter <= 16'b0;
+                        scl_high <= 1'b0;
+                        scl_low <= 1'b0;
+                        sda_high <= 1'b0;
+                        sda_low <= 1'b0;
+                        ack <= 1'b0;
+                        missed_ack_reg <= 1'b0;
+                        busy_reg <= 1'b1;
+                        bus_control_reg <= 1'b1;
+                        bus_active_reg <= 1'b1;
+                        s_axis_cmd_ready <= 1'b1;
+                    end else begin
+                        state <= 3'b000;
+                        s_axis_cmd_ready <= 1'b0;
+                    end
+                end
+                3'b001: begin // START
+                    if (scl_counter == scl_prescale) begin
+                        state <= 3'b010;
+                        scl_counter <= 16'b0;
+                        scl_high <= 1'b1;
+                        scl_low <= 1'b0;
+                        sda_high <= 1'b0;
+                        sda_low <= 1'b1;
+                    end else begin
+                        state <= 3'b001;
+                        scl_counter <= scl_counter + 16'b1;
+                    end
+                end
+                3'b010: begin // ADDRESS
+                    if (scl_counter == scl_prescale) begin
+                        state <= 3'b011;
+                        scl_counter <= 16'b0;
+                        scl_high <= 1'b0;
+                        scl_low <= 1'b1;
+                        sda_high <= 1'b0;
+                        sda_low <= 1'b0;
+                    end else begin
+                        state <= 3'b010;
+                        scl_counter <= scl_counter + 16'b1;
+                    end
+                end
+                3'b011: begin // ACK
+                    if (scl_counter == scl_prescale) begin
+                        if (sda_i) begin
+                            state <= 3'b100;
+                            scl_counter <= 16'b0;
+                            scl_high <= 1'b1;
+                            scl_low <= 1'b0;
+                            sda_high <= 1'b0;
+                            sda_low <= 1'b1;
+                            missed_ack_reg <= 1'b1;
+                        end else begin
+                            state <= 3'b100;
+                            scl_counter <= 16'b0;
+                            scl_high <= 1'b1;
+                            scl_low <= 1'b0;
+                            sda_high <= 1'b0;
+                            sda_low <= 1'b1;
+                        end
+                    end else begin
+                        state <= 3'b011;
+                        scl_counter <= scl_counter + 16'b1;
+                    end
+                end
+                3'b100: begin // WRITE
+                    if (s_axis_data_tvalid) begin
+                        state <= 3'b101;
+                        data <= s_axis_data_tdata;
+                        scl_counter <= 16'b0;
+                        scl_high <= 1'b1;
+                        scl_low <= 1'b0;
+                        sda_high <= 1'b0;
+                        sda_low <= 1'b1;
+                        s_axis_data_tready <= 1'b1;
+                    end else begin
+                        state <= 3'b100;
+                        s_axis_data_tready <= 1'b0;
+                    end
+                end
+                3'b101: begin // WRITE DATA
+                    if (scl_counter == scl_prescale) begin
+                        state <= 3'b110;
+                        scl_counter <= 16'b0;
+                        scl_high <= 1'b0;
+                        scl_low <= 1'b1;
+                        sda_high <= 1'b0;
+                        sda_low <= 1'b0;
+                    end else begin
+                        state <= 3'b101;
+                        scl_counter <= scl_counter + 16'b1;
+                    end
+                end
+                3'b110: begin // ACK
+                    if (scl_counter == scl_prescale) begin
+                        if (sda_i) begin
+                            state <= 3'b111;
+                            scl_counter <= 16'b0;
+                            scl_high <= 1'b1;
+                            scl_low <= 1'b0;
+                            sda_high <= 1'b0;
+                            sda_low <= 1'b1;
+                            missed_ack_reg <= 1'b1;
+                        end else begin
+                            state <= 3'b111;
+                            scl_counter <= 16'b0;
+                            scl_high <= 1'b1;
+                            scl_low <= 1'b0;
+                            sda_high <= 1'b0;
+                            sda_low <= 1'b1;
+                        end
+                    end else begin
+                        state <= 3'b110;
+                        scl_counter <= scl_counter + 16'b1;
+                    end
+                end
+                3'b111: begin // STOP
+                    if (scl_counter == scl_prescale) begin
+                        state <= 3'b000;
+                        scl_counter <= 16'b0;
+                        scl_high <= 1'b0;
+                        scl_low <= 1'b0;
+                        sda_high <= 1'b0;
+                        sda_low <= 1'b0;
+                        busy_reg <= 1'b0;
+                        bus_control_reg <= 1'b0;
+                        bus_active_reg <= 1'b0;
+                    end else begin
+                        state <= 3'b111;
+                        scl_counter <= scl_counter + 16'b1;
+                    end
+                end
+                default: begin
+                    state <= 3'b000;
+                end
+            endcase
+            if (m_axis_data_tready) begin
+                m_axis_data_tvalid <= 1'b1;
+                m_axis_data_tlast <= 1'b1;
+            end else begin
+                m_axis_data_tvalid <= 1'b0;
+                m_axis_data_tlast <= 1'b0;
+            end
+        end
+    end
+
+endmodule

@@ -1,0 +1,35 @@
+module data_sync #(
+    parameter STAGES = 2,
+    parameter DWIDTH = 8
+)(
+    input                  clk,
+    input                  rstn,
+    input  [DWIDTH-1:0]    din,
+    input                  dready_i,
+    output reg [DWIDTH-1:0] dout,
+    output reg             dready_o
+);
+    reg [DWIDTH-1:0] data [STAGES-1:0];
+    reg [STAGES-1:0] valid;
+
+    always @(posedge clk or negedge rstn) begin
+        if (~rstn) begin
+            for (int i = 0; i < STAGES; i++) begin
+                data[i] <= {DWIDTH{1'b0}};
+                valid[i] <= 1'b0;
+            end
+            dready_o <= 1'b0;
+        end else begin
+            data[0] <= dready_i? din : data[0];
+            valid[0] <= dready_i;
+            for (int i = 1; i < STAGES; i++) begin
+                data[i] <= valid[i-1]? data[i-1] : data[i];
+                valid[i] <= valid[i-1];
+            end
+            dready_o <= valid[STAGES-1] &&!dready_o;
+            if (valid[STAGES-1]) begin
+                dout <= data[STAGES-1];
+            end
+        end
+    end
+endmodule

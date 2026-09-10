@@ -25,7 +25,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from evaluate_generated import TB, evaluate  # noqa: E402
+from evaluate_generated import evaluate  # noqa: E402
 from generate_openrouter import extract_verilog  # noqa: E402
 
 PROMPT_DIR = ROOT / "experiments" / "prompts"

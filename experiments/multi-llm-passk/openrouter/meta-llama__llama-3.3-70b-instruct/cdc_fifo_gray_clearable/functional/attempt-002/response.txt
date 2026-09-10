@@ -1,0 +1,114 @@
+```verilog
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    reg [WIDTH-1:0]                fifo_ram [2**LOG_DEPTH-1:0];
+    reg [$clog2(2**LOG_DEPTH)-1:0] fifo_wr_ptr;
+    reg [$clog2(2**LOG_DEPTH)-1:0] fifo_rd_ptr;
+    reg [$clog2(2**LOG_DEPTH)-1:0] fifo_wr_ptr_gray;
+    reg [$clog2(2**LOG_DEPTH)-1:0] fifo_rd_ptr_gray;
+    reg [SYNC_STAGES-1:0]          src_clear_sync;
+    reg [SYNC_STAGES-1:0]          dst_clear_sync;
+    reg                           src_clear_pending;
+    reg                           dst_clear_pending;
+    reg                           src_ready;
+    reg                           dst_valid;
+    reg [WIDTH-1:0]                dst_data;
+
+    assign src_clear_pending_o = src_clear_pending;
+    assign dst_clear_pending_o = dst_clear_pending;
+    assign src_ready_o = src_ready;
+    assign dst_data_o = dst_data;
+    assign dst_valid_o = dst_valid;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_clear_pending <= 1'b1;
+            src_ready <= 1'b0;
+            fifo_wr_ptr <= '0;
+            fifo_wr_ptr_gray <= '0;
+        end else if (src_clear_i) begin
+            src_clear_pending <= 1'b1;
+            src_ready <= 1'b0;
+            fifo_wr_ptr <= '0;
+            fifo_wr_ptr_gray <= '0;
+        end else if (src_clear_sync[SYNC_STAGES-1]) begin
+            src_clear_pending <= 1'b0;
+            src_ready <= 1'b1;
+        end else begin
+            if (src_valid_i && src_ready) begin
+                fifo_ram[fifo_wr_ptr] <= src_data_i;
+                fifo_wr_ptr <= fifo_wr_ptr + 1'b1;
+                fifo_wr_ptr_gray <= gray_encode(fifo_wr_ptr);
+            end
+            src_ready <= (fifo_wr_ptr != (2**LOG_DEPTH-1));
+        end
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_clear_pending <= 1'b1;
+            dst_valid <= 1'b0;
+            fifo_rd_ptr <= '0;
+            fifo_rd_ptr_gray <= '0;
+        end else if (dst_clear_i) begin
+            dst_clear_pending <= 1'b1;
+            dst_valid <= 1'b0;
+            fifo_rd_ptr <= '0;
+            fifo_rd_ptr_gray <= '0;
+        end else if (dst_clear_sync[SYNC_STAGES-1]) begin
+            dst_clear_pending <= 1'b0;
+            dst_valid <= 1'b0;
+        end else begin
+            if (dst_ready_i && dst_valid) begin
+                fifo_rd_ptr <= fifo_rd_ptr + 1'b1;
+                fifo_rd_ptr_gray <= gray_encode(fifo_rd_ptr);
+            end
+            dst_valid <= (fifo_rd_ptr != fifo_wr_ptr_gray);
+            if (dst_valid) begin
+                dst_data <= fifo_ram[fifo_rd_ptr];
+            end
+        end
+    end
+
+    always @(posedge src_clk_i) begin
+        src_clear_sync[0] <= src_clear_i;
+        for (int i = 1; i < SYNC_STAGES; i++) begin
+            src_clear_sync[i] <= src_clear_sync[i-1];
+        end
+    end
+
+    always @(posedge dst_clk_i) begin
+        dst_clear_sync[0] <= dst_clear_i;
+        for (int i = 1; i < SYNC_STAGES; i++) begin
+            dst_clear_sync[i] <= dst_clear_sync[i-1];
+        end
+    end
+
+    function [$clog2(2**LOG_DEPTH)-1:0] gray_encode;
+        input [$clog2(2**LOG_DEPTH)-1:0] bin;
+        begin
+            gray_encode = bin ^ (bin >> 1);
+        end
+    endfunction
+
+endmodule
+```

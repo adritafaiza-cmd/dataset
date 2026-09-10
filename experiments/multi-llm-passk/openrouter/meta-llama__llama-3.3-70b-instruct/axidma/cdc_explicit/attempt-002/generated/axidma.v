@@ -1,0 +1,189 @@
+module axidma #(
+    parameter C_AXI_ID_WIDTH = 1,
+    parameter C_AXI_ADDR_WIDTH = 32,
+    parameter C_AXI_DATA_WIDTH = 32,
+    localparam C_AXIL_ADDR_WIDTH = 5,
+    localparam C_AXIL_DATA_WIDTH = 32,
+    parameter [0:0] OPT_UNALIGNED = 1'b1,
+    parameter [0:0] OPT_WRAPMEM = 1'b1,
+    parameter LGFIFO = 4,
+    parameter LGLEN = C_AXI_ADDR_WIDTH,
+    parameter [0:0] OPT_LOWPOWER = 1'b0,
+    parameter [0:0] OPT_CLKGATE = OPT_LOWPOWER,
+    parameter [C_AXI_ID_WIDTH-1:0] AXI_READ_ID = 0,
+    parameter [C_AXI_ID_WIDTH-1:0] AXI_WRITE_ID = 0,
+    parameter [7:0] ABORT_KEY = 8'h6d,
+    localparam ADDRLSB = $clog2(C_AXI_DATA_WIDTH)-3,
+    localparam AXILLSB = $clog2(C_AXIL_DATA_WIDTH)-3,
+    localparam LGLENW = LGLEN-ADDRLSB
+) (
+    input wire S_AXI_ACLK,
+    input wire S_AXI_ARESETN,
+    input wire S_AXIL_AWVALID,
+    output wire S_AXIL_AWREADY,
+    input wire [C_AXIL_ADDR_WIDTH-1:0] S_AXIL_AWADDR,
+    input wire [2:0] S_AXIL_AWPROT,
+    input wire S_AXIL_WVALID,
+    output wire S_AXIL_WREADY,
+    input wire [C_AXIL_DATA_WIDTH-1:0] S_AXIL_WDATA,
+    input wire [C_AXIL_DATA_WIDTH/8-1:0] S_AXIL_WSTRB,
+    output reg S_AXIL_BVALID,
+    input wire S_AXIL_BREADY,
+    output wire [1:0] S_AXIL_BRESP,
+    input wire S_AXIL_ARVALID,
+    output wire S_AXIL_ARREADY,
+    input wire [C_AXIL_ADDR_WIDTH-1:0] S_AXIL_ARADDR,
+    input wire [2:0] S_AXIL_ARPROT,
+    output reg S_AXIL_RVALID,
+    input wire S_AXIL_RREADY,
+    output reg [C_AXIL_DATA_WIDTH-1:0] S_AXIL_RDATA,
+    output wire [1:0] S_AXIL_RRESP,
+    output reg M_AXI_AWVALID,
+    input wire M_AXI_AWREADY,
+    output reg [C_AXI_ID_WIDTH-1:0] M_AXI_AWID,
+    output reg [C_AXI_ADDR_WIDTH-1:0] M_AXI_AWADDR,
+    output reg [2:0] M_AXI_AWSIZE,
+    output reg [1:0] M_AXI_AWBURST,
+    output reg M_AXI_AWLOCK,
+    output reg [3:0] M_AXI_AWCACHE,
+    output reg [2:0] M_AXI_AWPROT,
+    output reg [3:0] M_AXI_AWQOS,
+    output reg M_AXI_WVALID,
+    input wire M_AXI_WREADY,
+    output reg [C_AXI_DATA_WIDTH-1:0] M_AXI_WDATA,
+    output reg [C_AXI_DATA_WIDTH/8-1:0] M_AXI_WSTRB,
+    output reg M_AXI_WLAST,
+    input wire M_AXI_BVALID,
+    output reg M_AXI_BREADY,
+    input wire [C_AXI_ID_WIDTH-1:0] M_AXI_BID,
+    input wire [1:0] M_AXI_BRESP,
+    output reg M_AXI_ARVALID,
+    input wire M_AXI_ARREADY,
+    output wire [C_AXI_ID_WIDTH-1:0] M_AXI_ARID,
+    output reg [C_AXI_ADDR_WIDTH-1:0] M_AXI_ARADDR,
+    output wire [2:0] M_AXI_ARSIZE,
+    output wire [1:0] M_AXI_ARBURST,
+    output wire M_AXI_ARLOCK,
+    output wire [3:0] M_AXI_ARCACHE,
+    output wire [2:0] M_AXI_ARPROT,
+    output wire [3:0] M_AXI_ARQOS,
+    input wire M_AXI_RVALID,
+    output wire M_AXI_RREADY,
+    input wire [C_AXI_ID_WIDTH-1:0] M_AXI_RID,
+    input wire [C_AXI_DATA_WIDTH-1:0] M_AXI_RDATA,
+    input wire M_AXI_RLAST,
+    input wire [1:0] M_AXI_RRESP,
+    output reg o_int
+);
+
+    reg [C_AXIL_ADDR_WIDTH-1:0] src_addr;
+    reg [C_AXIL_ADDR_WIDTH-1:0] dst_addr;
+    reg [C_AXIL_ADDR_WIDTH-1:0] length;
+    reg [C_AXIL_ADDR_WIDTH-1:0] remaining_length;
+    reg [C_AXI_DATA_WIDTH-1:0] data;
+    reg [C_AXI_DATA_WIDTH/8-1:0] strb;
+    reg [1:0] burst;
+    reg [1:0] resp;
+    reg start;
+    reg done;
+
+    always @(posedge S_AXI_ACLK) begin
+        if (~S_AXI_ARESETN) begin
+            src_addr <= 0;
+            dst_addr <= 0;
+            length <= 0;
+            remaining_length <= 0;
+            data <= 0;
+            strb <= 0;
+            burst <= 0;
+            resp <= 0;
+            start <= 0;
+            done <= 0;
+            S_AXIL_BVALID <= 0;
+            S_AXIL_RVALID <= 0;
+            M_AXI_AWVALID <= 0;
+            M_AXI_WVALID <= 0;
+            M_AXI_BREADY <= 0;
+            M_AXI_ARVALID <= 0;
+            M_AXI_RREADY <= 0;
+            o_int <= 0;
+        end else begin
+            if (S_AXIL_AWVALID && S_AXIL_WVALID && S_AXIL_BREADY) begin
+                src_addr <= S_AXIL_AWADDR;
+                dst_addr <= S_AXIL_WDATA;
+                length <= S_AXIL_WDATA + 1;
+                remaining_length <= length;
+                start <= 1;
+            end
+
+            if (start && ~done) begin
+                if (remaining_length > 0) begin
+                    M_AXI_AWVALID <= 1;
+                    M_AXI_AWADDR <= src_addr;
+                    M_AXI_AWSIZE <= 2'b10;
+                    M_AXI_AWBURST <= 2'b01;
+                    M_AXI_WVALID <= 1;
+                    M_AXI_WDATA <= data;
+                    M_AXI_WSTRB <= strb;
+                    M_AXI_WLAST <= (remaining_length == 1);
+                    if (M_AXI_WREADY) begin
+                        remaining_length <= remaining_length - 1;
+                        src_addr <= src_addr + 1;
+                    end
+                end
+
+                if (M_AXI_BVALID) begin
+                    resp <= M_AXI_BRESP;
+                    M_AXI_BREADY <= 1;
+                    if (resp == 2'b00) begin
+                        done <= 1;
+                    end
+                end
+            end
+
+            if (done) begin
+                S_AXIL_BVALID <= 1;
+                S_AXIL_BRESP <= resp;
+                if (S_AXIL_BREADY) begin
+                    S_AXIL_BVALID <= 0;
+                    done <= 0;
+                end
+            end
+
+            if (S_AXIL_ARVALID) begin
+                M_AXI_ARVALID <= 1;
+                M_AXI_ARADDR <= S_AXIL_ARADDR;
+                M_AXI_ARSIZE <= 2'b10;
+                M_AXI_ARBURST <= 2'b01;
+                if (M_AXI_ARREADY) begin
+                    M_AXI_RREADY <= 1;
+                end
+            end
+
+            if (M_AXI_RVALID) begin
+                S_AXIL_RVALID <= 1;
+                S_AXIL_RDATA <= M_AXI_RDATA;
+                S_AXIL_RRESP <= M_AXI_RRESP;
+                if (S_AXIL_RREADY) begin
+                    S_AXIL_RVALID <= 0;
+                end
+            end
+        end
+    end
+
+    assign S_AXIL_AWREADY = 1;
+    assign S_AXIL_WREADY = 1;
+    assign S_AXIL_ARREADY = 1;
+    assign M_AXI_AWID = AXI_WRITE_ID;
+    assign M_AXI_ARID = AXI_READ_ID;
+    assign M_AXI_AWCACHE = 4'b1111;
+    assign M_AXI_ARCACHE = 4'b1111;
+    assign M_AXI_AWQOS = 4'b0000;
+    assign M_AXI_ARQOS = 4'b0000;
+    assign M_AXI_AWLOCK = 1'b0;
+    assign M_AXI_ARLOCK = 1'b0;
+    assign M_AXI_AWPROT = S_AXIL_AWPROT;
+    assign M_AXI_ARPROT = S_AXIL_ARPROT;
+    assign o_int = 1'b0;
+
+endmodule

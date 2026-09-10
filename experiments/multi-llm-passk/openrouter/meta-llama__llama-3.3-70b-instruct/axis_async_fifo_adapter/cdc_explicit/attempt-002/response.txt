@@ -1,0 +1,332 @@
+```verilog
+module axis_async_fifo_adapter #
+(
+    parameter DEPTH = 4096,
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                     s_clk,
+    input  wire                     s_rst,
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    input  wire                     m_clk,
+    input  wire                     m_rst,
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser,
+    input  wire                     s_pause_req,
+    output wire                     s_pause_ack,
+    input  wire                     m_pause_req,
+    output wire                     m_pause_ack,
+    output wire [$clog2(DEPTH):0]   s_status_depth,
+    output wire [$clog2(DEPTH):0]   s_status_depth_commit,
+    output wire                     s_status_overflow,
+    output wire                     s_status_bad_frame,
+    output wire                     s_status_good_frame,
+    output wire [$clog2(DEPTH):0]   m_status_depth,
+    output wire [$clog2(DEPTH):0]   m_status_depth_commit,
+    output wire                     m_status_overflow,
+    output wire                     m_status_bad_frame,
+    output wire                     m_status_good_frame
+);
+
+    // FIFO signals
+    reg [S_DATA_WIDTH-1:0] fifo_data;
+    reg [S_KEEP_WIDTH-1:0] fifo_keep;
+    reg [ID_WIDTH-1:0] fifo_id;
+    reg [DEST_WIDTH-1:0] fifo_dest;
+    reg [USER_WIDTH-1:0] fifo_user;
+    reg fifo_last;
+    reg fifo_valid;
+    reg fifo_ready;
+    reg [M_DATA_WIDTH-1:0] fifo_out_data;
+    reg [M_KEEP_WIDTH-1:0] fifo_out_keep;
+    reg [ID_WIDTH-1:0] fifo_out_id;
+    reg [DEST_WIDTH-1:0] fifo_out_dest;
+    reg [USER_WIDTH-1:0] fifo_out_user;
+    reg fifo_out_last;
+    reg fifo_out_valid;
+    reg fifo_out_ready;
+
+    // Asynchronous FIFO
+    reg [31:0] s_count;
+    reg [31:0] m_count;
+    reg [31:0] s_commit;
+    reg [31:0] m_commit;
+    reg s_overflow;
+    reg m_overflow;
+    reg s_bad_frame;
+    reg m_bad_frame;
+    reg s_good_frame;
+    reg m_good_frame;
+
+    // Width adapter
+    reg [M_DATA_WIDTH-1:0] adapter_data;
+    reg [M_KEEP_WIDTH-1:0] adapter_keep;
+    reg [ID_WIDTH-1:0] adapter_id;
+    reg [DEST_WIDTH-1:0] adapter_dest;
+    reg [USER_WIDTH-1:0] adapter_user;
+    reg adapter_last;
+    reg adapter_valid;
+    reg adapter_ready;
+
+    // CDC
+    reg s_rst_sync;
+    reg m_rst_sync;
+    reg s_clk_sync;
+    reg m_clk_sync;
+
+    // Synchronization logic
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_rst_sync <= 1'b1;
+            s_clk_sync <= 1'b0;
+        end else begin
+            s_rst_sync <= 1'b0;
+            s_clk_sync <= s_clk;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rst_sync <= 1'b1;
+            m_clk_sync <= 1'b0;
+        end else begin
+            m_rst_sync <= 1'b0;
+            m_clk_sync <= m_clk;
+        end
+    end
+
+    // FIFO logic
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            fifo_data <= {S_DATA_WIDTH{1'b0}};
+            fifo_keep <= {S_KEEP_WIDTH{1'b0}};
+            fifo_id <= {ID_WIDTH{1'b0}};
+            fifo_dest <= {DEST_WIDTH{1'b0}};
+            fifo_user <= {USER_WIDTH{1'b0}};
+            fifo_last <= 1'b0;
+            fifo_valid <= 1'b0;
+            fifo_ready <= 1'b0;
+        end else if (s_axis_tvalid && fifo_ready) begin
+            fifo_data <= s_axis_tdata;
+            fifo_keep <= s_axis_tkeep;
+            fifo_id <= s_axis_tid;
+            fifo_dest <= s_axis_tdest;
+            fifo_user <= s_axis_tuser;
+            fifo_last <= s_axis_tlast;
+            fifo_valid <= 1'b1;
+            fifo_ready <= 1'b0;
+        end
+    end
+
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            fifo_out_data <= {M_DATA_WIDTH{1'b0}};
+            fifo_out_keep <= {M_KEEP_WIDTH{1'b0}};
+            fifo_out_id <= {ID_WIDTH{1'b0}};
+            fifo_out_dest <= {DEST_WIDTH{1'b0}};
+            fifo_out_user <= {USER_WIDTH{1'b0}};
+            fifo_out_last <= 1'b0;
+            fifo_out_valid <= 1'b0;
+            fifo_out_ready <= 1'b0;
+        end else if (fifo_out_valid && m_axis_tready) begin
+            fifo_out_data <= {M_DATA_WIDTH{1'b0}};
+            fifo_out_keep <= {M_KEEP_WIDTH{1'b0}};
+            fifo_out_id <= {ID_WIDTH{1'b0}};
+            fifo_out_dest <= {DEST_WIDTH{1'b0}};
+            fifo_out_user <= {USER_WIDTH{1'b0}};
+            fifo_out_last <= 1'b0;
+            fifo_out_valid <= 1'b0;
+            fifo_out_ready <= 1'b1;
+        end
+    end
+
+    // Width adapter logic
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            adapter_data <= {M_DATA_WIDTH{1'b0}};
+            adapter_keep <= {M_KEEP_WIDTH{1'b0}};
+            adapter_id <= {ID_WIDTH{1'b0}};
+            adapter_dest <= {DEST_WIDTH{1'b0}};
+            adapter_user <= {USER_WIDTH{1'b0}};
+            adapter_last <= 1'b0;
+            adapter_valid <= 1'b0;
+            adapter_ready <= 1'b0;
+        end else if (fifo_valid && adapter_ready) begin
+            adapter_data <= fifo_data;
+            adapter_keep <= fifo_keep;
+            adapter_id <= fifo_id;
+            adapter_dest <= fifo_dest;
+            adapter_user <= fifo_user;
+            adapter_last <= fifo_last;
+            adapter_valid <= 1'b1;
+            adapter_ready <= 1'b0;
+        end
+    end
+
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            m_axis_tdata <= {M_DATA_WIDTH{1'b0}};
+            m_axis_tkeep <= {M_KEEP_WIDTH{1'b0}};
+            m_axis_tid <= {ID_WIDTH{1'b0}};
+            m_axis_tdest <= {DEST_WIDTH{1'b0}};
+            m_axis_tuser <= {USER_WIDTH{1'b0}};
+            m_axis_tlast <= 1'b0;
+            m_axis_tvalid <= 1'b0;
+        end else if (adapter_valid && m_axis_tready) begin
+            m_axis_tdata <= adapter_data;
+            m_axis_tkeep <= adapter_keep;
+            m_axis_tid <= adapter_id;
+            m_axis_tdest <= adapter_dest;
+            m_axis_tuser <= adapter_user;
+            m_axis_tlast <= adapter_last;
+            m_axis_tvalid <= 1'b1;
+        end
+    end
+
+    // Status logic
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            s_count <= 32'd0;
+            s_commit <= 32'd0;
+            s_overflow <= 1'b0;
+            s_bad_frame <= 1'b0;
+            s_good_frame <= 1'b0;
+        end else begin
+            if (fifo_valid && !fifo_ready) begin
+                s_count <= s_count + 1;
+            end else if (fifo_out_valid && m_axis_tready) begin
+                s_count <= s_count - 1;
+            end
+            if (s_count == DEPTH) begin
+                s_overflow <= 1'b1;
+            end else begin
+                s_overflow <= 1'b0;
+            end
+            if (fifo_last && fifo_valid) begin
+                s_commit <= s_commit + 1;
+            end
+            if (fifo_last && fifo_valid && fifo_user == USER_BAD_FRAME_VALUE) begin
+                s_bad_frame <= 1'b1;
+            end else begin
+                s_bad_frame <= 1'b0;
+            end
+            if (fifo_last && fifo_valid && fifo_user != USER_BAD_FRAME_VALUE) begin
+                s_good_frame <= 1'b1;
+            end else begin
+                s_good_frame <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            m_count <= 32'd0;
+            m_commit <= 32'd0;
+            m_overflow <= 1'b0;
+            m_bad_frame <= 1'b0;
+            m_good_frame <= 1'b0;
+        end else begin
+            if (adapter_valid && !m_axis_tready) begin
+                m_count <= m_count + 1;
+            end else if (m_axis_tvalid && m_axis_tready) begin
+                m_count <= m_count - 1;
+            end
+            if (m_count == DEPTH) begin
+                m_overflow <= 1'b1;
+            end else begin
+                m_overflow <= 1'b0;
+            end
+            if (adapter_last && adapter_valid) begin
+                m_commit <= m_commit + 1;
+            end
+            if (adapter_last && adapter_valid && adapter_user == USER_BAD_FRAME_VALUE) begin
+                m_bad_frame <= 1'b1;
+            end else begin
+                m_bad_frame <= 1'b0;
+            end
+            if (adapter_last && adapter_valid && adapter_user != USER_BAD_FRAME_VALUE) begin
+                m_good_frame <= 1'b1;
+            end else begin
+                m_good_frame <= 1'b0;
+            end
+        end
+    end
+
+    // Assign outputs
+    assign s_axis_tready = fifo_ready;
+    assign m_axis_tdata = adapter_data;
+    assign m_axis_tkeep = adapter_keep;
+    assign m_axis_tvalid = adapter_valid;
+    assign m_axis_tlast = adapter_last;
+    assign m_axis_tid = adapter_id;
+    assign m_axis_tdest = adapter_dest;
+    assign m_axis_tuser = adapter_user;
+    assign s_status_depth = s_count;
+    assign s_status_depth_commit = s_commit;
+    assign s_status_overflow = s_overflow;
+    assign s_status_bad_frame = s_bad_frame;
+    assign s_status_good_frame = s_good_frame;
+    assign m_status_depth = m_count;
+    assign m_status_depth_commit = m_commit;
+    assign m_status_overflow = m_overflow;
+    assign m_status_bad_frame = m_bad_frame;
+    assign m_status_good_frame = m_good_frame;
+
+    // Pause logic
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            s_pause_ack <= 1'b0;
+        end else if (s_pause_req) begin
+            s_pause_ack <= 1'b1;
+        end else begin
+            s_pause_ack <= 1'b0;
+        end
+    end
+
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            m_pause_ack <= 1'b0;
+        end else if (m_pause_req) begin
+            m_pause_ack <= 1'b1;
+        end else begin
+            m_pause_ack <= 1'b0;
+        end
+    end
+
+endmodule
+```

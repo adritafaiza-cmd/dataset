@@ -1,0 +1,169 @@
+module axis_adapter #
+(
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    /*
+     * AXI input
+     */
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    reg [S_DATA_WIDTH-1:0]          s_data;
+    reg [S_KEEP_WIDTH-1:0]          s_keep;
+    reg [ID_WIDTH-1:0]              s_id;
+    reg [DEST_WIDTH-1:0]            s_dest;
+    reg [USER_WIDTH-1:0]            s_user;
+    reg                           s_last;
+    reg                           s_valid;
+
+    reg [M_DATA_WIDTH-1:0]          m_data;
+    reg [M_KEEP_WIDTH-1:0]          m_keep;
+    reg [ID_WIDTH-1:0]              m_id;
+    reg [DEST_WIDTH-1:0]            m_dest;
+    reg [USER_WIDTH-1:0]            m_user;
+    reg                           m_last;
+    reg                           m_valid;
+
+    reg [31:0]                     cnt;
+    reg [31:0]                     cnt_max;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            s_axis_tready <= 1'b0;
+            m_axis_tdata <= {M_DATA_WIDTH{1'b0}};
+            m_axis_tkeep <= {M_KEEP_WIDTH{1'b0}};
+            m_axis_tvalid <= 1'b0;
+            m_axis_tlast <= 1'b0;
+            m_axis_tid <= {ID_WIDTH{1'b0}};
+            m_axis_tdest <= {DEST_WIDTH{1'b0}};
+            m_axis_tuser <= {USER_WIDTH{1'b0}};
+            s_data <= {S_DATA_WIDTH{1'b0}};
+            s_keep <= {S_KEEP_WIDTH{1'b0}};
+            s_id <= {ID_WIDTH{1'b0}};
+            s_dest <= {DEST_WIDTH{1'b0}};
+            s_user <= {USER_WIDTH{1'b0}};
+            s_last <= 1'b0;
+            s_valid <= 1'b0;
+            m_data <= {M_DATA_WIDTH{1'b0}};
+            m_keep <= {M_KEEP_WIDTH{1'b0}};
+            m_id <= {ID_WIDTH{1'b0}};
+            m_dest <= {DEST_WIDTH{1'b0}};
+            m_user <= {USER_WIDTH{1'b0}};
+            m_last <= 1'b0;
+            m_valid <= 1'b0;
+            cnt <= 32'd0;
+            cnt_max <= 32'd0;
+        end else if (s_axis_tvalid && s_axis_tready) begin
+            s_data <= s_axis_tdata;
+            s_keep <= s_axis_tkeep;
+            s_id <= s_axis_tid;
+            s_dest <= s_axis_tdest;
+            s_user <= s_axis_tuser;
+            s_last <= s_axis_tlast;
+            s_valid <= 1'b1;
+        end else if (!s_axis_tvalid && s_axis_tready) begin
+            s_valid <= 1'b0;
+        end
+
+        if (m_axis_tready && m_axis_tvalid) begin
+            m_valid <= 1'b0;
+        end else if (s_axis_tvalid && s_axis_tready &&!m_axis_tvalid) begin
+            m_valid <= 1'b1;
+        end
+
+        if (s_axis_tvalid && s_axis_tready) begin
+            if (cnt == 32'd0) begin
+                cnt_max <= (S_DATA_WIDTH + M_DATA_WIDTH - 1) / M_DATA_WIDTH;
+            end
+            if (cnt < cnt_max) begin
+                cnt <= cnt + 32'd1;
+            end else begin
+                cnt <= 32'd0;
+            end
+        end else if (m_axis_tready && m_axis_tvalid) begin
+            if (cnt == 32'd0) begin
+                cnt_max <= (S_DATA_WIDTH + M_DATA_WIDTH - 1) / M_DATA_WIDTH;
+            end
+            if (cnt < cnt_max) begin
+                cnt <= cnt + 32'd1;
+            end else begin
+                cnt <= 32'd0;
+            end
+        end else begin
+            cnt <= 32'd0;
+        end
+
+        if (m_axis_tready && m_axis_tvalid) begin
+            if (s_last) begin
+                m_last <= 1'b1;
+            end else begin
+                m_last <= 1'b0;
+            end
+        end else begin
+            m_last <= 1'b0;
+        end
+
+        if (s_axis_tvalid && s_axis_tready) begin
+            if (cnt == 32'd0) begin
+                m_data <= s_data;
+                m_keep <= s_keep;
+                m_id <= s_id;
+                m_dest <= s_dest;
+                m_user <= s_user;
+            end else begin
+                m_data <= {m_data[M_DATA_WIDTH-1:0], s_data[S_DATA_WIDTH-1:0]};
+                m_keep <= {m_keep[M_KEEP_WIDTH-1:0], s_keep[S_KEEP_WIDTH-1:0]};
+                m_id <= s_id;
+                m_dest <= s_dest;
+                m_user <= s_user;
+            end
+        end else if (m_axis_tready && m_axis_tvalid) begin
+            m_data <= {M_DATA_WIDTH{1'b0}};
+            m_keep <= {M_KEEP_WIDTH{1'b0}};
+            m_id <= {ID_WIDTH{1'b0}};
+            m_dest <= {DEST_WIDTH{1'b0}};
+            m_user <= {USER_WIDTH{1'b0}};
+        end
+
+        s_axis_tready <= (m_axis_tready &&!m_axis_tvalid) || (s_valid &&!m_axis_tvalid);
+        m_axis_tdata <= m_data;
+        m_axis_tkeep <= m_keep;
+        m_axis_tvalid <= m_valid;
+        m_axis_tid <= m_id;
+        m_axis_tdest <= m_dest;
+        m_axis_tuser <= m_user;
+    end
+
+endmodule

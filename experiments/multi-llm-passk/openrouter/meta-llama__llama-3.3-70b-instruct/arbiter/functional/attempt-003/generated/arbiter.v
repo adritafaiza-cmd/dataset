@@ -1,0 +1,68 @@
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+reg [PORTS-1:0] grant_reg;
+reg [$clog2(PORTS)-1:0] grant_encoded_reg;
+reg grant_valid_reg;
+reg [PORTS-1:0] priority_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        grant_reg <= {PORTS{1'b0}};
+        grant_encoded_reg <= 0;
+        grant_valid_reg <= 1'b0;
+        priority_reg <= {PORTS{1'b0}};
+    end else begin
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            if (grant_valid_reg && (ARB_BLOCK_ACK ? acknowledge[grant_encoded_reg] : request[grant_encoded_reg] == 1'b0)) begin
+                priority_reg <= {priority_reg[PORTS-2:0], priority_reg[PORTS-1]};
+            end
+        end
+
+        reg [PORTS-1:0] request_masked;
+        if (ARB_LSB_HIGH_PRIORITY) begin
+            request_masked <= request & ~(priority_reg << 1);
+        end else begin
+            request_masked <= request & ~priority_reg;
+        end
+
+        if (ARB_BLOCK && grant_valid_reg) begin
+            if (ARB_BLOCK_ACK ? acknowledge[grant_encoded_reg] : request[grant_encoded_reg] == 1'b0) begin
+                grant_reg <= {PORTS{1'b0}};
+                grant_encoded_reg <= 0;
+                grant_valid_reg <= 1'b0;
+            end
+        end else begin
+            if (|request_masked) begin
+                grant_encoded_reg <= $clog2(request_masked);
+                grant_reg <= 1 << grant_encoded_reg;
+                grant_valid_reg <= 1'b1;
+            end else begin
+                grant_reg <= {PORTS{1'b0}};
+                grant_encoded_reg <= 0;
+                grant_valid_reg <= 1'b0;
+            end
+        end
+    end
+end
+
+assign grant = grant_reg;
+assign grant_valid = grant_valid_reg;
+assign grant_encoded = grant_encoded_reg;
+
+endmodule

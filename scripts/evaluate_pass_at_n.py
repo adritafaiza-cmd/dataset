@@ -22,80 +22,37 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from evaluate_generated import TB, evaluate  # noqa: E402
+from evaluate_generated import (  # noqa: E402
+    evaluate,
+    evaluation_sim_script,
+    manifest_list,
+    manifest_scalar,
+    top_rtl_for,
+)
 
-CIRCUITS = ["cdc_2phase", "async_fifo", "apbxclk"]
+CIRCUITS = sorted(
+    path.name[: -len(".functional.md")]
+    for path in (ROOT / "experiments/prompts").glob("*.functional.md")
+    if (
+        ROOT
+        / "experiments/prompts"
+        / f"{path.name[: -len('.functional.md')]}.cdc_explicit.md"
+    ).exists()
+)
 PROMPT_TYPES = ["functional", "cdc_explicit"]
 XRUN_BIN = "/eda/cadence/XCELIUM2603/tools.lnx86/inca/bin/64bit"
 JG_BIN = "/eda/cadence/JASPER/bin"
-TIMEOUT_TCL = Path("/tmp/xrun_timeout.tcl")
-
-JG_BODY = {
-    "cdc_2phase": """
-clear -all
-analyze -sv $RTL_FILE
-elaborate -top $TOP
-read_sdc $SDC_FILE
-check_cdc -init
-clock src_clk_i
-clock dst_clk_i
-config_rtlds -reset -async {src_rst_ni dst_rst_ni} -polarity low
-config_rtlds -port {src_rst_ni src_data_i src_valid_i src_ready_o} -clock src_clk_i
-config_rtlds -port {dst_rst_ni dst_data_o dst_valid_o dst_ready_i} -clock dst_clk_i
-""",
-    "async_fifo": """
-clear -all
-analyze -sv $RTL_FILE
-elaborate -bbox_a 50000 -top $TOP
-read_sdc $SDC_FILE
-check_cdc -init
-clock wclk
-clock rclk
-config_rtlds -reset -async {wrst_n rrst_n} -polarity low
-config_rtlds -port {winc wdata wfull awfull} -clock wclk
-config_rtlds -port {rinc rdata rempty arempty} -clock rclk
-""",
-    "apbxclk": """
-clear -all
-analyze -sv $RTL_FILE
-elaborate -top $TOP
-read_sdc $SDC_FILE
-check_cdc -init
-clock S_APB_PCLK
-clock M_APB_PCLK
-config_rtlds -reset -async S_PRESETn -polarity low
-config_rtlds -port {S_APB_PSEL S_APB_PENABLE S_APB_PREADY S_APB_PADDR S_APB_PWRITE S_APB_PWDATA S_APB_PWSTRB S_APB_PPROT S_APB_PRDATA S_APB_PSLVERR} -clock S_APB_PCLK
-config_rtlds -port {M_PRESETn M_APB_PSEL M_APB_PENABLE M_APB_PREADY M_APB_PADDR M_APB_PWRITE M_APB_PWDATA M_APB_PWSTRB M_APB_PPROT M_APB_PRDATA M_APB_PSLVERR} -clock M_APB_PCLK
-""",
-}
 
 
 def simulate(rtl: Path, circuit: str, out_dir: Path) -> dict:
-    top, tb = TB[circuit]
     work = ROOT / "build" / "eval" / out_dir.relative_to(ROOT / "experiments") / "sim"
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
-    log = work / "sim.log"
-    TIMEOUT_TCL.write_text("run 50us\nexit\n")
-    cmd = [
-        "xrun",
-        "-64bit",
-        "-sv",
-        "-timescale",
-        "1ns/1ps",
-        "-top",
-        top,
-        "-xmlibdirname",
-        str(work / "xcelium"),
-        "-l",
-        str(log),
-        "-input",
-        str(TIMEOUT_TCL),
-        str(rtl),
-        str(tb),
-    ]
-    subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    runner, log = evaluation_sim_script(rtl, circuit, work, compile_only=False)
+    completed = subprocess.run(
+        [str(runner)], cwd=ROOT, capture_output=True, text=True
+    )
     text = log.read_text(errors="replace") if log.exists() else ""
     # Score $display / $finish output only. The apbxclk TB source itself
     # contains the string ALL TESTS PASSED, so ignore compiler source dumps.
@@ -104,21 +61,13 @@ def simulate(rtl: Path, circuit: str, out_dir: Path) -> dict:
         for line in text.splitlines()
         if "$display" not in line and "$finish" not in line
     )
-    pass_m = re.search(
-        r"^(?:xmsim:\s*)?(?:\s*\d+(?:\.\d+)?\s+\w+\s+)?(?:CDC 2PHASE:\s*)?ALL TESTS PASSED\s*$",
-        runtime,
-        re.M,
-    )
-    fail_m = re.search(
-        r"^(?:xmsim:\s*)?(?:\s*\d+(?:\.\d+)?\s+\w+\s+)?(?:CDC 2PHASE:\s*)?TESTS FAILED[^\n]*",
-        runtime,
-        re.M,
-    )
+    pass_m = re.search(r"^.*\bALL TESTS PASSED\b.*$", runtime, re.M)
+    fail_m = re.search(r"^.*\bTESTS FAILED\b.*$", runtime, re.M)
     if pass_m:
-        ok, note = True, "ALL TESTS PASSED"
+        ok, note = completed.returncode == 0, "ALL TESTS PASSED"
     elif fail_m:
         ok, note = False, fail_m.group(0).strip()
-    elif re.search(r"CDC 2PHASE: TIMEOUT", runtime) or "Ran until 50 US" in runtime:
+    elif re.search(r"\bTIMEOUT\b", runtime) or "Ran until 50 US" in runtime:
         ok, note = False, "TIMEOUT"
     else:
         ok, note = False, "no sim result"
@@ -153,24 +102,35 @@ def run_jasper(rtl: Path, circuit: str, tag: Path) -> dict:
         shutil.rmtree(rpt)
     rpt.mkdir(parents=True)
     tcl = rpt / "run.tcl"
-    tcl.write_text(
-        f"set TOP      {circuit}\n"
-        f"set RTL_FILE {rtl}\n"
-        f"set SDC_FILE $env(DS)/benchmarks/{circuit}/constraints/{circuit}.sdc\n"
-        f"set RPT_DIR  {rpt}\n"
-        "file mkdir $RPT_DIR\n"
-        + JG_BODY[circuit]
-        + "check_cdc -extract\n"
-        "check_cdc -list clock_signals -file $RPT_DIR/inferred_clocks.rpt -force\n"
-        "check_cdc -list design_resets -file $RPT_DIR/inferred_resets.rpt -force\n"
-        "check_cdc -list declared_resets -file $RPT_DIR/declared_resets.rpt -force\n"
-        "check_cdc -list domain_crossings -file $RPT_DIR/cdc_crossings.rpt -force\n"
-        "check_cdc -report -violation -detailed -file $RPT_DIR/cdc_report.rpt -force\n"
-        f"puts {{cdc_run {circuit}}}\n"
+    bench = ROOT / "benchmarks" / circuit
+    source_tcl = bench / manifest_scalar(circuit, "jasper")
+    text = source_tcl.read_text()
+    fixed_top = top_rtl_for(circuit)
+    top_name = re.escape(fixed_top.name)
+    replaced, count = re.subn(
+        rf"(?m)(?<!\S)\S*{top_name}(?!\S)",
+        str(rtl.resolve()),
+        text,
     )
+    if count == 0:
+        raise RuntimeError(
+            f"{circuit}: Jasper script does not reference {fixed_top.name}"
+        )
+    replaced, count = re.subn(
+        r"(?m)^set\s+RPT_DIR\s+.*$",
+        f"set RPT_DIR  {rpt}",
+        replaced,
+        count=1,
+    )
+    if count != 1:
+        raise RuntimeError(f"{circuit}: Jasper script has no unique RPT_DIR")
+    tcl.write_text(replaced)
     completed = subprocess.run(
         ["jg", "-batch", str(tcl)],
-        cwd=ROOT,
+        # Keep Jasper's implicit jgproject directory private to this attempt.
+        # Sharing ROOT caused every candidate to fail before check_cdc with
+        # "Cannot obtain ownership of project directory: jgproject".
+        cwd=rpt,
         capture_output=True,
         text=True,
     )
@@ -205,6 +165,9 @@ def run_jasper(rtl: Path, circuit: str, tag: Path) -> dict:
     # Jasper emits a CSV header even when it extracts zero crossings.
     crossings_extracted = max(0, len(crossing_lines) - 1)
     zero_violations = cdc_e == 0 and rdc_e == 0 and err_rows == 0
+    structural_activity = (
+        crossings_extracted > 0 or len(manifest_list(circuit, "clocks")) <= 1
+    )
     return {
         "jg_returncode": completed.returncode,
         "cdc_errors": cdc_e,
@@ -212,10 +175,9 @@ def run_jasper(rtl: Path, circuit: str, tag: Path) -> dict:
         "error_rows": err_rows,
         "crossings_extracted": crossings_extracted,
         "jasper_zero_violations": zero_violations,
-        # Every current pilot task necessarily transfers information between
-        # asynchronous domains. A zero-row report is therefore not evidence
-        # of a CDC-clean implementation.
-        "cdc_clean": zero_violations and crossings_extracted > 0,
+        # Multi-clock candidates must contain at least one extracted crossing;
+        # otherwise an empty/non-crossing implementation could look clean.
+        "cdc_clean": zero_violations and structural_activity,
         "jasper_report": str(report.relative_to(ROOT)),
         "jasper_log": str(jg_log.relative_to(ROOT)),
     }

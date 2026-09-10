@@ -1,0 +1,155 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+reg [ADDR_WIDTH-1:0] src_addr;
+reg [DATA_WIDTH-1:0] src_wdata;
+reg [DATA_WIDTH/8-1:0] src_strb;
+reg [2:0] src_prot;
+reg src_write;
+reg src_valid;
+reg src_ready;
+reg [DATA_WIDTH-1:0] dst_rdata;
+reg dst_err;
+reg dst_valid;
+reg dst_ready;
+
+reg [ADDR_WIDTH-1:0] fifo_addr [2**LOG_DEPTH-1:0];
+reg [DATA_WIDTH-1:0] fifo_wdata [2**LOG_DEPTH-1:0];
+reg [DATA_WIDTH/8-1:0] fifo_strb [2**LOG_DEPTH-1:0];
+reg [2:0] fifo_prot [2**LOG_DEPTH-1:0];
+reg fifo_write [2**LOG_DEPTH-1:0];
+reg fifo_valid [2**LOG_DEPTH-1:0];
+reg fifo_ready [2**LOG_DEPTH-1:0];
+
+reg [LOG_DEPTH-1:0] fifo_wr_ptr;
+reg [LOG_DEPTH-1:0] fifo_rd_ptr;
+reg fifo_empty;
+reg fifo_full;
+
+always @(posedge src_pclk_i or negedge src_preset_ni) begin
+    if (!src_preset_ni) begin
+        src_valid <= 1'b0;
+        src_ready <= 1'b0;
+    end else if (src_psel_i && src_penable_i) begin
+        src_addr <= src_paddr_i;
+        src_wdata <= src_pwdata_i;
+        src_strb <= src_pstrb_i;
+        src_prot <= src_pprot_i;
+        src_write <= src_pwrite_i;
+        src_valid <= 1'b1;
+    end else if (src_valid && src_ready) begin
+        src_valid <= 1'b0;
+    end
+end
+
+always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+    if (!dst_preset_ni) begin
+        dst_valid <= 1'b0;
+        dst_ready <= 1'b0;
+        dst_psel_o <= 1'b0;
+        dst_penable_o <= 1'b0;
+        dst_pwrite_o <= 1'b0;
+        dst_paddr_o <= {ADDR_WIDTH{1'b0}};
+        dst_pwdata_o <= {DATA_WIDTH{1'b0}};
+        dst_pstrb_o <= {DATA_WIDTH/8{1'b0}};
+        dst_pprot_o <= {3{1'b0}};
+    end else if (dst_valid && dst_pready_i) begin
+        dst_valid <= 1'b0;
+        dst_ready <= 1'b1;
+    end else if (dst_ready && !dst_pready_i) begin
+        dst_ready <= 1'b0;
+    end
+end
+
+always @(posedge src_pclk_i or negedge src_preset_ni) begin
+    if (!src_preset_ni) begin
+        fifo_wr_ptr <= {LOG_DEPTH{1'b0}};
+        fifo_rd_ptr <= {LOG_DEPTH{1'b0}};
+        fifo_empty <= 1'b1;
+        fifo_full <= 1'b0;
+    end else if (src_valid && !fifo_full) begin
+        fifo_addr[fifo_wr_ptr] <= src_addr;
+        fifo_wdata[fifo_wr_ptr] <= src_wdata;
+        fifo_strb[fifo_wr_ptr] <= src_strb;
+        fifo_prot[fifo_wr_ptr] <= src_prot;
+        fifo_write[fifo_wr_ptr] <= src_write;
+        fifo_valid[fifo_wr_ptr] <= 1'b1;
+        fifo_wr_ptr <= fifo_wr_ptr + 1;
+        fifo_empty <= 1'b0;
+        if (fifo_wr_ptr == 2**LOG_DEPTH - 1) begin
+            fifo_full <= 1'b1;
+        end
+    end else if (!fifo_empty && dst_ready) begin
+        dst_psel_o <= 1'b1;
+        dst_penable_o <= 1'b1;
+        dst_pwrite_o <= fifo_write[fifo_rd_ptr];
+        dst_paddr_o <= fifo_addr[fifo_rd_ptr];
+        dst_pwdata_o <= fifo_wdata[fifo_rd_ptr];
+        dst_pstrb_o <= fifo_strb[fifo_rd_ptr];
+        dst_pprot_o <= fifo_prot[fifo_rd_ptr];
+        fifo_valid[fifo_rd_ptr] <= 1'b0;
+        fifo_rd_ptr <= fifo_rd_ptr + 1;
+        fifo_full <= 1'b0;
+        if (fifo_rd_ptr == 2**LOG_DEPTH - 1) begin
+            fifo_empty <= 1'b1;
+        end
+    end
+end
+
+always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+    if (!dst_preset_ni) begin
+        dst_rdata <= {DATA_WIDTH{1'b0}};
+        dst_err <= 1'b0;
+    end else if (dst_pready_i && dst_psel_o) begin
+        dst_rdata <= dst_prdata_i;
+        dst_err <= dst_pslverr_i;
+    end
+end
+
+always @(posedge src_pclk_i or negedge src_preset_ni) begin
+    if (!src_preset_ni) begin
+        src_prdata_o <= {DATA_WIDTH{1'b0}};
+        src_pslverr_o <= 1'b0;
+        src_pready_o <= 1'b0;
+    end else if (src_valid && !fifo_full) begin
+        src_prdata_o <= {DATA_WIDTH{1'b0}};
+        src_pslverr_o <= 1'b0;
+        src_pready_o <= 1'b0;
+    end else if (dst_ready && !fifo_empty) begin
+        src_prdata_o <= dst_rdata;
+        src_pslverr_o <= dst_err;
+        src_pready_o <= 1'b1;
+    end else if (src_pready_o && src_penable_i) begin
+        src_pready_o <= 1'b0;
+    end
+end
+
+endmodule

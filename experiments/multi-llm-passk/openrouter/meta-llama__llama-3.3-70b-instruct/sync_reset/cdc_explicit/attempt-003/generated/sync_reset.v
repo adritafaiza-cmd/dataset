@@ -1,0 +1,27 @@
+module sync_reset #
+(
+    parameter N = 2
+)
+(
+    input  wire clk,
+    input  wire rst,
+    output wire out
+);
+
+reg [N-1:0] sync_rst;
+
+always @(posedge clk or posedge rst)
+begin
+    if (rst)
+    begin
+        sync_rst <= {N{1'b1}};
+    end
+    else
+    begin
+        sync_rst <= {sync_rst[N-2:0], 1'b0};
+    end
+end
+
+assign out = |sync_rst;
+
+endmodule

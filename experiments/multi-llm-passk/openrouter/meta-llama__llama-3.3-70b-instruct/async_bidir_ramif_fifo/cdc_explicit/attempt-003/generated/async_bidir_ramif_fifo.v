@@ -1,0 +1,141 @@
+module async_bidir_ramif_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "FALSE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir,
+       output wire             o_ram_a_clk,
+       output wire [DSIZE-1:0] o_ram_a_wdata,
+       input wire [DSIZE-1:0]  i_ram_a_rdata,
+       output wire [ASIZE-1:0] o_ram_a_addr,
+       output wire             o_ram_a_rinc,
+       output wire             o_ram_a_winc,
+       output wire             o_ram_b_clk,
+       output wire [DSIZE-1:0] o_ram_b_wdata,
+       input wire [DSIZE-1:0]  i_ram_b_rdata,
+       output wire [ASIZE-1:0] o_ram_b_addr,
+       output wire             o_ram_b_rinc,
+       output wire             o_ram_b_winc
+       );
+
+  reg [ASIZE-1:0] a_ptr;
+  reg [ASIZE-1:0] b_ptr;
+  reg [ASIZE-1:0] a_cnt;
+  reg [ASIZE-1:0] b_cnt;
+  reg [DSIZE-1:0] a_data;
+  reg [DSIZE-1:0] b_data;
+  reg a_empty_int;
+  reg a_full_int;
+  reg b_empty_int;
+  reg b_full_int;
+
+  assign o_ram_a_clk = a_clk;
+  assign o_ram_b_clk = b_clk;
+
+  assign o_ram_a_wdata = a_dir? a_wdata : i_ram_a_rdata;
+  assign o_ram_b_wdata = b_dir? b_wdata : i_ram_b_rdata;
+
+  assign o_ram_a_addr = a_ptr;
+  assign o_ram_b_addr = b_ptr;
+
+  assign o_ram_a_rinc = a_rinc &&!a_empty_int;
+  assign o_ram_a_winc = a_winc &&!a_full_int;
+  assign o_ram_b_rinc = b_rinc &&!b_empty_int;
+  assign o_ram_b_winc = b_winc &&!b_full_int;
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_ptr <= 0;
+      a_cnt <= 0;
+      a_empty_int <= 1;
+      a_full_int <= 0;
+      a_data <= 0;
+    end else begin
+      if (a_winc &&!a_full_int) begin
+        a_ptr <= a_ptr + 1;
+        a_cnt <= a_cnt + 1;
+        a_empty_int <= 0;
+      end
+      if (a_rinc &&!a_empty_int) begin
+        a_cnt <= a_cnt - 1;
+        a_empty_int <= (a_cnt == 0);
+      end
+      if (a_winc &&!a_full_int) begin
+        a_data <= a_wdata;
+      end
+      if (a_rinc &&!a_empty_int) begin
+        a_data <= i_ram_a_rdata;
+      end
+      if (a_cnt == (1 << ASIZE) - 1) begin
+        a_full_int <= 1;
+      end else begin
+        a_full_int <= 0;
+      end
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_ptr <= 0;
+      b_cnt <= 0;
+      b_empty_int <= 1;
+      b_full_int <= 0;
+      b_data <= 0;
+    end else begin
+      if (b_winc &&!b_full_int) begin
+        b_ptr <= b_ptr + 1;
+        b_cnt <= b_cnt + 1;
+        b_empty_int <= 0;
+      end
+      if (b_rinc &&!b_empty_int) begin
+        b_cnt <= b_cnt - 1;
+        b_empty_int <= (b_cnt == 0);
+      end
+      if (b_winc &&!b_full_int) begin
+        b_data <= b_wdata;
+      end
+      if (b_rinc &&!b_empty_int) begin
+        b_data <= i_ram_b_rdata;
+      end
+      if (b_cnt == (1 << ASIZE) - 1) begin
+        b_full_int <= 1;
+      end else begin
+        b_full_int <= 0;
+      end
+    end
+  end
+
+  assign a_rdata = a_data;
+  assign b_rdata = b_data;
+  assign a_full = a_full_int;
+  assign a_afull = a_full_int;
+  assign a_empty = a_empty_int;
+  assign a_aempty = a_empty_int;
+  assign b_full = b_full_int;
+  assign b_afull = b_full_int;
+  assign b_empty = b_empty_int;
+  assign b_aempty = b_empty_int;
+
+endmodule

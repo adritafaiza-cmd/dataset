@@ -1,0 +1,286 @@
+```verilog
+module axis_async_fifo_adapter #
+(
+    parameter DEPTH = 4096,
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                     s_clk,
+    input  wire                     s_rst,
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    input  wire                     m_clk,
+    input  wire                     m_rst,
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser,
+    input  wire                     s_pause_req,
+    output wire                     s_pause_ack,
+    input  wire                     m_pause_req,
+    output wire                     m_pause_ack,
+    output wire [$clog2(DEPTH):0]   s_status_depth,
+    output wire [$clog2(DEPTH):0]   s_status_depth_commit,
+    output wire                     s_status_overflow,
+    output wire                     s_status_bad_frame,
+    output wire                     s_status_good_frame,
+    output wire [$clog2(DEPTH):0]   m_status_depth,
+    output wire [$clog2(DEPTH):0]   m_status_depth_commit,
+    output wire                     m_status_overflow,
+    output wire                     m_status_bad_frame,
+    output wire                     m_status_good_frame
+);
+
+    // FIFO parameters
+    localparam FIFO_DEPTH = DEPTH;
+    localparam FIFO_DATA_WIDTH = S_DATA_WIDTH + (S_KEEP_ENABLE ? S_KEEP_WIDTH : 0) + (ID_ENABLE ? ID_WIDTH : 0) + (DEST_ENABLE ? DEST_WIDTH : 0) + (USER_ENABLE ? USER_WIDTH : 0) + 1; // +1 for tlast
+
+    // FIFO signals
+    reg [FIFO_DATA_WIDTH-1:0] fifo_data;
+    reg [FIFO_DATA_WIDTH-1:0] fifo_data_out;
+    reg [FIFO_DEPTH-1:0] fifo_empty;
+    reg [FIFO_DEPTH-1:0] fifo_full;
+    reg [FIFO_DEPTH-1:0] fifo_count;
+    reg [FIFO_DEPTH-1:0] fifo_count_out;
+
+    // FIFO control signals
+    wire fifo_write;
+    wire fifo_read;
+    wire fifo_empty_out;
+    wire fifo_full_out;
+
+    // Asynchronous FIFO
+    async_fifo #(
+        .DEPTH(FIFO_DEPTH),
+        .DATA_WIDTH(FIFO_DATA_WIDTH)
+    ) async_fifo_inst (
+        .s_clk(s_clk),
+        .s_rst(s_rst),
+        .s_data(fifo_data),
+        .s_write(fifo_write),
+        .s_full(fifo_full),
+        .m_clk(m_clk),
+        .m_rst(m_rst),
+        .m_data(fifo_data_out),
+        .m_read(fifo_read),
+        .m_empty(fifo_empty)
+    );
+
+    // Width adapter
+    reg [M_DATA_WIDTH-1:0] adapter_data;
+    reg [M_KEEP_WIDTH-1:0] adapter_keep;
+    reg [ID_WIDTH-1:0] adapter_id;
+    reg [DEST_WIDTH-1:0] adapter_dest;
+    reg [USER_WIDTH-1:0] adapter_user;
+    reg adapter_tlast;
+
+    // Width adapter control signals
+    wire adapter_valid;
+    wire adapter_ready;
+
+    // Status signals
+    reg [FIFO_DEPTH-1:0] status_depth;
+    reg [FIFO_DEPTH-1:0] status_depth_commit;
+    reg status_overflow;
+    reg status_bad_frame;
+    reg status_good_frame;
+
+    // Pause signals
+    reg pause_req;
+    reg pause_ack;
+
+    // Assignments
+    assign s_axis_tready = ~fifo_full_out;
+    assign m_axis_tdata = adapter_data;
+    assign m_axis_tkeep = adapter_keep;
+    assign m_axis_tvalid = adapter_valid;
+    assign m_axis_tlast = adapter_tlast;
+    assign m_axis_tid = adapter_id;
+    assign m_axis_tdest = adapter_dest;
+    assign m_axis_tuser = adapter_user;
+    assign s_pause_ack = pause_ack;
+    assign m_pause_ack = pause_req;
+    assign s_status_depth = status_depth;
+    assign s_status_depth_commit = status_depth_commit;
+    assign s_status_overflow = status_overflow;
+    assign s_status_bad_frame = status_bad_frame;
+    assign s_status_good_frame = status_good_frame;
+    assign m_status_depth = fifo_count_out;
+    assign m_status_depth_commit = fifo_count_out;
+    assign m_status_overflow = fifo_full_out;
+    assign m_status_bad_frame = status_bad_frame;
+    assign m_status_good_frame = status_good_frame;
+
+    // FIFO write logic
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            fifo_data <= 0;
+            fifo_write <= 0;
+        end else if (s_axis_tvalid && ~fifo_full_out) begin
+            fifo_data <= {s_axis_tlast, s_axis_tuser, s_axis_tdest, s_axis_tid, s_axis_tkeep, s_axis_tdata};
+            fifo_write <= 1;
+        end else begin
+            fifo_write <= 0;
+        end
+    end
+
+    // FIFO read logic
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            fifo_read <= 0;
+        end else if (fifo_empty_out && m_axis_tready) begin
+            fifo_read <= 1;
+        end else begin
+            fifo_read <= 0;
+        end
+    end
+
+    // Width adapter logic
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            adapter_data <= 0;
+            adapter_keep <= 0;
+            adapter_id <= 0;
+            adapter_dest <= 0;
+            adapter_user <= 0;
+            adapter_tlast <= 0;
+            adapter_valid <= 0;
+        end else if (fifo_data_out[FIFO_DATA_WIDTH-1]) begin
+            adapter_data <= fifo_data_out[FIFO_DATA_WIDTH-2:S_DATA_WIDTH-1];
+            adapter_keep <= fifo_data_out[S_DATA_WIDTH-2:S_DATA_WIDTH-1-S_KEEP_WIDTH];
+            adapter_id <= fifo_data_out[S_DATA_WIDTH-1-S_KEEP_WIDTH-1:S_DATA_WIDTH-1-S_KEEP_WIDTH-ID_WIDTH];
+            adapter_dest <= fifo_data_out[S_DATA_WIDTH-1-S_KEEP_WIDTH-ID_WIDTH-1:S_DATA_WIDTH-1-S_KEEP_WIDTH-ID_WIDTH-DEST_WIDTH];
+            adapter_user <= fifo_data_out[S_DATA_WIDTH-1-S_KEEP_WIDTH-ID_WIDTH-DEST_WIDTH-1:S_DATA_WIDTH-1-S_KEEP_WIDTH-ID_WIDTH-DEST_WIDTH-USER_WIDTH];
+            adapter_tlast <= fifo_data_out[0];
+            adapter_valid <= 1;
+        end else begin
+            adapter_valid <= 0;
+        end
+    end
+
+    // Status logic
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            status_depth <= 0;
+            status_depth_commit <= 0;
+            status_overflow <= 0;
+            status_bad_frame <= 0;
+            status_good_frame <= 0;
+        end else if (fifo_write && ~fifo_full_out) begin
+            status_depth <= status_depth + 1;
+            status_depth_commit <= status_depth_commit + 1;
+        end else if (fifo_read && ~fifo_empty_out) begin
+            status_depth <= status_depth - 1;
+            status_depth_commit <= status_depth_commit - 1;
+        end else if (fifo_full_out && fifo_write) begin
+            status_overflow <= 1;
+        end else begin
+            status_overflow <= 0;
+        end
+    end
+
+    // Pause logic
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            pause_req <= 0;
+            pause_ack <= 0;
+        end else if (s_pause_req) begin
+            pause_req <= 1;
+        end else if (pause_ack) begin
+            pause_req <= 0;
+        end
+    end
+
+endmodule
+
+module async_fifo #(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8
+)
+(
+    input  wire                     s_clk,
+    input  wire                     s_rst,
+    input  wire [DATA_WIDTH-1:0]    s_data,
+    input  wire                     s_write,
+    output wire                     s_full,
+    input  wire                     m_clk,
+    input  wire                     m_rst,
+    output wire [DATA_WIDTH-1:0]    m_data,
+    input  wire                     m_read,
+    output wire                     m_empty
+);
+
+    reg [DATA_WIDTH-1:0] fifo_data [DEPTH-1:0];
+    reg [DEPTH-1:0] fifo_empty;
+    reg [DEPTH-1:0] fifo_full;
+    reg [DEPTH-1:0] fifo_count;
+
+    // Asynchronous FIFO logic
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            fifo_data <= 0;
+            fifo_empty <= 0;
+            fifo_full <= 0;
+            fifo_count <= 0;
+        end else if (s_write && ~fifo_full) begin
+            fifo_data[fifo_count] <= s_data;
+            fifo_count <= fifo_count + 1;
+            fifo_empty <= 0;
+        end else if (fifo_full) begin
+            fifo_full <= 1;
+        end
+    end
+
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            m_data <= 0;
+            fifo_empty <= 1;
+            fifo_full <= 0;
+            fifo_count <= 0;
+        end else if (m_read && ~fifo_empty) begin
+            m_data <= fifo_data[0];
+            fifo_data <= fifo_data >> 1;
+            fifo_count <= fifo_count - 1;
+            fifo_empty <= (fifo_count == 1);
+        end else if (fifo_empty) begin
+            fifo_empty <= 1;
+        end
+    end
+
+    assign s_full = fifo_full;
+    assign m_empty = fifo_empty;
+
+endmodule
+```

@@ -1,0 +1,140 @@
+module axis_adapter #
+(
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    /*
+     * AXI input
+     */
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    reg [S_DATA_WIDTH-1:0]  fifo_data[S_DATA_WIDTH/M_DATA_WIDTH];
+    reg [S_KEEP_WIDTH-1:0]  fifo_keep[S_DATA_WIDTH/M_DATA_WIDTH];
+    reg [ID_WIDTH-1:0]      fifo_id;
+    reg [DEST_WIDTH-1:0]    fifo_dest;
+    reg [USER_WIDTH-1:0]    fifo_user;
+    reg                     fifo_last;
+    reg                     fifo_valid;
+    reg [S_DATA_WIDTH/M_DATA_WIDTH-1:0]  fifo_count;
+    reg [S_DATA_WIDTH/M_DATA_WIDTH-1:0]  fifo_read_count;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            fifo_data <= '{default: 0};
+            fifo_keep <= '{default: 0};
+            fifo_id <= 0;
+            fifo_dest <= 0;
+            fifo_user <= 0;
+            fifo_last <= 0;
+            fifo_valid <= 0;
+            fifo_count <= 0;
+            fifo_read_count <= 0;
+            s_axis_tready <= 0;
+            m_axis_tdata <= 0;
+            m_axis_tkeep <= 0;
+            m_axis_tvalid <= 0;
+            m_axis_tlast <= 0;
+            m_axis_tid <= 0;
+            m_axis_tdest <= 0;
+            m_axis_tuser <= 0;
+        end else begin
+            if (s_axis_tvalid && s_axis_tready) begin
+                if (fifo_count < S_DATA_WIDTH/M_DATA_WIDTH) begin
+                    fifo_data[fifo_count] <= s_axis_tdata;
+                    fifo_keep[fifo_count] <= s_axis_tkeep;
+                    if (s_axis_tlast) begin
+                        fifo_last <= 1;
+                    end else begin
+                        fifo_last <= 0;
+                    end
+                    if (ID_ENABLE) begin
+                        fifo_id <= s_axis_tid;
+                    end
+                    if (DEST_ENABLE) begin
+                        fifo_dest <= s_axis_tdest;
+                    end
+                    if (USER_ENABLE) begin
+                        fifo_user <= s_axis_tuser;
+                    end
+                    fifo_count <= fifo_count + 1;
+                end
+                s_axis_tready <= 1;
+            end else begin
+                s_axis_tready <= 0;
+            end
+
+            if (m_axis_tready && m_axis_tvalid) begin
+                fifo_read_count <= fifo_read_count + 1;
+                if (fifo_read_count == S_DATA_WIDTH/M_DATA_WIDTH) begin
+                    fifo_read_count <= 0;
+                    fifo_valid <= 0;
+                end
+            end
+
+            if (fifo_count == S_DATA_WIDTH/M_DATA_WIDTH) begin
+                fifo_valid <= 1;
+            end
+
+            if (fifo_valid && m_axis_tready) begin
+                m_axis_tdata <= {fifo_data[fifo_read_count], fifo_data[fifo_read_count+1]};
+                m_axis_tkeep <= {fifo_keep[fifo_read_count], fifo_keep[fifo_read_count+1]};
+                m_axis_tvalid <= 1;
+                if (fifo_last) begin
+                    m_axis_tlast <= 1;
+                end else begin
+                    m_axis_tlast <= 0;
+                end
+                if (ID_ENABLE) begin
+                    m_axis_tid <= fifo_id;
+                end
+                if (DEST_ENABLE) begin
+                    m_axis_tdest <= fifo_dest;
+                end
+                if (USER_ENABLE) begin
+                    m_axis_tuser <= fifo_user;
+                end
+            end else begin
+                m_axis_tdata <= 0;
+                m_axis_tkeep <= 0;
+                m_axis_tvalid <= 0;
+                m_axis_tlast <= 0;
+                m_axis_tid <= 0;
+                m_axis_tdest <= 0;
+                m_axis_tuser <= 0;
+            end
+        end
+    end
+
+endmodule

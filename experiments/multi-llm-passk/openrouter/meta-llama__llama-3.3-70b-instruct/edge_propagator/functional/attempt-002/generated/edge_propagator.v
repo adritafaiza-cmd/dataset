@@ -1,0 +1,37 @@
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+logic [1:0] edge_sync;
+logic edge_pulse;
+
+always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+  if (!rstn_tx_i) begin
+    edge_sync <= 2'b00;
+  end else begin
+    if (edge_i) begin
+      edge_sync <= 2'b01;
+    end else if (edge_sync == 2'b01) begin
+      edge_sync <= 2'b10;
+    end else if (edge_sync == 2'b10) begin
+      edge_sync <= 2'b00;
+    end
+  end
+end
+
+always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+  if (!rstn_rx_i) begin
+    edge_pulse <= 1'b0;
+    edge_o <= 1'b0;
+  end else begin
+    edge_pulse <= edge_sync[0] && !edge_sync[1];
+    edge_o <= edge_pulse;
+  end
+end
+
+endmodule
