@@ -4,6 +4,27 @@ This repository is a research benchmark for evaluating whether language models
 can generate RTL that is both functionally correct and safe across clock and
 reset domain crossings.
 
+**Full write-up (scores, GIR, Jasper checks, TB assertions):**
+[`reports/CDC_LLM_BENCHMARK_REPORT.md`](reports/CDC_LLM_BENCHMARK_REPORT.md)
+
+## Repository layout
+
+| Path | What it is |
+|---|---|
+| `benchmarks/<name>/fixed/rtl/` | **Golden** reference RTL (not for prompts) |
+| `benchmarks/<name>/original/rtl/` | Upstream snapshot before our CDC/RDC fixes |
+| `benchmarks/<name>/tb/` | Golden functional testbench |
+| `benchmarks/<name>/jasper/` | JasperGold CDC/RDC script (local Cadence machines) |
+| `experiments/prompts/` | Prompt A (`functional`) and Prompt B (`cdc_explicit`) |
+| `experiments/<model>/` | LLM generations (Llama, Qwen, GPT-5.6, RTLCoder, …) |
+| `complexvcoder/` | ComplexVCoder 27/264 dump + ecs05 scores |
+| `experiments/human_repaired/` | Human anti-patterns: sim pass, Jasper fail |
+| `reports/` | Project reports for collaborators |
+| `scripts/` | Generate and evaluate (`eval_all_generated.py`) |
+
+Do **not** treat a Torch HPC tarball extract as “LLM circuits.” Scoring
+`benchmarks/*/sim/run.sh` always uses **golden** `fixed/rtl`.
+
 ## Pilot dataset
 
 The Jasper-verified pilot contains 11 circuits:
