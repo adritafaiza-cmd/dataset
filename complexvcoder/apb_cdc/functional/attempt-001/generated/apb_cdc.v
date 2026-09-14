@@ -1,0 +1,121 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    // Internal signals
+    reg [DATA_WIDTH-1:0] src_prdata_o_reg;
+    reg src_pslverr_o_reg;
+    reg [ADDR_WIDTH-1:0] dst_paddr_o_reg;
+    reg [DATA_WIDTH-1:0] dst_pwdata_o_reg;
+    reg [DATA_WIDTH/8-1:0] dst_pstrb_o_reg;
+    reg [2:0] dst_pprot_o_reg;
+
+    // FIFO for holding APB transactions
+    wire src_transaction_valid;
+    wire src_transaction_ready;
+    wire [DATA_WIDTH-1:0] src_pwdata_i_reg;
+    wire [DATA_WIDTH/8-1:0] src_pstrb_i_reg;
+    wire [2:0] src_pprot_i_reg;
+
+    // FIFO instance
+    fifo #(
+        .ADDR_WIDTH(ADDR_WIDTH),
+        .DATA_WIDTH(DATA_WIDTH),
+        .LOG_DEPTH(LOG_DEPTH)
+    ) src_to_dst_fifo (
+        .write(src_transaction_valid),
+        .data_in(src_pwdata_i_reg),
+        .valid_in(src_transaction_valid),
+        .ready_in(dst_pready_i),
+        .data_out(dst_pwdata_o_reg),
+        .valid_out(src_psel_o),
+        .ready_out(src_pready_o)
+    );
+
+    // Clock-domain crossing for handshake signals
+    reg src_pready_o_reg;
+    reg src_prdata_o_reg;
+    reg src_pslverr_o_reg;
+    reg dst_psel_o_reg;
+    reg dst_penable_o_reg;
+    reg dst_pwrite_o_reg;
+
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_pready_o_reg <= 1'b0;
+            src_prdata_o_reg <= {DATA_WIDTH{1'b0}};
+            src_pslverr_o_reg <= 1'b0;
+        end else begin
+            src_pready_o_reg <= src_pready_o;
+            src_prdata_o_reg <= src_prdata_o;
+            src_pslverr_o_reg <= src_pslverr_o;
+        end
+    end
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_psel_o_reg <= 1'b0;
+            dst_penable_o_reg <= 1'b0;
+            dst_pwrite_o_reg <= 1'b0;
+        end else begin
+            dst_psel_o_reg <= src_psel_i;
+            dst_penable_o_reg <= src_penable_i;
+            dst_pwrite_o_reg <= src_pwrite_i;
+        end
+    end
+
+    // Assigning output ports
+    assign src_prdata_o = src_prdata_o_reg;
+    assign src_pslverr_o = src_pslverr_o_reg;
+    assign dst_paddr_o = src_paddr_i;
+    assign dst_pwdata_o = src_pwdata_i_reg;
+    assign dst_pstrb_o = src_pstrb_i_reg;
+    assign dst_pprot_o = src_pprot_i_reg;
+
+    // Detecting valid APB transactions and enqueuing them into FIFO
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_transaction_valid <= 1'b0;
+            src_pwdata_i_reg <= {DATA_WIDTH{1'b0}};
+            src_pstrb_i_reg <= {DATA_WIDTH/8{1'b0}};
+            src_pprot_i_reg <= {3{1'b0}};
+        end else begin
+            if (src_psel_i && src_penable_i && src_pready_o_reg) begin
+                src_transaction_valid <= 1'b1;
+                src_pwdata_i_reg <= src_pwdata_i;
+                src_pstrb_i_reg <= src_pstrb_i;
+                src_pprot_i_reg <= src_pprot_i;
+            end else begin
+                src_transaction_valid <= 1'b0;
+            end
+        end
+    end
+
+endmodule

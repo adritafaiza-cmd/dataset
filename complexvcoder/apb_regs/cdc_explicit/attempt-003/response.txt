@@ -1,0 +1,207 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "apb_regs",
+      "function": "Implement an APB-mapped register file",
+      "parameters": [
+        {
+          "name": "NoApbRegs",
+          "value": "32'd0"
+        },
+        {
+          "name": "ApbAddrWidth",
+          "value": "32'd0"
+        },
+        {
+          "name": "AddrOffset",
+          "value": "32'd4"
+        },
+        {
+          "name": "ApbDataWidth",
+          "value": "32'd0"
+        },
+        {
+          "name": "RegDataWidth",
+          "value": "32'd0"
+        },
+        {
+          "name": "ReadOnly",
+          "value": "32'h0"
+        },
+        {
+          "name": "req_t",
+          "value": "logic"
+        },
+        {
+          "name": "resp_t",
+          "value": "logic"
+        },
+        {
+          "name": "apb_addr_t",
+          "value": "logic[ApbAddrWidth-1:0]"
+        },
+        {
+          "name": "reg_data_t",
+          "value": "logic[RegDataWidth-1:0]"
+        }
+      ],
+      "ports": [
+        {
+          "name": "pclk_i",
+          "direction": "in",
+          "width": "1",
+          "clock_domain": "pclk_i"
+        },
+        {
+          "name": "preset_ni",
+          "direction": "in",
+          "width": "1",
+          "clock_domain": "pclk_i"
+        },
+        {
+          "name": "req_i",
+          "direction": "in",
+          "width": "1",
+          "clock_domain": "pclk_i"
+        },
+        {
+          "name": "resp_o",
+          "direction": "out",
+          "width": "1",
+          "clock_domain": "pclk_i"
+        },
+        {
+          "name": "base_addr_i",
+          "direction": "in",
+          "width": "ApbAddrWidth",
+          "clock_domain": "pclk_i"
+        },
+        {
+          "name": "reg_init_i",
+          "direction": "in",
+          "width": "NoApbRegs * RegDataWidth",
+          "clock_domain": "pclk_i"
+        },
+        {
+          "name": "reg_q_o",
+          "direction": "out",
+          "width": "NoApbRegs * RegDataWidth",
+          "clock_domain": "pclk_i"
+        }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        {
+          "name": "reg_data",
+          "width": "NoApbRegs * RegDataWidth"
+        },
+        {
+          "name": "reg_read",
+          "width": "NoApbRegs"
+        },
+        {
+          "name": "reg_write",
+          "width": "NoApbRegs"
+        },
+        {
+          "name": "reg_data_in",
+          "width": "RegDataWidth"
+        }
+      ],
+      "behavior": [
+        "Map NoApbRegs registers of RegDataWidth, spaced AddrOffset bytes apart, starting at base_addr_i.",
+        "req_i / resp_o use the APB request and response types supplied by the testbench.",
+        "Initialize from reg_init_i and drive reg_q_o with current values.",
+        "Read-only bits in ReadOnly must ignore writes.",
+        "After reset, registers return to reg_init_i."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```systemverilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Internal signals
+  logic [NoApbRegs*RegDataWidth-1:0] reg_data;
+  logic [NoApbRegs-1:0] reg_read;
+  logic [NoApbRegs-1:0] reg_write;
+  logic [RegDataWidth-1:0] reg_data_in;
+
+  // Register file initialization
+  initial begin
+    reg_data = reg_init_i;
+  end
+
+  // Register file read logic
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      reg_read <= {NoApbRegs{1'b0}};
+    end else begin
+      reg_read <= (req_i && (apb_addr_i[ApbAddrWidth-1:AddrOffset] < NoApbRegs));
+    end
+  end
+
+  // Register file write logic
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      reg_write <= {NoApbRegs{1'b0}};
+    end else begin
+      reg_write <= (req_i && (apb_addr_i[ApbAddrWidth-1:AddrOffset] < NoApbRegs) && !ReadOnly[apb_addr_i[ApbAddrWidth-1:AddrOffset]]);
+    end
+  end
+
+  // Register file data input logic
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      reg_data_in <= {RegDataWidth{1'b0}};
+    end else begin
+      reg_data_in <= req_i ? req_i[ApbDataWidth-1:0] : reg_data_in;
+    end
+  end
+
+  // Register file data output logic
+  always_comb begin
+    reg_q_o = reg_data;
+  end
+
+  // Register file write operation
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      reg_data <= reg_init_i;
+    end else if (reg_write) begin
+      reg_data[apb_addr_i[ApbAddrWidth-1:AddrOffset]*RegDataWidth +: RegDataWidth] <= reg_data_in;
+    end
+  end
+
+  // Response generation
+  always_comb begin
+    resp_o = reg_write ? 1'b1 : 1'b0;
+  end
+
+endmodule
+```

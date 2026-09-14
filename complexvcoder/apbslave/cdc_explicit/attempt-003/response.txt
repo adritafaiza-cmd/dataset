@@ -1,0 +1,225 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "apbslave",
+      "function": "Accept standard APB setup/access transfers and complete each access by asserting PREADY. Support reads and writes of C_APB_DATA_WIDTH using PWSTRB. PSLVERR may stay low for in-range accesses. After reset the slave must be idle.",
+      "parameters": [
+        {
+          "name": "C_APB_ADDR_WIDTH",
+          "value": "12"
+        },
+        {
+          "name": "C_APB_DATA_WIDTH",
+          "value": "32"
+        }
+      ],
+      "ports": [
+        {
+          "name": "PCLK",
+          "direction": "in",
+          "width": "1",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PRESETn",
+          "direction": "in",
+          "width": "1",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PSEL",
+          "direction": "in",
+          "width": "1",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PENABLE",
+          "direction": "in",
+          "width": "1",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PADDR",
+          "direction": "in",
+          "width": "C_APB_ADDR_WIDTH",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PWRITE",
+          "direction": "in",
+          "width": "1",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PWDATA",
+          "direction": "in",
+          "width": "C_APB_DATA_WIDTH",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PWSTRB",
+          "direction": "in",
+          "width": "C_APB_DATA_WIDTH / 8",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PPROT",
+          "direction": "in",
+          "width": "3",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PREADY",
+          "direction": "out",
+          "width": "1",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PRDATA",
+          "direction": "out",
+          "width": "C_APB_DATA_WIDTH",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PSLVERR",
+          "direction": "out",
+          "width": "1",
+          "clock_domain": "PCLK"
+        }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        {
+          "name": "state",
+          "width": "2"
+        },
+        {
+          "name": "data_reg",
+          "width": "C_APB_DATA_WIDTH"
+        },
+        {
+          "name": "addr_reg",
+          "width": "C_APB_ADDR_WIDTH"
+        },
+        {
+          "name": "ready_reg",
+          "width": "1"
+        },
+        {
+          "name": "slverr_reg",
+          "width": "1"
+        }
+      ],
+      "behavior": [
+        {
+          "description": "Reset handling: After reset, the slave must be idle. PREADY is low, PSLVERR is low, and all internal registers are reset to default values."
+        },
+        {
+          "description": "State machine for handling APB transactions. The state machine can be in one of three states: IDLE, READ, or WRITE."
+        },
+        {
+          "description": "In the IDLE state, the slave waits for a new APB transaction. When PSEL and PENABLE are asserted, the transaction is captured and the state transitions to either READ or WRITE based on the PWRITE signal."
+        },
+        {
+          "description": "In the READ state, the slave reads data from the specified address and asserts PREADY. After PREADY is asserted, the slave transitions back to the IDLE state."
+        },
+        {
+          "description": "In the WRITE state, the slave writes data to the specified address. After the write is complete, the slave asserts PREADY and transitions back to the IDLE state."
+        },
+        {
+          "description": "The PREADY signal is asserted when the slave is ready to handle the current transaction. It is deasserted when the transaction is in progress."
+        },
+        {
+          "description": "The PSLVERR signal is asserted when an error occurs during a transaction. For this implementation, it may stay low for in-range accesses."
+        },
+        {
+          "description": "The CDC requirement is handled by ensuring that all multi-bit data transfers are synchronized across clock domains. The reset release is also safe in each clock domain."
+        }
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module apbslave #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH,
+	localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+) (
+		input	wire			PCLK, PRESETn,
+		input	wire			PSEL,
+		input	wire			PENABLE,
+		output	reg			PREADY,
+		input	wire	[AW-1:0]	PADDR,
+		input	wire			PWRITE,
+		input	wire	[DW-1:0]	PWDATA,
+		input	wire	[DW/8-1:0]	PWSTRB,
+		input	wire	[2:0]		PPROT,
+		output	reg	[DW-1:0]	PRDATA,
+		output	wire			PSLVERR
+	);
+
+	localparam	IDLE = 2'b00,
+				READ = 2'b01,
+				WRITE = 2'b10;
+
+	reg [1:0] state;
+	reg [DW-1:0] data_reg;
+	reg [AW-1:0] addr_reg;
+	reg ready_reg;
+	reg slverr_reg;
+
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			state <= IDLE;
+			data_reg <= 0;
+			addr_reg <= 0;
+			ready_reg <= 0;
+			slverr_reg <= 0;
+			PREADY <= 0;
+			PRDATA <= 0;
+			PSLVERR <= 0;
+		end else begin
+			case (state)
+				IDLE:
+					if (PSEL && PENABLE) begin
+						addr_reg <= PADDR;
+						if (PWRITE) begin
+							state <= WRITE;
+						end else begin
+							state <= READ;
+						end
+					end else begin
+						PREADY <= 0;
+					end
+
+				READ:
+					begin
+						PREADY <= 1;
+						PRDATA <= data_reg;
+						slverr_reg <= 0; // May stay low for in-range accesses
+						state <= IDLE;
+					end
+
+				WRITE:
+					begin
+						data_reg[PWSTRB] <= PWDATA[PWSTRB];
+						PREADY <= 1;
+						state <= IDLE;
+					end
+
+				default:
+					state <= IDLE;
+			endcase
+		end
+	end
+
+endmodule
+```

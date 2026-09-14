@@ -1,0 +1,47 @@
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  reg [RegDataWidth-1:0] reg_file [NoApbRegs-1:0];
+  reg [ApbAddrWidth-1:0] reg_addr;
+  reg [RegDataWidth-1:0] reg_data;
+  reg write_en;
+
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      reg_file <= reg_init_i;
+    end else begin
+      if (req_i) begin
+        reg_addr = (base_addr_i >> AddrOffset) & (NoApbRegs - 1);
+        reg_data = reg_q_o[reg_addr * RegDataWidth +: RegDataWidth];
+        write_en = ~ReadOnly[reg_addr];
+        if (write_en) begin
+          reg_file[reg_addr] <= reg_data;
+        end
+      end
+    end
+  end
+
+  always_comb begin
+    resp_o = 1'b0; // Assuming resp_o is a simple acknowledge signal
+    reg_q_o = reg_file;
+  end
+
+endmodule
