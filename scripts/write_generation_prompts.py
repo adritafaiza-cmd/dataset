@@ -9,6 +9,7 @@ Does not mention Gray-code recipes, 2-flop recipes, or reference RTL.
 
 from __future__ import annotations
 
+import argparse
 import re
 from pathlib import Path
 
@@ -672,8 +673,141 @@ def render(
     return "\n".join(lines)
 
 
+HUMAN_BRIEF = {
+    "afifo": "Queue words across the write and read sides, in order. Honor the full/empty flags, reset behavior, and the selected write-edge and read-timing options.",
+    "apb_cdc": "Pass APB requests to the other side and bring back the corresponding response. Do not complete a request until the destination has completed it.",
+    "apb_regs": "Provide a small APB register bank with the configured layout. Keep read-only bits unchanged on writes and restore the initial register values on reset.",
+    "apbslave": "Provide an APB slave that supports ordinary setup and access phases, reads, and byte-strobed writes. Reset should leave it idle.",
+    "apbxclk": "Bridge APB transactions from the slave side to the master side. Preserve the request while the master waits, and return the matching response only after that transfer finishes. Keep both sides idle in reset; the registered option should not change bus behavior.",
+    "arbiter": "Grant one requester at a time, using the selected fixed or round-robin priority. If a grant is blocked, hold it until the specified release event.",
+    "areset_deassert_sync": "Make reset assert promptly but release cleanly with the destination clock, respecting the configured polarity and depth.",
+    "areset_sync": "Make reset assert promptly but release cleanly with the destination clock, respecting the configured depth.",
+    "async_bidir_fifo": "Move words in either direction, as selected on each side. Preserve their order, honor full/empty status and the fall-through option, and start empty after reset.",
+    "async_bidir_ramif_fifo": "Move words in either direction using the external RAM ports for storage. Preserve order, observe full/empty status and the fall-through option, and start empty after reset.",
+    "async_fifo": "Store words written on one side and return them in order on the other. Honor full, empty, and almost flags without losing or repeating data; support the fall-through option and start empty after reset.",
+    "async_fifo_sv": "Queue words between the write and read sides. Preserve order, keep the flags and pointer outputs meaningful in their respective domains, and start empty after reset.",
+    "axi_dma": "Use each descriptor to move the requested data between AXI memory and the stream interface, then return status for that descriptor. Respect the configured lengths and optional sidebands.",
+    "axidma": "Let software configure a memory copy through AXI-Lite, then perform the corresponding AXI reads and writes. Honor the address options and stop issuing traffic in reset.",
+    "axil_cdc": "Bridge AXI-Lite requests to the other clock domain and bring back the matching read and write responses. Do not lose or repeat a transaction.",
+    "axis_adapter": "Convert stream width while keeping data in order, preserving packet endings and any enabled sideband fields. Do not lose a beat when the output stalls.",
+    "axis_async_fifo": "Buffer stream beats between the two sides without disturbing their order, packet endings, or enabled sidebands. Honor the selected full, pause, and drop/mark options.",
+    "axis_async_fifo_adapter": "Buffer and adapt the stream between the two sides, preserving order and packet boundaries through width conversion. Honor the enabled sidebands and any selected pause or drop behavior.",
+    "axis_fifo": "Queue stream beats and preserve packet boundaries and enabled sidebands. Apply the configured frame and drop/mark options when they are enabled.",
+    "axis_register": "Make a stream register slice that behaves as a wire, buffer, or skid buffer according to its setting. Keep pending data and sidebands intact through a stall.",
+    "axis_switch": "Route each stream beat to the selected output, preserving packet boundaries and sidebands. Handle competing inputs using the configured arbitration policy.",
+    "axixclk": "Bridge AXI bursts between the slave and master sides. Preserve the association between requests, data, IDs, and responses through stalls, and honor the read/write and buffering options.",
+    "cdc_2phase": "Move source data to the destination once and in order. If the receiver is not ready, hold the pending item rather than losing it. Reset should leave both sides idle without creating a transfer.",
+    "cdc_2phase_clearable": "Move source data to the destination in order, holding it while the receiver waits. A clear request should flush the channel and let both sides return to idle without a stray transfer.",
+    "cdc_4phase": "Move data across the two sides using a four-phase handshake, without losing an item when the receiver pauses. Respect the decoupled option and the configured reset-message behavior.",
+    "cdc_fifo_2phase": "Queue accepted source items and deliver them in order at the destination. Stop accepting items when there is no room, and start empty after reset.",
+    "cdc_fifo_gray": "Queue data between the source and destination sides, returning it once in order. Keep flow control sensible and start empty after reset.",
+    "cdc_fifo_gray_clearable": "Queue data between the two sides in order. A clear request should flush pending data together on both sides so nothing stale appears afterward.",
+    "cdc_reset_ctrlr": "When either side requests a clear, isolate both sides before clearing either of them; wait for both acknowledgments at each step before releasing them.",
+    "data_sync": "Bring each new input value into the local clock domain coherently and indicate when it is ready. Reset should leave the output indication idle.",
+    "edge_propagator": "Carry an input event to the receiving side as one event, without duplicating it or leaving a stale event after reset.",
+    "i2c_master": "Send the requested I2C commands and data over the bus, return read bytes, and report missing acknowledgments. Honor the selected bus timing.",
+    "isochronous_4phase_handshake": "Provide a four-phase handshake between the related clocks. Avoid accepting or reporting a transfer that did not occur, including after reset.",
+    "isochronous_spill_register": "Buffer a short rate mismatch between the related clocks. Deliver accepted data once in order and leave the destination idle after reset.",
+    "pulse_sync": "Carry an input pulse to the other side once. Indicate when one is in flight, ignore further pulses while busy, and clear the outputs on reset.",
+    "rstgen": "Generate the active-low reset and initialization indication for the local clock. Honor the test-mode bypass when enabled.",
+    "spi_master_slave": "Send accepted parallel words over SPI and return received words when complete. Keep the serial interface idle after reset.",
+    "sync": "Bring the asynchronous input into the local clock domain, respecting the configured depth and reset value.",
+    "sync_multistage": "Bring the asynchronous input into the local clock domain, respecting the configured depth and reset value.",
+    "sync_reset": "Assert reset promptly and release the output cleanly after the configured number of local clock edges.",
+    "sync_wedge": "Bring the incoming bit into the local clock domain and give a short indication when it rises or falls, when enabled.",
+    "synchronizer": "Bring the asynchronous bit into the local clock domain with the configured depth. Reset should leave its output low.",
+    "uart16550": "Provide a UART with its Wishbone registers, serial interface, modem signals, and interrupt behavior. Reset should leave it idle.",
+    "wbxclk": "Bridge pipelined Wishbone requests between the two sides and return the matching response. Handle stalls without losing requests, and leave both sides idle on reset.",
+}
+
+
+ASYNC_INPUTS = {
+    "areset_deassert_sync": "async_rst_i",
+    "areset_sync": "async_rst_i",
+    "data_sync": "din and dready_i",
+    "rstgen": "rst_ni",
+    "sync": "serial_i",
+    "sync_multistage": "serial_i",
+    "sync_reset": "rst",
+    "sync_wedge": "serial_i",
+    "synchronizer": "async_sig_i",
+}
+
+
+def render_contract(bench_id: str, top: str, hdl: str, header: str, clocks: list[str], resets: list[str]) -> str:
+    if bench_id not in HUMAN_BRIEF:
+        raise ValueError(f"{bench_id}: no human-style brief")
+    ports = {name for _, name in parse_ports(header)}
+    external_clocks = [clock for clock in clocks if clock in ports]
+    external_resets = [reset for reset in resets if reset in ports]
+    mode = CLOCK_MODE.get(bench_id, "async" if len(external_clocks) > 1 else "single")
+    if len(external_clocks) > 1:
+        clocks_text = " and ".join(external_clocks)
+        clock_text = (
+            f"{clocks_text} are related clocks; please take care of signals crossing between them."
+            if mode == "related"
+            else f"{clocks_text} are independent clocks. Please take care of any clock-domain crossings between them."
+        )
+    elif external_clocks and bench_id in ASYNC_INPUTS:
+        source = ASYNC_INPUTS[bench_id]
+        clock_text = (
+            f"Please take care when {source} is released into the {external_clocks[0]} domain."
+            if bench_id in {"areset_deassert_sync", "areset_sync", "rstgen", "sync_reset"}
+            else f"Please take care as {source} {'enter' if ' and ' in source else 'enters'} the {external_clocks[0]} domain."
+        )
+    else:
+        clock_text = ""
+    reset_polarities = [
+        (reset, "active-low" if reset.lower().endswith(("_ni", "_n")) else reset_polarity(reset))
+        for reset in external_resets
+    ]
+    known_resets = [(reset, polarity) for reset, polarity in reset_polarities if polarity in {"active-low", "active-high"}]
+    if known_resets and len(known_resets) == len(external_resets) and len({polarity for _, polarity in known_resets}) == 1:
+        reset_text = f"The {'reset is' if len(known_resets) == 1 else 'resets are'} {known_resets[0][1]}."
+    else:
+        reset_text = " ".join(f"{reset} is {polarity}." for reset, polarity in known_resets)
+    return "\n".join(
+        [
+            "Please act as a professional Verilog designer.",
+            "",
+            f"Implement {IMPLEMENT[bench_id]}",
+            "",
+            f"{clock_text} {reset_text}".strip(),
+            "",
+            HUMAN_BRIEF[bench_id],
+            "",
+            f"Give me the complete {lang_label(hdl)} code in one source file, using this module interface.",
+            "Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.",
+            "",
+            header.rstrip(),
+            "",
+        ]
+    )
+
+
+def write_contract_prompts() -> None:
+    wrote = []
+    for man in sorted(BENCH.glob("*/manifest.yaml")):
+        bench_id = man.parent.name
+        text = man.read_text()
+        top = re.search(r"^top_module:\s*(\S+)", text, re.M).group(1)
+        hdl = re.search(r"^hdl:\s*(\S+)", text, re.M).group(1)
+        header = extract_header(man.parent, top)
+        (OUT / f"{bench_id}.observable.md").write_text(
+            render_contract(bench_id, top, hdl, header, yaml_list(text, "clocks"), yaml_list(text, "resets"))
+        )
+        wrote.append(bench_id)
+    print(f"wrote {len(wrote)} observable-contract RTL generation prompts")
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--observable-only", action="store_true")
+    args = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
+    if args.observable_only:
+        write_contract_prompts()
+        return
     wrote = []
     missing = []
     for man in sorted(BENCH.glob("*/manifest.yaml")):
