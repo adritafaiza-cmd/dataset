@@ -1,0 +1,1435 @@
+<think>Okay, I need to write a Verilog module for an AXI-Stream register slice with specific parameters and behavior. Let me start by understanding the requirements.
+
+First, the module is called axis_register. The parameters include DATA_WIDTH and others like KEEP_ENABLE, LAST_ENABLE, etc. The REG_TYPE determines the buffer type: 0 is a wire, 1 is a simple buffer, and 2 is a skid buffer that must not drop beats when stalled.
+
+The inputs and outputs are standard AXI-Stream signals. The key here is handling the handshake signals properly. The register slice sits between the source and destination, so it needs to buffer the data when the downstream isn't ready.
+
+The CDC requirements mean that the design must be safe for clock domain crossings. But wait, the module uses a single clock, so maybe CDC isn't an issue here. Wait, the user mentioned clock-domain and reset-domain crossings, but the module has a single clk. Hmm, maybe the CDC here refers to ensuring that the reset is properly synchronized if there were multiple domains, but since it's single clock, perhaps the reset is handled properly. Wait, the reset is active high and single domain. So maybe the CDC part is more about ensuring that the data doesn't get corrupted when crossing clock domains, but in this case, since it's single clock, perhaps the skid buffer is needed for the output when the downstream is stalled.
+
+Wait, REG_TYPE 2 is a skid buffer that must not drop a beat when stalled. So when the output is not ready, the skid buffer allows the input to hold the data until the output can accept it again.
+
+The parameters like KEEP_ENABLE determine whether certain sideband signals are included. For example, if KEEP_ENABLE is 0, then the tkeep signal is not used, so we can ignore it in the code.
+
+The main idea is to create a register that holds the data when the output is not ready. The skid buffer approach would have a storage element and a way to hold the data when the output is stalled.
+
+Let me outline the possible architectures based on REG_TYPE.
+
+For REG_TYPE 0: Just a wire. So s_axis_tready is directly connected to m_axis_tready. But that's only possible if the downstream can accept data immediately. But in reality, the tready from the output is an input here. Wait, in AXI-Stream, the tready is an input to the source (the module's s_axis_tready is driven by the downstream's tready). Wait, in the standard AXI-Stream protocol:
+
+The master (source) has tvalid and tready. The slave (destination) has tvalid and tready. Wait, no. Wait, the AXI-Stream protocol is that the source asserts tvalid, and the destination asserts tready. The data transfer occurs when both are high on the same clock edge.
+
+Wait, in the module's interface:
+
+The s_axis_* are inputs to the module (the source side), and m_axis_* are outputs (the destination side). Wait, no. Wait, the module is a register slice between a source and destination. Wait, the s_axis is the input to the slice (so the slice is acting as a master towards the source, and the m_axis is the output towards the destination. Wait, the naming can be confusing.
+
+Wait, in AXI-Stream terminology:
+
+The master initiates the transfer. The master's output is s_axis (source), and the slave's input is m_axis (master). Wait, perhaps the module here is acting as a register slice that sits between two AXI-Stream interfaces. So the s_axis is the input from the upstream, and m_axis is the output to the downstream.
+
+In any case, the tready from the downstream (m_axis_tready) is an input to the module. The s_axis_tready is the output of the module, indicating that the register can accept data.
+
+So the register slice's s_axis_tready is driven by whether the internal buffer can accept data. If the buffer is empty, then s_axis_tready is high. When data comes in (s_axis_tvalid and s_axis_tready both high), the data is stored in the buffer. Then, the buffer's output is presented on m_axis_tdata, etc., and the m_axis_tvalid is high. The downstream's tready (m_axis_tready) affects whether the buffer can be emptied.
+
+Wait, the skid buffer approach is when the output is stalled (m_axis_tready is low), the buffer holds the data until it can be sent. The skid buffer allows the input to be held if the output can't take it.
+
+So for REG_TYPE 2 (skid buffer), the buffer must not drop a beat. So when the output is blocked, the input can't be accepted. Wait, no. The skid buffer allows the input to be held until the output can accept it again.
+
+Let me think about the skid buffer structure. The skid buffer has a register that holds the data when the output is not ready. The idea is that when the output is not ready (m_axis_tready is low), the current data in the buffer is kept, and the incoming data is stored in the skid register. Once the output becomes ready again, the data is shifted out.
+
+Wait, the skid buffer is a way to allow the input to hold the data when the output is stalled. The buffer can hold one data item. If the output is not ready, the input can't proceed. Wait, perhaps the skid buffer is used to prevent data loss when the downstream is not ready.
+
+In any case, the code needs to handle the different REG_TYPE cases.
+
+First, the parameters:
+
+The KEEP_ENABLE is (DATA_WIDTH>8), but the user can override it. Similarly for others. The code should generate the signals conditionally based on these parameters.
+
+Wait, but in Verilog, parameters can be set, so the code can use generate blocks based on the parameters.
+
+But the code needs to handle all the signals that are enabled. For example, if KEEP_ENABLE is 0, then the tkeep is not present. Wait, but in the port list, the KEEP_WIDTH is given as ((DATA_WIDTH+7)/8). Wait, but the KEEP_ENABLE parameter determines whether the KEEP is present. Wait, the code's ports have s_axis_tkeep and m_axis_tkeep regardless of KEEP_ENABLE. Wait, but according to the AXI-Stream spec, tkeep is optional. But in the code, the ports are present. Wait, the code's parameters have KEEP_ENABLE which determines whether the KEEP is used. Wait, the code's ports have tkeep regardless. Hmm.
+
+Wait, the code's parameters have KEEP_ENABLE, which when 0 would mean that the KEEP is not used. But the ports are declared as [KEEP_WIDTH-1:0] for tkeep. So if KEEP_ENABLE is 0, the user may not use the tkeep, but the port is still there. Wait, but according to the AXI-Stream standard, tkeep is optional. The KEEP_ENABLE parameter would determine whether the KEEP is part of the interface.
+
+Wait, the code's parameters have KEEP_ENABLE, which is (DATA_WIDTH>8) by default. So if the data width is <=8, KEEP is not enabled. Wait, but the code's ports have tkeep regardless. Hmm. Maybe the code should conditionally include the KEEP signals based on the parameters. But in Verilog, the ports can't be conditionally generated based on parameters unless using generate blocks. Wait, but in Verilog-2001, you can't have generate blocks for ports. So the ports are fixed. Wait, but the user's code has the ports declared as per the parameters. Wait, the code in the problem statement has the ports like s_axis_tkeep as [KEEP_WIDTH-1:0], which is calculated based on DATA_WIDTH and KEEP_ENABLE.
+
+Wait, the parameters are given, and the code's ports are generated based on the parameters. For example, KEEP_WIDTH is ((DATA_WIDTH+7)/8). So the code's ports are fixed. So the KEEP is always present, but when KEEP_ENABLE is 0, the user may not use it. Wait, but according to the AXI-Stream spec, if KEEP is not used, the signal is not present. Hmm, but the code's ports are fixed. So perhaps the code should have the KEEP signals regardless, but in the code, if KEEP_ENABLE is 0, the code can ignore them.
+
+Wait, the problem says "Preserve tdata and enabled sidebands." So the code should only preserve the enabled sideband signals. So in the code, the KEEP is part of the ports, but if KEEP_ENABLE is 0, the code can ignore the tkeep.
+
+But in the code, the ports are declared as per the parameters. So the code's ports are fixed. So the code must have all the signals, but when the enable is 0, the code can just not use them.
+
+Wait, but the code's parameters have KEEP_ENABLE. For example, if KEEP_ENABLE is 0, then the KEEP is not part of the interface. Wait, but the code's ports are declared as [KEEP_WIDTH-1:0], which is ((DATA_WIDTH+7)/8). Wait, but KEEP_ENABLE is a parameter. Wait, the code's parameters include KEEP_ENABLE, which is (DATA_WIDTH>8) by default. Wait, the code's parameters have KEEP_ENABLE as a parameter, which is set to (DATA_WIDTH>8). Wait, in Verilog, the default value can be computed with a function.
+
+Wait, the code's parameters are:
+
+parameter KEEP_ENABLE = (DATA_WIDTH>8),
+
+So if DATA_WIDTH is 8, KEEP_ENABLE is 0. Otherwise, 1.
+
+But the code's ports have KEEP_WIDTH as ((DATA_WIDTH+7)/8). So the code's ports are fixed. So the code's ports have tkeep regardless. But when KEEP_ENABLE is 0, the code can ignore the tkeep.
+
+But in the code, the code must generate the signals. So the code can have all the signals, but when the enable is 0, the code can just not use them.
+
+But the code's parameters are given, so the code can use generate blocks to conditionally include the signals. Wait, but in Verilog, the ports can't be conditionally generated. So the code's ports are fixed. So the code must have all the signals, but when the enable is 0, the code can ignore them.
+
+Wait, but the code's parameters are given, and the code can use generate blocks to conditionally connect the signals. For example, if KEEP_ENABLE is 0, then the code can ignore the tkeep.
+
+But the code's ports are present. So in the code, the code can have:
+
+For example:
+
+generate
+if (KEEP_ENABLE) begin
+    // code for tkeep
+end else begin
+    // ignore tkeep
+end
+endgenerate
+
+But in Verilog, the generate blocks can be used for instantiating modules or code, but not for port connections. Wait, but the code's ports are declared as per the parameters. Wait, the code's ports are declared as per the parameters. For example, the KEEP_WIDTH is ((DATA_WIDTH+7)/8). So the code's ports have tkeep as [KEEP_WIDTH-1:0], which is fixed.
+
+But the KEEP_ENABLE parameter determines whether the KEEP is used. So in the code, when KEEP_ENABLE is 0, the code can just not use the tkeep. So in the code, the code can have:
+
+wire [KEEP_WIDTH-1:0] tkeep_reg;
+
+But if KEEP_ENABLE is 0, the code can just not use it.
+
+But the code's parameters are given. So the code can use generate blocks to conditionally include the logic.
+
+Wait, but the code's ports are fixed. So the code must have all the signals. For example, the code's ports have tkeep, but if KEEP_ENABLE is 0, the code can just not use it.
+
+But the code's parameters are given. So the code can use generate blocks to handle the different cases.
+
+Now, the main part is the register slice.
+
+The code's REG_TYPE determines the buffer type.
+
+REG_TYPE 0: wire. So the s_axis_tready is directly connected to m_axis_tready. The data is passed through. But in reality, the tvalid and tready must be registered. Wait, but a wire would imply that the data is not registered. Wait, but in a register slice, the standard approach is to have a one-register stage.
+
+Wait, the REG_TYPE 0 is a wire. Wait, but in Verilog, a wire is a continuous assignment. But in the context of a register slice, maybe REG_TYPE 0 is a combinational path (no register), but that's not a register slice. Hmm.
+
+Wait, the REG_TYPE options:
+
+- 0: wire (combinational path)
+- 1: simple buffer (registered)
+- 2: skid buffer (to prevent data loss when stalled)
+
+But the code's parameters need to handle these.
+
+Wait, the code's REG_TYPE is 0: wire. So the output is directly connected to the input. But in that case, the tvalid and tready would have to be directly connected. But in reality, the tready from the downstream (m_axis_tready) would drive the s_axis_tready. Wait, but in a combinational path, the tready from the downstream (m_axis_tready) would directly drive the s_axis_tready. Because if the downstream is ready, the upstream can send data. So:
+
+s_axis_tready = m_axis_tready;
+
+But in that case, the data is passed through without any registers. But in a register slice, the standard approach is to have a one-register stage. Hmm. Maybe the REG_TYPE 0 is a combinational path (no registers), REG_TYPE 1 is a single register, and REG_TYPE 2 is a skid buffer.
+
+But the user's description says:
+
+REG_TYPE 0 is a wire (combinational), 1 is a simple buffer (registered), 2 is skid buffer.
+
+So the code must handle these three types.
+
+Now, the code's structure.
+
+First, the parameters and ports are given.
+
+The code must generate the logic based on REG_TYPE.
+
+First, the code can have a generate block based on REG_TYPE.
+
+For REG_TYPE 0:
+
+s_axis_tready is directly connected to m_axis_tready.
+
+The data is passed through. So:
+
+assign s_axis_tready = m_axis_tready;
+
+assign m_axis_tvalid = s_axis_tvalid;
+
+But wait, in AXI-Stream, the tvalid is held until tready is high. Wait, but in a combinational path, the tvalid would be directly passed. But this would create a combinational path from tvalid to tready. Wait, but in the standard AXI-Stream protocol, the tvalid can be held until the tready is high. So if the downstream is ready (m_axis_tready is high), then the upstream can send data. So the s_axis_tready is connected to m_axis_tready. So the code would have:
+
+assign s_axis_tready = m_axis_tready;
+
+Then, the data is directly passed through. But in that case, the code would have:
+
+assign m_axis_tdata = s_axis_tdata;
+
+Similarly for other signals.
+
+But in this case, the code would have no registers. But the code is supposed to be a register slice. Hmm. Maybe the REG_TYPE 0 is a combinational register slice (no registers), but that's unusual.
+
+Alternatively, maybe REG_TYPE 0 is a combinational path (no registers), REG_TYPE 1 is a single register, and REG_TYPE 2 is a skid buffer.
+
+But the user's description says:
+
+REG_TYPE 0 is a wire (combinational), 1 is a simple buffer (registered), 2 is skid buffer.
+
+In that case, the code can proceed as follows.
+
+For REG_TYPE 0:
+
+s_axis_tready is directly connected to m_axis_tready.
+
+The data is passed through without any registers.
+
+But in that case, the code would have:
+
+assign s_axis_tready = m_axis_tready;
+
+assign m_axis_tvalid = s_axis_tvalid;
+
+assign m_axis_tdata = s_axis_tdata;
+
+Similarly for other signals.
+
+But in that case, the code would have no registers. But the code is supposed to be a register slice. Hmm. Maybe the REG_TYPE 0 is a combinational path (no registers), but the others are registered.
+
+But the code's parameters may vary.
+
+But the code's parameters are given. Let's proceed.
+
+The code can have generate blocks for each REG_TYPE.
+
+First, the code can have:
+
+generate
+if (REG_TYPE == 0) begin : wire_type
+    // combinational path
+    assign s_axis_tready = m_axis_tready;
+    // connect all the signals directly
+    assign m_axis_tvalid = s_axis_tvalid;
+    assign m_axis_tdata = s_axis_tdata;
+    assign m_axis_tkeep = s_axis_tkeep;
+    assign m_axis_tlast = s_axis_tlast;
+    assign m_axis_tid = s_axis_tid;
+    assign m_axis_tdest = s_axis_tdest;
+    assign m_axis_tuser = s_axis_tuser;
+end else if (REG_TYPE == 1) begin : simple_buffer
+    // simple registered buffer
+    // need to create a register that holds the data when valid and ready handshake occurs
+    // the s_axis_tready is high when the buffer is empty
+    // when data comes in, it's stored in the buffer, and m_axis_tvalid is set
+    // when the downstream is ready, the buffer is cleared
+    // need to handle the handshake.
+
+    // registers for the data and valid
+    reg [DATA_WIDTH-1:0] data_reg;
+    reg [KEEP_WIDTH-1:0] keep_reg;
+    reg last_reg;
+    reg [ID_WIDTH-1:0] id_reg;
+    reg [DEST_WIDTH-1:0] dest_reg;
+    reg [USER_WIDTH-1:0] user_reg;
+    reg valid_reg;
+
+    // s_axis_tready is high when the buffer is empty (valid_reg is 0)
+    assign s_axis_tready = ~valid_reg || m_axis_tready;
+
+    // when valid and ready, the data is transferred
+    always @(posedge clk) begin
+        if (rst) begin
+            valid_reg <= 0;
+        end else begin
+            if (s_axis_tvalid && s_axis_tready) begin
+                data_reg <= s_axis_tdata;
+                keep_reg <= s_axis_tkeep;
+                last_reg <= s_axis_tlast;
+                id_reg <= s_axis_tid;
+                dest_reg <= s_axis_tdest;
+                user_reg <= s_axis_tuser;
+                valid_reg <= 1;
+            end else if (m_axis_tready && valid_reg) begin
+                valid_reg <= 0;
+            end
+        end
+    end
+
+    // output assignments
+    assign m_axis_tvalid = valid_reg;
+    assign m_axis_tdata = data_reg;
+    assign m_axis_tkeep = keep_reg;
+    assign m_axis_tlast = last_reg;
+    assign m_axis_tid = id_reg;
+    assign m_axis_tdest = dest_reg;
+    assign m_axis_tuser = user_reg;
+
+end else if (REG_TYPE == 2) begin : skid_buffer
+    // skid buffer implementation
+    // need to handle the case where the output is stalled and the input can't be accepted
+    // skid buffer allows the input to hold the data when output is stalled
+
+    // registers for the data and valid
+    reg [DATA_WIDTH-1:0] data_reg;
+    reg [KEEP_WIDTH-1:0] keep_reg;
+    reg last_reg;
+    reg [ID_WIDTH-1:0] id_reg;
+    reg [DEST_WIDTH-1:0] dest_reg;
+    reg [USER_WIDTH-1:0] user_reg;
+    reg valid_reg;
+
+    // skid register
+    reg [DATA_WIDTH-1:0] skid_data;
+    reg skid_valid;
+
+    // s_axis_tready is high when either the buffer is empty or the skid can take data
+    assign s_axis_tready = (~valid_reg && ~skid_valid) || m_axis_tready;
+
+    // when data comes in and can be stored
+    always @(posedge clk) begin
+        if (rst) begin
+            valid_reg <= 0;
+            skid_valid <= 0;
+        end else begin
+            // handle the output first
+            if (m_axis_tready) begin
+                // if output is ready, consume the data
+                if (valid_reg) begin
+                    valid_reg <= 0;
+                end else if (skid_valid) begin
+                    // move skid to valid
+                    data_reg <= skid_data;
+                    keep_reg <= skid_keep;
+                    last_reg <= skid_last;
+                    id_reg <= skid_id;
+                    dest_reg <= skid_dest;
+                    user_reg <= skid_user;
+                    valid_reg <= 1;
+                    skid_valid <= 0;
+                end
+            end
+
+            // handle input
+            if (s_axis_tvalid && s_axis_tready) begin
+                if (valid_reg) begin
+                    // buffer is full, so store in skid
+                    skid_data <= s_axis_tdata;
+                    skid_keep <= s_axis_tkeep;
+                    skid_last <= s_axis_tlast;
+                    skid_id <= s_axis_tid;
+                    skid_dest <= s_axis_tdest;
+                    skid_user <= s_axis_tuser;
+                    skid_valid <= 1;
+                end else begin
+                    // buffer is empty, store in valid
+                    data_reg <= s_axis_tdata;
+                    keep_reg <= s_axis_tkeep;
+                    last_reg <= s_axis_tlast;
+                    id_reg <= s_axis_tid;
+                    dest_reg <= s_axis_tdest;
+                    user_reg <= s_axis_tuser;
+                    valid_reg <= 1;
+                end
+            end
+        end
+    end
+
+    // output assignments
+    assign m_axis_tvalid = valid_reg;
+    assign m_axis_tdata = data_reg;
+    assign m_axis_tkeep = keep_reg;
+    assign m_axis_tlast = last_reg;
+    assign m_axis_tid = id_reg;
+    assign m_axis_tdest = dest_reg;
+    assign m_axis_tuser = user_reg;
+
+end
+endgenerate
+
+Wait, but the code for REG_TYPE 2 (skid buffer) may need more detailed handling.
+
+In a skid buffer, when the output is stalled (m_axis_tready is 0), the input can't be accepted unless there's a skid register. The skid buffer allows the input to be stored in a separate register (the skid) when the main buffer is full.
+
+The code for the skid buffer would have two registers: the main one and the skid. When the main is full and the output is not ready, the skid holds the data. The main can accept new data only when the skid is empty.
+
+But the exact implementation may vary.
+
+Alternatively, the skid buffer can be implemented as follows:
+
+The buffer has a data register and a skid register. The s_axis_tready is high when either the buffer is empty or the skid is empty.
+
+When data comes in and the buffer is empty, it's stored in the buffer. If the buffer is full and the skid is empty, the data is stored in the skid. If the skid is full, then the input can't be accepted.
+
+Wait, perhaps the skid buffer allows the input to be held even if the output is stalled. The skid buffer is a single-entry buffer that allows the input to be stored when the output is blocked.
+
+The exact code for a skid buffer would be:
+
+reg [DATA_WIDTH-1:0] data_reg;
+reg valid_reg;
+reg [DATA_WIDTH-1:0] skid_data;
+reg skid_valid;
+
+assign s_axis_tready = (~valid_reg) || (skid_valid ? m_axis_tready : 1);
+
+Wait, perhaps the skid buffer is implemented with:
+
+When the output is not ready (m_axis_tready is 0), and the buffer is full, the data is moved to the skid, allowing the buffer to accept new data.
+
+But I need to look up the standard skid buffer implementation.
+
+Alternatively, the skid buffer is a way to allow the input to hold data when the output is stalled. The skid buffer has a register that holds the data when the output is not ready.
+
+The code for the skid buffer would have:
+
+- A main register (data_reg, valid_reg)
+- A skid register (skid_data, skid_valid)
+
+The s_axis_tready is high when either the main is empty or the skid is empty.
+
+When data comes in and the main is empty, it's stored in the main. If the main is full and the skid is empty, the data is stored in the skid. If the skid is full, then the input can't be accepted.
+
+But the exact code would need to handle the handshake.
+
+Alternatively, the skid buffer is implemented as:
+
+When the output is not ready (m_axis_tready is 0), the current data in the buffer is kept. The input data is stored into the skid register. Once the output becomes ready, the data is shifted out, and the skid data is moved into the buffer.
+
+But I need to code this properly.
+
+Alternatively, the skid buffer code can be:
+
+// Skid buffer variables
+reg [DATA_WIDTH-1:0] skid_data;
+reg skid_valid;
+
+// Main buffer
+reg [DATA_WIDTH-1:0] data_reg;
+reg valid_reg;
+
+// s_axis_tready is high when skid is empty or output is ready
+assign s_axis_tready = (~valid_reg) || (m_axis_tready && ~skid_valid);
+
+// On clock edge
+always @(posedge clk) begin
+    if (rst) begin
+        valid_reg <= 0;
+        skid_valid <= 0;
+    end else begin
+        // When output is ready, consume the data
+        if (m_axis_tready) begin
+            if (valid_reg) begin
+                valid_reg <= 0;
+                // If skid has data, move it to main
+                if (skid_valid) begin
+                    data_reg <= skid_data;
+                    skid_valid <= 0;
+                    valid_reg <= 1;
+                end
+            end
+        end
+
+        // When input is accepted
+        if (s_axis_tvalid && s_axis_tready) begin
+            if (valid_reg) begin
+                // Main buffer is full, store in skid
+                skid_data <= s_axis_tdata;
+                skid_valid <= 1;
+            end else begin
+                // Main buffer is empty, store in main
+                data_reg <= s_axis_tdata;
+                valid_reg <= 1;
+            end
+        end
+    end
+end
+
+// Output assignments
+assign m_axis_tvalid = valid_reg;
+assign m_axis_tdata = data_reg;
+
+// Other signals similarly.
+
+But this is a rough sketch. The exact code would need to handle all the signals.
+
+But given the time constraints, perhaps the code can proceed with the skid buffer as follows.
+
+Now, the code for REG_TYPE 2:
+
+// Skid buffer implementation
+reg [DATA_WIDTH-1:0] data_reg;
+reg [KEEP_WIDTH-1:0] keep_reg;
+reg last_reg;
+reg [ID_WIDTH-1:0] id_reg;
+reg [DEST_WIDTH-1:0] dest_reg;
+reg [USER_WIDTH-1:0] user_reg;
+reg valid_reg;
+
+reg [DATA_WIDTH-1:0] skid_data;
+reg [KEEP_WIDTH-1:0] skid_keep;
+reg skid_last;
+reg [ID_WIDTH-1:0] skid_id;
+reg [DEST_WIDTH-1:0] skid_dest;
+reg [USER_WIDTH-1:0] skid_user;
+reg skid_valid;
+
+// s_axis_tready is high when either the main buffer is empty or the skid is empty and output is ready
+assign s_axis_tready = (~valid_reg) || (m_axis_tready && ~skid_valid);
+
+// On clock edge
+always @(posedge clk) begin
+    if (rst) begin
+        valid_reg <= 0;
+        skid_valid <= 0;
+    end else begin
+        // Handle output first
+        if (m_axis_tready) begin
+            if (valid_reg) begin
+                valid_reg <= 0;
+                if (skid_valid) begin
+                    // Move skid to valid
+                    data_reg <= skid_data;
+                    keep_reg <= skid_keep;
+                    last_reg <= skid_last;
+                    id_reg <= skid_id;
+                    dest_reg <= skid_dest;
+                    user_reg <= skid_user;
+                    valid_reg <= 1;
+                    skid_valid <= 0;
+                end
+            end
+        end
+
+        // Handle input
+        if (s_axis_tvalid && s_axis_tready) begin
+            if (valid_reg) begin
+                // Main buffer is full, store in skid
+                skid_data <= s_axis_tdata;
+                skid_keep <= s_axis_tkeep;
+                skid_last <= s_axis_tlast;
+                skid_id <= s_axis_tid;
+                skid_dest <= s_axis_tdest;
+                skid_user <= s_axis_tuser;
+                skid_valid <= 1;
+            end else begin
+                // Main buffer is empty, store in main
+                data_reg <= s_axis_tdata;
+                keep_reg <= s_axis_tkeep;
+                last_reg <= s_axis_tlast;
+                id_reg <= s_axis_tid;
+                dest_reg <= s_axis_tdest;
+                user_reg <= s_axis_tuser;
+                valid_reg <= 1;
+            end
+        end
+    end
+end
+
+// Output assignments
+assign m_axis_tvalid = valid_reg;
+assign m_axis_tdata = data_reg;
+assign m_axis_tkeep = keep_reg;
+assign m_axis_tlast = last_reg;
+assign m_axis_tid = id_reg;
+assign m_axis_tdest = dest_reg;
+assign m_axis_tuser = user_reg;
+
+But this code may need to handle all the signals, including the ones that are enabled (like KEEP, LAST, etc.)
+
+Now, the code must generate the logic for all the signals based on their enable parameters.
+
+For example, if LAST_ENABLE is 0, then the code can ignore the tlast.
+
+But the code's ports have the signals regardless. So in the code, the code can have:
+
+For example:
+
+generate
+if (LAST_ENABLE) begin
+    // code for tlast
+end else begin
+    // ignore tlast
+end
+endgenerate
+
+But the code's parameters are given. So the code can use generate blocks to conditionally include the logic for each signal.
+
+But the code's parameters are:
+
+LAST_ENABLE: 1 by default.
+
+So in the code, the code can have:
+
+// For tlast
+generate
+if (LAST_ENABLE) begin
+    assign m_axis_tlast = last_reg;
+end else begin
+    assign m_axis_tlast = 1'b0; // or leave it unconnected? But in Verilog, outputs must be driven.
+end
+endgenerate
+
+Wait, but the code's ports have m_axis_tlast as an output. So if LAST_ENABLE is 0, the code must drive it to 0 or leave it as don't care? According to AXI-Stream, if the sideband is not enabled, the value is undefined. But in practice, the code can drive it to 0.
+
+But the code's parameters have LAST_ENABLE, which when 0, the code can ignore the tlast.
+
+But the code's ports have the tlast signal regardless.
+
+So the code can have:
+
+// For tlast
+generate
+if (LAST_ENABLE) begin
+    assign m_axis_tlast = last_reg;
+end else begin
+    assign m_axis_tlast = 1'b0;
+end
+endgenerate
+
+Similarly for other signals.
+
+But this complicates the code.
+
+Alternatively, the code can have the assignments regardless of the enable, but when the enable is 0, the code can ignore the input.
+
+But the code's parameters are given, so the code can use generate blocks.
+
+But the code's ports are fixed, so the code must assign all outputs.
+
+Now, the code can proceed.
+
+The code for the skid buffer:
+
+// Registers for the main and skid
+reg [DATA_WIDTH-1:0] data_reg;
+reg [KEEP_WIDTH-1:0] keep_reg;
+reg last_reg;
+reg [ID_WIDTH-1:0] id_reg;
+reg [DEST_WIDTH-1:0] dest_reg;
+reg [USER_WIDTH-1:0] user_reg;
+reg valid_reg;
+
+reg [DATA_WIDTH-1:0] skid_data;
+reg [KEEP_WIDTH-1:0] skid_keep;
+reg skid_last;
+reg [ID_WIDTH-1:0] skid_id;
+reg [DEST_WIDTH-1:0] skid_dest;
+reg [USER_WIDTH-1:0] skid_user;
+reg skid_valid;
+
+// s_axis_tready is high when main buffer is empty or skid is empty and output is ready
+assign s_axis_tready = (~valid_reg) || (m_axis_tready && ~skid_valid);
+
+// On clock edge
+always @(posedge clk) begin
+    if (rst) begin
+        valid_reg <= 0;
+        skid_valid <= 0;
+    end else begin
+        // Handle output first
+        if (m_axis_tready) begin
+            if (valid_reg) begin
+                valid_reg <= 0;
+                // If skid has data, move to valid
+                if (skid_valid) begin
+                    data_reg <= skid_data;
+                    keep_reg <= skid_keep;
+                    last_reg <= skid_last;
+                    id_reg <= skid_id;
+                    dest_reg <= skid_dest;
+                    user_reg <= skid_user;
+                    valid_reg <= 1;
+                    skid_valid <= 0;
+                end
+            end
+        end
+
+        // Handle input
+        if (s_axis_tvalid && s_axis_tready) begin
+            if (valid_reg) begin
+                // Main buffer is full, store in skid
+                skid_data <= s_axis_tdata;
+                skid_keep <= s_axis_tkeep;
+                skid_last <= s_axis_tlast;
+                skid_id <= s_axis_tid;
+                skid_dest <= s_axis_tdest;
+                skid_user <= s_axis_tuser;
+                skid_valid <= 1;
+            end else begin
+                // Main buffer is empty, store in main
+                data_reg <= s_axis_tdata;
+                keep_reg <= s_axis_tkeep;
+                last_reg <= s_axis_tlast;
+                id_reg <= s_axis_tid;
+                dest_reg <= s_axis_tdest;
+                user_reg <= s_axis_tuser;
+                valid_reg <= 1;
+            end
+        end
+    end
+end
+
+// Assign outputs with generate blocks for each signal based on enable parameters
+generate
+if (KEEP_ENABLE) begin
+    assign m_axis_tkeep = keep_reg;
+end else begin
+    assign m_axis_tkeep = 0; // or leave as 0?
+end
+endgenerate
+
+if (LAST_ENABLE) begin
+    assign m_axis_tlast = last_reg;
+end else begin
+    assign m_axis_tlast = 0;
+end
+
+if (ID_ENABLE) begin
+    assign m_axis_tid = id_reg;
+end else begin
+    assign m_axis_tid = 0;
+end
+
+if (DEST_ENABLE) begin
+    assign m_axis_tdest = dest_reg;
+end else begin
+    assign m_axis_tdest = 0;
+end
+
+if (USER_ENABLE) begin
+    assign m_axis_tuser = user_reg;
+end else begin
+    assign m_axis_tuser = 0;
+end
+
+// Data and valid are always present
+assign m_axis_tvalid = valid_reg;
+assign m_axis_tdata = data_reg;
+
+This way, the code uses generate blocks to conditionally assign the outputs based on the enable parameters.
+
+Now, putting all together.
+
+The code for REG_TYPE 2:
+
+// Skid buffer implementation
+reg [DATA_WIDTH-1:0] data_reg;
+reg [KEEP_WIDTH-1:0] keep_reg;
+reg last_reg;
+reg [ID_WIDTH-1:0] id_reg;
+reg [DEST_WIDTH-1:0] dest_reg;
+reg [USER_WIDTH-1:0] user_reg;
+reg valid_reg;
+
+reg [DATA_WIDTH-1:0] skid_data;
+reg [KEEP_WIDTH-1:0] skid_keep;
+reg skid_last;
+reg [ID_WIDTH-1:0] skid_id;
+reg [DEST_WIDTH-1:0] skid_dest;
+reg [USER_WIDTH-1:0] skid_user;
+reg skid_valid;
+
+// s_axis_tready is high when main buffer is empty or skid is empty and output is ready
+assign s_axis_tready = (~valid_reg) || (m_axis_tready && ~skid_valid);
+
+// On clock edge
+always @(posedge clk) begin
+    if (rst) begin
+        valid_reg <= 0;
+        skid_valid <= 0;
+    end else begin
+        // Handle output first
+        if (m_axis_tready) begin
+            if (valid_reg) begin
+                valid_reg <= 0;
+                // If skid has data, move to valid
+                if (skid_valid) begin
+                    data_reg <= skid_data;
+                    keep_reg <= skid_keep;
+                    last_reg <= skid_last;
+                    id_reg <= skid_id;
+                    dest_reg <= skid_dest;
+                    user_reg <= skid_user;
+                    valid_reg <= 1;
+                    skid_valid <= 0;
+                end
+            end
+        end
+
+        // Handle input
+        if (s_axis_tvalid && s_axis_tready) begin
+            if (valid_reg) begin
+                // Main buffer is full, store in skid
+                skid_data <= s_axis_tdata;
+                skid_keep <= s_axis_tkeep;
+                skid_last <= s_axis_tlast;
+                skid_id <= s_axis_tid;
+                skid_dest <= s_axis_tdest;
+                skid_user <= s_axis_tuser;
+                skid_valid <= 1;
+            end else begin
+                // Main buffer is empty, store in main
+                data_reg <= s_axis_tdata;
+                keep_reg <= s_axis_tkeep;
+                last_reg <= s_axis_tlast;
+                id_reg <= s_axis_tid;
+                dest_reg <= s_axis_tdest;
+                user_reg <= s_axis_tuser;
+                valid_reg <= 1;
+            end
+        end
+    end
+end
+
+// Assign outputs with generate blocks for each sideband
+generate
+if (KEEP_ENABLE) begin
+    assign m_axis_tkeep = keep_reg;
+end else begin
+    assign m_axis_tkeep = 0;
+end
+endgenerate
+
+if (LAST_ENABLE) begin
+    assign m_axis_tlast = last_reg;
+end else begin
+    assign m_axis_tlast = 0;
+end
+
+if (ID_ENABLE) begin
+    assign m_axis_tid = id_reg;
+end else begin
+    assign m_axis_tid = 0;
+end
+
+if (DEST_ENABLE) begin
+    assign m_axis_tdest = dest_reg;
+end else begin
+    assign m_axis_tdest = 0;
+end
+
+if (USER_ENABLE) begin
+    assign m_axis_tuser = user_reg;
+end else begin
+    assign m_axis_tuser = 0;
+end
+
+// Data and valid are always present
+assign m_axis_tvalid = valid_reg;
+assign m_axis_tdata = data_reg;
+
+Now, the code for REG_TYPE 1 (simple buffer):
+
+// Simple buffer
+reg [DATA_WIDTH-1:0] data_reg;
+reg [KEEP_WIDTH-1:0] keep_reg;
+reg last_reg;
+reg [ID_WIDTH-1:0] id_reg;
+reg [DEST_WIDTH-1:0] dest_reg;
+reg [USER_WIDTH-1:0] user_reg;
+reg valid_reg;
+
+assign s_axis_tready = ~valid_reg || m_axis_tready;
+
+always @(posedge clk) begin
+    if (rst) begin
+        valid_reg <= 0;
+    end else begin
+        if (s_axis_tvalid && s_axis_tready) begin
+            data_reg <= s_axis_tdata;
+            keep_reg <= s_axis_tkeep;
+            last_reg <= s_axis_tlast;
+            id_reg <= s_axis_tid;
+            dest_reg <= s_axis_tdest;
+            user_reg <= s_axis_tuser;
+            valid_reg <= 1;
+        end else if (m_axis_tready && valid_reg) begin
+            valid_reg <= 0;
+        end
+    end
+end
+
+// Assign outputs with generate blocks for each sideband
+generate
+if (KEEP_ENABLE) begin
+    assign m_axis_tkeep = keep_reg;
+end else begin
+    assign m_axis_tkeep = 0;
+end
+endgenerate
+
+if (LAST_ENABLE) begin
+    assign m_axis_tlast = last_reg;
+end else begin
+    assign m_axis_tlast = 0;
+end
+
+if (ID_ENABLE) begin
+    assign m_axis_tid = id_reg;
+end else begin
+    assign m_axis_tid = 0;
+end
+
+if (DEST_ENABLE) begin
+    assign m_axis_tdest = dest_reg;
+end else begin
+    assign m_axis_tdest = 0;
+end
+
+if (USER_ENABLE) begin
+    assign m_axis_tuser = user_reg;
+end else begin
+    assign m_axis_tuser = 0;
+end
+
+// Data and valid
+assign m_axis_tvalid = valid_reg;
+assign m_axis_tdata = data_reg;
+
+Now, the code for REG_TYPE 0 (wire):
+
+// Combinational path
+assign s_axis_tready = m_axis_tready;
+
+assign m_axis_tvalid = s_axis_tvalid;
+assign m_axis_tdata = s_axis_tdata;
+
+// Similarly for other signals, but with generate blocks.
+
+generate
+if (KEEP_ENABLE) begin
+    assign m_axis_tkeep = s_axis_tkeep;
+end else begin
+    assign m_axis_tkeep = 0;
+end
+endgenerate
+
+if (LAST_ENABLE) begin
+    assign m_axis_tlast = s_axis_tlast;
+end else begin
+    assign m_axis_tlast = 0;
+end
+
+if (ID_ENABLE) begin
+    assign m_axis_tid = s_axis_tid;
+end else begin
+    assign m_axis_tid = 0;
+end
+
+if (DEST_ENABLE) begin
+    assign m_axis_tdest = s_axis_tdest;
+end else begin
+    assign m_axis_tdest = 0;
+end
+
+if (USER_ENABLE) begin
+    assign m_axis_tuser = s_axis_tuser;
+end else begin
+    assign m_axis_tuser = 0;
+end
+
+Now, putting all together.
+
+The code would have generate blocks for each REG_TYPE.
+
+Finally, the code would have:
+
+module axis_register #(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+) (
+    input wire clk,
+    input wire rst,
+    // Input AXI Stream
+    input wire [DATA_WIDTH-1:0] s_axis_tdata,
+    input wire [KEEP_WIDTH-1:0] s_axis_tkeep,
+    input wire s_axis_tvalid,
+    output wire s_axis_tready,
+    input wire s_axis_tlast,
+    input wire [ID_WIDTH-1:0] s_axis_tid,
+    input wire [DEST_WIDTH-1:0] s_axis_tdest,
+    input wire [USER_WIDTH-1:0] s_axis_tuser,
+    // Output AXI Stream
+    output wire [DATA_WIDTH-1:0] m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0] m_axis_tkeep,
+    output wire m_axis_tvalid,
+    input wire m_axis_tready,
+    output wire m_axis_tlast,
+    output wire [ID_WIDTH-1:0] m_axis_tid,
+    output wire [DEST_WIDTH-1:0] m_axis_tdest,
+    output wire [USER_WIDTH-1:0] m_axis_tuser
+);
+
+generate
+if (REG_TYPE == 0) begin : wire_type
+    // Combinational path
+    assign s_axis_tready = m_axis_tready;
+
+    assign m_axis_tvalid = s_axis_tvalid;
+    assign m_axis_tdata = s_axis_tdata;
+
+    generate
+    if (KEEP_ENABLE) begin
+        assign m_axis_tkeep = s_axis_tkeep;
+    end else begin
+        assign m_axis_tkeep = 0;
+    end
+    endgenerate
+
+    generate
+    if (LAST_ENABLE) begin
+        assign m_axis_tlast = s_axis_tlast;
+    end else begin
+        assign m_axis_tlast = 0;
+    end
+    endgenerate
+
+    generate
+    if (ID_ENABLE) begin
+        assign m_axis_tid = s_axis_tid;
+    end else begin
+        assign m_axis_tid = 0;
+    end
+    endgenerate
+
+    generate
+    if (DEST_ENABLE) begin
+        assign m_axis_tdest = s_axis_tdest;
+    end else begin
+        assign m_axis_tdest = 0;
+    end
+    endgenerate
+
+    generate
+    if (USER_ENABLE) begin
+        assign m_axis_tuser = s_axis_tuser;
+    end else begin
+        assign m_axis_tuser = 0;
+    end
+    endgenerate
+
+end else if (REG_TYPE == 1) begin : simple_buffer
+    // Simple registered buffer
+    reg [DATA_WIDTH-1:0] data_reg;
+    reg [KEEP_WIDTH-1:0] keep_reg;
+    reg last_reg;
+    reg [ID_WIDTH-1:0] id_reg;
+    reg [DEST_WIDTH-1:0] dest_reg;
+    reg [USER_WIDTH-1:0] user_reg;
+    reg valid_reg;
+
+    assign s_axis_tready = ~valid_reg || m_axis_tready;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            valid_reg <= 0;
+        end else begin
+            if (s_axis_tvalid && s_axis_tready) begin
+                data_reg <= s_axis_tdata;
+                keep_reg <= s_axis_tkeep;
+                last_reg <= s_axis_tlast;
+                id_reg <= s_axis_tid;
+                dest_reg <= s_axis_tdest;
+                user_reg <= s_axis_tuser;
+                valid_reg <= 1;
+            end else if (m_axis_tready && valid_reg) begin
+                valid_reg <= 0;
+            end
+        end
+    end
+
+    assign m_axis_tvalid = valid_reg;
+    assign m_axis_tdata = data_reg;
+
+    generate
+    if (KEEP_ENABLE) begin
+        assign m_axis_tkeep = keep_reg;
+    end else begin
+        assign m_axis_tkeep = 0;
+    end
+    endgenerate
+
+    generate
+    if (LAST_ENABLE) begin
+        assign m_axis_tlast = last_reg;
+    end else begin
+        assign m_axis_tlast = 0;
+    end
+    endgenerate
+
+    generate
+    if (ID_ENABLE) begin
+        assign m_axis_tid = id_reg;
+    end else begin
+        assign m_axis_tid = 0;
+    end
+    endgenerate
+
+    generate
+    if (DEST_ENABLE) begin
+        assign m_axis_tdest = dest_reg;
+    end else begin
+        assign m_axis_tdest = 0;
+    end
+    endgenerate
+
+    generate
+    if (USER_ENABLE) begin
+        assign m_axis_tuser = user_reg;
+    end else begin
+        assign m_axis_tuser = 0;
+    end
+    endgenerate
+
+end else if (REG_TYPE == 2) begin : skid_buffer
+    // Skid buffer implementation
+    reg [DATA_WIDTH-1:0] data_reg;
+    reg [KEEP_WIDTH-1:0] keep_reg;
+    reg last_reg;
+    reg [ID_WIDTH-1:0] id_reg;
+    reg [DEST_WIDTH-1:0] dest_reg;
+    reg [USER_WIDTH-1:0] user_reg;
+    reg valid_reg;
+
+    reg [DATA_WIDTH-1:0] skid_data;
+    reg [KEEP_WIDTH-1:0] skid_keep;
+    reg skid_last;
+    reg [ID_WIDTH-1:0] skid_id;
+    reg [DEST_WIDTH-1:0] skid_dest;
+    reg [USER_WIDTH-1:0] skid_user;
+    reg skid_valid;
+
+    assign s_axis_tready = (~valid_reg) || (m_axis_tready && ~skid_valid);
+
+    always @(posedge clk) begin
+        if (rst) begin
+            valid_reg <= 0;
+            skid_valid <= 0;
+        end else begin
+            // Handle output first
+            if (m_axis_tready) begin
+                if (valid_reg) begin
+                    valid_reg <= 0;
+                    // If skid has data, move to valid
+                    if (skid_valid) begin
+                        data_reg <= skid_data;
+                        keep_reg <= skid_keep;
+                        last_reg <= skid_last;
+                        id_reg <= skid_id;
+                        dest_reg <= skid_dest;
+                        user_reg <= skid_user;
+                        valid_reg <= 1;
+                        skid_valid <= 0;
+                    end
+                end
+            end
+
+            // Handle input
+            if (s_axis_tvalid && s_axis_tready) begin
+                if (valid_reg) begin
+                    // Main buffer is full, store in skid
+                    skid_data <= s_axis_tdata;
+                    skid_keep <= s_axis_tkeep;
+                    skid_last <= s_axis_tlast;
+                    skid_id <= s_axis_tid;
+                    skid_dest <= s_axis_tdest;
+                    skid_user <= s_axis_tuser;
+                    skid_valid <= 1;
+                end else begin
+                    // Main buffer is empty, store in main
+                    data_reg <= s_axis_tdata;
+                    keep_reg <= s_axis_tkeep;
+                    last_reg <= s_axis_tlast;
+                    id_reg <= s_axis_tid;
+                    dest_reg <= s_axis_tdest;
+                    user_reg <= s_axis_tuser;
+                    valid_reg <= 1;
+                end
+            end
+        end
+    end
+
+    assign m_axis_tvalid = valid_reg;
+    assign m_axis_tdata = data_reg;
+
+    generate
+    if (KEEP_ENABLE) begin
+        assign m_axis_tkeep = keep_reg;
+    end else begin
+        assign m_axis_tkeep = 0;
+    end
+    endgenerate
+
+    generate
+    if (LAST_ENABLE) begin
+        assign m_axis_tlast = last_reg;
+    end else begin
+        assign m_axis_tlast = 0;
+    end
+    endgenerate
+
+    generate
+    if (ID_ENABLE) begin
+        assign m_axis_tid = id_reg;
+    end else begin
+        assign m_axis_tid = 0;
+    end
+    endgenerate
+
+    generate
+    if (DEST_ENABLE) begin
+        assign m_axis_tdest = dest_reg;
+    end else begin
+        assign m_axis_tdest = 0;
+    end
+    endgenerate
+
+    generate
+    if (USER_ENABLE) begin
+        assign m_axis_tuser = user_reg;
+    end else begin
+        assign m_axis_tuser = 0;
+    end
+    endgenerate
+
+end else begin
+    // Default to skid buffer?
+    // Or error?
+end
+endgenerate
+
+endmodule
+</think>
+
+<answer>
+```verilog
+module axis_register #(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+) (
+    input wire clk,
+    input wire rst,
+    // Input AXI Stream
+    input wire [DATA_WIDTH-1:0] s_axis_tdata,
+    input wire [KEEP_WIDTH-1:0] s_axis_tkeep,
+    input wire s_axis_tvalid,
+    output wire s_axis_tready,
+    input wire s_axis_tlast,
+    input wire [ID_WIDTH-1:0] s_axis_tid,
+    input wire [DEST_WIDTH-1:0] s_axis_tdest,
+    input wire [USER_WIDTH-1:0] s_axis_tuser,
+    // Output AXI Stream
+    output wire [DATA_WIDTH-1:0] m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0] m_axis_tkeep,
+    output wire m_axis_tvalid,
+    input wire m_axis_tready,
+    output wire m_axis_tlast,
+    output wire [ID_WIDTH-1:0] m_axis_tid,
+    output wire [DEST_WIDTH-1:0] m_axis_tdest,
+    output wire [USER_WIDTH-1:0] m_axis_tuser
+);
+
+generate
+if (REG_TYPE == 0) begin : wire_type
+    assign s_axis_tready = m_axis_tready;
+    assign m_axis_tvalid = s_axis_tvalid;
+    assign m_axis_tdata = s_axis_tdata;
+
+    if (KEEP_ENABLE) begin
+        assign m_axis_tkeep = s_axis_tkeep;
+    end else begin
+        assign m_axis_tkeep = 0;
+    end
+
+    if (LAST_ENABLE) begin
+        assign m_axis_tlast = s_axis_tlast;
+    end else begin
+        assign m_axis_tlast = 0;
+    end
+
+    if (ID_ENABLE) begin
+        assign m_axis_tid = s_axis_tid;
+    end else begin
+        assign m_axis_tid = 0;
+    end
+
+    if (DEST_ENABLE) begin
+        assign m_axis_tdest = s_axis_tdest;
+    end else begin
+        assign m_axis_tdest = 0;
+    end
+
+    if (USER_ENABLE) begin
+        assign m_axis_tuser = s_axis_tuser;
+    end else begin
+        assign m_axis_tuser = 0;
+    end
+
+end else if (REG_TYPE == 1) begin : simple_buffer
+    reg [DATA_WIDTH-1:0] data_reg;
+    reg [KEEP_WIDTH-1:0] keep_reg;
+    reg last_reg;
+    reg [ID_WIDTH-1:0] id_reg;
+    reg [DEST_WIDTH-1:0] dest_reg;
+    reg [USER_WIDTH-1:0] user_reg;
+    reg valid_reg;
+
+    assign s_axis_tready = ~valid_reg || m_axis_tready;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            valid_reg <= 0;
+        end else begin
+            if (s_axis_tvalid && s_axis_tready) begin
+                data_reg <= s_axis_tdata;
+                keep_reg <= s_axis_tkeep;
+                last_reg <= s_axis_tlast;
+                id_reg <= s_axis_tid;
+                dest_reg <= s_axis_tdest;
+                user_reg <= s_axis_tuser;
+                valid_reg <= 1;
+            end else if (m_axis_tready && valid_reg) begin
+                valid_reg <= 0;
+            end
+        end
+    end
+
+    assign m_axis_tvalid = valid_reg;
+    assign m_axis_tdata = data_reg;
+
+    if (KEEP_ENABLE) begin
+        assign m_axis_tkeep = keep_reg;
+    end else begin
+        assign m_axis_tkeep = 0;
+    end
+
+    if (LAST_ENABLE) begin
+        assign m_axis_tlast = last_reg;
+    end else begin
+        assign m_axis_tlast = 0;
+    end
+
+    if (ID_ENABLE) begin
+        assign m_axis_tid = id_reg;
+    end else begin
+        assign m_axis_tid = 0;
+    end
+
+    if (DEST_ENABLE) begin
+        assign m_axis_tdest = dest_reg;
+    end else begin
+        assign m_axis_tdest = 0;
+    end
+
+    if (USER_ENABLE) begin
+        assign m_axis_tuser = user_reg;
+    end else begin
+        assign m_axis_tuser = 0;
+    end
+
+end else if (REG_TYPE == 2) begin : skid_buffer
+    reg [DATA_WIDTH-1:0] data_reg;
+    reg [KEEP_WIDTH-1:0] keep_reg;
+    reg last_reg;
+    reg [ID_WIDTH-1:0] id_reg;
+    reg [DEST_WIDTH-1:0] dest_reg;
+    reg [USER_WIDTH-1:0] user_reg;
+    reg valid_reg;
+
+    reg [DATA_WIDTH-1:0] skid_data;
+    reg [KEEP_WIDTH-1:0] skid_keep;
+    reg skid_last;
+    reg [ID_WIDTH-1:0] skid_id;
+    reg [DEST_WIDTH-1:0] skid_dest;
+    reg [USER_WIDTH-1:0] skid_user;
+    reg skid_valid;
+
+    assign s_axis_tready = (~valid_reg) || (m_axis_tready && ~skid_valid);
+
+    always @(posedge clk) begin
+        if (rst) begin
+            valid_reg <= 0;
+            skid_valid <= 0;
+        end else begin
+            if (m_axis_tready) begin
+                if (valid_reg) begin
+                    valid_reg <= 0;
+                    if (skid_valid) begin
+                        data_reg <= skid_data;
+                        keep_reg <= skid_keep;
+                        last_reg <= skid_last;
+                        id_reg <= skid_id;
+                        dest_reg <= skid_dest;
+                        user_reg <= skid_user;
+                        valid_reg <= 1;
+                        skid_valid <= 0;
+                    end
+                end
+            end
+
+            if (s_axis_tvalid && s_axis_tready) begin
+                if (valid_reg) begin
+                    skid_data <= s_axis_tdata;
+                    skid_keep <= s_axis_tkeep;
+                    skid_last <= s_axis_tlast;
+                    skid_id <= s_axis_tid;
+                    skid_dest <= s_axis_tdest;
+                    skid_user <= s_axis_tuser;
+                    skid_valid <= 1;
+                end else begin
+                    data_reg <= s_axis_tdata;
+                    keep_reg <= s_axis_tkeep;
+                    last_reg <= s_axis_tlast;
+                    id_reg <= s_axis_tid;
+                    dest_reg <= s_axis_tdest;
+                    user_reg <= s_axis_tuser;
+                    valid_reg <= 1;
+                end
+            end
+        end
+    end
+
+    assign m_axis_tvalid = valid_reg;
+    assign m_axis_tdata = data_reg;
+
+    if (KEEP_ENABLE) begin
+        assign m_axis_tkeep = keep_reg;
+    end else begin
+        assign m_axis_tkeep = 0;
+    end
+
+    if (LAST_ENABLE) begin
+        assign m_axis_tlast = last_reg;
+    end else begin
+        assign m_axis_tlast = 0;
+    end
+
+    if (ID_ENABLE) begin
+        assign m_axis_tid = id_reg;
+    end else begin
+        assign m_axis_tid = 0;
+    end
+
+    if (DEST_ENABLE) begin
+        assign m_axis_tdest = dest_reg;
+    end else begin
+        assign m_axis_tdest = 0;
+    end
+
+    if (USER_ENABLE) begin
+        assign m_axis_tuser = user_reg;
+    end else begin
+        assign m_axis_tuser = 0;
+    end
+
+end
+endgenerate
+
+endmodule
+```
+</answer>

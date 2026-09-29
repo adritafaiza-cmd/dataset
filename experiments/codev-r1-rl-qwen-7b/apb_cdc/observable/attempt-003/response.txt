@@ -1,0 +1,1270 @@
+<think>Okay, I need to design an APB clock-domain bridge in Verilog. Let's start by understanding the requirements. The bridge has two clock domains: src_pclk_i and dst_pclk_i. The resets are active-low. The main goal is to pass APB requests from the source domain to the destination and wait for the response before completing the request.
+
+First, the APB protocol basics. APB transfers happen when PSEL and PENABLE are high. The transfer completes when PREADY is high. So the source side initiates a transfer, and the bridge needs to hold the request until the destination side completes it.
+
+Since the clocks are asynchronous, I need to handle clock domain crossings. The standard approach for handshakes between two clocks is using a handshake mechanism with request and acknowledge signals. Let's think about the handshake signals.
+
+The source domain will generate a request (src_req) when a transfer starts (PSEL and PENABLE). Then, this request is synchronized to the destination clock domain using a two-flop synchronizer. Once the destination acknowledges (dst_ack), the source can complete the transfer.
+
+Wait, but APB has the PREADY signal. The bridge can't complete the transfer until the destination side does. So the source side's pready_o should be low until the destination's pready_i comes back.
+
+So the steps would be:
+
+1. On the source side: when a transfer starts (src_psel_i and src_penable_i), latch the request and the data (addr, write, etc.) into a register. Then, generate a request signal (src_req) which is sent to the destination domain.
+
+2. The request is synchronized to the destination clock using a two-stage synchronizer. Once the destination domain sees the request, it processes the transfer and sends back an acknowledge (dst_ack). This ack is synchronized back to the source domain.
+
+3. Once the ack is received in the source domain, the source can assert pready_o, completing the transfer.
+
+Wait, but APB protocol requires that PREADY is only valid when PSEL and PENABLE are high. So the handshake needs to be done in such a way that the source side holds the request until the destination's response.
+
+Another approach: Use a FIFO for the request and response. But since the data is small (APB signals), maybe a handshake with a toggle or a req/ack with handshaking.
+
+Alternatively, use a two-phase handshake with a req and ack. The source domain raises a request, the destination domain processes it, and then sends an ack. The source waits for the ack before completing the transfer.
+
+But how to synchronize the req and ack across the clock domains.
+
+Wait, the standard way for APB CDC is to use a handshake mechanism. Let's outline the steps.
+
+In the source domain:
+
+When a transfer starts (src_psel_i and src_penable_i and src_pready_o is high?), but wait, the source's pready is the output. Wait, in APB, the transfer starts when PSEL and PENABLE are high. The slave responds with PREADY. If PREADY is low, the transfer is extended.
+
+Wait, the APB protocol is that the master (the bridge here) initiates a transfer by setting PSEL and PENABLE. The slave responds with PREADY. If PREADY is 0, the transfer is extended. So the bridge's pready_o is the signal that indicates the transfer can complete.
+
+In the bridge's case, the source side (the APB master side) initiates a transfer. The bridge must hold the transfer until the destination (APB slave) completes it. So the bridge's pready_o is low until the destination's pready_i comes back.
+
+So the steps would be:
+
+1. When the source side starts a transfer (src_psel_i and src_penable_i are high), the bridge needs to latch the request and data (addr, write, etc.) into a register.
+
+2. Then, the bridge sends a request to the destination domain. The destination domain processes the request and when done, sends back an ack.
+
+3. The bridge in the source domain waits for the ack, then asserts pready_o to complete the transfer.
+
+But how to synchronize the request and ack across the two clock domains.
+
+Possible approach:
+
+Use a req/ack handshake with synchronization.
+
+In the source domain:
+
+- When a transfer starts (src_psel_i and src_penable_i and src_pready_o is high?), but wait, the bridge's pready is the output. Wait, the bridge's pready is the source's output. Wait, in the APB protocol, the master (the bridge here) initiates the transfer. Wait, the bridge is acting as an APB master on the source side and as a bridge to the destination.
+
+Wait, the APB protocol has a master and a slave. The bridge here is the master on the source side and the slave on the destination side. Wait, no. Wait, the bridge is supposed to pass the requests from the source (APB master) to the destination (APB slave). Wait, the APB master initiates the transfer. Wait, maybe the bridge is sitting between an APB master and an APB slave, but the bridge is crossing clock domains.
+
+Wait, the module's interface:
+
+The inputs are src_pclk_i (the master's clock), and the outputs are the destination's signals (dst_psel_o, etc.), which would connect to the destination APB slave.
+
+Wait, the bridge is acting as a master on the source side (generating the APB signals to the destination) and as a slave on the destination side? Wait, no. Wait, the bridge's source side is the master side (the master initiates the transfer). Wait, the APB protocol: the master initiates the transfer by asserting PSEL, PENABLE, etc. So the bridge here is the master on the source side (the side connected to the master) and the slave on the destination side (connected to the slave). Wait, but the bridge is supposed to pass the requests from the master to the slave across clock domains.
+
+Wait, the bridge's source side (src_pclk_i) is the master's clock. The bridge's destination side (dst_pclk_i) is the slave's clock. So the bridge is acting as a master on the source side (generating the APB signals to the destination) and the slave on the destination side? Wait, no. Wait, the bridge is between two APB domains. Wait, perhaps the bridge is acting as a master on the source side (the master initiates the transfer) and the destination is a slave. Wait, but the bridge's destination side is connected to the slave's APB interface.
+
+Wait, the bridge's inputs are the master's APB signals (src_*), and the outputs are the slave's APB signals (dst_*). So the bridge is the master on the source side (the side connected to the master) and the slave on the destination side (connected to the slave). Wait, but APB is a point-to-point interface. Hmm, perhaps the bridge is acting as a master on the source side (generating the APB signals to the destination) and the destination is a slave. Wait, but the bridge's destination side is the APB slave's interface. So the bridge's source is the master, destination is the slave.
+
+Wait, the APB protocol is that the master initiates the transfer. So the bridge here is the master on the source side (the master's side) and the bridge's destination is the slave's side. Wait, but the bridge's destination side is connected to the slave's APB interface. So the bridge's source side is the master (the one initiating the transfer) and the destination is the slave.
+
+Wait, the bridge's inputs (src_*) are the master's signals. The bridge's outputs (dst_*) are connected to the slave. So the bridge is acting as a master on the source side (the master's side) and the bridge's destination is the slave's side.
+
+In that case, the bridge's source side is the master initiating the transfer. The bridge must cross the clock to the destination (slave) side, which is in a different clock domain.
+
+So the process would be:
+
+1. The master (source side) starts a transfer (src_psel_i and src_penable_i are high). The bridge must then pass this to the destination side (slave) and wait until the slave completes the transfer (dst_pready_i is high). Once the slave's transfer is done, the bridge can complete the original transfer (assert src_pready_o).
+
+But the clocks are separate. So the handshake between the two domains is needed.
+
+So the steps:
+
+In the source domain:
+
+- When a transfer starts (src_psel_i and src_penable_i are high and the bridge is ready to accept a new transfer), latch the address, data, etc. into a register.
+
+- Then, generate a request signal (src_req) which is synchronized to the destination clock domain.
+
+In the destination domain:
+
+- Once the synchronized request is detected, perform the APB transfer on the destination side (slave). Wait until dst_pready_i comes back.
+
+- Once the transfer completes (dst_pready_i is high), generate an acknowledge signal (dst_ack) which is synchronized back to the source domain.
+
+In the source domain:
+
+- Wait for the acknowledge. Once received, the bridge can assert src_pready_o to complete the transfer.
+
+But the APB protocol requires that PREADY is only valid when PSEL and PENABLE are active. So the bridge's pready_o is only valid when PSEL and PENABLE are active.
+
+Wait, the APB transfer is as follows:
+
+The master (bridge) asserts PSELx and PENABLEx in the address phase. Then in the data phase, PENABLE is kept high. The slave responds with PREADY. If PREADY is high, the transfer completes. If not, the data phase is extended.
+
+In the bridge's case, the source side is the master. The bridge's source side (src_*) is the master's signals. The bridge's destination side (dst_*) is connected to the slave.
+
+So the bridge's job is to pass the request from the source (master) to the destination (slave) and wait for the response.
+
+But since the destination is in a different clock domain, the bridge must handle CDC.
+
+So the steps:
+
+When the source side starts a transfer (src_psel_i and src_penable_i are high), the bridge must:
+
+1. Latch the address, data, write, etc. into a register.
+
+2. Send a request to the destination domain (using a handshake).
+
+3. Wait for the destination to process the request and send back the response (data and error).
+
+4. Once the response is received, complete the transfer by asserting src_pready_o.
+
+Now, the handshake between the two domains.
+
+Possible approach:
+
+Use a two-register handshake with req and ack.
+
+In the source domain:
+
+- When a transfer starts (src_psel_i and src_penable_i are high and src_pready_o is high?), wait, but the bridge's pready is the output. Wait, in APB, the master (bridge) can't proceed until the slave (destination) is ready. Wait, the bridge's pready_o is the signal that the current transfer can complete.
+
+Wait, the bridge's pready_o is the output. So when the bridge is ready to accept a new transfer, pready is high. But in our case, the bridge can't accept a new transfer until the previous one is completed.
+
+Wait, the bridge can't start a new transfer until the previous one is done. So the bridge's pready_o is low when it's busy.
+
+Wait, the APB protocol allows the transfer to be extended (PREADY low) if the slave is not ready. So the bridge's pready_o is the signal that the destination has completed the transfer.
+
+Wait, the bridge's pready_o is the same as the destination's pready_i. Wait, no. Because the bridge is acting as a master on the source side. Wait, the bridge's source side is the master. The bridge's destination is the slave.
+
+Wait, the bridge's source side (src_*) is the master's interface. The bridge's destination is the slave's interface.
+
+In that case, the bridge's pready_o (src_pready_o) is the signal that the bridge's current transfer can complete. So when the bridge is in the middle of a transfer (waiting for the destination), pready_o is low. Once the destination responds, pready_o goes high, allowing the transfer to complete.
+
+So the steps:
+
+When the source initiates a transfer (src_psel_i and src_penable_i are high), the bridge must:
+
+1. Latch the address, data, etc.
+
+2. Start the transfer on the destination side (slave). Wait for the destination's pready_i.
+
+3. Once the destination's transfer completes (dst_pready_i is high), the bridge can assert pready_o (src_pready_o) to complete the transfer.
+
+But the clocks are different. So the handshake between the two.
+
+Wait, but the destination's pready_i is synchronous to dst_pclk_i. So the bridge's source side (src_pclk_i) and destination side (dst_pclk_i) are asynchronous.
+
+Wait, but the bridge's source side is the master initiating the transfer. The destination is the slave. So the bridge's source side is the master's side, and the destination is the slave's side.
+
+In that case, the bridge's source side is the master, and the destination is the slave. The bridge's job is to cross the clock domains.
+
+But the APB protocol is synchronous to the clock of the slave. Wait, APB is a synchronous protocol. The master and slave are in the same clock domain. But here, the bridge is between two different clocks.
+
+So the bridge's source side (src_pclk_i) is the master's clock. The destination's clock is dst_pclk_i.
+
+The bridge must pass the request from the master's side (src) to the slave's side (dst) and wait for the response.
+
+But the APB protocol requires that the slave responds in the same clock domain. Wait, but the slave is in a different domain here.
+
+Wait, the destination's signals (dst_*) are connected to the slave's APB interface. The slave's clock is dst_pclk_i. So the bridge's destination side operates in that domain.
+
+So the bridge's source side (src) is the master's side (APB master), and the destination is the slave's side (APB slave). The bridge must handle CDC between the two.
+
+The standard approach here is to use a handshake mechanism.
+
+Let me outline the possible signals:
+
+In the source domain (src_pclk_i):
+
+- When a transfer starts (src_psel_i and src_penable_i are high), we need to latch the data and start the transfer.
+
+- Generate a request signal (src_req) which is sent to the destination domain.
+
+In the destination domain (dst_pclk_i):
+
+- Once the request is detected (after synchronization), perform the APB transfer.
+
+- Wait for the destination's pready_i (slave's response) and capture the data and error.
+
+- Then generate an acknowledge (dst_ack) which is sent back to the source domain.
+
+In the source domain:
+
+- Wait for the acknowledge. Once received, the bridge can assert pready_o to complete the transfer.
+
+Now, the handshake steps:
+
+1. Source domain:
+
+   a. When a transfer starts (src_psel_i and src_penable_i are high and pready_o is high?), but wait, the bridge's pready is the output. Wait, the bridge's pready_o is the signal that the current transfer can complete. So when the bridge is ready to accept a new transfer, pready is high. But in this case, the bridge can't accept a new transfer until the previous one is done. So pready is low while the bridge is busy.
+
+Wait, the APB protocol allows the transfer to be extended (pready low) if the slave is not ready. So the bridge's pready_o is the same as the destination's response.
+
+Wait, the bridge's pready_o is the same as the destination's pready_i. Wait, no. Because the bridge is acting as a master on the source side. Wait, the bridge's source side is the master. The bridge's destination is the slave.
+
+Wait, the bridge's source side (src_*) is the master's interface. The bridge's destination is the slave's interface.
+
+In that case, the bridge's pready_o (src_pready_o) is the same as the slave's response (dst_pready_i). Wait, but the bridge is in between. Hmm, perhaps the bridge's pready_o is the same as the destination's pready_i. Wait, but the bridge's destination is the slave. So when the bridge's destination (slave) responds with pready_i, that's the same as the bridge's pready_o.
+
+Wait, maybe the bridge's pready_o is directly connected to the destination's pready_i. But that's only possible if the bridge's source and destination are in the same clock domain. But here they are in different domains.
+
+This is getting a bit complicated. Let's think again.
+
+The bridge's source side is the master (APB master), and the destination is the slave (APB slave). The bridge is sitting between the two, and the clocks are different.
+
+The master initiates the transfer. The bridge must pass the request to the slave (destination) in another clock domain. The slave's response comes back, and the bridge must pass that back to the master.
+
+So the steps:
+
+1. Master starts a transfer (src_psel_i and src_penable_i are high). The bridge latches the data and starts the transfer on the destination side.
+
+2. The bridge's destination side (slave) is in a different clock domain. The bridge must handle CDC here.
+
+3. Once the slave responds (dst_pready_i is high), the bridge completes the transfer (src_pready_o is high).
+
+But the CDC between the two domains.
+
+Possible approach: Use a two-register synchronizer for the request and ack.
+
+Let's outline the signals:
+
+In the source domain:
+
+- When a transfer starts (src_psel_i and src_penable_i are high and pready_o is high?), but wait, the bridge's pready_o is the output. Wait, the bridge's pready_o is the signal that the current transfer can complete. So when the bridge is ready to accept a new transfer, pready is high. But in this case, the bridge can't accept a new transfer until the previous one is done. So pready is low while the bridge is busy.
+
+Wait, the bridge's pready_o is the same as the destination's response. Wait, but the destination is in a different clock domain.
+
+Alternatively, the bridge's pready_o is high when there's no ongoing transfer. Once a transfer starts, pready_o goes low until the destination responds.
+
+Wait, the APB protocol allows the transfer to be extended (pready low) if the slave is not ready. So the bridge's pready_o is the same as the destination's response.
+
+Wait, but the destination is in a different clock domain. So the bridge's pready_o is the synchronized version of the destination's pready_i.
+
+Wait, but the destination's pready_i is in the dst_pclk domain. So the bridge's pready_o (src_pready_o) is the dst_pready_i synchronized to the source clock.
+
+But that's not correct. Because the bridge's pready_o is the response to the current transfer.
+
+Alternatively, the bridge's pready_o is generated once the destination's response is received.
+
+Hmm. Let's think of the bridge as a state machine.
+
+Possible states:
+
+- IDLE: No ongoing transfer. pready_o is high. When a transfer starts (src_psel and penable), latch the data and move to WAIT state.
+
+- WAIT: pready_o is low. Wait for the destination to respond. Once response comes, move back to IDLE.
+
+In the WAIT state, the bridge is waiting for the destination's response. The destination's response is in the dst_pclk domain.
+
+So the steps:
+
+In IDLE:
+
+- When src_psel_i and src_penable_i are high, latch the data (addr, write, etc.) into a register.
+
+- Generate a request (src_req) to the destination.
+
+In WAIT:
+
+- Wait until the destination's response (dst_pready_i) comes.
+
+- Once received, output the data and error, and return to IDLE.
+
+But the clocks are different. So the request from IDLE to WAIT must be synchronized.
+
+Wait, the request is generated in the source domain (src_pclk) and sent to the destination (dst_pclk). The destination processes the request and sends back an ack.
+
+So the handshake:
+
+In source domain:
+
+- When a transfer starts (src_psel and penable), generate a request (src_req) and hold the data.
+
+- src_req is synchronized to the destination domain via two flip-flops.
+
+In destination domain:
+
+- Once the synchronized request is detected, perform the APB transfer.
+
+- Wait for the destination's pready_i (slave's response).
+
+- Once received, generate an ack (dst_ack) which is synchronized back to the source domain.
+
+In source domain:
+
+- Wait for the ack. Once received, complete the transfer (pready_o is high) and go back to IDLE.
+
+So the code would have:
+
+In the source domain:
+
+- A state machine with IDLE and WAIT states.
+
+- When in IDLE and a transfer starts, latch the data and move to WAIT.
+
+- In WAIT, wait for the ack.
+
+In the destination domain:
+
+- Once the request is detected (after synchronization), perform the APB transfer.
+
+- Wait for dst_pready_i.
+
+- Once received, generate ack.
+
+Now, the Verilog code.
+
+First, the source domain:
+
+Registers to hold the data during transfer.
+
+In the source domain:
+
+- When starting a transfer (src_psel_i and src_penable_i and src_pready_o is high?), but wait, the bridge's pready is the output. Wait, in the IDLE state, pready is high. When a transfer starts, pready goes low.
+
+Wait, the bridge's pready_o is high when it can accept a new transfer. So when in IDLE, pready is high. When a transfer starts (src_psel and penable), pready goes low (busy), and the data is latched.
+
+So:
+
+State machine:
+
+IDLE:
+
+   if (src_psel_i && src_penable_i && src_pready_o) then latch data and move to BUSY.
+
+BUSY:
+
+   Wait for ack from destination. Once ack comes, go back to IDLE.
+
+But the ack is synchronized from the destination.
+
+Now, the code outline:
+
+In the source domain:
+
+reg [ADDR_WIDTH-1:0] addr_reg;
+reg [DATA_WIDTH-1:0] wdata_reg;
+reg [DATA_WIDTH/8-1:0] strb_reg;
+reg write_reg;
+reg [2:0] prot_reg;
+reg pready_reg;
+
+reg state; // 0: IDLE, 1: BUSY
+
+// Synchronizers for request and ack.
+
+In the source domain:
+
+// Generate request to destination.
+
+// When starting a transfer, set req and data.
+
+// Then synchronize the ack.
+
+Wait, the handshake:
+
+In source domain:
+
+- When in IDLE and a transfer starts (src_psel and penable and pready is high), latch the data and set a req signal.
+
+- The req is sent to destination via synchronizer.
+
+In destination domain:
+
+- Once the synchronized req is detected, perform the APB transfer.
+
+- Wait for dst_pready_i.
+
+- Once received, generate an ack.
+
+The ack is synchronized back to the source domain.
+
+Once the ack is received, the source domain completes the transfer.
+
+Now, code:
+
+First, the source domain:
+
+// Source domain registers
+reg [ADDR_WIDTH-1:0] addr_reg;
+reg [DATA_WIDTH-1:0] wdata_reg;
+reg [DATA_WIDTH/8-1:0] strb_reg;
+reg write_reg;
+reg [2:0] prot_reg;
+
+// State machine
+reg state; // 0: IDLE, 1: BUSY
+
+// Request to destination (src_req)
+reg src_req;
+
+// Synchronizers for ack from destination
+reg dst_ack_sync1, dst_ack_sync2;
+
+// Generate src_req when starting a transfer
+always @(posedge src_pclk_i or negedge src_preset_ni) begin
+    if (!src_preset_ni) begin
+        state <= 0;
+        src_req <= 0;
+        addr_reg <= 0;
+        // ... other resets
+    end else begin
+        case (state)
+            0: begin // IDLE
+                if (src_psel_i && src_penable_i && src_pready_o) begin
+                    // Latch data
+                    addr_reg <= src_paddr_i;
+                    wdata_reg <= src_pwdata_i;
+                    strb_reg <= src_pstrb_i;
+                    write_reg <= src_pwrite_i;
+                    prot_reg <= src_pprot_i;
+                    src_req <= 1;
+                    state <= 1;
+                end
+            end
+            1: begin // BUSY
+                if (dst_ack_sync2) begin
+                    src_req <= 0;
+                    state <= 0;
+                end
+            end
+        endcase
+    end
+end
+
+// Synchronize the ack from destination
+always @(posedge src_pclk_i or negedge src_preset_ni) begin
+    if (!src_preset_ni) begin
+        dst_ack_sync1 <= 0;
+        dst_ack_sync2 <= 0;
+    end else begin
+        dst_ack_sync1 <= dst_ack;
+        dst_ack_sync2 <= dst_ack_sync1;
+    end
+end
+
+// Generate pready_o
+assign src_pready_o = (state == 0);
+
+// Assign outputs to destination
+assign dst_psel_o = (state == 1) && !src_req; // Wait, when in BUSY state, the destination's PSEL is active?
+Wait, no. The destination's PSEL should be active when the bridge is in BUSY state and the ack hasn't been received yet.
+
+Wait, the destination's PSEL is active when the bridge is in the BUSY state and the request is being processed.
+
+Wait, the destination's PSEL is generated as:
+
+In the BUSY state, the bridge is waiting for the ack. Once the ack comes, the transfer is done.
+
+Wait, the destination's PSEL is active during the BUSY state until the ack is received.
+
+Wait, the destination's PSEL should be active once the request is sent and until the ack comes.
+
+But the APB protocol requires that PSEL and PENABLE are held until the transfer completes.
+
+Hmm. Alternatively, the bridge's destination side is a master, so when the bridge is in BUSY state, the destination's PSEL is active.
+
+Wait, the bridge's destination side is connected to the slave. The bridge's destination signals (dst_psel_o, etc.) are driven by the bridge's state.
+
+In the BUSY state, the bridge is waiting for the destination's response. So the destination's PSEL should be active until the ack comes.
+
+Wait, but the APB transfer on the destination side would have to be initiated once the request is sent.
+
+Wait, perhaps the bridge's destination side is a master, so when the bridge is in BUSY state, it starts the APB transfer on the destination side.
+
+Wait, but the destination is a slave. Hmm, maybe I'm getting confused.
+
+Wait, the bridge's destination side is connected to the slave. The bridge's destination signals (dst_psel_o, etc.) are the slave's interface.
+
+In the bridge's source domain (acting as a master), when a transfer starts, the bridge's destination (slave) is supposed to receive the request.
+
+Wait, no. The bridge's destination is the slave. The bridge's source is the master. So the bridge's destination is the slave's interface. The bridge's source is the master's interface.
+
+Wait, perhaps the bridge's destination is the slave's interface. So the bridge's destination side is the slave's APB interface. So the bridge's destination signals (dst_psel_o) are inputs to the slave.
+
+In that case, the bridge's destination side (slave) must perform the APB transfer.
+
+Wait, this is getting too complicated. Let's refer to standard CDC techniques for APB.
+
+An APB CDC bridge typically uses a handshake mechanism with a req and ack.
+
+The standard approach is:
+
+- The source domain (master side) sends a request to the destination domain (slave side).
+
+- The request is synchronized to the destination clock.
+
+- The destination processes the request and sends back an ack.
+
+- The ack is synchronized back to the source domain.
+
+In the source domain:
+
+- When a transfer starts, latch the data and assert a req signal.
+
+- Wait until the ack is received.
+
+- Once ack is received, complete the transfer.
+
+In the destination domain:
+
+- Once the synchronized req is detected, perform the APB transfer.
+
+- Wait for the slave's response (pready_i).
+
+- Once received, assert ack.
+
+Now, the code.
+
+In the source domain:
+
+// Source domain registers
+reg [ADDR_WIDTH-1:0] addr_reg;
+reg [DATA_WIDTH-1:0] wdata_reg;
+reg [DATA_WIDTH/8-1:0] strb_reg;
+reg write_reg;
+reg [2:0] prot_reg;
+
+// State: IDLE or BUSY
+reg state;
+
+// req signal
+reg req;
+
+// Synchronizers for req and ack
+reg dst_req_sync1, dst_req_sync2;
+reg ack;
+
+// Destination's ack synchronization
+reg src_ack_sync1, src_ack_sync2;
+
+// APB signals to destination
+assign dst_psel_o = (state == BUSY) && (dst_req_sync2 == 1);
+assign dst_penable_o = (state == BUSY) && (dst_req_sync2 == 1);
+assign dst_paddr_o = addr_reg;
+// ... other signals
+
+// State machine
+always @(posedge src_pclk_i or negedge src_preset_ni) begin
+    if (!src_preset_ni) begin
+        state <= IDLE;
+        req <= 0;
+        // reset other registers
+    end else begin
+        case (state)
+            IDLE: begin
+                if (src_psel_i && src_penable_i && src_pready_o) begin
+                    // Latch data
+                    addr_reg <= src_paddr_i;
+                    wdata_reg <= src_pwdata_i;
+                    strb_reg <= src_pstrb_i;
+                    write_reg <= src_pwrite_i;
+                    prot_reg <= src_pprot_i;
+                    req <= 1;
+                    state <= BUSY;
+                end
+            end
+            BUSY: begin
+                if (dst_ack_sync2) begin
+                    req <= 0;
+                    state <= IDLE;
+                end
+            end
+        endcase
+    end
+end
+
+// Synchronize req to destination domain
+always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+    if (!dst_preset_ni) begin
+        dst_req_sync1 <= 0;
+        dst_req_sync2 <= 0;
+    end else begin
+        dst_req_sync1 <= req;
+        dst_req_sync2 <= dst_req_sync1;
+    end
+end
+
+// Destination domain processing
+// Once dst_req_sync2 is high, perform APB transfer
+// Wait for dst_pready_i
+
+// Generate ack when done
+reg ack;
+
+always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+    if (!dst_preset_ni) begin
+        ack <= 0;
+    end else begin
+        if (dst_req_sync2 && !ack) begin
+            // Start APB transfer here
+            // Wait for dst_pready_i
+            // Once received, set ack
+            if (dst_pready_i) begin
+                ack <= 1;
+            end
+        end else if (ack) begin
+            ack <= 0; // Reset ack after one cycle?
+        end
+    end
+end
+
+// Synchronize ack back to source domain
+always @(posedge src_pclk_i or negedge src_preset_ni) begin
+    if (!src_preset_ni) begin
+        src_ack_sync1 <= 0;
+        src_ack_sync2 <= 0;
+    end else begin
+        src_ack_sync1 <= ack;
+        src_ack_sync2 <= src_ack_sync1;
+    end
+end
+
+// Assign pready_o
+assign src_pready_o = (state == IDLE);
+
+// Assign destination signals
+assign dst_psel_o = (state == BUSY) && dst_req_sync2;
+assign dst_penable_o = (state == BUSY) && dst_req_sync2;
+assign dst_pwrite_o = write_reg;
+assign dst_paddr_o = addr_reg;
+assign dst_pwdata_o = wdata_reg;
+assign dst_pstrb_o = strb_reg;
+assign dst_pprot_o = prot_reg;
+
+// Assign response from destination
+assign src_prdata_o = dst_prdata_i;
+assign src_pslverr_o = dst_pslverr_i;
+
+Wait, but in the destination domain, the APB transfer is initiated once the synchronized request is detected. The destination's PSEL and PENABLE are driven based on the state.
+
+Wait, but the destination's PSEL and PENABLE should be active when the bridge is in BUSY state and the request is active.
+
+But in the code above, the destination's PSEL and PENABLE are active when state is BUSY and the synchronized request is active.
+
+But the APB transfer on the destination side would need to be driven.
+
+Wait, the destination's PSEL and PENABLE are outputs from the bridge. The bridge's destination side is acting as a master towards the slave.
+
+Wait, no. The bridge's destination side is connected to the slave. So the bridge's destination signals are inputs to the slave. Wait, no. The slave's signals are inputs to the bridge. Wait, the bridge's destination signals (dst_psel_o) are the outputs of the bridge to the slave's PSEL input.
+
+Yes. So the bridge's destination side is the master initiating the transfer on the slave's side.
+
+Wait, no. The bridge's destination is the slave's interface. The bridge's destination signals (dst_psel_o) are the slave's PSEL input.
+
+Wait, the slave's PSEL is an input. So the bridge's destination signals (outputs) are connected to the slave's PSEL, etc.
+
+In that case, the bridge's destination side is acting as a master towards the slave.
+
+Wait, but the bridge's source is the master (the one initiating the transfer). The bridge's destination is the slave.
+
+So the bridge's destination side is the slave's interface. The bridge's source is the master's interface.
+
+In that case, the bridge's destination side (slave) must respond to the master's (bridge's source) requests.
+
+But the bridge's destination is in a different clock domain.
+
+This is getting too complicated. Let's proceed with the code.
+
+The final code would have:
+
+In the source domain:
+
+- Latch the request when starting.
+
+- Generate a request signal (req) which is synchronized to the destination domain.
+
+In the destination domain:
+
+- Once the synchronized request is detected, perform the APB transfer.
+
+- Wait for the destination's pready_i.
+
+- Once received, generate an ack which is synchronized back.
+
+The code:
+
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    // Source domain registers
+    reg [ADDR_WIDTH-1:0] addr_reg;
+    reg [DATA_WIDTH-1:0] wdata_reg;
+    reg [DATA_WIDTH/8-1:0] strb_reg;
+    reg write_reg;
+    reg [2:0] prot_reg;
+
+    reg state; // 0: IDLE, 1: BUSY
+    reg req;
+
+    // Synchronizers for req and ack
+    reg dst_req_sync1, dst_req_sync2;
+    reg ack;
+
+    // Destination domain ack synchronization
+    reg src_ack_sync1, src_ack_sync2;
+
+    // APB signals to destination
+    reg dst_psel_reg;
+    reg dst_penable_reg;
+    reg dst_pwrite_reg;
+    reg [ADDR_WIDTH-1:0] dst_paddr_reg;
+    reg [DATA_WIDTH-1:0] dst_pwdata_reg;
+    reg [DATA_WIDTH/8-1:0] dst_pstrb_reg;
+    reg [2:0] dst_pprot_reg;
+
+    // Source domain logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            state <= 0;
+            req <= 0;
+            addr_reg <= 0;
+            wdata_reg <= 0;
+            strb_reg <= 0;
+            write_reg <= 0;
+            prot_reg <= 0;
+        end else begin
+            case (state)
+                0: begin // IDLE
+                    if (src_psel_i && src_penable_i && src_pready_o) begin
+                        // Latch the data
+                        addr_reg <= src_paddr_i;
+                        wdata_reg <= src_pwdata_i;
+                        strb_reg <= src_pstrb_i;
+                        write_reg <= src_pwrite_i;
+                        prot_reg <= src_pprot_i;
+                        req <= 1;
+                        state <= 1;
+                    end
+                end
+                1: begin // BUSY
+                    if (src_ack_sync2) begin
+                        req <= 0;
+                        state <= 0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Synchronize req to destination domain
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_req_sync1 <= 0;
+            dst_req_sync2 <= 0;
+        end else begin
+            dst_req_sync1 <= req;
+            dst_req_sync2 <= dst_req_sync1;
+        end
+    end
+
+    // Destination domain logic
+    reg dst_ack;
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_ack <= 0;
+        end else begin
+            if (dst_req_sync2 && !dst_ack) begin
+                // Perform APB transfer here
+                // Wait for dst_pready_i
+                if (dst_pready_i) begin
+                    dst_ack <= 1;
+                end
+            end else if (dst_ack) begin
+                dst_ack <= 0;
+            end
+        end
+    end
+
+    // Synchronize ack back to source domain
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_ack_sync1 <= 0;
+            src_ack_sync2 <= 0;
+        end else begin
+            src_ack_sync1 <= dst_ack;
+            src_ack_sync2 <= src_ack_sync1;
+        end
+    end
+
+    // Assign outputs to destination
+    assign dst_psel_o = (state == 1) && dst_req_sync2;
+    assign dst_penable_o = (state == 1) && dst_req_sync2;
+    assign dst_pwrite_o = write_reg;
+    assign dst_paddr_o = addr_reg;
+    assign dst_pwdata_o = wdata_reg;
+    assign dst_pstrb_o = strb_reg;
+    assign dst_pprot_o = prot_reg;
+
+    // Assign pready_o
+    assign src_pready_o = (state == 0);
+
+    // Assign response from destination
+    assign src_prdata_o = dst_prdata_i;
+    assign src_pslverr_o = dst_pslverr_i;
+
+endmodule
+
+Wait, but in the destination domain, the APB transfer is initiated once the synchronized request is active. The destination's PSEL and PENABLE are driven based on the state and the synchronized request.
+
+But in the code above, the destination's PSEL and PENABLE are active when state is 1 (BUSY) and the synchronized request is active.
+
+But the APB transfer requires that PSEL and PENABLE are held until the transfer completes.
+
+Wait, in the destination domain, once the synchronized request is active (dst_req_sync2), the bridge starts the APB transfer. The PSEL and PENABLE are driven high, and then wait for the destination's pready_i.
+
+But in the code above, the destination's PSEL and PENABLE are active only when state is BUSY and the synchronized request is active.
+
+But the state is BUSY once the request is sent. The destination's PSEL and PENABLE would be active until the ack comes.
+
+Wait, perhaps the code should drive the destination's PSEL and PENABLE as follows:
+
+Once the synchronized request is detected (dst_req_sync2), the destination's PSEL and PENABLE are asserted.
+
+But the APB transfer on the destination side would need to be held until the slave responds.
+
+But in the code above, the destination's PSEL and PENABLE are active only when the state is BUSY and the synchronized request is active.
+
+Hmm, maybe the code is missing the actual APB transfer on the destination side.
+
+Wait, the destination's PSEL and PENABLE are outputs from the bridge. The bridge's destination side is acting as a master towards the slave.
+
+Wait, the bridge's destination is the slave's interface. The bridge's destination signals are connected to the slave's APB interface.
+
+In that case, the bridge's destination side (slave) must perform the APB transfer.
+
+Wait, no. The bridge's destination is the slave's interface. The bridge's destination signals are the inputs to the slave.
+
+Wait, the slave's APB interface has PSEL, PENABLE, etc. as inputs. So the bridge's destination signals (outputs) are connected to the slave's inputs.
+
+Thus, the bridge's destination side is acting as a master towards the slave.
+
+In that case, the bridge's destination side initiates the transfer.
+
+Thus, the code should drive the destination's PSEL and PENABLE when the synchronized request is active.
+
+Once the request is synchronized (dst_req_sync2), the bridge's destination side starts the APB transfer.
+
+The code would then drive PSEL and PENABLE high, and wait for the slave's pready_i.
+
+Once pready_i is received, the bridge generates an ack.
+
+Thus, the code for the destination domain:
+
+// Once dst_req_sync2 is active, drive the APB signals.
+
+// State machine in destination domain.
+
+reg dst_state; // 0: IDLE, 1: BUSY
+
+always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+    if (!dst_preset_ni) begin
+        dst_state <= 0;
+        dst_ack <= 0;
+    end else begin
+        case (dst_state)
+            0: begin
+                if (dst_req_sync2) begin
+                    // Start transfer
+                    dst_psel_reg <= 1;
+                    dst_penable_reg <= 1;
+                    dst_state <= 1;
+                end
+            end
+            1: begin
+                if (dst_pready_i) begin
+                    // Transfer done
+                    dst_psel_reg <= 0;
+                    dst_penable_reg <= 0;
+                    dst_ack <= 1;
+                    dst_state <= 0;
+                end
+            end
+        endcase
+    end
+end
+
+But this is getting complicated. Given time constraints, perhaps the code should be as follows:
+
+Final code:
+
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    // Source domain registers
+    reg [ADDR_WIDTH-1:0] addr_reg;
+    reg [DATA_WIDTH-1:0] wdata_reg;
+    reg [DATA_WIDTH/8-1:0] strb_reg;
+    reg write_reg;
+    reg [2:0] prot_reg;
+
+    reg state; // 0: IDLE, 1: BUSY
+    reg req;
+
+    // Synchronizers for req and ack
+    reg dst_req_sync1, dst_req_sync2;
+    reg ack;
+
+    // Destination domain ack synchronization
+    reg src_ack_sync1, src_ack_sync2;
+
+    // APB signals to destination
+    reg dst_psel_reg;
+    reg dst_penable_reg;
+    reg dst_pwrite_reg;
+    reg [ADDR_WIDTH-1:0] dst_paddr_reg;
+    reg [DATA_WIDTH-1:0] dst_pwdata_reg;
+    reg [DATA_WIDTH/8-1:0] dst_pstrb_reg;
+    reg [2:0] dst_pprot_reg;
+
+    // Source domain logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            state <= 0;
+            req <= 0;
+            addr_reg <= 0;
+            wdata_reg <= 0;
+            strb_reg <= 0;
+            write_reg <= 0;
+            prot_reg <= 0;
+        end else begin
+            case (state)
+                0: begin // IDLE
+                    if (src_psel_i && src_penable_i && src_pready_o) begin
+                        // Latch the data
+                        addr_reg <= src_paddr_i;
+                        wdata_reg <= src_pwdata_i;
+                        strb_reg <= src_pstrb_i;
+                        write_reg <= src_pwrite_i;
+                        prot_reg <= src_pprot_i;
+                        req <= 1;
+                        state <= 1;
+                    end
+                end
+                1: begin // BUSY
+                    if (src_ack_sync2) begin
+                        req <= 0;
+                        state <= 0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Synchronize req to destination domain
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_req_sync1 <= 0;
+            dst_req_sync2 <= 0;
+        end else begin
+            dst_req_sync1 <= req;
+            dst_req_sync2 <= dst_req_sync1;
+        end
+    end
+
+    // Destination domain logic
+    reg dst_ack;
+
+    // State machine in destination domain
+    reg dst_state; // 0: IDLE, 1: BUSY
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_state <= 0;
+            dst_ack <= 0;
+            dst_psel_reg <= 0;
+            dst_penable_reg <= 0;
+        end else begin
+            case (dst_state)
+                0: begin
+                    if (dst_req_sync2) begin
+                        // Start APB transfer
+                        dst_psel_reg <= 1;
+                        dst_penable_reg <= 1;
+                        dst_state <= 1;
+                    end
+                end
+                1: begin
+                    if (dst_pready_i) begin
+                        // Transfer done
+                        dst_psel_reg <= 0;
+                        dst_penable_reg <= 0;
+                        dst_ack <= 1;
+                        dst_state <= 0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Synchronize ack back to source domain
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_ack_sync1 <= 0;
+            src_ack_sync2 <= 0;
+        end else begin
+            src_ack_sync1 <= dst_ack;
+            src_ack_sync2 <= src_ack_sync1;
+        end
+    end
+
+    // Assign outputs to destination
+    assign dst_psel_o = dst_psel_reg;
+    assign dst_penable_o = dst_penable_reg;
+    assign dst_pwrite_o = write_reg;
+    assign dst_paddr_o = addr_reg;
+    assign dst_pwdata_o = wdata_reg;
+    assign dst_pstrb_o = strb_reg;
+    assign dst_pprot_o = prot_reg;
+
+    // Assign pready_o
+    assign src_pready_o = (state == 0);
+
+    // Assign response from destination
+    assign src_prdata_o = dst_prdata_i;
+    assign src_pslverr_o = dst_pslverr_i;
+
+endmodule
+
+Wait, but in the destination domain, the APB transfer is initiated once the synchronized request is active. The destination's PSEL and PENABLE are driven high, and the bridge waits for the destination's pready_i.
+
+Once received, the ack is generated.
+
+This code should handle the handshake.
+
+But need to check if the destination's PSEL and PENABLE are held until the transfer completes.
+
+In the destination domain's state machine:
+
+When in state 0 and dst_req_sync2 is active, it moves to state 1 and asserts PSEL and PENABLE.
+
+Then, waits for dst_pready_i. Once received, deasserts PSEL and PENABLE and generates ack.
+
+Yes.
+
+Thus, the code should work.
+</think>
+
+<answer>
+```verilog
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    // Source domain registers
+    reg [ADDR_WIDTH-1:0] addr_reg;
+    reg [DATA_WIDTH-1:0] wdata_reg;
+    reg [DATA_WIDTH/8-1:0] strb_reg;
+    reg write_reg;
+    reg [2:0] prot_reg;
+
+    reg state; // 0: IDLE, 1: BUSY
+    reg req;
+
+    // Synchronizers for req and ack
+    reg dst_req_sync1, dst_req_sync2;
+    reg dst_ack;
+
+    // Destination domain ack synchronization
+    reg src_ack_sync1, src_ack_sync2;
+
+    // APB signals to destination
+    reg dst_psel_reg;
+    reg dst_penable_reg;
+    reg dst_pwrite_reg;
+    reg [ADDR_WIDTH-1:0] dst_paddr_reg;
+    reg [DATA_WIDTH-1:0] dst_pwdata_reg;
+    reg [DATA_WIDTH/8-1:0] dst_pstrb_reg;
+    reg [2:0] dst_pprot_reg;
+
+    // Source domain logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            state <= 0;
+            req <= 0;
+            addr_reg <= 0;
+            wdata_reg <= 0;
+            strb_reg <= 0;
+            write_reg <= 0;
+            prot_reg <= 0;
+        end else begin
+            case (state)
+                0: begin // IDLE
+                    if (src_psel_i && src_penable_i && src_pready_o) begin
+                        // Latch the data
+                        addr_reg <= src_paddr_i;
+                        wdata_reg <= src_pwdata_i;
+                        strb_reg <= src_pstrb_i;
+                        write_reg <= src_pwrite_i;
+                        prot_reg <= src_pprot_i;
+                        req <= 1;
+                        state <= 1;
+                    end
+                end
+                1: begin // BUSY
+                    if (src_ack_sync2) begin
+                        req <= 0;
+                        state <= 0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Synchronize req to destination domain
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_req_sync1 <= 0;
+            dst_req_sync2 <= 0;
+        end else begin
+            dst_req_sync1 <= req;
+            dst_req_sync2 <= dst_req_sync1;
+        end
+    end
+
+    // Destination domain logic
+    reg dst_state; // 0: IDLE, 1: BUSY
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_state <= 0;
+            dst_ack <= 0;
+            dst_psel_reg <= 0;
+            dst_penable_reg <= 0;
+        end else begin
+            case (dst_state)
+                0: begin
+                    if (dst_req_sync2) begin
+                        // Start APB transfer
+                        dst_psel_reg <= 1;
+                        dst_penable_reg <= 1;
+                        dst_state <= 1;
+                    end
+                end
+                1: begin
+                    if (dst_pready_i) begin
+                        // Transfer done
+                        dst_psel_reg <= 0;
+                        dst_penable_reg <= 0;
+                        dst_ack <= 1;
+                        dst_state <= 0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Synchronize ack back to source domain
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_ack_sync1 <= 0;
+            src_ack_sync2 <= 0;
+        end else begin
+            src_ack_sync1 <= dst_ack;
+            src_ack_sync2 <= src_ack_sync1;
+        end
+    end
+
+    // Assign outputs to destination
+    assign dst_psel_o = dst_psel_reg;
+    assign dst_penable_o = dst_penable_reg;
+    assign dst_pwrite_o = write_reg;
+    assign dst_paddr_o = addr_reg;
+    assign dst_pwdata_o = wdata_reg;
+    assign dst_pstrb_o = strb_reg;
+    assign dst_pprot_o = prot_reg;
+
+    // Assign pready_o
+    assign src_pready_o = (state == 0);
+
+    // Assign response from destination
+    assign src_prdata_o = dst_prdata_i;
+    assign src_pslverr_o = dst_pslverr_i;
+
+endmodule
+```
+</answer>

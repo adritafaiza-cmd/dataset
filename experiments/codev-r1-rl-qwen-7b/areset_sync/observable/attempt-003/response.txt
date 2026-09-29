@@ -1,0 +1,475 @@
+<think>Okay, I need to write a Verilog module for a destination-clock reset-release synchronizer. The module is called areset_sync with parameters and ports specified. The main goal is to handle the asynchronous reset release into the destination clock domain properly.
+
+First, the parameters: STAGES is given as 2, but maybe the user wants it configurable. Wait, the parameter is already set with STAGES as a parameter, so the code should use that. The default is 2, but the code should allow changing it.
+
+The inputs are clk and async_rst_i. The output is sync_rst_o. The purpose is to synchronize the release of the asynchronous reset into the clk domain.
+
+The standard approach for a reset synchronizer is to have a chain of flip-flops. When the async reset is asserted (active high?), it should immediately assert the sync reset. When it's released, the async reset is de-asserted, and the sync reset is de-asserted only after the async reset is stable for a few clock cycles (the STAGES parameter).
+
+Wait, the reset could be active high or active low. The problem statement says "async_rst_i is released into the clk domain". Typically, async resets are active high. So when async_rst_i is asserted (1), the system is in reset. When it's de-asserted (0), the reset is released. Wait, but the naming here is a bit ambiguous. Let me think.
+
+In Verilog, common practice is to have active-high resets. So when async_rst_i is 1, the reset is active. The sync_rst_o should be the synchronized version. So the synchronizer should take the async reset and synchronize its de-assertion.
+
+The standard code for a reset synchronizer is:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {STAGES{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+    end
+end
+
+assign sync_rst_o = sync_reg[STAGES-1];
+
+Wait, but the initial state when async_rst_i is 0. Wait, when async_rst_i is asserted (1), the sync_reg is all 1s. Then when async_rst_i is released (goes to 0), the first flop gets 0, then shifts through.
+
+Wait, the code would be:
+
+The async reset is active high. When async_rst_i is high, the sync_reg is all ones (so sync_rst_o is high). When async_rst_i is de-asserted (goes low), the flops start shifting in zeros. After STAGES cycles, the sync_rst_o goes low.
+
+Wait, the code would be:
+
+The first flop's input is tied to 0. The chain is such that when async reset is active, all flops are set to 1. When async reset is released, each stage takes the previous one's value, so after STAGES cycles, the output is 0.
+
+Wait, maybe the code is:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {STAGES{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+    end
+end
+
+Wait, but in Verilog, the syntax {sync_reg[STAGES-2:0], 1'b0} would create a vector where the first STAGES-1 bits are the lower bits of sync_reg and then a 0. Wait, but if STAGES is 2, then the first flop would take the 0, and the second flop would take the first's previous value.
+
+Wait, maybe the code is:
+
+The first flop's input is 0. The rest of the flops take the previous one's output.
+
+Wait, the standard approach is:
+
+The async reset is connected to all flops. When async reset is active, all flops are set to 1. When async reset is released, the first flop's D is 0, and each subsequent flop takes the previous one's Q. So after two cycles, the output is 0.
+
+Wait, here's a standard code:
+
+module areset_sync #(
+    parameter STAGES = 2
+) (
+    input clk,
+    input async_rst_i,
+    output sync_rst_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+
+    always @(posedge clk or posedge async_rst_i) begin
+        if (async_rst_i) begin
+            sync_reg <= {STAGES{1'b1}};
+        end else begin
+            sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+        end
+    end
+
+    assign sync_rst_o = sync_reg[STAGES-1];
+
+endmodule
+
+Wait, but in Verilog, the syntax {sync_reg[STAGES-2:0], 1'b0} would create a vector of (STAGES-1 +1) bits? Wait, if STAGES is 2, then STAGES-2 is 0, so [0:0], which is one bit. Then concatenated with 1'b0 would be two bits. Hmm, maybe that's not correct.
+
+Wait, perhaps the code should be:
+
+The first flop's input is 0, and the rest are shifted. Wait, maybe the code is:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {STAGES{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+    end
+end
+
+Wait, for STAGES=2, the code would have sync_reg as two bits. When async_rst_i is 0, the code shifts left, inserting 0. Wait, but the first stage would be the first bit. Wait, maybe the code is:
+
+Wait, the standard approach is to have a shift register where each stage is clocked, and the first stage is fed with 0. Wait, perhaps the code is:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {STAGES{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+    end
+end
+
+Wait, but for STAGES=2, the code would have:
+
+sync_reg[1:0] becomes {sync_reg[0], 1'b0} ?
+
+Wait, no. Wait, if STAGES is 2, then the code would have:
+
+sync_reg is two bits. When async_rst_i is 0, the code shifts left, inserting 0. Wait, the code would be:
+
+sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+
+If STAGES is 2, then STAGES-2 is 0. So the code would take sync_reg[0:0] (the first bit) and concatenate 1'b0. Wait, but in Verilog, the indices are [MSB:LSB]. Wait, if the reg is [STAGES-1 :0], then the code would take the lower bits.
+
+Wait, perhaps the code is:
+
+sync_reg is a vector of STAGES bits. When async_rst_i is 1, all bits are 1. When async_rst_i is 0, the first bit (index 0) is set to 0, and the rest are shifted from the previous.
+
+Wait, maybe the code is:
+
+sync_reg[0] is the first stage. Then, each next stage is the previous one's value.
+
+Wait, the code would be:
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {STAGES{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+    end
+end
+
+Wait, for STAGES=2:
+
+sync_reg is [1:0]. The code would take bits [0] and concatenate 0. So the new value is {sync_reg[0], 0} ?
+
+Wait, but when async_rst_i is de-asserted, the first stage (sync_reg[0]) is set to 0. Then the next cycle, the second stage (sync_reg[1]) takes the previous sync_reg[0], which was 0. Wait, but in the first cycle after reset, the sync_reg would be all 1s. Then when async_rst_i is released, the code shifts in 0.
+
+Wait, perhaps the code is:
+
+The first flop's input is 0. The rest of the flops take the previous one's output.
+
+Wait, the code would be:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {STAGES{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+    end
+end
+
+Wait, but for STAGES=2, the code would have:
+
+sync_reg is [1:0]. The code would take the lower bits (sync_reg[0]) and append 0. Wait, but the first stage is the LSB? Hmm, maybe the code is written in a way that the first stage is the LSB.
+
+Alternatively, maybe the code is:
+
+The first flop is the first in the chain. The code is:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {STAGES{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+    end
+end
+
+Wait, but for STAGES=2, the code would take sync_reg[0] and append 0. Wait, if the initial state is all 1s (after reset), then when async_rst_i is released, the first flop (sync_reg[0]) becomes 0, and the second flop (sync_reg[1]) takes the previous sync_reg[0], which was 1. Wait, that's not right.
+
+Hmm, maybe the code should be:
+
+The shift register is filled with 1's when async_rst is active. When async_rst is released, each stage shifts in a 0. Wait, but the number of stages is the parameter. Wait, the standard approach is that the reset is de-asserted synchronously after passing through the shift register.
+
+Wait, here's the standard code:
+
+module areset_sync #(
+    parameter STAGES = 2
+) (
+    input clk,
+    input async_rst_i,
+    output sync_rst_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+
+    // Synchronous process
+    always @(posedge clk or posedge async_rst_i) begin
+        if (async_rst_i) begin
+            sync_reg <= {STAGES{1'b1}};
+        end else begin
+            sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+        end
+    end
+
+    assign sync_rst_o = sync_reg[STAGES-1];
+
+endmodule
+
+Wait, but when async_rst_i is de-asserted (goes low), the first flop (sync_reg[0]) gets 0, then the next cycle, the next one gets that 0, etc. Wait, but in the code above, the code is shifting in a 0 each time. Wait, but in the first cycle after reset, the code would have:
+
+sync_reg is all 1s. When async_rst_i is 0, the code shifts in 0. So the first stage (sync_reg[0]) becomes 0. Then next cycle, the next stage (sync_reg[1]) becomes 0. Wait, but the code for STAGES=2 would have:
+
+sync_reg is [1:0]. The code in the else block would take the lower bits (sync_reg[0] and then append 0. Wait, no. Wait, {sync_reg[STAGES-2:0], 1'b0} for STAGES=2 would be {sync_reg[0], 1'b0} ?
+
+Wait, if STAGES is 2, then STAGES-2 is 0. So the code would take sync_reg[0:0] (the first bit) and concatenate 1'b0. So the new value is {sync_reg[0], 0} ?
+
+Wait, but if the initial state is all 1s (after reset), then when async_rst is released, the code would shift in 0. So the first stage (sync_reg[0]) becomes 0. Then the next cycle, the second stage (sync_reg[1]) would take the previous sync_reg[0], which was 0. Wait, but that would mean that after two cycles, the output is 0.
+
+Wait, but in the code above, the output is sync_reg[STAGES-1], which for STAGES=2 is sync_reg[1]. So the code would have:
+
+After reset: sync_reg is all 1s. Output is 1.
+
+When async_rst is de-asserted (goes low), the next posedge clk:
+
+sync_reg becomes {sync_reg[0], 0} (since STAGES-2 is 0, so sync_reg[0:0] is the first bit). Wait, if STAGES is 2, then sync_reg is [1:0]. So sync_reg[STAGES-2:0] would be [0:0], which is the first bit (bit 0). So the code would be:
+
+sync_reg <= {bit0, 0} ?
+
+Wait, but in that case, the first stage (bit0) is set to 0. Then the next cycle, the code would take the new bit0 (0) and append 0 again. Wait, but that would result in two 0s after two cycles.
+
+Wait, maybe the code is wrong here.
+
+Alternative approach: The standard way to create a synchronizer is to have a chain of flip-flops where each stage is clocked by the destination clock. The asynchronous reset is applied to all stages. When the async reset is de-asserted, the first stage is set to 0, then the next stages follow.
+
+Wait, here's a code example from trusted sources:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {STAGES{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+    end
+end
+
+assign sync_rst_o = sync_reg[STAGES-1];
+
+Wait, but in this code, the first stage (LSB) is set to 0 each time. Wait, but when the async reset is released, the first flop (sync_reg[0]) becomes 0, then the next flop (sync_reg[1]) takes the previous value of sync_reg[0], which was 1 (from reset). Wait, that would not work.
+
+Hmm, perhaps the code is correct. Let's think for STAGES=2.
+
+After reset: sync_reg is 11. Output is 1.
+
+When async reset is released:
+
+On first clock edge, sync_reg becomes {sync_reg[0], 0} → {1, 0} → sync_reg is 10. Output is 1.
+
+Second clock edge: sync_reg becomes {0, 0} → 00. Output is 0.
+
+Wait, but that would take two clock cycles to de-assert. Wait, but the output is the MSB. So in the first cycle after reset, the output is still 1. Then after two cycles, it's 0. Wait, but the code would take two cycles to de-assert. Wait, but the code for STAGES=2 would have two flip-flops.
+
+Wait, but the code in the example would have:
+
+sync_reg is two bits. When async_rst is de-asserted:
+
+First clock: sync_reg becomes {sync_reg[0], 0} → if initial is 11, then after first clock, it's {1, 0} → output is 1 (the MSB is 1). Then next clock, {0, 0} → output 0.
+
+Wait, but the output is the MSB. So the code would take two cycles after de-assertion to de-assert the reset. Wait, but the code would have the reset de-assert after two cycles.
+
+Wait, but in the code, the first stage (LSB) is set to 0. Wait, but in the code, the code is:
+
+sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+
+Wait, for STAGES=2, STAGES-2 is 0. So the code would take the first bit (sync_reg[0]) and append 0. So the new value is {sync_reg[0], 0}.
+
+Wait, but in the first cycle after reset, the sync_reg is all 1s. So when async_rst is released, the code would set sync_reg to {1, 0} (since sync_reg[0] is 1). Then the next cycle, it's {0, 0}.
+
+Wait, but the output is the MSB (sync_reg[1]), which would be 1 in the first cycle (after reset) and then 0 after two cycles.
+
+Wait, but the code would take two cycles to de-assert the reset. So the STAGES parameter is the number of flip-flops, which is the number of cycles needed.
+
+Wait, but in the code, the number of stages is the parameter. So the code is correct.
+
+But in the code example, the code uses STAGES as the number of flip-flops. So the code is correct.
+
+Wait, but the code in the example would have the output being the last stage. So the code is:
+
+module areset_sync #(
+    parameter STAGES = 2
+) (
+    input clk,
+    input async_rst_i,
+    output sync_rst_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+
+    always @(posedge clk or posedge async_rst_i) begin
+        if (async_rst_i) begin
+            sync_reg <= {STAGES{1'b1}};
+        end else begin
+            sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+        end
+    end
+
+    assign sync_rst_o = sync_reg[STAGES-1];
+
+endmodule
+
+Wait, but in Verilog, the syntax {sync_reg[STAGES-2:0], 1'b0} would create a vector of (STAGES-1 +1) bits. Wait, if STAGES is 2, then STAGES-2 is 0. So the code would take sync_reg[0:0], which is one bit, then append 0. So the new vector is two bits. So for STAGES=2, the code would be:
+
+sync_reg <= {sync_reg[0], 1'b0};
+
+Wait, but in that case, the first stage (LSB) is set to 0. Wait, but the code is shifting in a 0 each time.
+
+Wait, but when the async reset is released, the first flop (LSB) becomes 0, and the next flop (MSB) takes the previous LSB's value. Wait, but in the code, the code is concatenating the lower bits (sync_reg[STAGES-2:0]) and appending 0. For STAGES=2, that's sync_reg[0], then 0. So the code would shift left, inserting 0.
+
+Wait, but in that case, the code would have:
+
+sync_reg[1] <= sync_reg[0]
+
+sync_reg[0] <= 0 ?
+
+Wait, no. Wait, the code is:
+
+The new value is {sync_reg[STAGES-2:0], 1'b0}.
+
+Wait, if STAGES is 2, then STAGES-2 is 0. So the code would take sync_reg[0], and then append 0. So the new vector is [sync_reg[0], 0].
+
+Wait, but the code is written as:
+
+sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+
+Which for STAGES=2 would be:
+
+sync_reg <= {sync_reg[0], 1'b0};
+
+So the new value is two bits. The first bit (sync_reg[1]) is the previous sync_reg[0], and the second bit (sync_reg[0]) is 0.
+
+Wait, but that's a right shift. Hmm, maybe the code is written in a way that the first stage is the LSB. So the code is:
+
+The first flop is the LSB. When you shift, you shift right.
+
+But in any case, the code would take the lower bits and shift in a 0.
+
+But perhaps the code is correct. Let's test for STAGES=2.
+
+Initial state: async_rst_i is 1 → sync_reg is 11. Output is 1.
+
+When async_rst_i is de-asserted (goes to 0), on the first clock edge:
+
+sync_reg becomes {sync_reg[0], 0} → {1, 0} → output is 1 (MSB is 1).
+
+On the second clock edge:
+
+sync_reg becomes {0, 0} → output is 0.
+
+Thus, after two clock cycles, the output de-asserts. Which is correct for two stages.
+
+Yes, that's correct. So the code is okay.
+
+Wait, but in the code, the code is written as:
+
+sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+
+Which for STAGES=2 would be:
+
+sync_reg[0], then 0. So the code shifts in a 0 each time. Wait, but the first stage (LSB) is 0, and the next stage (MSB) takes the previous LSB's value.
+
+Wait, but in the first cycle after reset, the LSB is 0. Then the next cycle, the LSB is 0 again, and the MSB is the previous LSB (which was 0). Wait, but in the first cycle after reset, the LSB is 0, so the MSB is 1.
+
+Hmm, perhaps the code is correct.
+
+Another way: the code is creating a shift register where the first stage is the LSB. The code shifts in a 0 each time. Wait, but after the first shift, the LSB is 0, and the next shift, the next bit is 0. Wait, but the code would have the output as the MSB. So after two shifts, the output becomes 0.
+
+Yes. So the code is correct.
+
+Thus, the code would be:
+
+module areset_sync #(
+    parameter STAGES = 2
+)(
+    input clk,
+    input async_rst_i,
+    output sync_rst_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+
+    always @(posedge clk or posedge async_rst_i) begin
+        if (async_rst_i) begin
+            sync_reg <= {STAGES{1'b1}};
+        end else begin
+            sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+        end
+    end
+
+    assign sync_rst_o = sync_reg[STAGES-1];
+
+endmodule
+
+Wait, but in Verilog, when you have a parameter, the code uses STAGES. For example, if STAGES is 3, the code would have:
+
+sync_reg <= {sync_reg[1:0], 1'b0};
+
+Which would shift in a 0 each time.
+
+Yes. So the code is correct.
+
+Wait, but the code uses STAGES-2:0. Wait, if STAGES is 3, then STAGES-2 is 1. So the code would take bits [1:0], and append 0. So the new vector is [1:0] of the previous, then 0. So the code would shift left, inserting 0.
+
+Wait, but the code for STAGES=3 would have:
+
+sync_reg is [2:0]. The code would take bits [1:0], append 0. So the new value is {sync_reg[1:0], 0} ?
+
+Wait, no. Wait, the code is {sync_reg[STAGES-2:0], 1'b0}.
+
+If STAGES is 3, STAGES-2 is 1. So the code would take bits [1:0], then append 0. So the new vector is [1:0] followed by 0. Wait, but the code is written as:
+
+{sync_reg[STAGES-2:0], 1'b0}
+
+Which for STAGES=3 would be {sync_reg[1:0], 1'b0} → which is three bits. Wait, but the code would have STAGES bits. Wait, the code is:
+
+sync_reg is [STAGES-1 :0]. The code is taking the lower STAGES-1 bits (from STAGES-2 downto 0) and appending a 0. So the new vector is (STAGES-1 +1) bits. Wait, but the code is assigning to a reg of STAGES bits. So the code would have:
+
+{sync_reg[STAGES-2:0], 1'b0} → which is (STAGES-1 +1) bits. Wait, but the code is assigning to a reg of STAGES bits. So for example, if STAGES is 3:
+
+sync_reg is [2:0]. The code would take sync_reg[1:0], append 0 → 3 bits. So the code would be:
+
+sync_reg <= {sync_reg[1:0], 1'b0};
+
+Which is 3 bits. So the code is okay.
+
+Thus, the code is correct.
+
+So the code for the areset_sync module is as written above.
+
+Wait, but in the code, the initial value when async_rst_i is asserted is all 1s. Then when released, the code shifts in 0s. The output is the MSB. So the number of stages is the parameter, and the reset is de-asserted after STAGES cycles.
+
+Yes.
+
+Thus, the code should be as written.
+</think>
+
+<answer>
+```verilog
+module areset_sync #(
+    parameter STAGES = 2
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+
+    always @(posedge clk or posedge async_rst_i) begin
+        if (async_rst_i) begin
+            sync_reg <= {STAGES{1'b1}};
+        end else begin
+            sync_reg <= {sync_reg[STAGES-2:0], 1'b0};
+        end
+    end
+
+    assign sync_rst_o = sync_reg[STAGES-1];
+
+endmodule
+```
+</answer>

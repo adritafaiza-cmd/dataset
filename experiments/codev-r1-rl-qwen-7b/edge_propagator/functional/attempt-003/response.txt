@@ -1,0 +1,699 @@
+<think>Okay, I need to create a Verilog module called edge_propagator that transfers a pulse from the TX clock domain to the RX clock domain. The clocks are asynchronous, so I have to handle clock domain crossing properly. The main challenge here is ensuring that a single edge in the TX domain results in a single pulse in the RX domain without missing any or causing duplicates.
+
+First, I remember that for clock domain crossing, a common approach is using synchronizers. But since we're dealing with a pulse, which is a single bit of information, we need to convert the pulse into a level change that can be safely synchronized. Then, in the destination domain, we detect the edge of that synchronized level to recreate the pulse.
+
+Wait, the standard method for passing pulses across asynchronous domains is to use a toggle synchronizer. Let me think: when the edge_i occurs in TX domain, we toggle a flip-flop. Then, in the RX domain, we synchronize that toggle signal and detect the change to generate a pulse.
+
+So the steps would be:
+
+1. In TX domain:
+   - When edge_i is detected (a pulse), toggle a register (let's call it tx_toggle).
+   - This toggle will change state every time there's a pulse on edge_i.
+
+2. Then, synchronize this tx_toggle to the RX domain using a two-flop synchronizer.
+
+3. In RX domain:
+   - Detect the edge of the synchronized toggle (i.e., when the current synchronized value is different from the previous one). That edge indicates a pulse occurred in TX domain.
+   - Generate edge_o as a pulse whenever this edge is detected.
+
+But wait, the edge_i is a pulse. So when edge_i is high for one clock cycle, we need to toggle the tx_toggle. Then, the RX side detects the toggle's change and outputs a pulse.
+
+Wait, but edge_i is a single pulse. So the TX domain's edge_i is a single-cycle pulse. So the toggle approach would work here.
+
+So the steps:
+
+In TX domain:
+
+- On each edge_i pulse, toggle a register (tx_toggle_reg). So each pulse flips the state.
+
+Then, synchronize tx_toggle_reg to RX domain via two DFFs (sync1 and sync2). Then, in RX domain, compare the current sync2 value with the previous one (stored in another register, say rx_sync_prev). If they differ, that's a toggle, so generate a pulse.
+
+Wait, but the edge in TX domain (the toggle) is a level change. So when the TX toggles, the RX side will see the change after synchronization. Then, the RX side can detect the change and generate a pulse.
+
+Wait, the standard approach for a pulse synchronizer is:
+
+In TX domain:
+
+- When the input pulse comes, set a flag (like a pulse_reg) to 1. Then, in the destination domain, after synchronization, the flag is read and cleared. But that's for multi-bit data. Alternatively, the toggle method is better here.
+
+So the toggle synchronizer:
+
+In TX domain:
+
+- Whenever edge_i is high, toggle a flip-flop (tx_toggle). So each pulse flips the state.
+
+Then, in RX domain:
+
+- Synchronize the tx_toggle into the RX domain (using two DFFs to avoid metastability).
+- Then, in RX domain, detect the edge (change) in the synchronized toggle. When the current and previous synchronized values differ, that's a pulse.
+
+Wait, but the toggle's edge (change) in the RX domain would correspond to the original pulse in TX. So the edge in the RX domain would be a pulse.
+
+Wait, here's the process:
+
+In TX:
+
+- edge_i is a pulse (1 cycle). Each time edge_i is high, toggle a register (tx_toggle). So if edge_i is a single pulse, the tx_toggle will flip once. Then, in RX domain, the synchronized version of tx_toggle will have a transition. The RX side can detect the transition (current and previous state) and generate a pulse.
+
+Wait, but the toggle in TX is a level. So the RX side's synchronized version (after two flops) would have the same level. But the edge in the TX's toggle would be a transition. So the RX side can detect the edge (change) between the two synchronized stages.
+
+Wait, here's the standard approach:
+
+The TX side:
+
+- When edge_i comes, toggle a register (tx_toggle). So each pulse toggles.
+
+Then, in RX:
+
+- Use two flops to synchronize tx_toggle into rx domain (sync1 and sync2). Then, compare the current sync2 with previous (stored in another flop, rx_prev). If they differ, then a pulse occurred.
+
+Wait, but the toggle's transition would be a single transition. So the edge in the RX would be a single pulse.
+
+Wait, let's outline the code.
+
+TX domain:
+
+reg tx_toggle;
+
+always @(posedge clk_tx_i or negedge rstn_tx_i) begin
+  if (!rstn_tx_i) begin
+    tx_toggle <= 0;
+  end else begin
+    if (edge_i) begin
+      tx_toggle <= ~tx_toggle;
+    end
+  end
+end
+
+Then, in RX domain:
+
+We need to synchronize tx_toggle into RX's clock domain.
+
+First, pass through two flops to get sync1 and sync2.
+
+Then, in RX:
+
+reg sync1, sync2, sync_prev;
+
+always @(posedge clk_rx_i or negedge rstn_rx_i) begin
+  if (!rstn_rx_i) begin
+    sync1 <= 0;
+    sync2 <= 0;
+    sync_prev <= 0;
+  end else begin
+    sync1 <= tx_toggle; // Wait, but tx_toggle is in TX domain. So need to cross clock.
+
+Wait, no. Wait, the tx_toggle is in TX domain. So when we sample tx_toggle in RX domain, we need to pass through two flops.
+
+Wait, the correct way is:
+
+In RX domain:
+
+reg sync1, sync2;
+
+always @(posedge clk_rx_i or negedge rstn_rx_i) begin
+  if (!rstn_rx_i) begin
+    sync1 <= 0;
+    sync2 <= 0;
+  end else begin
+    sync1 <= tx_toggle; // This is asynchronous, so first flop is sync1, then sync2.
+    sync2 <= sync1;
+  end
+end
+
+Then, in RX domain, the edge is detected when sync2 changes. So:
+
+reg sync_prev;
+
+always @(posedge clk_rx_i or negedge rstn_rx_i) begin
+  if (!rstn_rx_i) begin
+    sync_prev <= 0;
+  end else begin
+    sync_prev <= sync2;
+  end
+end
+
+Then, edge_o is (sync2 ^ sync_prev). Wait, if they are different, then there's a toggle. So edge_o would be a pulse whenever the synchronized toggle changes.
+
+Wait, but in the toggle synchronizer approach, the edge in the RX domain would be a pulse. So edge_o would be (sync2 != sync_prev). But since in Verilog, we can write:
+
+assign edge_o = (sync2 ^ sync_prev);
+
+But edge_o is a pulse. Wait, but in the toggle synchronizer, each toggle in TX would generate a pulse in RX. So yes.
+
+Wait, but the edge in the TX is a pulse (edge_i is a single pulse). Each edge_i causes a toggle. Then, the RX side's edge is the transition of the synchronized toggle. So each toggle in TX would result in a pulse in RX.
+
+Wait, but if the TX sends two pulses in a row (without RX catching the first), then the toggle would have two transitions. But the RX would see the transitions and generate two pulses. So the code would handle that.
+
+Wait, but the problem says "Do not lose or double-count isolated edges." So the code must ensure that each edge in TX is captured once in RX.
+
+So the toggle approach would work here.
+
+Now, the code:
+
+In TX domain:
+
+We have edge_i. Each time edge_i is high, toggle a register.
+
+In RX domain:
+
+We synchronize the toggle, and the edge is when the synchronized value changes.
+
+Wait, but the code for the TX part:
+
+reg tx_toggle;
+
+always @(posedge clk_tx_i or negedge rstn_tx_i) begin
+  if (!rstn_tx_i) begin
+    tx_toggle <= 0;
+  end else if (edge_i) begin
+    tx_toggle <= ~tx_toggle;
+  end
+end
+
+Then, in RX domain:
+
+We need to pass tx_toggle through two flops in RX domain.
+
+reg sync1, sync2;
+
+always @(posedge clk_rx_i or negedge rstn_rx_i) begin
+  if (!rstn_rx_i) begin
+    sync1 <= 0;
+    sync2 <= 0;
+  end else begin
+    sync1 <= tx_toggle;
+    sync2 <= sync1;
+  end
+end
+
+Then, the edge in RX is when sync2 changes. So:
+
+reg sync_prev;
+
+always @(posedge clk_rx_i or negedge rstn_rx_i) begin
+  if (!rstn_rx_i) begin
+    sync_prev <= 0;
+  end else begin
+    sync_prev <= sync2;
+  end
+end
+
+Then, edge_o is (sync2 != sync_prev). So:
+
+assign edge_o = (sync2 ^ sync_prev);
+
+Wait, but edge_o is a pulse. So when the two flops change, the XOR gives a one-cycle pulse.
+
+Wait, but in the code, the edge is detected when the current and previous synchronized values differ. So yes.
+
+Wait, but in the code:
+
+If the TX toggles, the RX's sync2 will eventually change. The edge is the transition. So the XOR between current and previous gives a pulse.
+
+Yes.
+
+Now, the edge_o is assigned as (sync2 ^ sync_prev). But in Verilog, that's a combinational assignment. Wait, but in the code:
+
+Wait, in the code:
+
+sync_prev is the previous value of sync2. So:
+
+At each clock edge, sync_prev is updated to the previous sync2. Then, the XOR between current sync2 and sync_prev gives a pulse whenever they differ.
+
+Yes.
+
+So edge_o would be high for one cycle whenever the synchronized toggle changes.
+
+But in the code:
+
+Wait, the code for edge_o would be:
+
+assign edge_o = (sync2 ^ sync_prev);
+
+But in Verilog, that's a combinational assignment. But in the code, the edge_o is a registered output? Wait, no. Wait, the edge is detected as a combinational XOR. Wait, but in the code, the edge would be a pulse that's one cycle long.
+
+Wait, but in the code:
+
+The sync_prev is the previous value of sync2. So when sync2 changes, the XOR is 1 for one cycle.
+
+Yes. So edge_o is a single-cycle pulse whenever the toggle in TX was toggled.
+
+Thus, the code would work.
+
+Now, the code:
+
+Putting it all together.
+
+Wait, but the TX toggle is in the TX clock domain. The RX part is in RX clock domain.
+
+But in Verilog, the code would have:
+
+In the TX domain:
+
+reg tx_toggle;
+
+always @(posedge clk_tx_i or negedge rstn_tx_i) begin
+  if (!rstn_tx_i) begin
+    tx_toggle <= 1'b0;
+  end else begin
+    if (edge_i) begin
+      tx_toggle <= ~tx_toggle;
+    end
+  end
+end
+
+Wait, but edge_i is a pulse. So whenever edge_i is high (for one cycle), the toggle flips.
+
+Then, in RX domain:
+
+We need to synchronize tx_toggle into RX's clock domain.
+
+So:
+
+reg sync1, sync2;
+
+always @(posedge clk_rx_i or negedge rstn_rx_i) begin
+  if (!rstn_rx_i) begin
+    sync1 <= 1'b0;
+    sync2 <= 1'b0;
+  end else begin
+    sync1 <= tx_toggle;
+    sync2 <= sync1;
+  end
+end
+
+Then, the edge detection:
+
+reg sync_prev;
+
+always @(posedge clk_rx_i or negedge rstn_rx_i) begin
+  if (!rstn_rx_i) begin
+    sync_prev <= 1'b0;
+  end else begin
+    sync_prev <= sync2;
+  end
+end
+
+Then:
+
+assign edge_o = (sync2 ^ sync_prev);
+
+Wait, but edge_o is a combinational output. But in Verilog, if we assign it as a wire, that's okay.
+
+But in the code, the output edge_o is declared as logic. So:
+
+Wait, the code:
+
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  // TX domain: toggle on edge_i
+  reg tx_toggle;
+
+  always @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      tx_toggle <= 1'b0;
+    end else begin
+      if (edge_i) begin
+        tx_toggle <= ~tx_toggle;
+      end
+    end
+  end
+
+  // Synchronizer in RX domain
+  reg sync1, sync2;
+
+  always @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      sync1 <= 1'b0;
+      sync2 <= 1'b0;
+    end else begin
+      sync1 <= tx_toggle;
+      sync2 <= sync1;
+    end
+  end
+
+  // Edge detection in RX domain
+  reg sync_prev;
+
+  always @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      sync_prev <= 1'b0;
+    end else begin
+      sync_prev <= sync2;
+    end
+  end
+
+  assign edge_o = (sync2 ^ sync_prev);
+
+endmodule
+
+Wait, but edge_o is a combinational output. But in Verilog, the XOR would produce a pulse that's high when the two differ. But in the code, the edge is detected as a transition. Wait, but in the code, the edge is the XOR of the current and previous. So when the two differ, edge_o is high for one cycle.
+
+Wait, but in the code, the edge_prev is the previous value of sync2. Wait, no. Wait, the code:
+
+sync_prev is the previous value of sync2. So:
+
+At each clock edge, sync_prev is updated to the current sync2. Then, the XOR between sync2 (current) and sync_prev (previous) gives a pulse.
+
+Wait, but in the code:
+
+sync_prev is assigned to sync2 in the same clock edge. Wait, no.
+
+Wait, the code:
+
+In the always block for sync_prev:
+
+sync_prev <= sync2;
+
+So, in the next clock cycle, sync_prev is the previous value of sync2.
+
+Wait, no. Wait, in the current clock cycle, after the posedge:
+
+sync_prev is the value of sync2 from the previous clock.
+
+Wait, no. Let's think:
+
+At time t, after the posedge:
+
+sync_prev is assigned the value of sync2 from the previous clock (t-1). So:
+
+sync_prev is the previous state of sync2.
+
+Then, the XOR between sync2 (current) and sync_prev (previous) gives a pulse when they differ.
+
+Wait, but in the code:
+
+At each clock edge:
+
+sync_prev is updated to the current sync2 (from the previous step). Wait, no.
+
+Wait, the code:
+
+In the always block:
+
+sync_prev <= sync2;
+
+So, in the current clock cycle, after the posedge, the value of sync_prev is the value of sync2 from the previous clock.
+
+Wait, no. Let's see:
+
+At each clock edge:
+
+sync_prev gets the value of sync2 from the previous clock.
+
+Wait, the code:
+
+At time t:
+
+sync_prev is updated to the value of sync2 at time t-1.
+
+Wait, no. Let's see:
+
+At the first clock edge after reset:
+
+sync_prev is 0 (after reset). Then, in the next clock edge, sync_prev is assigned the value of sync2 (which was 0 after reset). Wait, perhaps I need to think of the code.
+
+Wait, the code:
+
+reg sync_prev;
+
+always @(posedge clk_rx_i or negedge rstn_rx_i) begin
+  if (!rstn_rx_i) begin
+    sync_prev <= 0;
+  end else begin
+    sync_prev <= sync2;
+  end
+end
+
+So, in the RX clock domain, every posedge, sync_prev is updated to the current value of sync2 (from the previous clock cycle). Wait, no. Wait, in the same clock edge, the sync2 is the value from the previous clock.
+
+Wait, the code:
+
+At the current clock edge, the code samples sync2 (the value from the previous clock) and assigns it to sync_prev. Then, in the next clock edge, sync_prev will have the previous value of sync2.
+
+Wait, no. Wait, in the code:
+
+At each posedge clk_rx_i:
+
+sync_prev is assigned the current value of sync2 (the value before the clock edge). So, after the assignment, sync_prev holds the previous value of sync2.
+
+Wait, perhaps the code is:
+
+At time t:
+
+sync_prev is the value of sync2 at time t-1.
+
+Then, the XOR between sync2 (current at time t) and sync_prev (value at t-1) gives a pulse if they differ.
+
+Yes. So the edge is detected when the current sync2 (after synchronization) is different from the previous one. So edge_o is a pulse whenever the synchronized toggle changes.
+
+Thus, the code would generate a pulse in RX domain whenever the TX domain toggled.
+
+But in the code, the edge_o is assigned as (sync2 ^ sync_prev). So whenever the two differ, edge_o is high for one cycle.
+
+Yes.
+
+Now, the code:
+
+Wait, but the initial state after reset.
+
+After reset:
+
+tx_toggle is 0.
+
+In RX domain:
+
+sync1 and sync2 are 0.
+
+sync_prev is 0.
+
+So edge_o would be 0.
+
+If edge_i occurs once in TX:
+
+tx_toggle toggles to 1.
+
+Then, in RX domain, after synchronization:
+
+sync1 becomes 1, then sync2 becomes 1.
+
+sync_prev is 0 (previous value of sync2). So edge_o is 1 (1 XOR 0).
+
+Then, in the next cycle, sync_prev becomes 1, so edge_o is 0 again.
+
+Thus, edge_o is a single pulse.
+
+Yes.
+
+Another case: two edge_i pulses in TX.
+
+First pulse: toggle to 1. Then, after synchronization, edge_o pulses once.
+
+Second pulse: toggle to 0. Then, after synchronization, edge_o pulses again.
+
+Thus, two pulses in TX would generate two pulses in RX.
+
+Which is correct.
+
+Thus, the code should work.
+
+Wait, but in the code, the edge_i is a pulse. So the code in TX domain:
+
+if (edge_i) then toggle.
+
+But edge_i is a single cycle pulse. So each time edge_i is high, toggle.
+
+Yes.
+
+Now, the code:
+
+Wait, the code for TX:
+
+always @(posedge clk_tx_i or negedge rstn_tx_i) begin
+  if (!rstn_tx_i) begin
+    tx_toggle <= 0;
+  end else if (edge_i) begin
+    tx_toggle <= ~tx_toggle;
+  end
+end
+
+Wait, but edge_i is a pulse. So if edge_i is high for one cycle, the toggle flips once.
+
+Yes.
+
+Now, the code for RX:
+
+The synchronizer is two flops. Then, the edge detection.
+
+Yes.
+
+Thus, the code should be as follows.
+
+Wait, but in the code, the edge_o is assigned as (sync2 ^ sync_prev). But in Verilog, the XOR is a bitwise operator. So if they are single bits, it's okay.
+
+Wait, but in Verilog, the XOR of two single bits gives a single bit. So yes.
+
+Thus, the code should be:
+
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  // TX domain: toggle on edge_i
+  reg tx_toggle;
+
+  always @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      tx_toggle <= 1'b0;
+    end else begin
+      if (edge_i) begin
+        tx_toggle <= ~tx_toggle;
+      end
+    end
+  end
+
+  // Synchronizer in RX domain
+  reg sync1, sync2;
+
+  always @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      sync1 <= 1'b0;
+      sync2 <= 1'b0;
+    end else begin
+      sync1 <= tx_toggle;
+      sync2 <= sync1;
+    end
+  end
+
+  // Edge detection in RX domain
+  reg sync_prev;
+
+  always @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      sync_prev <= 1'b0;
+    end else begin
+      sync_prev <= sync2;
+    end
+  end
+
+  assign edge_o = (sync2 ^ sync_prev);
+
+endmodule
+
+Wait, but the edge_o is assigned as a combinational output. But in Verilog, when you assign a wire like that, it's okay. But in the code, edge_o is declared as logic. Wait, in SystemVerilog, output logic is allowed. So yes.
+
+Wait, but in Verilog, you can't have assign to a logic. Wait, no. Wait, in Verilog, if you declare output as logic, you can assign via continuous assignment.
+
+Wait, in Verilog:
+
+If the output is declared as logic, then you can use assign.
+
+Yes.
+
+Thus, the code should be okay.
+
+Testing:
+
+After reset, all flops are 0. So edge_o is 0.
+
+When edge_i occurs once in TX:
+
+tx_toggle toggles to 1.
+
+In RX domain, after two cycles, sync2 becomes 1.
+
+sync_prev was 0 (after reset). So edge_o is 1.
+
+Then, in next cycle, sync_prev becomes 1. So edge_o is 0 again.
+
+Thus, edge_o is a single pulse.
+
+Yes.
+
+Another case: two edge_i pulses in TX.
+
+First pulse: toggle to 1. Then, after synchronization, edge_o pulses once.
+
+Second pulse: toggle to 0. Then, after synchronization, edge_o pulses again.
+
+Thus, two pulses in TX generate two in RX.
+
+Thus, this code should satisfy the requirements.
+
+Now, the code meets all the requirements:
+
+- Pulse in TX domain (edge_i) leads to a single pulse in RX (edge_o).
+
+- No loss or duplication.
+
+- After reset, edge_o is low.
+
+Thus, this code should work.
+</think>
+
+<answer>
+```verilog
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  // TX domain: toggle on edge_i
+  reg tx_toggle;
+
+  always @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      tx_toggle <= 1'b0;
+    end else begin
+      if (edge_i) begin
+        tx_toggle <= ~tx_toggle;
+      end
+    end
+  end
+
+  // Synchronizer in RX domain
+  reg sync1, sync2;
+
+  always @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      sync1 <= 1'b0;
+      sync2 <= 1'b0;
+    end else begin
+      sync1 <= tx_toggle;
+      sync2 <= sync1;
+    end
+  end
+
+  // Edge detection in RX domain
+  reg sync_prev;
+
+  always @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      sync_prev <= 1'b0;
+    end else begin
+      sync_prev <= sync2;
+    end
+  end
+
+  assign edge_o = (sync2 ^ sync_prev);
+
+endmodule
+```
+</answer>

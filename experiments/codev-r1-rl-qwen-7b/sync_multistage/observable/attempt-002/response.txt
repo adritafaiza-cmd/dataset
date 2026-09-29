@@ -1,0 +1,687 @@
+<think>Okay, I need to write a Verilog module for a single-bit destination-clock synchronizer. The parameters are STAGES and ResetValue. The reset is active-low. The input is serial_i, which is asynchronous and needs to be synchronized to clk_i. The output is serial_o.
+
+First, the synchronizer typically uses a chain of flip-flops. The number of stages is determined by STAGES. The ResetValue is the value the flip-flops take when reset is active (since reset is active-low, when rst_ni is 0, we reset).
+
+Wait, the reset is active-low, so when rst_ni is low (0), the flops should reset to ResetValue. So in the always block, on the negedge of rst_ni, we set the flops to ResetValue. Otherwise, on the clock edge, we shift the values through the stages.
+
+The standard approach is to have a shift register where each stage is a flip-flop. The first flop samples the async input, then each subsequent flop samples the previous one. The output is the last flop in the chain.
+
+So for STAGES=2, two flops. The first flop's input is serial_i, then the second flop's input is the first's output. The output of the second is serial_o.
+
+Wait, but the ResetValue is the value when reset. For example, if ResetValue is 0, then after reset, all stages are 0. If it's 1, they are 1. So the flops should have their reset value set to ResetValue.
+
+In Verilog, the syntax would be something like:
+
+reg [STAGES-1:0] sync_chain;
+
+always_ff @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_chain <= {STAGES{ResetValue}};
+  end else begin
+    sync_chain <= {sync_chain[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, but the number of stages is STAGES. Wait, if STAGES is 2, then two flip-flops. So the chain would be [1:0], with the first being the first stage, the second the second. Wait, but the code would need to create a shift register of length STAGES.
+
+Wait, the standard way is to have a vector where each element is a stage. For example, if STAGES is 2, then two flops. The first flop's input is the async signal, the second's input is the first's output. So the code would have:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, but if STAGES is 1, then the code would have to handle that. Wait, but the parameter is unsigned and at least 2? Or can STAGES be 1? The problem says "configured depth" but the default is 2. Hmm.
+
+Wait, the standard synchronizer uses two stages. But the parameter allows for more. So the code should handle any STAGES >=1. Wait, but in practice, the depth is at least two. But the code should be written to handle any STAGES >=1.
+
+Wait, the code for the synchronizer is a shift register with STAGES flip-flops. The first one takes the input, each subsequent one takes the previous. The output is the last one.
+
+Wait, in Verilog, if we have a vector, the first stage is the first element. For example:
+
+sync_reg[0] is the first stage, sync_reg[1] the second, etc. Wait, but the code would need to shift in the serial_i into the first position, then shift through.
+
+Wait, maybe better to use a generate loop. Alternatively, create a vector of STAGES bits, and each clock cycle, shift left, with the first bit being the input.
+
+Wait, for example:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, if STAGES is 2, then sync_reg is [1:0]. The code would shift the lower bits (index 0) and append serial_i. Wait, but the first stage is the first one. Wait, perhaps the code is:
+
+sync_reg[0] is the first stage, then next is sync_reg[1], etc. Wait, but in the code above, the concatenation would be {sync_reg[STAGES-2:0], serial_i} which for STAGES=2 would be {sync_reg[0], serial_i}, which would make the new sync_reg[1] = sync_reg[0], and sync_reg[0] = serial_i. Wait, that's a shift to the left. Wait, but the order of the bits in the vector may be reversed.
+
+Alternatively, maybe the code should be:
+
+sync_reg <= {sync_reg[STAGES-1:1], serial_i};
+
+Wait, no. Let's think again.
+
+Suppose STAGES is 2. The first flop is the first stage, the second is the second. The input is serial_i. The first flop's output is the second flop's input. The output is the second flop's output.
+
+In code:
+
+reg stage1, stage2;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    stage1 <= ResetValue;
+    stage2 <= ResetValue;
+  end else begin
+    stage1 <= serial_i;
+    stage2 <= stage1;
+  end
+end
+
+assign serial_o = stage2;
+
+But if STAGES is a parameter, then the code can be written with a generate loop.
+
+Wait, but in Verilog, for variable stages, you can create a shift register with a vector.
+
+Wait, here's the approach:
+
+The code can have a register array of size STAGES. The first element is the first stage, the last is the output.
+
+In code:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, but if STAGES is 1, then the code would have sync_reg[0], and the code would be {sync_reg[-1:0], serial_i} which is invalid. Wait, so STAGES must be at least 2? Or the code should handle STAGES=1.
+
+Wait the problem says "configured depth", but the default is 2. So perhaps the code can assume STAGES >=2. But the code should handle any STAGES >=1.
+
+Wait, but in the code, if STAGES is 1, then the code would have:
+
+sync_reg <= {sync_reg[0], serial_i} when STAGES is 1? Wait, no. Wait, if STAGES is 1, the code would have:
+
+sync_reg is [0:0], and the code would be:
+
+sync_reg <= {sync_reg[0], serial_i} ?
+
+Wait, but if STAGES is 1, the code would have:
+
+sync_reg is a single bit. So the code would be:
+
+sync_reg <= {sync_reg[0], serial_i} ?
+
+Wait, but in that case, the code would be:
+
+sync_reg <= {sync_reg[STAGES-2:0], serial_i} when STAGES is 1, STAGES-2 would be -1, which is invalid.
+
+Hmm, so perhaps the code should handle STAGES >=2. But the problem statement says "configured depth", but the default is 2. So perhaps the code can assume that STAGES is at least 2.
+
+Alternatively, the code can use a generate loop for each stage.
+
+Another approach is to create a vector of STAGES bits. The first stage is the first element, and each subsequent stage is the next. The code would shift the input into the first stage, and each stage takes the previous one.
+
+Wait, here's a way:
+
+The code can have a register array where each index is a stage. For example:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, if STAGES is 2, then sync_reg is [1:0]. The code would take the lower bits (0) and append serial_i. So the new sync_reg would be [0] = old [0], [1] = serial_i. Wait, no. Wait, the code {sync_reg[STAGES-2:0], serial_i} would be for STAGES=2: {sync_reg[0], serial_i} which is two bits. So the new sync_reg would have the first stage (sync_reg[0]) as the previous first, and the second stage (sync_reg[1]) as the input. Wait, that's not correct.
+
+Wait, the first stage is the first in the chain. The first flop's input is the async signal, then the next flop's input is the first's output, etc.
+
+Wait, the code for two stages would be:
+
+stage1 <= serial_i;
+
+stage2 <= stage1;
+
+So the code would have:
+
+sync_reg[0] is stage1, sync_reg[1] is stage2.
+
+In that case, the code would shift the input into the first stage, then each next stage.
+
+Wait, perhaps the code should be:
+
+sync_reg[0] <= serial_i;
+
+for (i=1; i < STAGES; i++) sync_reg[i] <= sync_reg[i-1];
+
+But in Verilog, you can't loop in the always block like that. So using a generate loop.
+
+Alternatively, the code can be written as:
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg[0] <= serial_i;
+    for (int i=1; i < STAGES; i++) begin
+      sync_reg[i] <= sync_reg[i-1];
+    end
+  end
+end
+
+But in Verilog, the for loop in the always block is allowed in SystemVerilog.
+
+Wait, the code can use a generate loop for the stages.
+
+Alternatively, the code can use a shift register approach.
+
+Wait, here's a possible code:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+  end
+end
+
+assign serial_o = sync_reg[STAGES-1];
+
+Wait, but for STAGES=2, the code would have:
+
+sync_reg is [1:0]. The code would shift in the serial_i into the LSB, and the previous bits shift left. Wait, but that would make the first stage the LSB, and the second the MSB. Wait, but the output is the last stage. So the code would have:
+
+The first stage is the LSB (index 0), the second is index 1. Wait, but the code {sync_reg[STAGES-2:0], serial_i} would be for STAGES=2: {sync_reg[0], serial_i} which is two bits. So the new sync_reg would have index 0 as the previous index 0, and index 1 as the serial_i. Wait, that's not correct. Because the first stage should take the input, then the next stage takes the previous.
+
+Wait, perhaps the code is written as:
+
+sync_reg[0] is the first stage. Then, each next stage is the next index. So the code would shift the input into the first, then each next.
+
+Wait, in code:
+
+sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+
+Wait, if STAGES is 2, then the code would take bits [0] (the first stage) and append serial_i. So the new sync_reg would be [0] is the previous [0], [1] is the new input. Wait, that's not the correct order. Because the first stage is the first to be sampled, then the second.
+
+Wait, perhaps the code should be:
+
+sync_reg <= {sync_reg[STAGES-1:1], serial_i};
+
+Wait, no. Let's think again.
+
+Suppose STAGES is 2. The first flop is the first stage (stage 1), the second is stage 2. The input is serial_i.
+
+At each clock edge:
+
+stage1 gets serial_i.
+
+stage2 gets stage1's previous value.
+
+So the code would be:
+
+stage1 <= serial_i;
+
+stage2 <= stage1;
+
+In code:
+
+reg stage1, stage2;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    stage1 <= ResetValue;
+    stage2 <= ResetValue;
+  end else begin
+    stage1 <= serial_i;
+    stage2 <= stage1;
+  end
+end
+
+assign serial_o = stage2;
+
+So for STAGES=2, two flops. The code can be written with a loop for variable stages.
+
+But in Verilog, if the code uses a variable number of stages, the generate loop can be used.
+
+But in SystemVerilog, you can use a for loop inside the always block.
+
+Wait, here's the code:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg[0] <= serial_i;
+    for (int i=1; i < STAGES; i++) begin
+      sync_reg[i] <= sync_reg[i-1];
+    end
+  end
+end
+
+assign serial_o = sync_reg[STAGES-1];
+
+Wait, but in Verilog, the for loop inside the always block is allowed in SystemVerilog. So this code would create a shift register where the first stage is index 0, and each next stage is the next index. The output is the last index.
+
+But in the code above, the first stage (index 0) takes the input, and each next stage takes the previous. So the code would be:
+
+sync_reg[0] <= serial_i;
+
+sync_reg[1] <= sync_reg[0];
+
+sync_reg[2] <= sync_reg[1];
+
+etc.
+
+Yes. So for STAGES=2, the code would have:
+
+sync_reg[0] <= serial_i;
+
+sync_reg[1] <= sync_reg[0];
+
+Which is correct.
+
+So the code would be:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg[0] <= serial_i;
+    for (int i=1; i < STAGES; i++) begin
+      sync_reg[i] <= sync_reg[i-1];
+    end
+  end
+end
+
+assign serial_o = sync_reg[STAGES-1];
+
+Wait, but in Verilog, the for loop variable in the always block must be declared as genvar or in a generate loop. Wait, no. In SystemVerilog, you can use an integer in the loop.
+
+Wait, but in Verilog, the for loop in the always block is allowed as long as it's a static loop.
+
+Wait, the code would have:
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    // reset all stages
+  end else begin
+    // first stage gets input
+    // then each next stage gets previous
+  end
+end
+
+Yes. So the code would be:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg[0] <= serial_i;
+    for (integer i = 1; i < STAGES; i = i + 1) begin
+      sync_reg[i] <= sync_reg[i-1];
+    end
+  end
+end
+
+assign serial_o = sync_reg[STAGES-1];
+
+Wait, but in Verilog, the integer declaration inside the for loop may not be allowed. Wait, in Verilog, you can declare the loop variable as an integer in the for loop.
+
+Wait, in Verilog, you can have:
+
+for (integer i=0; ... )
+
+But in SystemVerilog, it's allowed.
+
+Assuming that the code is written in SystemVerilog (as per the user's request for SystemVerilog code), then this is acceptable.
+
+So the code would have:
+
+- Declare the sync_reg as a vector of STAGES bits.
+
+- On reset, set all bits to ResetValue.
+
+- Else, shift the input into the first stage, then each next stage takes the previous.
+
+The output is the last stage.
+
+Now, the parameters:
+
+The module is named sync, with parameters STAGES (unsigned) and ResetValue (bit).
+
+The code would have:
+
+module sync #(
+    parameter int unsigned STAGES = 2,
+    parameter bit ResetValue = 1'b0
+) (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic serial_i,
+    output logic serial_o
+);
+
+Then, the code:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg[0] <= serial_i;
+    for (int i = 1; i < STAGES; i++) begin
+      sync_reg[i] <= sync_reg[i-1];
+    end
+  end
+end
+
+assign serial_o = sync_reg[STAGES-1];
+
+Wait, but if STAGES is 1, then the loop runs from i=1 to i <1, which is 0 iterations. So the code would have:
+
+sync_reg[0] <= serial_i;
+
+No loop, so the code would work.
+
+Wait, but if STAGES is 1, then the code would have:
+
+sync_reg[0] <= serial_i;
+
+No other stages. So the output is the same as the input after one clock. But in practice, synchronizers are at least two stages. But the code allows for STAGES >=1.
+
+But the problem says "configured depth", but the default is 2. So the code should handle STAGES >=2? Or any?
+
+The code as written allows any STAGES >=1.
+
+But in the code, if STAGES is 1, the loop runs from i=1 to i <1 (so no iterations). So the code would have:
+
+sync_reg[0] <= serial_i;
+
+Which is correct for a single stage.
+
+But the output would be the same as the input after one clock. But in practice, synchronizers are two stages. But the code allows for any.
+
+But the user's problem says "configured depth" and the default is 2. So the code should allow STAGES >=2? Or any?
+
+The code as written works for any STAGES >=1.
+
+But the code uses a for loop in the always block. So the code should be okay.
+
+Wait, but in Verilog, the for loop variable in the always block must be declared as an integer. Wait, in SystemVerilog, declaring the loop variable as int is allowed.
+
+Yes.
+
+So the code would be:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg[0] <= serial_i;
+    for (int i = 1; i < STAGES; i++) begin
+      sync_reg[i] <= sync_reg[i-1];
+    end
+  end
+end
+
+assign serial_o = sync_reg[STAGES-1];
+
+Wait, but in Verilog, the for loop variable can be declared as an integer. So in the code, the loop variable is declared as int.
+
+Wait, but in Verilog, the syntax for the loop variable is:
+
+for (integer i=0; ... )
+
+But in SystemVerilog, you can use 'int' as well.
+
+Assuming that the code is written in SystemVerilog, the code is okay.
+
+But in Verilog, the loop variable in the for loop must be declared as genvar if in generate, but in procedural for loops (inside always blocks), you can use integer.
+
+Wait, in Verilog, variables in procedural for loops (inside always blocks) are declared as integers.
+
+Wait, in Verilog, the syntax is:
+
+integer i;
+
+for (i=0; i < N; i=i+1) ...
+
+So in the code, the loop variable should be declared as integer.
+
+Wait, but in the code above, the code uses 'int i' in the for loop. Wait, in Verilog, 'int' is a SystemVerilog keyword. Wait, in Verilog, the integer is a keyword.
+
+Wait, in Verilog, the loop variable in procedural for loops is declared as integer.
+
+So the code would have:
+
+integer i;
+
+for (i=1; i < STAGES; i = i +1) begin
+  sync_reg[i] <= sync_reg[i-1];
+end
+
+But in the code above, the code uses 'int i' which is SystemVerilog.
+
+Hmm. So perhaps the code should use 'integer i' in Verilog.
+
+But the user asked for SystemVerilog code.
+
+Assuming that the code is written in SystemVerilog, the code can use 'int' for the loop variable.
+
+But to make it compatible with Verilog, perhaps declare as integer.
+
+But the code in the answer is supposed to be SystemVerilog.
+
+So the code can use:
+
+for (int i=1; i < STAGES; i++) 
+
+Yes.
+
+So the code would be:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg[0] <= serial_i;
+    for (int i = 1; i < STAGES; i++) begin
+      sync_reg[i] <= sync_reg[i-1];
+    end
+  end
+end
+
+assign serial_o = sync_reg[STAGES-1];
+
+Wait, but in Verilog, the syntax for the loop variable in the for loop is:
+
+for (initialization; condition; increment)
+
+So the code would have:
+
+for (int i = 1; i < STAGES; i = i +1) begin ... end
+
+But in Verilog, the 'int' is allowed in the loop variable declaration.
+
+Wait, in Verilog-2001, the for loop variables are declared as genvar for generate loops, but in procedural for loops (inside always blocks), the variables are declared as integers.
+
+Wait, no. In Verilog, the for loop variables in procedural code are declared as integers.
+
+Wait, the code would have:
+
+integer i;
+
+for (i=1; i < STAGES; i = i +1) begin ... end
+
+But in the code above, the code uses 'int i' which is SystemVerilog.
+
+Assuming that the code is written in SystemVerilog, the code is okay.
+
+So the code would be:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg[0] <= serial_i;
+    for (int i = 1; i < STAGES; i++) begin
+      sync_reg[i] <= sync_reg[i-1];
+    end
+  end
+end
+
+assign serial_o = sync_reg[STAGES-1];
+
+Wait, but if STAGES is 1, then the loop runs from i=1 to i <1, which is no iterations. So the code would have:
+
+sync_reg[0] <= serial_i;
+
+No other assignments. So the output is the same as the input after one clock. But in practice, synchronizers are two stages. But the code allows any STAGES >=1.
+
+But the problem says "configured depth", but the default is 2. So the code should handle STAGES >=2? Or any?
+
+The code as written allows any STAGES >=1.
+
+But the code in the answer should be correct.
+
+Now, the code for the module.
+
+Wait, the code uses a reg [STAGES-1:0] sync_reg.
+
+But if STAGES is 0? Well, the parameter is unsigned and at least 2? The default is 2.
+
+But the code can handle STAGES >=1.
+
+Now, the code:
+
+module sync #(
+    parameter int unsigned STAGES = 2,
+    parameter bit ResetValue = 1'b0
+) (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic serial_i,
+    output logic serial_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            sync_reg <= {STAGES{ResetValue}};
+        end else begin
+            sync_reg[0] <= serial_i;
+            for (int i = 1; i < STAGES; i++) begin
+                sync_reg[i] <= sync_reg[i-1];
+            end
+        end
+    end
+
+    assign serial_o = sync_reg[STAGES-1];
+
+endmodule
+
+Wait, but in Verilog, the syntax for the for loop variable is 'int i' or 'integer i'?
+
+In SystemVerilog, 'int' is allowed. If the code is written in Verilog, 'integer i' is needed.
+
+Assuming the code is written in SystemVerilog, the code is okay.
+
+But the user said "SystemVerilog code".
+
+So the code should be written with SystemVerilog syntax.
+
+Thus, the code would be as above.
+
+Testing for STAGES=2:
+
+sync_reg is [1:0]
+
+In the else clause:
+
+sync_reg[0] <= serial_i;
+
+sync_reg[1] <= sync_reg[0];
+
+Then, the output is sync_reg[1].
+
+Yes.
+
+So the code works.
+
+Now, the code uses the parameters correctly.
+
+The reset is active-low. When rst_ni is 0, the flops are reset to ResetValue.
+
+Yes.
+
+The code uses {STAGES{ResetValue}} to set all bits to ResetValue.
+
+Yes.
+
+Thus, the code should be correct.
+</think>
+
+<answer>
+```verilog
+module sync #(
+    parameter int unsigned STAGES = 2,
+    parameter bit ResetValue = 1'b0
+) (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic serial_i,
+    output logic serial_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            sync_reg <= {STAGES{ResetValue}};
+        end else begin
+            sync_reg[0] <= serial_i;
+            for (int i = 1; i < STAGES; i++) begin
+                sync_reg[i] <= sync_reg[i-1];
+            end
+        end
+    end
+
+    assign serial_o = sync_reg[STAGES-1];
+
+endmodule
+```
+</answer>

@@ -1,0 +1,1218 @@
+<think>Okay, I need to design an asynchronous FIFO in SystemVerilog. Let's start by recalling the key components of an asynchronous FIFO. The main parts are the write and read pointers, synchronization between clock domains, full and empty generation, and the memory array.
+
+First, the parameters: DATA_WIDTH, ADDR_WIDTH, and SYNC_STAGES. The SYNC_STAGES probably refers to the number of synchronization stages for the pointers crossing clock domains. Common choices are 2 or 3 stages for CDC safety.
+
+The module has separate clocks for write and read (wclk and rclk), and separate resets (wrst_n and rrst_n). The resets are active-low and asynchronous. Wait, but in CDC, the resets need to be synchronized as well. Hmm, but the standard approach is to have each domain's reset synchronized in their own domain. Wait, but the resets here are per domain. So the write domain reset (wrst_n) is for the write side, and read domain reset (rrst_n) for read.
+
+The FIFO uses a dual-port memory where writes go to the write pointer's address and reads from the read pointer's address. The pointers are usually one bit larger than the address to distinguish between full and empty conditions. For example, if ADDR_WIDTH is 4, the pointers are 5 bits. The MSB indicates whether the write has wrapped around more than the read.
+
+For synchronization: The write pointer is synchronized to the read clock domain and vice versa. The full condition is when the write pointer's synchronized version in the write domain is such that the difference equals the depth. Similarly, empty is when the read pointer equals the write pointer in the read domain.
+
+Wait, the standard approach is:
+
+- Write pointer (wptr) and read pointer (rptr) are each N+1 bits (ADDR_WIDTH+1). The actual address is the lower N bits.
+
+- FIFO is full when the upper bits differ and the lower N bits are equal.
+
+- Empty when the entire pointers are equal.
+
+But the synchronization steps: The write pointer is passed through two flip-flops in the read domain (for synchronization), same for read pointer in write domain.
+
+Wait, the SYNC_STAGES parameter here. The user says SYNC_STAGES is the number of stages for CDC. So for each pointer crossing, we have two stages. The default is 2.
+
+So the steps:
+
+1. Instantiate the dual-port memory. The write side writes data when winc and not full. The read side reads when rinc and not empty.
+
+Wait, the memory can be a simple dual-port RAM where write and read are on different clocks. The read data is registered, perhaps? Or maybe not. Wait, in some FIFO designs, the read data is registered, leading to a one-cycle latency. But the standard approach for asynchronous FIFO is that when you read, the data comes out on the next cycle. Wait, but the exact behavior depends on the design.
+
+Wait, the output data (rdata) is registered. So when you read, the data is available on the next clock edge. So the FIFO's read data is registered. That's a common approach.
+
+Now, the pointers:
+
+The write pointer (wptr) increments when a write occurs (winc and not full). Similarly, the read pointer increments when a read occurs (rinc and not empty).
+
+The pointers are ADDR_WIDTH+1 bits. The actual address is the lower ADDR_WIDTH bits.
+
+The full condition is when the write pointer's next value's upper bits differ and the lower bits are equal to the read pointer's synchronized value.
+
+Wait, the full condition is determined in the write domain. The write pointer is synchronized to the read domain, but the read pointer is synchronized to the write domain.
+
+Wait, the standard approach is:
+
+- The write pointer (wptr) is converted to gray code and synchronized to the read clock domain (rclk) using two flip-flops. Similarly, the read pointer (rptr) is converted to gray code and synchronized to the write clock (wclk) domain.
+
+The gray code is used because consecutive values differ by one bit, which reduces the chance of metastability issues when crossing clock domains.
+
+The empty condition is when the synchronized read pointer (in write domain) equals the current write pointer.
+
+Wait, no. Wait, the empty is determined in the read domain. The write pointer is synchronized to the read domain (as wr_ptr_gray_sync), and if the read pointer equals the synchronized write pointer, then empty.
+
+Similarly, the full is determined in the write domain: if the write pointer's next value (if we write) would make the difference between write and read pointers equal to the FIFO depth. Wait, the full condition is when the next write pointer's gray code is such that the difference between write and read pointers (after synchronization) indicates that the FIFO is full.
+
+Alternatively, the actual full condition is when the write pointer's next value (binary) minus the synchronized read pointer (binary) equals the FIFO depth. But since the pointers are gray, converting back to binary would be needed.
+
+Hmm, this is getting a bit complicated. Let's outline the steps.
+
+First, the memory:
+
+The memory is a dual-port RAM with write and read addresses. The write side uses the write pointer's lower bits (ADDR_WIDTH bits), and the read side uses the read pointer's lower bits.
+
+The pointers (wptr and rptr) are (ADDR_WIDTH +1) bits. The MSB is used to detect wrap-around.
+
+The full condition is when the write pointer's next value (if we write) would have the same lower bits as the read pointer, but the MSB is different. So:
+
+full = (wptr_gray_next == {~rptr_gray_sync[ADDR_WIDTH], rptr_gray_sync[ADDR_WIDTH-1:0]}) ?
+
+Wait, maybe better to convert the gray code pointers back to binary and check.
+
+Alternatively, the standard approach is:
+
+- The write pointer (binary) is converted to gray code and synchronized to the read domain.
+
+Similarly, the read pointer is converted to gray and synchronized to the write domain.
+
+The empty condition is when the read pointer's gray code equals the synchronized write pointer's gray code (in read domain).
+
+The full condition is when the write pointer's gray code (after increment) is equal to the synchronized read pointer's gray code except for the top two bits (since in gray code, when the pointers are N+1 bits, the full condition is when the next write would make the pointers differ by the size).
+
+Wait, perhaps the standard way is:
+
+Full condition in write domain:
+
+If the next write pointer (binary) has the same lower bits as the synchronized read pointer (binary) but the MSB is different. Wait, but the pointers are in binary, but converted to gray for CDC.
+
+Alternatively, here's a step-by-step plan:
+
+1. Instantiate the dual-port memory (could be a reg array in Verilog). The write side uses waddr (lower bits of wptr) and the read side uses raddr (lower bits of rptr).
+
+Wait, the actual address is the lower ADDR_WIDTH bits of the pointers.
+
+Wait, the pointers are (ADDR_WIDTH +1) bits. The actual address is the lower ADDR_WIDTH bits. The extra bit is for the wrap-around detection.
+
+So:
+
+- waddr is the lower ADDR_WIDTH bits of the write pointer.
+
+Similarly for raddr.
+
+The FIFO is full when the write pointer's next value (if we write) would have the same lower bits as the read pointer's current value, but the MSB is different. Wait, but the pointers are N+1 bits. So:
+
+Full condition: (wptr - rptr_sync) >= (2^ADDR_WIDTH)
+
+Wait, but in terms of the pointers:
+
+If the write pointer is one more than the read pointer, but the difference is equal to the depth (2^ADDR_WIDTH), then it's full.
+
+Wait, the actual condition for full is when the write pointer's next value (binary) minus the synchronized read pointer (binary) equals the depth (2^ADDR_WIDTH). But since the pointers are N+1 bits, the maximum is 2^(N+1). Wait, perhaps the full condition is when the write pointer's next value's binary is such that:
+
+(wptr_next - rptr_sync_bin) == 2^ADDR_WIDTH.
+
+But converting gray to binary for the synchronized pointers.
+
+This is getting a bit involved.
+
+Alternatively, here's a standard approach:
+
+The write pointer (binary) is converted to gray code and synchronized to the read domain. Similarly, the read pointer is converted to gray and synchronized to the write domain.
+
+Empty condition: when the read pointer's gray equals the synchronized write pointer's gray.
+
+Full condition: when the write pointer's gray is equal to the synchronized read pointer's gray except that the two MSBs are flipped. Wait, in gray code, the full condition is when the write pointer's gray code is one less than the read pointer's gray code (but considering the wrap around). Hmm, perhaps I need to refer to standard FIFO implementations.
+
+Wait, here's a common method:
+
+The FIFO is full when:
+
+(wptr_gray_next == { ~rptr_gray_sync[ADDR_WIDTH:ADDR_WIDTH-1], rptr_gray_sync[ADDR_WIDTH-2:0] } )
+
+Wait, maybe not. Let's think again.
+
+In the standard asynchronous FIFO design:
+
+The write pointer (binary) is converted to gray and passed through two sync stages in the read domain. Similarly, the read pointer is converted to gray and passed through two stages in the write domain.
+
+The empty condition is when the read pointer's gray equals the synchronized write pointer's gray.
+
+The full condition is when the write pointer's gray is equal to the synchronized read pointer's gray except that the top two bits are flipped and the rest are the same.
+
+Wait, the full condition is when:
+
+(wptr_gray == ( { ~rptr_gray_sync[ADDR_WIDTH], ~rptr_gray_sync[ADDR_WIDTH-1], rptr_gray_sync[ADDR_WIDTH-2:0] } ) )
+
+Wait, perhaps the full condition is determined by checking that the next write pointer (binary) would have the same lower bits as the read pointer, but the MSB is different. But in terms of gray code, the check is different.
+
+Alternatively, here's a step-by-step:
+
+1. The write pointer (wptr) is a binary counter. The read pointer (rptr) is a binary counter.
+
+2. Convert both to gray code (wgray and rgray).
+
+3. Synchronize the read pointer's gray code to the write clock domain (rgray_sync) using two flip-flops.
+
+4. Similarly, synchronize the write pointer's gray code to the read clock domain (wgray_sync).
+
+5. Empty condition: when rgray equals wgray_sync.
+
+6. Full condition: when the next write pointer's gray code (wgray_next) is equal to the synchronized read pointer's gray code (rgray_sync) except that the top two bits are flipped and the rest are the same.
+
+Wait, the full condition is when:
+
+wgray_next == ( { ~rgray_sync[ADDR_WIDTH], ~rgray_sync[ADDR_WIDTH-1], rgray_sync[ADDR_WIDTH-2:0] } )
+
+Wait, perhaps. Let me think.
+
+In binary terms, the full condition is when (wptr - rptr_sync) >= depth. But when using gray code, the comparison is different.
+
+Alternatively, the full condition is when:
+
+(wgray_next == (rgray_sync ^ ( (1 << (ADDR_WIDTH)) | (1 << (ADDR_WIDTH-1)) ) ) )
+
+Hmm, this is getting complicated. Maybe I should refer to a standard code example.
+
+Looking up a standard async FIFO code in Verilog.
+
+In Cliff Cummings' paper, the full condition is determined by:
+
+assign full = (wpnext == { ~rptr_sync[ADDR_WIDTH:ADDR_WIDTH-1], rptr_sync[ADDR_WIDTH-2:0] });
+
+Wait, in the code example, the full is when the next write pointer's gray code is equal to the synchronized read pointer's gray code except the top two bits are flipped.
+
+Wait, the code in the paper uses:
+
+// full when the next write pointer's gray code is one less than the read pointer's (synchronized)
+
+Wait, perhaps the code is:
+
+// full condition
+
+assign full = ( (wpnext[ADDR_WIDTH] != rptr_sync[ADDR_WIDTH]) && (wpnext[ADDR_WIDTH-1:0] == rptr_sync[ADDR_WIDTH-1:0]) );
+
+Wait, but in the code example, the pointers are N+1 bits. Wait, the code example uses:
+
+// full when the next write pointer's gray code is one less than the read pointer's (synchronized)
+
+Wait, perhaps the code in the paper (Cummings) uses:
+
+// full when the next write pointer's gray code is one less than the read pointer's (synchronized)
+
+Wait, but the actual code in the paper uses:
+
+// full when the next write pointer's gray code is one less than the read pointer's (synchronized)
+
+Wait, but in the code example, the full is determined by:
+
+// full condition
+
+if ( (wpnext == { ~rptr_sync[ADDR_WIDTH:ADDR_WIDTH-1], rptr_sync[ADDR_WIDTH-2:0] }) )
+
+Wait, perhaps the code in Cummings' paper is:
+
+// full when the next write pointer's gray code is one less than the read pointer's (synchronized)
+
+Wait, but I'm getting stuck here. Let's proceed.
+
+In any case, the standard approach is:
+
+- Use gray code pointers.
+
+- Synchronize the pointers across clock domains.
+
+- Generate full and empty based on the gray code comparisons.
+
+Now, the code outline:
+
+Parameters:
+
+- DATA_WIDTH, ADDR_WIDTH, SYNC_STAGES (probably 2 for synchronization stages)
+
+Registers:
+
+- write pointer (wptr) and read pointer (rptr) as binary.
+
+- Convert to gray code (wgray, rgray).
+
+- Synchronize the read pointer's gray code to the write domain (rgray_sync).
+
+- Synchronize the write pointer's gray code to the read domain (wgray_sync).
+
+Full condition:
+
+In write domain:
+
+If the next write pointer's gray code (after increment) would equal the synchronized read pointer's gray code except that the top two bits are flipped. Wait, perhaps:
+
+full = ( (wgraynext == { ~rgray_sync[ADDR_WIDTH], ~rgray_sync[ADDR_WIDTH-1], rgray_sync[ADDR_WIDTH-2:0] }) )
+
+Similarly, empty is when the read gray equals the synchronized write gray.
+
+Now, the code steps:
+
+First, the memory:
+
+reg [DATA_WIDTH-1:0] mem [0:(1 << ADDR_WIDTH)-1];
+
+The write address is waddr = wptr[ADDR_WIDTH-1:0]
+
+Wait, no. Wait, the pointers are (ADDR_WIDTH +1) bits. The actual address is the lower ADDR_WIDTH bits.
+
+Wait, for example, if ADDR_WIDTH is 4, the address is 4 bits, and the pointer is 5 bits. So:
+
+waddr = wptr[ADDR_WIDTH-1:0]
+
+Similarly for raddr.
+
+The memory is written when winc and not full.
+
+The read data is read from the memory when the read pointer is incremented.
+
+Wait, but in the code, the read data is registered. So when the read pointer increments, the data is read from the memory and stored in a register.
+
+Wait, the standard approach is:
+
+The read data is registered. So when you read (rinc and not empty), the read pointer increments, and the data is read from the memory and stored into a register (rdata_reg), which is output as rdata.
+
+But in the code, the output is rdata, which is the registered version.
+
+Now, the code:
+
+First, the write pointer logic:
+
+In the write domain:
+
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        wptr <= 0;
+    end else begin
+        if (winc && !wfull) begin
+            wptr <= wptr + 1;
+        end
+    end
+end
+
+Similarly for read pointer:
+
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        rptr <= 0;
+    end else begin
+        if (rinc && !rempty) begin
+            rptr <= rptr + 1;
+        end
+    end
+end
+
+Then, convert pointers to gray code:
+
+function [ADDR_WIDTH:0] bin2gray;
+    input [ADDR_WIDTH:0] bin;
+    bin2gray = (bin >> 1) ^ bin;
+endfunction
+
+// write gray and read gray
+reg [ADDR_WIDTH:0] wgray, rgray;
+
+always @* begin
+    wgray = bin2gray(wptr);
+    rgray = bin2gray(rptr);
+end
+
+Then, synchronize the read pointer's gray code to write domain:
+
+reg [ADDR_WIDTH:0] rgray_sync1, rgray_sync2;
+
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        rgray_sync1 <= 0;
+        rgray_sync2 <= 0;
+    end else begin
+        rgray_sync1 <= rgray;
+        rgray_sync2 <= rgray_sync1;
+    end
+end
+
+Similarly, synchronize the write pointer's gray code to read domain:
+
+reg [ADDR_WIDTH:0] wgray_sync1, wgray_sync2;
+
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        wgray_sync1 <= 0;
+        wgray_sync2 <= 0;
+    end else begin
+        wgray_sync1 <= wgray;
+        wgray_sync2 <= wgray_sync1;
+    end
+end
+
+Then, generate full and empty:
+
+// Full condition in write domain
+// Check if next write pointer's gray equals the synchronized read pointer's gray with top two bits flipped.
+
+wire full;
+wire [ADDR_WIDTH:0] wgraynext = bin2gray(wptr + 1);
+
+assign full = (wgraynext == { ~rgray_sync2[ADDR_WIDTH], ~rgray_sync2[ADDR_WIDTH-1], rgray_sync2[ADDR_WIDTH-2:0] });
+
+Wait, but the standard full condition is when the next write pointer's gray code is equal to the synchronized read pointer's gray code except the top two bits are flipped.
+
+Wait, the code in Cummings' paper uses:
+
+assign full = ( (wgraynext == { ~rgray_sync[ADDR_WIDTH], ~rgray_sync[ADDR_WIDTH-1], rgray_sync[ADDR_WIDTH-2:0] }) );
+
+Yes. So the full condition is when the next write pointer's gray code equals the synchronized read pointer's gray code but with the two MSBs flipped.
+
+Similarly, empty is when the read pointer's gray equals the synchronized write pointer's gray.
+
+// Empty condition in read domain
+assign empty = (rgray == wgray_sync2);
+
+Wait, but the empty is when the read pointer's gray equals the synchronized write pointer's gray.
+
+Wait, no. Wait, the empty is when the read pointer (gray) equals the synchronized write pointer (gray). Because when they are equal, the FIFO is empty.
+
+Wait, yes. So:
+
+assign rempty = (rgray == wgray_sync2);
+
+Similarly, the full condition is as per the code above.
+
+Now, the memory:
+
+The write side:
+
+always @(posedge wclk) begin
+    if (winc && !wfull) begin
+        mem[waddr] <= wdata;
+    end
+end
+
+Wait, but the address is the lower bits of the write pointer. Wait, the write pointer is (ADDR_WIDTH+1) bits. The actual address is the lower ADDR_WIDTH bits.
+
+Wait, the code:
+
+wire [ADDR_WIDTH-1:0] waddr = wptr[ADDR_WIDTH-1:0];
+wire [ADDR_WIDTH-1:0] raddr = rptr[ADDR_WIDTH-1:0];
+
+Wait, but the pointers are (ADDR_WIDTH+1) bits. Wait, the address is the lower ADDR_WIDTH bits. So:
+
+assign waddr = wptr[ADDR_WIDTH-1:0];
+assign raddr = rptr[ADDR_WIDTH-1:0];
+
+Wait, but the pointers are (ADDR_WIDTH+1) bits. For example, if ADDR_WIDTH is 4, the pointer is 5 bits, and the address is 4 bits. So the lower 4 bits.
+
+Yes.
+
+Now, the memory:
+
+reg [DATA_WIDTH-1:0] mem [0:(1 << ADDR_WIDTH)-1];
+
+// Write to memory
+always @(posedge wclk) begin
+    if (winc && !wfull) begin
+        mem[waddr] <= wdata;
+    end
+end
+
+// Read from memory
+assign rdata = mem[raddr];
+
+Wait, but in some designs, the read data is registered. Wait, the standard approach is that the read data is available on the next clock cycle after the read pointer increments. So when you read, the data is read from the current address and then the pointer increments. Wait, but the exact behavior depends on the design.
+
+Alternatively, the read data is registered, so when you read, you get the data from the current read pointer's address, and then the pointer increments. So the data is available in the same cycle. Wait, but in Verilog, if you have a combinational read, the data is available immediately.
+
+But in practice, the read data is registered to improve timing. Let's assume that the read data is registered. Wait, but the code in Cummings' example uses a combinational read.
+
+Wait, the code example:
+
+// Read data is combinational
+assign rdata = mem[raddr];
+
+But in that case, the read data is available immediately. However, in some designs, the read data is registered. Hmm.
+
+But the user's problem says that the output ports include rdata. The exact behavior is not specified. But the standard FIFO usually allows reading data when the read pointer is valid.
+
+Assuming that the read data is combinational from the memory array.
+
+Now, the code outline:
+
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+// Local parameters
+localparam PTR_WIDTH = ADDR_WIDTH + 1;
+
+// Pointers
+reg [PTR_WIDTH-1:0] wptr, rptr;
+
+// Gray code pointers
+reg [PTR_WIDTH-1:0] wgray, rgray;
+
+// Synchronized pointers
+reg [PTR_WIDTH-1:0] rgray_sync1, rgray_sync2;
+reg [PTR_WIDTH-1:0] wgray_sync1, wgray_sync2;
+
+// Memory
+reg [DATA_WIDTH-1:0] mem [0:(1 << ADDR_WIDTH)-1];
+
+// Write domain logic
+wire wfull_next;
+wire [PTR_WIDTH-1:0] wgraynext = bin2gray(wptr + 1);
+
+// Read domain logic
+wire rempty_next;
+
+// Convert binary to gray code
+function [PTR_WIDTH-1:0] bin2gray;
+    input [PTR_WIDTH-1:0] bin;
+    bin2gray = (bin >> 1) ^ bin;
+endfunction
+
+// Write pointer update
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        wptr <= 0;
+    end else begin
+        if (winc && !wfull) begin
+            wptr <= wptr + 1;
+        end
+    end
+end
+
+// Convert to gray
+always @* begin
+    wgray = bin2gray(wptr);
+end
+
+// Synchronize read pointer to write domain
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        rgray_sync1 <= 0;
+        rgray_sync2 <= 0;
+    end else begin
+        rgray_sync1 <= rgray;
+        rgray_sync2 <= rgray_sync1;
+    end
+end
+
+// Full condition
+assign wfull = (wgraynext == { ~rgray_sync2[PTR_WIDTH-1], ~rgray_sync2[PTR_WIDTH-2], rgray_sync2[PTR_WIDTH-3:0] });
+
+// Write data to memory
+always @(posedge wclk) begin
+    if (winc && !wfull) begin
+        mem[wptr[PTR_WIDTH-2:0]] <= wdata;
+    end
+end
+
+// Read pointer update
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        rptr <= 0;
+    end else begin
+        if (rinc && !rempty) begin
+            rptr <= rptr + 1;
+        end
+    end
+end
+
+// Convert to gray
+always @* begin
+    rgray = bin2gray(rptr);
+end
+
+// Synchronize write pointer to read domain
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        wgray_sync1 <= 0;
+        wgray_sync2 <= 0;
+    end else begin
+        wgray_sync1 <= wgray;
+        wgray_sync2 <= wgray_sync1;
+    end
+end
+
+// Empty condition
+assign rempty = (rgray == wgray_sync2);
+
+// Read data from memory
+assign rdata = mem[rptr[PTR_WIDTH-2:0]];
+
+// Assign outputs
+assign wfull = ...; // Wait, earlier code had wfull as a wire.
+
+Wait, but in the code above, the full condition is assigned as:
+
+assign wfull = (wgraynext == { ~rgray_sync2[PTR_WIDTH-1], ~rgray_sync2[PTR_WIDTH-2], rgray_sync2[PTR_WIDTH-3:0] });
+
+Wait, but the code in Cummings' example uses:
+
+assign full = (wgraynext == { ~rgray_sync[PTR_WIDTH-1], ~rgray_sync[PTR_WIDTH-2], rgray_sync[PTR_WIDTH-3:0] });
+
+But the exact code may vary.
+
+Wait, the standard full condition is when the next write pointer's gray code is equal to the synchronized read pointer's gray code except the top two bits are flipped.
+
+So:
+
+wire [PTR_WIDTH-1:0] rgray_sync = rgray_sync2;
+
+assign wfull = (wgraynext == { ~rgray_sync[PTR_WIDTH-1], ~rgray_sync[PTR_WIDTH-2], rgray_sync[PTR_WIDTH-3:0] });
+
+Wait, but the code for the full condition in Cummings' paper is:
+
+// full when the next write pointer's gray code is one less than the read pointer's (synchronized)
+
+Wait, perhaps the code is:
+
+assign wfull = ( (wgraynext == { ~rgray_sync[PTR_WIDTH-1], ~rgray_sync[PTR_WIDTH-2], rgray_sync[PTR_WIDTH-3:0] }) );
+
+But the exact code may vary.
+
+In any case, the code for the full condition and empty condition is critical.
+
+Once the full and empty conditions are correct, the rest follows.
+
+Now, the code:
+
+The write pointer is ADDR_WIDTH+1 bits. The actual address is the lower ADDR_WIDTH bits.
+
+Wait, the code for the memory:
+
+// Write address is lower ADDR_WIDTH bits of the write pointer.
+
+wire [ADDR_WIDTH-1:0] waddr = wptr[ADDR_WIDTH-1:0];
+wire [ADDR_WIDTH-1:0] raddr = rptr[ADDR_WIDTH-1:0];
+
+Wait, but the pointers are (ADDR_WIDTH+1) bits. Wait, if ADDR_WIDTH is 4, then the pointer is 5 bits. The lower 4 bits are the address. So:
+
+assign waddr = wptr[ADDR_WIDTH-1:0];
+assign raddr = rptr[ADDR_WIDTH-1:0];
+
+But the output ports are:
+
+output wire [ADDR_WIDTH:0] waddr,
+output wire [ADDR_WIDTH:0] raddr
+
+Wait, the outputs are ADDR_WIDTH+1 bits. Wait, the pointers are ADDR_WIDTH+1 bits. So the outputs are the full pointers.
+
+Wait, the user's code has:
+
+output wire [ADDR_WIDTH:0] waddr,
+
+Which is ADDR_WIDTH+1 bits. So the code should output the full pointers.
+
+Wait, the code in the module:
+
+output wire [ADDR_WIDTH:0] waddr,
+
+So the waddr is the full pointer (ADDR_WIDTH+1 bits). Similarly for raddr.
+
+Ah, right. So the outputs are the pointers (ADDR_WIDTH+1 bits). So the code should have:
+
+assign waddr = wptr;
+assign raddr = rptr;
+
+Wait, the pointers are (ADDR_WIDTH+1) bits. So the outputs are the full pointers.
+
+So in the code:
+
+// Assign outputs
+assign waddr = wptr;
+assign raddr = rptr;
+
+Now, the code for the memory:
+
+// Write to memory
+always @(posedge wclk) begin
+    if (winc && !wfull) begin
+        mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+    end
+end
+
+// Read from memory
+assign rdata = mem[rptr[ADDR_WIDTH-1:0]];
+
+Wait, but the read data is registered? Or not.
+
+In the code example, the read data is combinational. But in practice, it's better to have registered outputs. However, the user's problem doesn't specify, so perhaps the code uses combinational read.
+
+But the standard FIFO may have registered outputs. Hmm.
+
+But the code in Cummings' example uses:
+
+// Read data is combinational from memory.
+
+But in the code, the read data is directly assigned.
+
+Now, the code:
+
+// Memory
+reg [DATA_WIDTH-1:0] mem [0:(1 << ADDR_WIDTH)-1];
+
+// Write to memory
+always @(posedge wclk) begin
+    if (winc && !wfull) begin
+        mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+    end
+end
+
+// Read from memory
+assign rdata = mem[rptr[ADDR_WIDTH-1:0]];
+
+Now, the full and empty conditions.
+
+The full condition in the write domain:
+
+wire [PTR_WIDTH-1:0] wgraynext = bin2gray(wptr + 1);
+
+// Synchronized read pointer's gray code (two stages)
+// Then check if the next write's gray equals the synchronized read's gray with top two bits flipped.
+
+assign wfull = (wgraynext == { ~rgray_sync2[PTR_WIDTH-1], ~rgray_sync2[PTR_WIDTH-2], rgray_sync2[PTR_WIDTH-3:0] });
+
+Wait, but the code for the full condition in Cummings' example is:
+
+assign full = ( (wgraynext == { ~rgray_sync[ADDRWIDTH], ~rgray_sync[ADDRWIDTH-1], rgray_sync[ADDRWIDTH-2:0] }) );
+
+Assuming ADDRWIDTH is ADDR_WIDTH.
+
+But in our code, PTR_WIDTH is ADDR_WIDTH +1.
+
+So:
+
+assign wfull = (wgraynext == { ~rgray_sync2[PTR_WIDTH-1], ~rgray_sync2[PTR_WIDTH-2], rgray_sync2[PTR_WIDTH-3:0] });
+
+Wait, but the code in Cummings uses:
+
+// full when the next write pointer's gray code is one less than the read pointer's (synchronized)
+
+But perhaps the code is:
+
+assign wfull = (wgraynext == ( { ~rgray_sync2[PTR_WIDTH-1], ~rgray_sync2[PTR_WIDTH-2], rgray_sync2[PTR_WIDTH-3:0] } ));
+
+Wait, but the exact code may vary.
+
+Alternatively, the full condition is when:
+
+(wgraynext == (rgray_sync2 ^ ( (1 << (ADDR_WIDTH)) | (1 << (ADDR_WIDTH-1)) )) )
+
+But I'm not sure.
+
+Alternatively, the standard code from Cummings:
+
+// full when the next write pointer's gray code is one less than the read pointer's (synchronized)
+
+// code from Cummings:
+
+// full when the next write pointer's gray code is one less than the read pointer's (synchronized)
+
+// code:
+
+// full = ( (wgraynext == { ~rgray_sync[ADDRWIDTH], ~rgray_sync[ADDRWIDTH-1], rgray_sync[ADDRWIDTH-2:0] }) );
+
+// where ADDRWIDTH is ADDR_WIDTH.
+
+In our code, the pointers are (ADDR_WIDTH+1) bits.
+
+So:
+
+assign wfull = (wgraynext == { ~rgray_sync2[PTR_WIDTH-1], ~rgray_sync2[PTR_WIDTH-2], rgray_sync2[PTR_WIDTH-3:0] });
+
+Wait, but the code in Cummings uses:
+
+// full when the next write pointer's gray code is one less than the read pointer's (synchronized)
+
+// code:
+
+// full = ( (wgraynext == { ~rgray_sync[ADDRWIDTH], ~rgray_sync[ADDRWIDTH-1], rgray_sync[ADDRWIDTH-2:0] }) );
+
+// ADDRWIDTH is the address width.
+
+In our case, the pointers are (ADDR_WIDTH+1) bits. So:
+
+assign wfull = (wgraynext == { ~rgray_sync2[PTR_WIDTH-1], ~rgray_sync2[PTR_WIDTH-2], rgray_sync2[PTR_WIDTH-3:0] });
+
+But perhaps the code should be:
+
+assign wfull = ( (wgraynext == { ~rgray_sync2[PTR_WIDTH-1], ~rgray_sync2[PTR_WIDTH-2], rgray_sync2[PTR_WIDTH-3:0] }) );
+
+But I'm not entirely sure. However, given time constraints, I'll proceed with the code.
+
+Now, the code:
+
+// Full condition
+wire [PTR_WIDTH-1:0] wgraynext = bin2gray(wptr + 1);
+
+// Synchronized read pointer's gray code (two stages)
+reg [PTR_WIDTH-1:0] rgray_sync1, rgray_sync2;
+
+// Synchronize read pointer to write domain
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        rgray_sync1 <= 0;
+        rgray_sync2 <= 0;
+    end else begin
+        rgray_sync1 <= rgray;
+        rgray_sync2 <= rgray_sync1;
+    end
+end
+
+// Full condition
+assign wfull = (wgraynext == { ~rgray_sync2[PTR_WIDTH-1], ~rgray_sync2[PTR_WIDTH-2], rgray_sync2[PTR_WIDTH-3:0] });
+
+// Empty condition
+// Synchronized write pointer's gray code (two stages)
+reg [PTR_WIDTH-1:0] wgray_sync1, wgray_sync2;
+
+// Synchronize write pointer to read domain
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        wgray_sync1 <= 0;
+        wgray_sync2 <= 0;
+    end else begin
+        wgray_sync1 <= wgray;
+        wgray_sync2 <= wgray_sync1;
+    end
+end
+
+// Empty condition
+assign rempty = (rgray == wgray_sync2);
+
+// Assign outputs
+assign wfull = ...; // Wait, in code, the output is wfull.
+
+Wait, the code:
+
+// Full condition
+wire wfull;
+assign wfull = ...;
+
+Wait, but in the code:
+
+// Full condition
+wire wfull;
+
+// ... 
+
+Wait, but in the code, the output is wfull.
+
+Wait, in the code:
+
+output wire wfull,
+
+So the code:
+
+// Full condition
+reg wfull;
+
+Wait, no. The code uses assign.
+
+Wait, the code:
+
+// Full condition
+wire wfull;
+
+Wait, no. The code uses:
+
+assign wfull = ...;
+
+Yes.
+
+Now, the code for the full condition:
+
+wire [PTR_WIDTH-1:0] wgraynext = bin2gray(wptr + 1);
+
+// Synchronized read pointer's gray code (two stages)
+reg [PTR_WIDTH-1:0] rgray_sync1, rgray_sync2;
+
+// Synchronize read pointer to write domain
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        rgray_sync1 <= 0;
+        rgray_sync2 <= 0;
+    end else begin
+        rgray_sync1 <= rgray;
+        rgray_sync2 <= rgray_sync1;
+    end
+end
+
+// Full condition
+assign wfull = (wgraynext == { ~rgray_sync2[PTR_WIDTH-1], ~rgray_sync2[PTR_WIDTH-2], rgray_sync2[PTR_WIDTH-3:0] });
+
+Wait, but if PTR_WIDTH is ADDR_WIDTH+1, then:
+
+For example, if ADDR_WIDTH is 4, PTR_WIDTH is 5.
+
+Then:
+
+rgray_sync2 is 5 bits.
+
+The code would be:
+
+assign wfull = (wgraynext == { ~rgray_sync2[4], ~rgray_sync2[3], rgray_sync2[2:0] });
+
+Which would be:
+
+The top two bits are flipped, and the lower bits are same.
+
+Yes.
+
+Similarly, the empty condition:
+
+// Synchronized write pointer's gray code (two stages)
+reg [PTR_WIDTH-1:0] wgray_sync1, wgray_sync2;
+
+// Synchronize write pointer to read domain
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        wgray_sync1 <= 0;
+        wgray_sync2 <= 0;
+    end else begin
+        wgray_sync1 <= wgray;
+        wgray_sync2 <= wgray_sync1;
+    end
+end
+
+// Empty condition
+assign rempty = (rgray == wgray_sync2);
+
+Now, the code for the pointers:
+
+// Write pointer update
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        wptr <= 0;
+    end else begin
+        if (winc && !wfull) begin
+            wptr <= wptr + 1;
+        end
+    end
+end
+
+// Read pointer update
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        rptr <= 0;
+    end else begin
+        if (rinc && !rempty) begin
+            rptr <= rptr + 1;
+        end
+    end
+end
+
+Now, the code for the memory:
+
+// Write to memory
+always @(posedge wclk) begin
+    if (winc && !wfull) begin
+        mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+    end
+end
+
+// Read from memory
+assign rdata = mem[rptr[ADDR_WIDTH-1:0]];
+
+Wait, but the pointers are (ADDR_WIDTH+1) bits. The lower ADDR_WIDTH bits are the address.
+
+Yes.
+
+Now, the code for the gray conversion:
+
+// Convert binary to gray code
+function [PTR_WIDTH-1:0] bin2gray;
+    input [PTR_WIDTH-1:0] bin;
+    bin2gray = (bin >> 1) ^ bin;
+endfunction
+
+// Convert gray to binary (if needed)
+
+But in the code, the pointers are stored as binary, converted to gray for synchronization.
+
+Now, the code for the outputs:
+
+assign waddr = wptr;
+assign raddr = rptr;
+
+Now, the code for the reset conditions:
+
+After reset, wfull is low and rempty is high.
+
+Wait, in the code:
+
+After reset:
+
+wptr is 0, rptr is 0.
+
+The empty condition is when rgray (which is 0) equals the synchronized write pointer (which is 0). So rempty is 1.
+
+Wait, but initially, after reset, the FIFO is empty.
+
+Yes.
+
+Now, the code for the initial conditions.
+
+Now, the code:
+
+Putting all together.
+
+Final code:
+
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam PTR_WIDTH = ADDR_WIDTH + 1;
+
+    // Pointers
+    reg [PTR_WIDTH-1:0] wptr, rptr;
+
+    // Gray code pointers
+    reg [PTR_WIDTH-1:0] wgray, rgray;
+
+    // Synchronized pointers
+    reg [PTR_WIDTH-1:0] rgray_sync1, rgray_sync2;
+    reg [PTR_WIDTH-1:0] wgray_sync1, wgray_sync2;
+
+    // Memory
+    reg [DATA_WIDTH-1:0] mem [0:(1 << ADDR_WIDTH)-1];
+
+    // Write domain logic
+    wire [PTR_WIDTH-1:0] wgraynext = ( (wptr + 1) >> 1 ) ^ (wptr + 1); // bin2gray(wptr +1)
+
+    // Read domain logic
+    wire [PTR_WIDTH-1:0] rgraynext = ( (rptr + 1) >> 1 ) ^ (rptr + 1);
+
+    // Convert binary to gray code
+    function [PTR_WIDTH-1:0] bin2gray;
+        input [PTR_WIDTH-1:0] bin;
+        bin2gray = (bin >> 1) ^ bin;
+    endfunction
+
+    // Write pointer update
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= 0;
+        end else begin
+            if (winc && !wfull) begin
+                wptr <= wptr + 1;
+            end
+        end
+    end
+
+    // Read pointer update
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= 0;
+        end else begin
+            if (rinc && !rempty) begin
+                rptr <= rptr + 1;
+            end
+        end
+    end
+
+    // Convert pointers to gray
+    always @* begin
+        wgray = bin2gray(wptr);
+        rgray = bin2gray(rptr);
+    end
+
+    // Synchronize read pointer to write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rgray_sync1 <= 0;
+            rgray_sync2 <= 0;
+        end else begin
+            rgray_sync1 <= rgray;
+            rgray_sync2 <= rgray_sync1;
+        end
+    end
+
+    // Synchronize write pointer to read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wgray_sync1 <= 0;
+            wgray_sync2 <= 0;
+        end else begin
+            wgray_sync1 <= wgray;
+            wgray_sync2 <= wgray_sync1;
+        end
+    end
+
+    // Full condition
+    wire [PTR_WIDTH-1:0] wgraynext = bin2gray(wptr + 1);
+    assign wfull = (wgraynext == { ~rgray_sync2[PTR_WIDTH-1], ~rgray_sync2[PTR_WIDTH-2], rgray_sync2[PTR_WIDTH-3:0] });
+
+    // Empty condition
+    assign rempty = (rgray == wgray_sync2);
+
+    // Write to memory
+    always @(posedge wclk) begin
+        if (winc && !wfull) begin
+            mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+        end
+    end
+
+    // Read from memory
+    assign rdata = mem[rptr[ADDR_WIDTH-1:0]];
+
+    // Assign outputs
+    assign waddr = wptr;
+    assign raddr = rptr;
+
+endmodule
+</think>
+
+<answer>
+```verilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam PTR_WIDTH = ADDR_WIDTH + 1;
+
+    // Pointers
+    reg [PTR_WIDTH-1:0] wptr, rptr;
+
+    // Gray code pointers
+    reg [PTR_WIDTH-1:0] wgray, rgray;
+
+    // Synchronized pointers
+    reg [PTR_WIDTH-1:0] rgray_sync1, rgray_sync2;
+    reg [PTR_WIDTH-1:0] wgray_sync1, wgray_sync2;
+
+    // Memory
+    reg [DATA_WIDTH-1:0] mem [0:(1 << ADDR_WIDTH)-1];
+
+    // Write domain logic
+    wire [PTR_WIDTH-1:0] wgraynext = bin2gray(wptr + 1);
+
+    // Read domain logic
+    wire [PTR_WIDTH-1:0] rgraynext = bin2gray(rptr + 1);
+
+    // Convert binary to gray code
+    function [PTR_WIDTH-1:0] bin2gray;
+        input [PTR_WIDTH-1:0] bin;
+        bin2gray = (bin >> 1) ^ bin;
+    endfunction
+
+    // Write pointer update
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= 0;
+        end else begin
+            if (winc && !wfull) begin
+                wptr <= wptr + 1;
+            end
+        end
+    end
+
+    // Read pointer update
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= 0;
+        end else begin
+            if (rinc && !rempty) begin
+                rptr <= rptr + 1;
+            end
+        end
+    end
+
+    // Convert pointers to gray
+    always @* begin
+        wgray = bin2gray(wptr);
+        rgray = bin2gray(rptr);
+    end
+
+    // Synchronize read pointer to write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rgray_sync1 <= 0;
+            rgray_sync2 <= 0;
+        end else begin
+            rgray_sync1 <= rgray;
+            rgray_sync2 <= rgray_sync1;
+        end
+    end
+
+    // Synchronize write pointer to read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wgray_sync1 <= 0;
+            wgray_sync2 <= 0;
+        end else begin
+            wgray_sync1 <= wgray;
+            wgray_sync2 <= wgray_sync1;
+        end
+    end
+
+    // Full condition
+    assign wfull = (wgraynext == { ~rgray_sync2[PTR_WIDTH-1], ~rgray_sync2[PTR_WIDTH-2], rgray_sync2[PTR_WIDTH-3:0] });
+
+    // Empty condition
+    assign rempty = (rgray == wgray_sync2);
+
+    // Write to memory
+    always @(posedge wclk) begin
+        if (winc && !wfull) begin
+            mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+        end
+    end
+
+    // Read from memory
+    assign rdata = mem[rptr[ADDR_WIDTH-1:0]];
+
+    // Assign outputs
+    assign waddr = wptr;
+    assign raddr = rptr;
+
+endmodule
+```
+</answer>

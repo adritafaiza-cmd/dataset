@@ -1,0 +1,1465 @@
+<think>Okay, I need to design a clearable valid/ready asynchronous FIFO in Verilog. Let's start by understanding the requirements. The module is called cdc_fifo_gray_clearable. The key features are the asynchronous clocks for source and destination, active-low resets, and the ability to clear the FIFO on either side with pending signals.
+
+First, the standard valid/ready FIFO structure. The FIFO uses Gray codes for pointers to handle clock domain crossings safely. The main components would be the memory array, write and read pointers, and synchronization of pointers between domains.
+
+The clear functionality: when src_clear_i is asserted, it should flush the FIFO on the source side. Similarly for dst_clear_i on the destination. The pending signals (src_clear_pending_o and dst_clear_pending_o) indicate that the clear is in progress and hasn't completed yet. The clear must not cause a destination beat, so when a clear is initiated, the FIFO should drop all data and return to empty.
+
+Gray code pointers are essential here. The write pointer increments in the source domain, and the read pointer in the destination. The synchronization of these pointers across clock domains uses synchronizers (like multi-stage synchronizers) to prevent metastability.
+
+Let me outline the steps:
+
+1. Define the FIFO parameters: WIDTH, LOG_DEPTH (depth is 2^LOG_DEPTH entries), SYNC_STAGES for synchronizers.
+
+2. Create the memory array. The size is 2^LOG_DEPTH entries, each WIDTH bits wide.
+
+3. Source domain (src_clk_i):
+   - Write pointer (gray encoded) increments when src_valid_i and src_ready_o (which is when FIFO is not full)
+   - The write pointer is converted to binary, used to write data into memory.
+   - The read pointer from destination is synchronized into the source domain (using Gray code to avoid issues)
+   - The FIFO's full condition is when the next write pointer's Gray code equals the synchronized read pointer's Gray code (but with the MSB and next bit inverted, similar to standard FIFO logic)
+
+Wait, the standard approach for full and empty: the write pointer is one more than the read pointer (mod depth*2). So in Gray terms, the full condition is when the next write pointer's Gray is equal to the synchronized read pointer's Gray. Wait, maybe I should recall the exact conditions.
+
+Wait, the Gray code pointers have a width of LOG_DEPTH +1 bits. The actual depth is 2^LOG_DEPTH. The extra bit helps in determining full and empty.
+
+Empty condition: when read and write pointers (Gray) are equal.
+
+Full condition: when the write pointer's Gray code is such that the next write would make the pointers differ by the depth. Wait, the standard approach is that when the MSBs and the next bits are different, and the rest are same. For example, if the write pointer is one more than the read pointer (mod 2*DEPTH), then the FIFO is full.
+
+But since we are using Gray codes, the actual comparison for full is when the write pointer's Gray code is equal to the read pointer's Gray code except the two MSBs are flipped. Hmm, perhaps I need to check.
+
+Alternatively, the full condition in Gray terms is when:
+
+wptr_gray == { ~rptr_sync_gray[LOG_DEPTH:LOG_DEPTH-1], rptr_sync_gray[LOG_DEPTH-2:0] }
+
+Wait, maybe I should refer to standard FIFO implementations.
+
+Wait, in standard FIFO with Gray pointers:
+
+- Empty: when read and write pointers (Gray) are equal.
+
+- Full: when the write pointer's Gray code is such that the next increment would make it equal to the read pointer's Gray code. Wait, but the pointers are one more than the depth. Hmm.
+
+Alternatively, the full condition is when the write pointer's next Gray code (after increment) would equal the read pointer's synchronized Gray code. Wait, perhaps the standard approach is:
+
+The FIFO is full when the MSBs of the write and read pointers differ, and the rest of the bits are equal. Wait, but in Gray code, consecutive numbers differ by one bit. So the actual full condition is when the write pointer's next Gray code (after increment) is equal to the read pointer's Gray code. Wait, but the pointers are (log_depth +1) bits. Let me think.
+
+Wait, the actual pointers are (log_depth +1) bits. The actual depth is 2^log_depth. The extra bit allows to distinguish between full and empty when the pointers wrap around.
+
+The empty condition is when the read and write pointers (gray) are equal.
+
+The full condition is when the write pointer's gray code is equal to the read pointer's gray code except that the two MSBs are flipped. For example, if the pointers are N bits (log_depth+1), then:
+
+full = (wptr_gray == { ~rptr_sync_gray[N-1], ~rptr_sync_gray[N-2], rptr_sync_gray[N-3:0] } )
+
+Wait, perhaps I need to refer to the standard FIFO implementation.
+
+Alternatively, the full condition is when:
+
+(wptr_gray ^ (wptr_gray >> 1)) == (rptr_sync_gray ^ (rptr_sync_gray >>1 )) )
+
+Wait, maybe not. Let's think again.
+
+In standard FIFO:
+
+The binary pointers are (log_depth +1) bits. The actual depth is 2^log_depth. The pointers can range from 0 to 2^(log_depth+1) -1.
+
+Empty: when read_ptr == write_ptr.
+
+Full: when (write_ptr - read_ptr) == 2^log_depth.
+
+But when using Gray code, the pointers are converted to Gray. The full condition is when the next write would make the write pointer equal to the read pointer (mod 2^(log_depth+1)), but since the actual depth is 2^log_depth, the full is when the difference is exactly the depth.
+
+But how to compute that in Gray code terms.
+
+Alternatively, the full condition is when:
+
+(wptr_gray == { ~rptr_sync_gray[LOG_DEPTH:LOG_DEPTH-1], rptr_sync_gray[LOG_DEPTH-2 :0] } )
+
+Wait, perhaps the standard approach is:
+
+The full condition is when the write pointer's Gray code is equal to the synchronized read pointer's Gray code except that the two MSBs are flipped. For example, if the pointers are N bits (log_depth+1), then:
+
+full = (wptr_gray == { ~rptr_sync_gray[N-1], ~rptr_sync_gray[N-2], rptr_sync_gray[N-3:0] } )
+
+But I need to confirm.
+
+Alternatively, the full condition is when the next write pointer (binary) would have the same value as the read pointer (binary). Wait, but in binary terms, the full is when (wptr - rptr) == depth.
+
+But in Gray code terms, the pointers are converted to Gray. So the logic would be:
+
+The write pointer (binary) increments when writing. The read pointer (binary) is synchronized via Gray code.
+
+Wait, perhaps the steps are:
+
+In the source domain:
+
+- The write pointer (binary) increments when src_valid and src_ready.
+
+- The read pointer (binary) is synchronized via Gray code from destination.
+
+Similarly, in destination domain:
+
+- The read pointer increments when dst_valid and dst_ready.
+
+- The write pointer (binary) is synchronized via Gray code.
+
+The full condition is when (wptr - rptr_sync_bin) >= depth.
+
+Wait, but the pointers are in binary. Wait, but the actual pointers are (log_depth +1) bits. The actual depth is 2^log_depth.
+
+Wait, maybe the standard approach is:
+
+The FIFO is full when:
+
+(wptr - rptr) >= (2^log_depth)
+
+But in binary terms. But when pointers are (log_depth+1) bits, the maximum is 2^(log_depth+1) -1.
+
+Wait, perhaps the full condition is when the write pointer's binary is (read pointer's binary + depth) mod 2^(log_depth+1). So the difference is exactly depth.
+
+But how to compute that.
+
+Alternatively, the full condition is when:
+
+(wptr_gray == { ~rptr_sync_gray[LOG_DEPTH:LOG_DEPTH-1], rptr_sync_gray[LOG_DEPTH-2:0] } )
+
+Wait, perhaps the standard way is that the full condition is when the MSBs of the two pointers (after Gray conversion) differ and the rest are same. Wait, but I'm getting confused here.
+
+Alternatively, the full condition is when the next write would make the write pointer equal to the read pointer. Wait, but that's the empty condition. Hmm.
+
+Alternatively, the standard FIFO uses the following:
+
+The FIFO is empty when the read and write pointers (binary) are equal.
+
+The FIFO is full when the write pointer is exactly (read pointer + depth) mod (2*depth). Wait, but pointers are (log_depth +1) bits. Wait, depth is 2^log_depth. So the total entries are 2^log_depth. The pointers are (log_depth +1) bits, allowing to track the wrap around.
+
+So when the difference between write and read pointers is equal to the depth, the FIFO is full.
+
+So in binary terms:
+
+full = ( (wptr - rptr_sync_bin) == (2**LOG_DEPTH) )
+
+But how to compute that in Verilog.
+
+But since the pointers are in binary, but the Gray code is used for synchronization.
+
+Wait, perhaps the steps are:
+
+In the source domain:
+
+- The write pointer (binary) is converted to Gray (wptr_gray).
+
+- The read pointer (binary) is synchronized via Gray code (rptr_sync_gray) in the source domain.
+
+Similarly, in destination domain:
+
+- The read pointer (binary) is converted to Gray (rptr_gray).
+
+- The write pointer (binary) is synchronized via Gray code (wptr_sync_gray) in the destination domain.
+
+The empty condition is when the synchronized write pointer (Gray) equals the read pointer's Gray.
+
+Wait, no. Wait, the empty is when the read and write pointers (binary) are equal. So in the destination domain, the read pointer increments, and the synchronized write pointer (from source) is converted to binary. If they are equal, then empty.
+
+Similarly, in the source domain, the write pointer (binary) is compared to the synchronized read pointer (binary) to check if the FIFO is full.
+
+Wait, perhaps the steps are:
+
+In the source domain:
+
+- The write pointer (binary) is incremented when writing (src_valid and src_ready).
+
+- The read pointer (binary) is synchronized via Gray code (rptr_sync_gray) converted to binary (rptr_sync_bin).
+
+- The FIFO is full when (wptr - rptr_sync_bin) >= (2**LOG_DEPTH)
+
+Similarly, in destination domain:
+
+- The read pointer (binary) is incremented when reading (dst_valid and dst_ready).
+
+- The write pointer (binary) is synchronized via Gray code (wptr_sync_gray) converted to binary (wptr_sync_bin).
+
+- The FIFO is empty when (wptr_sync_bin == rptr)
+
+Wait, but the FIFO is empty when the read pointer equals the write pointer.
+
+Wait, perhaps the standard approach is:
+
+The FIFO is empty when the read and write pointers (binary) are equal.
+
+The FIFO is full when (write pointer - read pointer) == depth.
+
+So in code:
+
+assign full = ( (wptr - rptr_sync_bin) >= (1 << LOG_DEPTH) );
+
+But in Verilog, the pointers are (LOG_DEPTH +1) bits. So the maximum possible difference is (2^(LOG_DEPTH+1) -1). So the full condition is when (wptr - rptr_sync_bin) == (1 << LOG_DEPTH).
+
+But how to compute that.
+
+Alternatively, the full is when the next write would make the FIFO full. So:
+
+wire [LOG_DEPTH:0] wptr_inc = wptr + 1;
+
+assign full = ( (wptr_inc - rptr_sync_bin) == (1 << LOG_DEPTH) );
+
+But perhaps the standard way is to use the MSB and the rest.
+
+Alternatively, the full condition is when:
+
+(wptr_gray == { ~rptr_sync_gray[LOG_DEPTH:LOG_DEPTH-1], rptr_sync_gray[LOG_DEPTH-2:0] } )
+
+But I need to confirm.
+
+Alternatively, the full condition is when the write pointer's Gray code is equal to the synchronized read pointer's Gray code except the two MSBs are flipped.
+
+Wait, here's a reference: 
+
+In Clifford E. Cummings' papers on FIFO design, the full condition is determined by:
+
+The write pointer's Gray code is compared with the synchronized read pointer's Gray code. The full condition is when:
+
+wgraynext == { ~rgrayc[LOGDEPTH:LOGDEPTH-1], rgrayc[LOGDEPTH-2:0] }
+
+Wait, perhaps.
+
+In Cummings' example, the full condition is when the next Gray code (after increment) of the write pointer equals the synchronized read pointer's Gray code, but with the top two bits inverted.
+
+Wait, here's the code from his example:
+
+// full when the next write pointer's gray equals the synchronized read pointer's gray except the top two bits are flipped.
+
+assign full = ( (wgraynext == { ~rgrayc[LOGDEPTH], ~rgrayc[LOGDEPTH-1], rgrayc[LOGDEPTH-2:0] }) );
+
+Wait, perhaps that's the case.
+
+In any case, the exact full and empty conditions are critical here.
+
+But perhaps the code can be structured as follows.
+
+Now, the clear functionality. The clear (src_clear_i and dst_clear_i) should reset the FIFO. The pending signals indicate that the clear is in progress.
+
+Wait, the clear is supposed to flush the FIFO. So when a clear is requested (src_clear_i or dst_clear_i), the FIFO should drop all data and return to empty. The pending signals go high and stay until the clear is done.
+
+But the clear must not cause a destination beat. So when a clear is initiated, the FIFO should not output any data until the clear is done.
+
+Wait, the behavior says: "Clear and reset must not create a destination beat." So when a clear is active, the FIFO should not have a valid transaction on the destination side.
+
+So the clear process:
+
+When a clear is triggered (either src_clear_i or dst_clear_i), the FIFO should:
+
+1. Isolate both sides (source and destination domains).
+
+2. Drop all stored and in-flight data.
+
+3. Return to empty.
+
+4. The pending signal (src_clear_pending_o or dst_clear_pending_o) stays high until the clear is done.
+
+So the clear is a two-phase process. Once initiated, the FIFO must flush all data and then deassert the pending.
+
+But how to handle the cross-domain clear signals.
+
+Wait, the clear can be initiated from either side. So if the source domain does a clear, the destination domain's pointers may be in a different state. Need to synchronize the clear signals across domains.
+
+Wait, the clear is asynchronous. So the clear signals (src_clear_i and dst_clear_i) are in their own domains.
+
+Wait, the src_clear_i is in the source domain (src_clk_i), and dst_clear_i is in the destination domain (dst_clk_i). The pending signals are outputs in their respective domains.
+
+So the process is:
+
+In the source domain:
+
+When src_clear_i is asserted, the FIFO should start a clear process. The pending signal (src_clear_pending_o) is set high. The FIFO is emptied (pointers reset to zero?), and the pending stays high until the clear is done.
+
+Similarly for the destination domain.
+
+But how to coordinate between the two domains.
+
+Wait, the clear can be initiated from either side. So if the source domain does a clear, the destination's pointers may have data. So the clear must propagate to both domains.
+
+Alternatively, the clear is a global operation. Once any domain initiates a clear, the FIFO is flushed.
+
+But the pending signals are per domain. So if the source does a clear, the src_clear_pending is high until the clear is done. Similarly for destination.
+
+But the actual clearing process must be done in both domains.
+
+Wait, the clear is a request that must be handled in both domains. So the clear signals (src_clear_i and dst_clear_i) are asynchronous and need to be synchronized into their respective domains.
+
+Wait, but the src_clear_i is in the source domain. So when src_clear_i is active, the source domain starts the clear process. Similarly, dst_clear_i in destination.
+
+But the FIFO is a single entity. So the clear process must be synchronized across both domains.
+
+Alternatively, the clear is a two-step process. Once either side initiates a clear, the FIFO is flushed, and the pending signals are set.
+
+But the pending signals are per domain. So if the source does a clear, the src_clear_pending is set. The destination's pending may not be set unless the destination also gets the clear.
+
+Wait, the behavior says:
+
+- src_clear_i / dst_clear_i request a flush: isolate both sides, drop stored and in-flight data, then return to empty.
+
+So the clear is a request that when either side does it, the FIFO is flushed. The pending signals indicate that the clear is in progress.
+
+But the pending signals are per domain. So when a clear is initiated in the source domain, the src_clear_pending is high until the clear is done. Similarly for destination.
+
+But the actual clearing must be done in both domains. So the clear is a cross-domain signal.
+
+Wait, perhaps the clear is a signal that is synchronized across both domains. For example, when src_clear_i is active, it's synchronized into the destination domain, and vice versa.
+
+But the exact implementation is a bit unclear.
+
+Alternatively, the clear is a request that can be initiated from either side. Once any clear is active, the FIFO is flushed. The pending signals are set once the clear is done.
+
+But the pending signals are outputs. So when a clear is initiated (either side), the pending is set and remains until the clear is done.
+
+But the actual process is:
+
+When a clear is requested (either src_clear_i or dst_clear_i), the FIFO must:
+
+1. Deassert valid and ready signals to prevent any data transfer.
+
+2. Reset the pointers to empty.
+
+3. Wait until all data is flushed.
+
+But the exact steps are unclear.
+
+Alternatively, the clear operation:
+
+When a clear is requested (either side), the FIFO is emptied immediately (pointers reset), and the pending signals are set. The pending signals go low once the FIFO is empty and the clear is done.
+
+But the pending signals are outputs. So:
+
+src_clear_pending_o is high when the source side is in the process of clearing.
+
+Similarly for dst_clear_pending_o.
+
+But the actual clearing process may take time. For example, if the FIFO is being read by the destination side, the clear must wait until the read side has finished.
+
+Alternatively, the clear is a global operation that resets the FIFO regardless of the current state. The pending signals indicate that the clear is in progress (i.e., the FIFO is being flushed).
+
+But the exact behavior is not fully detailed in the problem statement.
+
+But according to the problem statement:
+
+- The clear and reset must not create a destination beat. So when a clear is active, the FIFO should not output any valid data.
+
+So the clear process must:
+
+- When a clear is requested (either side), the FIFO is emptied.
+
+- The pending signals are set and stay high until the clear is done.
+
+Now, the code structure.
+
+First, the standard asynchronous FIFO with Gray code pointers.
+
+Then, adding the clear functionality.
+
+The clear would override the normal operation. When a clear is active, the FIFO's read and write pointers are reset to zero, and the memory is cleared (if possible). The pending signals are set and cleared once the pointers are reset.
+
+But the clear is asynchronous. So the clear signals (src_clear_i and dst_clear_i) are asynchronous and need to be synchronized into their respective domains.
+
+Wait, but the src_clear_i is in the source domain. So when src_clear_i is asserted, it's in the src_clk_i domain. Similarly for dst_clear_i.
+
+But the FIFO's internal logic must handle the cross-domain clear.
+
+Wait, the clear is a request that can be initiated from either side. So the clear signals need to be synchronized into both domains.
+
+Alternatively, the clear is a signal that is synchronized into both domains. Once any domain detects a clear, the FIFO is cleared.
+
+But the pending signals are per domain.
+
+Alternatively, the clear is a two-phase handshake. Once a clear is initiated, the FIFO is cleared, and the pending signals are set. Once the clear is done, the pending is cleared.
+
+But the exact implementation is a bit unclear.
+
+Let me proceed step by step.
+
+First, the standard FIFO structure with Gray pointers.
+
+Then, adding the clear.
+
+The clear can be initiated from either side. So the clear signals (src_clear_i and dst_clear_i) are asynchronous and need to be synchronized into their own domains.
+
+Wait, but the src_clear_i is in the source domain. So when src_clear_i is active, the source domain starts the clear process. Similarly for the destination.
+
+But the FIFO's internal state (pointers, memory) is in both domains. So the clear must be handled in both domains.
+
+Wait, but the FIFO is a single entity. So the clear is a global operation. Once any clear is active, the FIFO is emptied.
+
+But the pending signals are per domain. So the src_clear_pending is set once the source domain has processed the clear, and similarly for the destination.
+
+But the actual code would need to have:
+
+In the source domain:
+
+- When src_clear_i is active, the FIFO is cleared (pointers reset, etc.), and src_clear_pending is set.
+
+Similarly for destination.
+
+But the clear is a request that can come from either side. So if the source domain does a clear, the destination's pending may not be set unless the destination also gets the clear.
+
+Alternatively, the clear is a request that must be synchronized across both domains.
+
+But the problem statement says:
+
+- The clear and reset must not create a destination beat.
+
+So when a clear is active, the FIFO must not output any data (valid remains low).
+
+Now, the code outline.
+
+First, the standard FIFO with Gray pointers.
+
+The FIFO has:
+
+- Memory array.
+
+- Write pointer (binary and Gray) in source domain.
+
+- Read pointer (binary and Gray) in destination domain.
+
+Synchronization:
+
+- The write pointer's Gray is synchronized into the destination domain.
+
+- The read pointer's Gray is synchronized into the source domain.
+
+Full and empty conditions.
+
+Now, adding the clear.
+
+The clear can be initiated from either side. So:
+
+When src_clear_i is asserted (in source domain), the FIFO starts a clear process. Similarly for dst_clear_i in destination.
+
+The pending signals are outputs in their respective domains.
+
+The clear process:
+
+1. When a clear is requested (either side), the FIFO is emptied.
+
+2. The pending signals are set and stay until the clear is done.
+
+3. The clear must not cause any data to be output (valid remains low).
+
+So the steps:
+
+In the source domain:
+
+If src_clear_i is active, then:
+
+- Reset the write pointer to 0.
+
+- Set src_clear_pending to 1.
+
+Similarly, in destination domain:
+
+If dst_clear_i is active:
+
+- Reset read pointer to 0.
+
+- Set dst_clear_pending to 1.
+
+But the FIFO's empty condition is when read and write pointers are equal.
+
+Wait, but the pointers are in different domains. So when a clear is done in the source domain, the write pointer is reset. The read pointer in the destination domain may have a higher value. So after the clear, the FIFO is empty.
+
+But the pending signals are per domain. So the src_clear_pending is set once the source has cleared, and the dst_clear_pending once the destination has cleared.
+
+But the actual clearing may need to be done in both domains.
+
+Alternatively, the clear is a global operation. Once any clear is active, the FIFO is emptied.
+
+But the pending signals are per domain.
+
+But the code may need to have:
+
+In the source domain:
+
+src_clear_pending is set when a clear is requested (src_clear_i) and remains until the FIFO is empty.
+
+Similarly, in destination domain, dst_clear_pending is set when a clear is requested (dst_clear_i) and until empty.
+
+But the actual clearing process is that once either side does a clear, the FIFO is emptied.
+
+But the pending signals are outputs. So:
+
+src_clear_pending_o is high when the source side is in the process of clearing.
+
+Similarly for dst_clear_pending_o.
+
+Now, the code.
+
+First, the standard FIFO.
+
+The FIFO has:
+
+- Memory array.
+
+- Write pointer (binary and gray) in source domain.
+
+- Read pointer (binary and gray) in destination domain.
+
+Synchronization:
+
+- The write pointer's gray is synchronized into destination domain (using SYNC_STAGES).
+
+- The read pointer's gray is synchronized into source domain.
+
+Full and empty conditions.
+
+Now, the clear.
+
+The clear is a request that can come from either side.
+
+The clear process:
+
+When a clear is requested (src_clear_i or dst_clear_i), the FIFO is emptied (pointers reset to zero), and the pending signals are set.
+
+Once the FIFO is empty, the pending signals are cleared.
+
+But the pending signals are in their own domains.
+
+Wait, but the FIFO's empty state is determined by the read and write pointers.
+
+If the write pointer is zero and read pointer is zero, then empty.
+
+So when a clear is done (either side), the pointers are reset to zero.
+
+Thus, the code can be:
+
+In the source domain:
+
+If src_clear_i is active, then:
+
+   write pointer is reset to zero.
+
+   src_clear_pending is set.
+
+Similarly, in destination domain:
+
+If dst_clear_i is active:
+
+   read pointer is reset to zero.
+
+   dst_clear_pending is set.
+
+But the pointers are in different domains. So the reset of write pointer (source domain) and read pointer (destination domain) would need to be synchronized.
+
+But the clear is a request that can be done from either side.
+
+Wait, but the FIFO's pointers are in both domains. So if the source domain does a clear, the write pointer is reset. The read pointer (in destination) may have data. But after the clear, the FIFO is empty.
+
+But the pending signals are per domain.
+
+But the code may have:
+
+In the source domain:
+
+src_clear_pending is set when a clear is requested (src_clear_i) and the FIFO is emptied.
+
+Similarly for destination.
+
+But the actual code would need to handle the cross-domain signals.
+
+Alternatively, the clear is a two-step process.
+
+Once a clear is initiated in either domain, the FIFO is emptied, and the pending signals are set.
+
+Once the FIFO is empty, the pending signals are cleared.
+
+But the pending signals are per domain.
+
+But the code may need to have:
+
+In the source domain:
+
+src_clear_pending is set when src_clear_i is active and the FIFO is empty.
+
+Wait, but the clear is a request to flush. So when the clear is active, the FIFO is emptied immediately.
+
+But the pending signals indicate that the clear is in progress.
+
+Alternatively, the pending signals are set when the clear is requested and cleared once the FIFO is empty.
+
+But the exact behavior is not fully clear.
+
+But according to the problem statement:
+
+- src_clear_i / dst_clear_i request a flush: isolate both sides, drop stored and in-flight data, then return to empty.
+
+- *_clear_pending_o stays high until that side finishes.
+
+So the pending signals are high from when the clear is requested until the FIFO is empty.
+
+Thus:
+
+When a clear is requested (src_clear_i or dst_clear_i), the pending signal (src or dst) is set. Once the FIFO is empty (pointers equal), the pending is cleared.
+
+But the pending is per domain.
+
+Wait, but the FIFO's empty state is determined by the synchronized pointers. So if the source domain's write pointer and destination's read pointer are equal, then empty.
+
+But the pending signals are per domain.
+
+Alternatively, the pending signals are set when a clear is requested and cleared once the FIFO is empty (pointers equal).
+
+Thus, the code:
+
+In the source domain:
+
+src_clear_pending is set when src_clear_i is active (and maybe after synchronization) and cleared when the FIFO is empty.
+
+Similarly for destination.
+
+But the clear can be initiated from either side. So if the source domain does a clear, the pending is set in source, and once the FIFO is empty (pointers equal), pending is cleared.
+
+But the pending signals are outputs, so they need to be in their own domains.
+
+Now, the code.
+
+First, the standard FIFO.
+
+The FIFO has:
+
+- Memory array.
+
+- Write pointer (binary and gray) in source domain.
+
+- Read pointer (binary and gray) in destination domain.
+
+Synchronization:
+
+- The write pointer's gray is synchronized into destination domain (using SYNC_STAGES).
+
+- The read pointer's gray is synchronized into source domain.
+
+Full and empty conditions.
+
+Now, the clear.
+
+The clear can be initiated from either side.
+
+The code for the source domain:
+
+When src_clear_i is active:
+
+   reset write pointer to zero.
+
+   set src_clear_pending.
+
+Once the FIFO is empty (read and write pointers equal), clear pending.
+
+Similarly for destination.
+
+But the FIFO's empty condition is when read and write pointers are equal.
+
+But the pointers are in different domains.
+
+Wait, but the read pointer is synchronized into the source domain (as rptr_sync_gray), converted to binary.
+
+Similarly, the write pointer is synchronized into destination as wptr_sync_gray.
+
+So the empty condition in destination is when the read pointer equals the synchronized write pointer.
+
+In the source domain, the empty condition would be when the synchronized read pointer equals the write pointer.
+
+But the pending signals are per domain.
+
+But the code for the clear:
+
+In the source domain:
+
+src_clear_pending is set when src_clear_i is active and remains until the FIFO is empty.
+
+But the FIFO is empty when the read and write pointers (after synchronization) are equal.
+
+Wait, but the FIFO's empty is determined by the synchronized pointers.
+
+But the code may need to have:
+
+In the source domain:
+
+src_clear_pending is set when src_clear_i is active (after synchronization) and cleared when the FIFO is empty (read and write pointers equal).
+
+Similarly for destination.
+
+But the code:
+
+First, the standard FIFO code.
+
+The FIFO has:
+
+- Memory array.
+
+- write pointer (binary and gray) in source domain.
+
+- read pointer (binary and gray) in destination domain.
+
+Synchronization:
+
+- write pointer's gray is synchronized into destination domain (using SYNC_STAGES).
+
+- read pointer's gray is synchronized into source domain.
+
+Full and empty conditions.
+
+Now, adding the clear.
+
+The clear can be initiated from either side.
+
+The code for the source domain:
+
+When src_clear_i is active (and synchronized to the source domain), the write pointer is reset to zero. The src_clear_pending is set. Once the FIFO is empty (read and write pointers equal), the pending is cleared.
+
+Similarly, in destination domain:
+
+When dst_clear_i is active, reset read pointer to zero. Set dst_clear_pending. Once empty, clear pending.
+
+But the pointers are in different domains. So the reset of write pointer (source domain) and read pointer (destination) would need to be done.
+
+But the code:
+
+In the source domain:
+
+always @(posedge src_clk_i or negedge src_rst_ni) begin
+
+   if (!src_rst_ni) begin
+
+      // reset
+
+   end else begin
+
+      if (src_clear_i) begin
+
+         // initiate clear
+
+         wptr <= 0;
+
+         src_clear_pending <= 1;
+
+      end else if (src_clear_pending) begin
+
+         // wait until FIFO is empty
+
+         if (wptr == rptr_sync_bin) begin
+
+             src_clear_pending <= 0;
+
+         end
+
+      end else begin
+
+         // normal operation
+
+      end
+
+   end
+
+end
+
+Wait, but the src_clear_i is asynchronous. Need to synchronize it.
+
+Wait, the src_clear_i is in the source domain. So when it's asserted, it's in the src_clk_i domain.
+
+But the code would need to handle the clear as a synchronous signal.
+
+Wait, the code:
+
+In the source domain:
+
+The src_clear_i is a level-sensitive signal. When active, the FIFO is cleared.
+
+But the pending is set once the clear is done.
+
+Wait, perhaps the code:
+
+In the source domain:
+
+When src_clear_i is active, the write pointer is reset to zero. The pending is set. Once the FIFO is empty (read and write pointers equal), pending is cleared.
+
+But the read pointer is in the destination domain. So the synchronized read pointer (rptr_sync_bin) is used.
+
+Similarly in destination.
+
+But the code for the source:
+
+src_clear_pending is set when src_clear_i is active and remains until the FIFO is empty.
+
+But the FIFO's empty condition is when the read and write pointers (after synchronization) are equal.
+
+Wait, but the write pointer is in the source domain (wptr), and the read pointer is in destination (rptr).
+
+The synchronized read pointer (rptr_sync_bin) in the source domain.
+
+So in the source domain:
+
+if (src_clear_i) begin
+
+   wptr <= 0;
+
+   src_clear_pending <= 1;
+
+end else if (src_clear_pending) begin
+
+   if (wptr == rptr_sync_bin) begin
+
+      src_clear_pending <= 0;
+
+   end
+
+end
+
+Similarly in destination:
+
+if (dst_clear_i) begin
+
+   rptr <= 0;
+
+   dst_clear_pending <= 1;
+
+end else if (dst_clear_pending) begin
+
+   if (wptr_sync_bin == rptr) begin
+
+      dst_clear_pending <= 0;
+
+   end
+
+end
+
+But the pending signals are outputs. So:
+
+src_clear_pending_o is src_clear_pending.
+
+dst_clear_pending_o is dst_clear_pending.
+
+Now, the code.
+
+The code outline:
+
+module cdc_fifo_gray_clearable #(...) (...);
+
+// Parameters
+
+// Port declarations.
+
+// FIFO memory array.
+
+reg [WIDTH-1:0] mem [0:(1<<LOG_DEPTH)-1];
+
+// Source domain signals.
+
+reg [LOG_DEPTH:0] wptr_bin, rptr_sync_bin;
+
+reg [LOG_DEPTH:0] wptr_gray;
+
+// Synchronizers for read pointer in source domain.
+
+reg [LOG_DEPTH:0] rptr_sync [SYNC_STAGES-1:0];
+
+// Destination domain signals.
+
+reg [LOG_DEPTH:0] rptr_bin, wptr_sync_bin;
+
+reg [LOG_DEPTH:0] rptr_gray;
+
+// Synchronizers for write pointer in destination domain.
+
+reg [LOG_DEPTH:0] wptr_sync [SYNC_STAGES-1:0];
+
+// Source domain logic.
+
+// Synchronize read pointer from destination.
+
+always @(posedge src_clk_i or negedge src_rst_ni) begin
+
+   if (!src_rst_ni) begin
+
+      // reset synchronizers
+
+      for (int i=0; i<SYNC_STAGES; i++) begin
+
+         rptr_sync[i] <= 0;
+
+      end
+
+   end else begin
+
+      // shift synchronizer
+
+      rptr_sync[0] <= rptr_gray;
+
+      for (int i=1; i<SYNC_STAGES; i++) begin
+
+         rptr_sync[i] <= rptr_sync[i-1];
+
+      end
+
+   end
+
+end
+
+assign rptr_sync_bin = rptr_sync[SYNC_STAGES-1];
+
+// Source domain clear logic.
+
+reg src_clear_pending;
+
+always @(posedge src_clk_i or negedge src_rst_ni) begin
+
+   if (!src_rst_ni) begin
+
+      src_clear_pending <= 0;
+
+      wptr_bin <= 0;
+
+      wptr_gray <= 0;
+
+   end else begin
+
+      if (src_clear_i) begin
+
+         // initiate clear
+
+         wptr_bin <= 0;
+
+         wptr_gray <= 0;
+
+         src_clear_pending <= 1;
+
+      end else if (src_clear_pending) begin
+
+         // wait until FIFO is empty
+
+         if (wptr_bin == rptr_sync_bin) begin
+
+             src_clear_pending <= 0;
+
+         end
+
+      end else begin
+
+         // normal operation
+
+         if (src_valid_i && src_ready_o) begin
+
+             mem[wptr_bin[LOG_DEPTH-1:0]] <= src_data_i;
+
+             wptr_bin <= wptr_bin + 1;
+
+             wptr_gray <= bin2gray(wptr_bin + 1);
+
+         end
+
+      end
+
+   end
+
+end
+
+// src_ready_o is when not full.
+
+wire full;
+
+assign full = ( (wptr_bin - rptr_sync_bin) >= (1 << LOG_DEPTH) );
+
+assign src_ready_o = !full;
+
+// Destination domain logic.
+
+// Synchronize write pointer from source.
+
+always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+
+   if (!dst_rst_ni) begin
+
+      for (int i=0; i<SYNC_STAGES; i++) begin
+
+         wptr_sync[i] <= 0;
+
+      end
+
+   end else begin
+
+      wptr_sync[0] <= wptr_gray;
+
+      for (int i=1; i<SYNC_STAGES; i++) begin
+
+         wptr_sync[i] <= wptr_sync[i-1];
+
+      end
+
+   end
+
+end
+
+assign wptr_sync_bin = wptr_sync[SYNC_STAGES-1];
+
+// Destination domain clear logic.
+
+reg dst_clear_pending;
+
+always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+
+   if (!dst_rst_ni) begin
+
+      dst_clear_pending <= 0;
+
+      rptr_bin <= 0;
+
+      rptr_gray <= 0;
+
+   end else begin
+
+      if (dst_clear_i) begin
+
+         // initiate clear
+
+         rptr_bin <= 0;
+
+         rptr_gray <= 0;
+
+         dst_clear_pending <= 1;
+
+      end else if (dst_clear_pending) begin
+
+         if (wptr_sync_bin == rptr_bin) begin
+
+             dst_clear_pending <= 0;
+
+         end
+
+      end else begin
+
+         if (dst_ready_i && dst_valid_o) begin
+
+             rptr_bin <= rptr_bin + 1;
+
+             rptr_gray <= bin2gray(rptr_bin + 1);
+
+         end
+
+      end
+
+   end
+
+end
+
+// dst_valid_o is when not empty.
+
+wire empty;
+
+assign empty = (rptr_bin == wptr_sync_bin);
+
+assign dst_valid_o = !empty;
+
+// Data output.
+
+assign dst_data_o = mem[rptr_bin[LOG_DEPTH-1:0]];
+
+// Other assignments.
+
+assign src_clear_pending_o = src_clear_pending;
+
+assign dst_clear_pending_o = dst_clear_pending;
+
+// Function to convert binary to gray.
+
+function [LOG_DEPTH:0] bin2gray;
+
+input [LOG_DEPTH:0] bin;
+
+begin
+
+   bin2gray = bin ^ (bin >> 1);
+
+end
+
+endfunction
+
+endmodule
+
+Wait, but the code has several parts.
+
+The main parts are:
+
+- Memory array.
+
+- Synchronization of pointers.
+
+- Full and empty conditions.
+
+- Clear logic.
+
+But the code may need to handle the cross-domain clear.
+
+But the code above has:
+
+In the source domain:
+
+When src_clear_i is active, the write pointer is reset, and pending is set. Once the FIFO is empty (wptr_bin == rptr_sync_bin), pending is cleared.
+
+Similarly, in destination:
+
+When dst_clear_i is active, read pointer is reset, pending set. Once empty (wptr_sync_bin == rptr_bin), pending cleared.
+
+The FIFO's empty is determined by the synchronized pointers.
+
+The full is when (wptr_bin - rptr_sync_bin) >= depth.
+
+The empty is when (rptr_bin == wptr_sync_bin).
+
+The clear logic in each domain.
+
+The pending signals are outputs.
+
+But the code may have some issues.
+
+For example, the clear in the source domain resets the write pointer and sets pending. The pending remains until the FIFO is empty (pointers equal).
+
+Similarly for destination.
+
+The code for the source:
+
+The src_clear_pending is set when src_clear_i is active. Once the FIFO is empty (wptr_bin == rptr_sync_bin), pending is cleared.
+
+But the FIFO's empty is determined by the synchronized read pointer.
+
+Similarly in destination.
+
+This code may need to be adjusted.
+
+But the code outline seems to follow the required behavior.
+
+Now, the code.
+
+The code would have:
+
+- Memory array.
+
+- Source and destination pointers.
+
+- Synchronizers for pointers.
+
+- Full and empty conditions.
+
+- Clear logic.
+
+Now, the code.
+
+First, the parameters and ports.
+
+Then, the memory.
+
+Then, the source domain:
+
+- Synchronizing read pointer.
+
+- Write pointer logic.
+
+- Clear logic.
+
+Destination domain:
+
+- Synchronizing write pointer.
+
+- Read pointer logic.
+
+- Clear logic.
+
+The full and empty conditions.
+
+The clear logic.
+
+Now, the code.
+
+The code:
+
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    // Local parameters
+    localparam PTR_WIDTH = LOG_DEPTH + 1;
+
+    // FIFO memory
+    reg [WIDTH-1:0] mem [0:(1 << LOG_DEPTH)-1];
+
+    // Source domain signals
+    reg [PTR_WIDTH-1:0] wptr_bin, rptr_sync_bin;
+    reg [PTR_WIDTH-1:0] wptr_gray;
+    reg [PTR_WIDTH-1:0] rptr_sync [0:SYNC_STAGES-1];
+    reg src_clear_pending;
+
+    // Destination domain signals
+    reg [PTR_WIDTH-1:0] rptr_bin, wptr_sync_bin;
+    reg [PTR_WIDTH-1:0] rptr_gray;
+    reg [PTR_WIDTH-1:0] wptr_sync [0:SYNC_STAGES-1];
+    reg dst_clear_pending;
+
+    // Synchronization of read pointer in source domain
+    integer i;
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            for (i = 0; i < SYNC_STAGES; i = i + 1) begin
+                rptr_sync[i] <= 0;
+            end
+        end else begin
+            rptr_sync[0] <= rptr_gray;
+            for (i = 1; i < SYNC_STAGES; i = i + 1) begin
+                rptr_sync[i] <= rptr_sync[i-1];
+            end
+        end
+    end
+    assign rptr_sync_bin = rptr_sync[SYNC_STAGES-1];
+
+    // Source domain logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            wptr_bin <= 0;
+            wptr_gray <= 0;
+            src_clear_pending <= 0;
+        end else begin
+            if (src_clear_i) begin
+                // Clear request from source
+                wptr_bin <= 0;
+                wptr_gray <= 0;
+                src_clear_pending <= 1;
+            end else if (src_clear_pending) begin
+                // Wait until FIFO is empty
+                if (wptr_bin == rptr_sync_bin) begin
+                    src_clear_pending <= 0;
+                end
+            end else begin
+                // Normal operation
+                if (src_valid_i && src_ready_o) begin
+                    mem[wptr_bin[LOG_DEPTH-1:0]] <= src_data_i;
+                    wptr_bin <= wptr_bin + 1;
+                    wptr_gray <= bin2gray(wptr_bin + 1);
+                end
+            end
+        end
+    end
+
+    // Full condition
+    wire full;
+    assign full = ((wptr_bin - rptr_sync_bin) >= (1 << LOG_DEPTH));
+
+    assign src_ready_o = !full;
+
+    // Destination domain synchronization of write pointer
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            for (i = 0; i < SYNC_STAGES; i = i + 1) begin
+                wptr_sync[i] <= 0;
+            end
+        end else begin
+            wptr_sync[0] <= wptr_gray;
+            for (i = 1; i < SYNC_STAGES; i = i + 1) begin
+                wptr_sync[i] <= wptr_sync[i-1];
+            end
+        end
+    end
+    assign wptr_sync_bin = wptr_sync[SYNC_STAGES-1];
+
+    // Destination domain logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            rptr_bin <= 0;
+            rptr_gray <= 0;
+            dst_clear_pending <= 0;
+        end else begin
+            if (dst_clear_i) begin
+                // Clear request from destination
+                rptr_bin <= 0;
+                rptr_gray <= 0;
+                dst_clear_pending <= 1;
+            end else if (dst_clear_pending) begin
+                // Wait until FIFO is empty
+                if (wptr_sync_bin == rptr_bin) begin
+                    dst_clear_pending <= 0;
+                end
+            end else begin
+                // Normal operation
+                if (dst_ready_i && dst_valid_o) begin
+                    rptr_bin <= rptr_bin + 1;
+                    rptr_gray <= bin2gray(rptr_bin + 1);
+                end
+            end
+        end
+    end
+
+    // Empty condition
+    wire empty;
+    assign empty = (rptr_bin == wptr_sync_bin);
+
+    assign dst_valid_o = !empty;
+
+    // Data output
+    assign dst_data_o = mem[rptr_bin[LOG_DEPTH-1:0]];
+
+    // Pending outputs
+    assign src_clear_pending_o = src_clear_pending;
+    assign dst_clear_pending_o = dst_clear_pending;
+
+    // Binary to Gray conversion function
+    function [PTR_WIDTH-1:0] bin2gray;
+        input [PTR_WIDTH-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+endmodule
+</think>
+
+<answer>
+```verilog
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam PTR_WIDTH = LOG_DEPTH + 1;
+
+    reg [WIDTH-1:0] mem [0:(1 << LOG_DEPTH)-1];
+
+    // Source domain signals
+    reg [PTR_WIDTH-1:0] wptr_bin, rptr_sync_bin;
+    reg [PTR_WIDTH-1:0] wptr_gray;
+    reg [PTR_WIDTH-1:0] rptr_sync [0:SYNC_STAGES-1];
+    reg src_clear_pending;
+
+    // Destination domain signals
+    reg [PTR_WIDTH-1:0] rptr_bin, wptr_sync_bin;
+    reg [PTR_WIDTH-1:0] rptr_gray;
+    reg [PTR_WIDTH-1:0] wptr_sync [0:SYNC_STAGES-1];
+    reg dst_clear_pending;
+
+    integer i;
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            for (i = 0; i < SYNC_STAGES; i = i + 1)
+                rptr_sync[i] <= 0;
+        end else begin
+            rptr_sync[0] <= rptr_gray;
+            for (i = 1; i < SYNC_STAGES; i = i + 1)
+                rptr_sync[i] <= rptr_sync[i-1];
+        end
+    end
+    assign rptr_sync_bin = rptr_sync[SYNC_STAGES-1];
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            wptr_bin <= 0;
+            wptr_gray <= 0;
+            src_clear_pending <= 0;
+        end else begin
+            if (src_clear_i) begin
+                wptr_bin <= 0;
+                wptr_gray <= 0;
+                src_clear_pending <= 1;
+            end else if (src_clear_pending) begin
+                if (wptr_bin == rptr_sync_bin)
+                    src_clear_pending <= 0;
+            end else if (src_valid_i && src_ready_o) begin
+                mem[wptr_bin[LOG_DEPTH-1:0]] <= src_data_i;
+                wptr_bin <= wptr_bin + 1;
+                wptr_gray <= bin2gray(wptr_bin + 1);
+            end
+        end
+    end
+
+    wire full;
+    assign full = ((wptr_bin - rptr_sync_bin) >= (1 << LOG_DEPTH));
+    assign src_ready_o = !full;
+
+    // Destination domain synchronization
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            for (i = 0; i < SYNC_STAGES; i = i + 1)
+                wptr_sync[i] <= 0;
+        end else begin
+            wptr_sync[0] <= wptr_gray;
+            for (i = 1; i < SYNC_STAGES; i = i + 1)
+                wptr_sync[i] <= wptr_sync[i-1];
+        end
+    end
+    assign wptr_sync_bin = wptr_sync[SYNC_STAGES-1];
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            rptr_bin <= 0;
+            rptr_gray <= 0;
+            dst_clear_pending <= 0;
+        end else begin
+            if (dst_clear_i) begin
+                rptr_bin <= 0;
+                rptr_gray <= 0;
+                dst_clear_pending <= 1;
+            end else if (dst_clear_pending) begin
+                if (wptr_sync_bin == rptr_bin)
+                    dst_clear_pending <= 0;
+            end else if (dst_ready_i && dst_valid_o) begin
+                rptr_bin <= rptr_bin + 1;
+                rptr_gray <= bin2gray(rptr_bin + 1);
+            end
+        end
+    end
+
+    wire empty;
+    assign empty = (rptr_bin == wptr_sync_bin);
+    assign dst_valid_o = !empty;
+    assign dst_data_o = mem[rptr_bin[LOG_DEPTH-1:0]];
+
+    assign src_clear_pending_o = src_clear_pending;
+    assign dst_clear_pending_o = dst_clear_pending;
+
+    function [PTR_WIDTH-1:0] bin2gray;
+        input [PTR_WIDTH-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+endmodule
+```
+</answer>

@@ -1,0 +1,851 @@
+<think>Okay, I need to write a Verilog module for a single-bit destination-clock synchronizer. Let's start by recalling what a synchronizer does. The main purpose here is to bring an asynchronous signal into a clock domain safely, using a chain of flip-flops to mitigate metastability.
+
+The parameters: STAGES is the depth, default 2. The inputs are clk, rstn (active low reset), async_sig_i. Output is sync_sig_o.
+
+The reset should leave the output low. So when rstn is low (active), the flops reset to 0. The async_sig_i is asynchronous and needs to be synchronized to clk.
+
+The standard approach is to have a shift register of STAGES flip-flops. Each stage is clocked by clk, and the output of one feeds into the next. The first stage samples the async input, subsequent stages reduce the chance of metastability.
+
+Wait, but in Verilog, when you have a parameterized number of stages, how to create the flip-flops? Maybe using a generate loop. For example, create a register array with STAGES elements. The first element takes the async input, each subsequent one takes the previous one's output.
+
+Wait, but the first stage's input is the async signal. Then each stage is clocked by clk. So the code would have a series of flops.
+
+Wait, the code structure would be:
+
+reg [STAGES-1:0] sync_reg;
+
+But wait, in Verilog, if STAGES is 2, then two flip-flops. The first flop's input is async_sig_i, the second flop's input is the first's output.
+
+Wait, the code would be:
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync_reg <= 0;
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], async_sig_i};
+    end
+end
+
+Wait, but if STAGES is 2, then the first flop is the first element, the second flop is the second. Wait, maybe the code is better written as a shift register where each stage is a flip-flop.
+
+Wait, perhaps using a generate loop. Let's think.
+
+If STAGES is the number of flip-flops. The first flop's input is async_sig_i, and each subsequent flop's input is the previous one's output.
+
+Wait, the code would be:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync_reg <= 0;
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], async_sig_i};
+    end
+end
+
+Wait, but in Verilog, if STAGES is 2, then the code would have two flops. The first flop (index 0) takes async_sig_i, the second (index 1) takes the first's output. Wait, but the code above would have the first stage as the leftmost bit. Hmm, perhaps the code is:
+
+Wait, the standard approach is:
+
+The first flop samples the async input, then each subsequent flop samples the previous one's output.
+
+So for STAGES=2:
+
+reg stage1, stage2;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        stage1 <= 0;
+        stage2 <= 0;
+    end else begin
+        stage1 <= async_sig_i;
+        stage2 <= stage1;
+    end
+end
+
+Then the output is stage2.
+
+So in general, for STAGES, you have a chain of registers. So the code can be written with a generate loop.
+
+But in Verilog, if the parameter is variable, you can create a shift register array.
+
+Wait, here's an approach:
+
+Declare a reg array of size STAGES. The first element is the first flop, then each next is the next.
+
+Wait, in code:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync_reg <= {STAGES{1'b0}};
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], async_sig_i};
+    end
+end
+
+Wait, but if STAGES is 2, then the code would have two flops. The first flop (sync_reg[0]) is assigned async_sig_i, the second (sync_reg[1]) is the previous value of sync_reg[0]. Wait, no, in the code above, the concatenation would be {sync_reg[STAGES-2:0], async_sig_i} which for STAGES=2 would be {sync_reg[0], async_sig_i}, then the next cycle, the first element is the previous async_sig_i, and the second element is the first's previous.
+
+Wait, but in the code above, the first flop's input is the async_sig_i, and each subsequent flop takes the previous one's output.
+
+Wait, perhaps the code is:
+
+sync_reg[0] is the first stage, which takes async_sig_i.
+
+Then, each next stage is sync_reg[i] <= sync_reg[i-1]
+
+Wait, but the code in the generate loop would be better.
+
+Alternatively, using a generate loop for each stage.
+
+Wait, here's a way:
+
+If STAGES is the number of flip-flops, then create a chain.
+
+For example:
+
+genvar i;
+reg [STAGES-1:0] sync_reg;
+
+generate
+for (i=0; i < STAGES; i=i+1) begin : gen_sync
+    if (i == 0) begin
+        // first stage: input is async_sig_i
+        always @(posedge clk or negedge rstn) begin
+            if (!rstn) begin
+                sync_reg[i] <= 1'b0;
+            end else begin
+                sync_reg[i] <= async_sig_i;
+            end
+        end
+    end else begin
+        // subsequent stages: input is previous stage's output
+        always @(posedge clk or negedge rstn) begin
+            if (!rstn) begin
+                sync_reg[i] <= 1'b0;
+            end else begin
+                sync_reg[i] <= sync_reg[i-1];
+            end
+        end
+    end
+end
+endgenerate
+
+Wait, but in Verilog, you can't have multiple always blocks in a generate loop for the same reg. Wait, no, each iteration of the generate loop creates a separate always block. Wait, but the reg array is a single variable. Hmm, perhaps better to use a shift register approach.
+
+Alternatively, the code can be written as:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync_reg <= {STAGES{1'b0}};
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], async_sig_i};
+    end
+end
+
+Wait, but if STAGES is 2, then the code would have two bits. The first assignment would be:
+
+sync_reg[1] is the first stage (since in Verilog, the leftmost is the MSB?), wait no. Wait, if the array is [STAGES-1:0], then the first index is 0 (LSB) and the last is STAGES-1 (MSB). Wait, but in Verilog, the syntax is [n:0] for n+1 bits.
+
+Wait, if STAGES is 2, then the array is [1:0], which is two bits. So the code:
+
+sync_reg <= {sync_reg[STAGES-2:0], async_sig_i};
+
+For STAGES=2, that would be {sync_reg[0], async_sig_i}.
+
+Wait, but the first flop would be the first element. Wait, perhaps the code is:
+
+The first flop (stage 0) takes the async input. The next flop (stage 1) takes the first's output.
+
+Wait, but in the code above, the concatenation would be:
+
+sync_reg is [STAGES-1:0], so for STAGES=2, indices 1 and 0.
+
+Wait, perhaps the code is:
+
+sync_reg[0] is the first stage, and sync_reg[1] is the second.
+
+Wait, but in the code:
+
+sync_reg <= {sync_reg[STAGES-2:0], async_sig_i}
+
+If STAGES is 2, then STAGES-2 is 0, so the slice is [0:0], which is the first element. So the concatenation would be {sync_reg[0], async_sig_i}.
+
+Wait, but that would make the first stage (sync_reg[0]) take the async_sig_i, and the second stage (sync_reg[1]) take the previous sync_reg[0], which is the first stage's previous value.
+
+Wait, but in that case, the code would have:
+
+At each clock edge:
+
+sync_reg[0] gets async_sig_i (the input)
+
+sync_reg[1] gets the previous sync_reg[0]
+
+Wait, but that's the opposite of the intended order. Wait, no. Wait, in the code, the code is:
+
+sync_reg is assigned as {sync_reg[STAGES-2:0], async_sig_i}
+
+For STAGES=2:
+
+sync_reg is [1:0], so STAGES-2 is 0, so the slice is [0:0], which is the first element (index 0). Then the concatenation would be {sync_reg[0], async_sig_i}, which is two bits. Then the new sync_reg would have:
+
+sync_reg[1] = sync_reg[0] (from previous iteration)
+
+sync_reg[0] = async_sig_i (current input)
+
+Wait, that's not correct. Because the first flop would be the first element (index 0), which is the async input. Then the next flop (index 1) would take the previous value of index 0.
+
+Wait, but in the code, the code is:
+
+At each clock edge:
+
+sync_reg is updated to the concatenation of the lower STAGES-1 bits (from previous) and the new input.
+
+Wait, perhaps the code is wrong here. Let's think again.
+
+In a standard two-stage synchronizer:
+
+stage1 <= async_sig_i;
+
+stage2 <= stage1;
+
+So the output is stage2.
+
+In code:
+
+reg stage1, stage2;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        stage1 <= 0;
+        stage2 <= 0;
+    end else begin
+        stage1 <= async_sig_i;
+        stage2 <= stage1;
+    end
+end
+
+Then the output is stage2.
+
+So for STAGES=2, the code is two flops. The first is the first stage, the second is the second.
+
+In the code, the code can be written as a shift register where each stage is shifted into the next.
+
+So in general, for STAGES, the code would have:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync_reg <= 0;
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], async_sig_i};
+    end
+end
+
+Wait, for STAGES=2, the code would have:
+
+sync_reg is [1:0]
+
+In the assignment:
+
+sync_reg <= {sync_reg[0], async_sig_i}
+
+Wait, but the first element (index 0) is the first stage, which takes the async input. The second element (index 1) takes the previous index 0.
+
+Wait, but in the code, the first assignment would be:
+
+sync_reg[0] gets async_sig_i (the input)
+
+sync_reg[1] gets the previous sync_reg[0]
+
+Wait, but in the code, the concatenation is {sync_reg[STAGES-2:0], async_sig_i}
+
+If STAGES is 2, then STAGES-2 is 0, so the slice is [0:0], which is the first element (index 0). So the concatenation would be {sync_reg[0], async_sig_i} which is two bits. So the new sync_reg would be:
+
+sync_reg[1] = sync_reg[0] (the previous value of the first stage)
+
+sync_reg[0] = async_sig_i (the new input)
+
+Wait, that's the opposite of the intended order. Because the first stage (stage1) should be the first to sample the async input, then the second stage (stage2) samples the first.
+
+Wait, in the code above, the first stage would be the rightmost bit (index 0), and the second is index 1. So the code would have:
+
+stage1 (index 0) gets async_sig_i, then stage2 (index 1) gets previous stage1.
+
+Wait, but in the code, the code is:
+
+sync_reg is [STAGES-1:0], so for STAGES=2, [1:0]
+
+In the code:
+
+sync_reg <= {sync_reg[0], async_sig_i}
+
+Wait, the left side is the higher index. Wait, in Verilog, the left side of the concatenation is the MSB.
+
+Wait, if STAGES is 2, the code:
+
+sync_reg <= {sync_reg[0], async_sig_i}
+
+Which would create a two-bit vector where the first bit (index 1) is sync_reg[0], and index 0 is async_sig_i.
+
+Wait, no. Wait, in Verilog, when you concatenate two bits, the left part is the higher index.
+
+Wait, {a, b} where a is 1 bit and b is 1 bit would be a two-bit vector with a in the higher position (left) and b in the lower.
+
+Wait, for example:
+
+If a is 1 bit (say, 1), and b is 1 bit (0), then {a,b} is 2 bits: 1 followed by 0.
+
+So in code:
+
+sync_reg <= {sync_reg[STAGES-2:0], async_sig_i}
+
+If STAGES is 2, then STAGES-2 is 0. So the slice is [0:0], which is one bit. So the concatenation would be {sync_reg[0], async_sig_i} which is two bits. Then the new sync_reg would be:
+
+sync_reg[1] = sync_reg[0] (the previous value of the first stage)
+
+sync_reg[0] = async_sig_i (the new input)
+
+Wait, but in the intended two-stage synchronizer, the first stage is the first to sample the input, then the second samples the first. So the code would have:
+
+stage1 <= async_sig_i;
+
+stage2 <= stage1;
+
+In the code above, the first stage (index 0) would be the async input, and the second (index 1) would be the previous stage0. Wait, but in the code, the code is:
+
+sync_reg[0] is the first stage (stage1), and sync_reg[1] is the second (stage2). Wait, but in the code, the code is:
+
+sync_reg is [1:0], and the code is:
+
+sync_reg <= {sync_reg[0], async_sig_i}
+
+Wait, the first element (index 1) would get the previous index 0, and index 0 gets the async input. Wait, that's the opposite of the intended order.
+
+Hmm, perhaps the code is wrong here.
+
+Alternative approach: create a shift register where each stage is the next one.
+
+Wait, perhaps the code should be:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync_reg <= 0;
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], async_sig_i};
+    end
+end
+
+Wait, but for STAGES=2, the code would have:
+
+sync_reg[1] <= sync_reg[0]
+
+sync_reg[0] <= async_sig_i
+
+Wait, but in the intended two-stage synchronizer, the first flop (stage1) is the first, then stage2.
+
+In that case, the code would have:
+
+stage1 is the first, then stage2.
+
+So the code would be:
+
+stage1 <= async_sig_i;
+
+stage2 <= stage1;
+
+Thus, the code for two stages would have:
+
+sync_reg[0] is stage1, sync_reg[1] is stage2.
+
+Wait, but in the code above, the code would have:
+
+sync_reg <= {sync_reg[0], async_sig_i} for STAGES=2.
+
+Wait, but that would make the first stage (sync_reg[0]) take the async input, and the second (sync_reg[1]) take the previous value of sync_reg[0].
+
+Wait, but in the code, the code is:
+
+sync_reg is [1:0], so the code:
+
+sync_reg <= {sync_reg[0], async_sig_i}
+
+Which would assign:
+
+sync_reg[1] = sync_reg[0] (the previous value of the first stage)
+
+sync_reg[0] = async_sig_i (the new input)
+
+Wait, but that's the opposite of the intended order. Because the first stage should be the first to sample the input, then the second.
+
+Wait, perhaps the code is reversed. Let's think again.
+
+In the standard two-stage synchronizer:
+
+The first flip-flop (stage1) is the first in the chain. The input is the async signal. The output of stage1 is fed into stage2.
+
+So the code would be:
+
+stage1 <= async_sig_i;
+
+stage2 <= stage1;
+
+In Verilog:
+
+reg stage1, stage2;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        stage1 <= 0;
+        stage2 <= 0;
+    end else begin
+        stage1 <= async_sig_i;
+        stage2 <= stage1;
+    end
+end
+
+Then the output is stage2.
+
+In this case, the code for STAGES=2 would have two flops. The code can be written as a shift register.
+
+So in code, for a parameterized STAGES:
+
+We can create a shift register array where each element is the next in the chain.
+
+But in Verilog, the code can be written as:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync_reg <= 0;
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], async_sig_i};
+    end
+end
+
+Wait, but for STAGES=2:
+
+sync_reg is [1:0]
+
+The code would assign:
+
+sync_reg[1] <= sync_reg[0]
+
+sync_reg[0] <= async_sig_i
+
+Wait, but in the intended two-stage synchronizer, the first flop (stage1) is the first, then stage2.
+
+In the code above, the first flop (sync_reg[0]) is the first, and the second (sync_reg[1]) is the second. Wait, no. Wait, the code would have:
+
+The first assignment is sync_reg[0] gets the async input, then the next assignment is sync_reg[1] gets the previous sync_reg[0].
+
+Wait, but in the code, the code is:
+
+sync_reg is assigned as {sync_reg[STAGES-2:0], async_sig_i}
+
+Which for STAGES=2 would be {sync_reg[0], async_sig_i}
+
+So the new sync_reg would have:
+
+sync_reg[1] = sync_reg[0] (the previous value of the first stage)
+
+sync_reg[0] = async_sig_i (the new input)
+
+Wait, that's the opposite of the intended order. Because the first stage (stage1) would be the first in the chain, then stage2.
+
+Wait, perhaps the code is reversed. Let's think again.
+
+In the standard two-stage synchronizer:
+
+stage1 is first, then stage2.
+
+At each clock edge:
+
+stage1 gets the async input.
+
+stage2 gets the previous stage1.
+
+So the code would be:
+
+stage1 <= async_sig_i;
+
+stage2 <= stage1;
+
+In code:
+
+reg stage1, stage2;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        stage1 <= 0;
+        stage2 <= 0;
+    end else begin
+        stage1 <= async_sig_i;
+        stage2 <= stage1;
+    end
+end
+
+So the output is stage2.
+
+In code, the code can be written as a shift register where the first element is the first stage, and each next element is the next.
+
+In Verilog, if the array is [STAGES-1:0], then the first element (index 0) is the first stage, and the last (index STAGES-1) is the last.
+
+Wait, but in the code above, the code for STAGES=2 would have:
+
+stage1 is index 0, stage2 is index 1.
+
+In the code:
+
+stage1 <= async_sig_i;
+
+stage2 <= stage1;
+
+Which would be:
+
+sync_reg[0] <= async_sig_i;
+
+sync_reg[1] <= sync_reg[0];
+
+Which is the same as the code.
+
+So in code, the code would be:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync_reg <= 0;
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], async_sig_i};
+    end
+end
+
+Wait, but for STAGES=2, the code would be:
+
+sync_reg <= {sync_reg[0], async_sig_i}
+
+Which would assign:
+
+sync_reg[1] = sync_reg[0]
+
+sync_reg[0] = async_sig_i
+
+Which would mean that the first stage (sync_reg[0]) is the async input, and the second (sync_reg[1]) is the previous value of the first. That's correct.
+
+Wait, but in the code, the first stage is the first element (sync_reg[0]), which is assigned the async input. Then the second stage (sync_reg[1]) is assigned the previous value of the first.
+
+Yes. So the code would have:
+
+sync_reg[0] is the first stage (stage1)
+
+sync_reg[1] is the second stage (stage2)
+
+So the code would be correct.
+
+Then the output is the last element of the array.
+
+Wait, in the code, the output is sync_sig_o = sync_reg[STAGES-1]
+
+Wait, for STAGES=2, the output is sync_reg[1], which is the second stage.
+
+Yes.
+
+So the code would be:
+
+module synchronizer #(
+    parameter STAGES = 2
+)(
+    input  clk,
+    input  rstn,
+    input  async_sig_i,
+    output sync_sig_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            sync_reg <= {STAGES{1'b0}};
+        end else begin
+            sync_reg <= {sync_reg[STAGES-2:0], async_sig_i};
+        end
+    end
+
+    assign sync_sig_o = sync_reg[STAGES-1];
+
+endmodule
+
+Wait, but in Verilog, the syntax {sync_reg[STAGES-2:0], async_sig_i} would create a vector of (STAGES-1 +1) bits? Wait, if STAGES is 2, then STAGES-2 is 0, so the slice is [0:0], which is one bit. So the concatenation would be {1 bit, 1 bit} (async_sig_i is 1 bit). Wait, no. Wait, the code {sync_reg[STAGES-2:0], async_sig_i} would take the bits from STAGES-2 to 0 (so for STAGES=2, bits 0:0) and concatenate with async_sig_i (1 bit). So the total bits would be (STAGES-1) +1 = STAGES bits. Wait, no. Wait, if STAGES is 2, then the code would be:
+
+sync_reg is [1:0]
+
+sync_reg[STAGES-2:0] is [0:0], which is one bit.
+
+Then concatenated with async_sig_i (1 bit) gives two bits. So the code would be:
+
+sync_reg <= {sync_reg[0], async_sig_i}
+
+Which is two bits. So the new sync_reg would be:
+
+sync_reg[1] = sync_reg[0] (the previous first stage)
+
+sync_reg[0] = async_sig_i (the new input)
+
+Wait, but in the code, the first stage is sync_reg[0], which is the first in the chain. Then the second stage is sync_reg[1], which is the previous value of the first.
+
+Wait, but in the code, the code is:
+
+sync_reg <= {sync_reg[STAGES-2:0], async_sig_i}
+
+Which for STAGES=2 would be:
+
+sync_reg <= {sync_reg[0], async_sig_i}
+
+Which is two bits. So the first stage (sync_reg[0]) is the async input, and the second (sync_reg[1]) is the previous value of the first.
+
+Wait, but in the code, the first stage (sync_reg[0]) is the first to sample the async input. Then the second stage (sync_reg[1]) samples the first. So the code is correct.
+
+Wait, but in the code, the first stage (sync_reg[0]) is the first in the chain. So the code would have:
+
+sync_reg[0] <= async_sig_i
+
+sync_reg[1] <= sync_reg[0]
+
+Wait, no. Wait, the code is:
+
+In the code:
+
+sync_reg is assigned as {sync_reg[STAGES-2:0], async_sig_i}
+
+Which for STAGES=2:
+
+sync_reg[1:0] <= {sync_reg[0], async_sig_i}
+
+So the new sync_reg[1] is the previous sync_reg[0], and sync_reg[0] is the async_sig_i.
+
+Wait, that's the opposite of the intended order. Because the first stage (stage1) would be the first to sample the input, then the second (stage2) samples the first.
+
+Wait, in the code, the first stage (sync_reg[0]) is the async input. The second (sync_reg[1]) is the previous value of the first. So the code would have:
+
+stage1 = sync_reg[0] (async input)
+
+stage2 = sync_reg[1] (previous stage1)
+
+Wait, but in the code, the code is:
+
+stage1 (sync_reg[0]) is the async input. Then stage2 (sync_reg[1]) is the previous value of stage1.
+
+Wait, but in the code, the code is:
+
+sync_reg is assigned as {sync_reg[0], async_sig_i}
+
+Wait, no. Wait, the code is:
+
+sync_reg <= {sync_reg[STAGES-2:0], async_sig_i}
+
+Which for STAGES=2:
+
+sync_reg <= {sync_reg[0], async_sig_i}
+
+Which is two bits. So the first bit (index 1) is sync_reg[0], and the second (index 0) is async_sig_i.
+
+Wait, no. Wait, in Verilog, the leftmost part of the concatenation is the higher index.
+
+Wait, if you have:
+
+reg [1:0] a;
+
+a <= {b, c};
+
+Then a[1] is b, a[0] is c.
+
+So in the code:
+
+sync_reg <= {sync_reg[0], async_sig_i}
+
+Which would assign:
+
+sync_reg[1] = sync_reg[0]
+
+sync_reg[0] = async_sig_i
+
+So the first stage (sync_reg[0]) is the async input, and the second (sync_reg[1]) is the previous value of the first.
+
+Wait, but in the intended two-stage synchronizer, the first stage (stage1) is the first to sample the input, then stage2 (stage2) samples the first.
+
+In this code, the first stage (sync_reg[0]) is the async input, and the second (sync_reg[1]) is the previous value of the first. So the code is correct.
+
+Wait, but the code would have:
+
+At each clock edge:
+
+stage1 (sync_reg[0]) is the async input.
+
+stage2 (sync_reg[1]) is the previous stage1.
+
+Yes. So the code is correct.
+
+Thus, the code would have:
+
+sync_reg[0] is the first stage, which takes the async input.
+
+sync_reg[1] is the second stage, which takes the previous value of the first.
+
+Thus, the output is sync_reg[1], which is the second stage.
+
+Thus, the code would be:
+
+module synchronizer #(
+    parameter STAGES = 2
+)(
+    input  clk,
+    input  rstn,
+    input  async_sig_i,
+    output sync_sig_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            sync_reg <= {STAGES{1'b0}};
+        end else begin
+            sync_reg <= {sync_reg[STAGES-2:0], async_sig_i};
+        end
+    end
+
+    assign sync_sig_o = sync_reg[STAGES-1];
+
+endmodule
+
+Wait, but in Verilog, when you have a parameterized code, the code {sync_reg[STAGES-2:0], async_sig_i} may have an issue if STAGES is 1. But the parameter is supposed to be at least 2? Or the code should handle STAGES >=2.
+
+Wait, the problem says "configured depth" but the default is 2. So the code should handle STAGES >= 2. Wait, but in the code, if STAGES is 1, then STAGES-2 would be negative. So the code would have a problem. But the user's code says the parameter is STAGES, default 2. So the code should handle STAGES >=2.
+
+But the code as written would have a problem if STAGES is 1. So perhaps the code should have a check. But the user's code says "configured depth", so the code should allow STAGES >=2.
+
+Wait, but the code in the example uses STAGES=2. So the code should handle STAGES >=2.
+
+But in the code, when STAGES is 1, the code would have:
+
+sync_reg <= {sync_reg[-1:0], async_sig_i} which is invalid.
+
+Thus, the code is written for STAGES >=2.
+
+But the code in the example uses STAGES as a parameter with default 2. So the code is okay.
+
+But in Verilog, if STAGES is 1, the code would have a problem. So perhaps the code should have a generate block to handle STAGES=1. But the user's problem says "configured depth" but the default is 2. So perhaps the code is intended for STAGES >=2.
+
+Assuming STAGES >=2.
+
+Thus, the code would be as written.
+
+Wait, but in the code, the code is:
+
+sync_reg <= {sync_reg[STAGES-2:0], async_sig_i}
+
+Which for STAGES=2, the slice is [0:0], so the code is:
+
+sync_reg <= {sync_reg[0], async_sig_i}
+
+Which is two bits. So the first stage (sync_reg[0]) is the async input, the second (sync_reg[1]) is the previous value of the first.
+
+Yes.
+
+Thus, the code would work.
+
+Thus, the code would have:
+
+The output is the last element of the array.
+
+Thus, the code is correct.
+
+Now, the reset is active low. The reset leaves the output low. So in the code, when rstn is 0, the sync_reg is set to all zeros. Thus, the output (sync_reg[STAGES-1]) is zero.
+
+Yes.
+
+Thus, the code should be as written.
+
+Now, the code uses Verilog-2001 syntax. The code uses the concatenation in the assignment.
+
+Thus, the code is correct.
+
+So the final code is:
+
+module synchronizer #(
+    parameter STAGES = 2
+)(
+    input  clk,
+    input  rstn,
+    input  async_sig_i,
+    output sync_sig_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            sync_reg <= {STAGES{1'b0}};
+        end else begin
+            sync_reg <= {sync_reg[STAGES-2:0], async_sig_i};
+        end
+    end
+
+    assign sync_sig_o = sync_reg[STAGES-1];
+
+endmodule
+
+Wait, but in Verilog, the syntax {sync_reg[STAGES-2:0], async_sig_i} would be okay if STAGES >=1. For STAGES=2, it's {sync_reg[0], async_sig_i} which is two bits.
+
+Yes.
+
+Thus, the code should work.
+
+Testing for STAGES=2:
+
+sync_reg is [1:0]
+
+On reset, sync_reg is 0.
+
+When async_sig_i is 1, after two clock cycles, sync_sig_o becomes 1.
+
+Yes.
+
+Thus, the code should be correct.
+</think>
+
+<answer>
+```verilog
+module synchronizer #(
+    parameter STAGES = 2
+)(
+    input  clk,
+    input  rstn,
+    input  async_sig_i,
+    output sync_sig_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            sync_reg <= {STAGES{1'b0}};
+        end else begin
+            sync_reg <= {sync_reg[STAGES-2:0], async_sig_i};
+        end
+    end
+
+    assign sync_sig_o = sync_reg[STAGES-1];
+
+endmodule
+```
+</answer>

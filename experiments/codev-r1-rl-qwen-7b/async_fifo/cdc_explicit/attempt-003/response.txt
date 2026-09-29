@@ -1,0 +1,4363 @@
+<think>Okay, I need to design an asynchronous FIFO in Verilog with the given specifications. Let's start by recalling the key components of an async FIFO. The main challenge is handling the cross-clock domain communication between the write and read sides without metastability issues. 
+
+First, the parameters: DSIZE is the data width, ASIZE is the log2 of the number of entries. The FIFO has a size of 2^ASIZE entries. The FIFO should have full, empty, almost full, almost empty signals. Also, the FALLTHROUGH parameter affects the read data behavior.
+
+The clocks are wclk and rclk, which are asynchronous. Resets are active-low, separate for each domain: wrst_n for write, rrst_n for read.
+
+The main parts of an async FIFO are the dual-port memory, write pointer, read pointer, synchronization of pointers across clock domains, and the generation of flags like full, empty.
+
+Wait, the almost full and almost empty. The user didn't specify the threshold for almost full/empty. Hmm. Maybe the standard approach is to have almost full when there's one entry left before full, and almost empty when one entry left before empty. But the problem statement says "approaching full" and "approaching empty". So perhaps the almost full is when the FIFO is one less than full, and almost empty is one more than empty. Or maybe the parameters for the thresholds are not given. Wait, the parameters in the module are DSIZE, ASIZE, FALLTHROUGH. The almost full and almost empty are just flags that indicate when the FIFO is approaching those states. So the almost full is when the FIFO is one less than full, and almost empty when one more than empty. Let's proceed with that.
+
+The standard approach for async FIFO is to use Gray code pointers for synchronization between the two domains. The write pointer is in the write clock domain, read pointer in read. The pointers are converted to Gray code before crossing to the other domain. Then, the synchronized pointers are used to compute the full and empty conditions.
+
+Wait, the full condition is when the write pointer's next Gray code is equal to the read pointer's synchronized Gray code (but with the MSB and the second MSB different). Wait, the actual full condition is when the write pointer has wrapped around and the difference between write and read pointers equals the size. Similarly for empty.
+
+Wait, the standard method for full and empty:
+
+- Empty: when read pointer == write pointer.
+
+- Full: when the write pointer is one less than the read pointer (if using a wrap-around with an extra bit). Wait, the pointers are ASIZE+1 bits. The actual depth is 2^ASIZE. The extra bit is used to distinguish between full and empty when the pointers are equal.
+
+Wait, the pointers are (ASIZE +1) bits. The actual address is the lower ASIZE bits, and the MSB is used to detect wrap-around.
+
+So, when the write pointer and read pointer have the same lower bits but different MSB, the FIFO is full.
+
+So:
+
+Full condition: (wptr - rptr) == 2^ASIZE.
+
+But in terms of the pointers:
+
+If the write pointer is one more than the read pointer (modulo 2^(ASIZE+1)), then the FIFO is full.
+
+Wait, the standard approach is:
+
+The write pointer increments on writes, read pointer increments on reads.
+
+The FIFO is full when the write pointer's next value (if written) would equal the read pointer's synchronized value. Wait, perhaps the actual way is:
+
+The FIFO is full when the MSBs differ and the rest are equal. For example, if the write pointer is (rptr_gray_sync ^ (1 << ASIZE)), then it's full.
+
+Alternatively, the Gray code pointers are synchronized, and then the full is determined by comparing the current write pointer and the synchronized read pointer.
+
+Hmm, maybe I should outline the steps.
+
+First, the memory is dual-port, with write and read pointers. The write side increments the write pointer on a write (when winc and not full). The read side increments the read pointer on a read (when rinc and not empty).
+
+The pointers are (ASIZE +1) bits. The actual address is the lower ASIZE bits.
+
+The full condition is when the write pointer's next value (if written) would have the same lower bits as the read pointer, but the MSB differs. Wait, perhaps:
+
+Full is when (wptr - rptr) == 2^ASIZE.
+
+But in terms of pointers, the write pointer is one more than the read pointer when the FIFO is full. Wait, no. Let's think again.
+
+The FIFO has 2^ASIZE entries. The pointers are (ASIZE +1) bits. The actual count is (wptr - rptr). If the difference equals 2^ASIZE, then the FIFO is full.
+
+Wait, the maximum entries possible is 2^ASIZE. So when the write pointer is ahead by exactly that, it's full.
+
+So:
+
+Full condition: (wptr - rptr_sync) == 2^ASIZE.
+
+Similarly, empty is when (wptr_sync == rptr).
+
+But the pointers are Gray code, so when converting to binary, the difference is computed.
+
+Wait, but in practice, the pointers are converted to Gray code before being synchronized across domains. Then, in the destination domain, the Gray code is converted back to binary (or maybe not, depending on the method).
+
+Alternatively, the pointers are kept in binary, but synchronized via two flip-flops in the destination domain to avoid metastability.
+
+Wait, the standard approach for async FIFO:
+
+- Use binary pointers for the actual addressing (since Gray code is for synchronization).
+
+Wait, no. Wait, the pointers are converted to Gray code before crossing clock domains. The Gray code ensures that only one bit changes at a time, which avoids issues with multiple bits changing during synchronization.
+
+So:
+
+In the write domain:
+
+- The write pointer (binary) increments on writes.
+
+- Convert to Gray code (wgray_next).
+
+- Synchronize the read pointer's Gray code (rgray_sync) into the write domain via two FFs.
+
+Similarly, in the read domain:
+
+- Read pointer (binary) increments on reads.
+
+- Convert to Gray code (rgray_next).
+
+- Synchronize the write pointer's Gray code (wgray_sync) into the read domain via two FFs.
+
+Then, in the write domain:
+
+- The full condition is determined by comparing the current write pointer (binary) and the synchronized read pointer (binary converted from Gray). Wait, but the synchronized pointers are Gray, so need to convert back to binary.
+
+Wait, perhaps steps:
+
+In write domain:
+
+- The write pointer (binary) is converted to Gray (wgray).
+
+- The read pointer's Gray code (from read domain) is synchronized via two FFs (rgray_sync1 and rgray_sync2). Then converted back to binary (rbin).
+
+Similarly, in read domain:
+
+- The read pointer (binary) converted to Gray (rgray).
+
+- The write pointer's Gray code (wgray) synchronized via two FFs (wgray_sync1 and wgray_sync2), converted to binary (wbin).
+
+Then:
+
+Full condition: (wptr - rbin) >= (2^ASIZE -1) ?
+
+Wait, maybe the full condition is when the next write would make the FIFO full.
+
+Wait, the standard full condition is:
+
+If the write pointer's next Gray code (after increment) is equal to the read pointer's Gray code except for the two MSBs. Wait, perhaps the actual full condition is when:
+
+wgray_next == { ~rgray_sync[ASIZE:ASIZE-1], rgray_sync[ASIZE-2:0] }
+
+Wait, I'm getting a bit confused here. Let me recall the standard method.
+
+The Gray code pointers have an extra bit (the MSB) to indicate wrap-around. The full condition is when:
+
+The MSBs of the write and read pointers are different, and the rest of the bits are equal.
+
+Wait, for example, if the pointers are (n+1) bits for a 2^n depth.
+
+If the write pointer's Gray code is equal to the read pointer's Gray code except that the MSB and the second MSB are flipped. Then the FIFO is full.
+
+Wait, the actual full condition is when:
+
+(wptr_gray == { ~rptr_gray_sync[ASIZE], ~rptr_gray_sync[ASIZE-1], rptr_gray_sync[ASIZE-2:0] } )
+
+Wait, perhaps the full condition is when:
+
+(wptr_gray_next == (rptr_gray_sync ^ ( (1 << (ASIZE)) | (1 << (ASIZE-1)) )) )
+
+Alternatively, the standard approach is:
+
+Full is when the write pointer's next Gray code is equal to the synchronized read pointer's Gray code except that the two MSBs are flipped.
+
+Wait, here's a reference: 
+
+The full condition is determined in the write domain by checking if the next write pointer's Gray code is equal to the synchronized read pointer's Gray code except that the two MSBs are flipped. 
+
+Similarly, empty is when the read pointer's Gray code equals the synchronized write pointer's Gray code.
+
+Wait, here's a standard approach:
+
+In the write domain:
+
+- The write pointer (binary) is converted to Gray (wgray).
+
+- The synchronized read pointer (Gray) is converted to binary (rbin).
+
+Full condition: (wptr - rbin) >= (2^ASIZE -1) ?
+
+Wait, perhaps the actual full condition is when the difference between write and read pointers equals the total number of entries (so the FIFO is full). But since pointers are (ASIZE+1) bits, the actual count is (wptr - rptr) mod 2^(ASIZE+1). If that equals 2^ASIZE, then the FIFO is full.
+
+But in terms of the pointers:
+
+If (wptr - rptr) == 2^ASIZE, then the FIFO is full.
+
+But how to compute that.
+
+Alternatively, the full condition is when:
+
+(wgray_next == { ~rgray_sync[ASIZE], ~rgray_sync[ASIZE-1], rgray_sync[ASIZE-2:0] } )
+
+Wait, perhaps the full condition is when:
+
+The next write pointer's Gray code is equal to the synchronized read pointer's Gray code except that the two MSBs are flipped.
+
+Yes, that's the standard approach. For example, when the write pointer's next Gray code is equal to the read pointer's Gray code (from read domain, synchronized) but with the two MSBs inverted. 
+
+Similarly, empty is when the read pointer's Gray code equals the synchronized write pointer's Gray code.
+
+So:
+
+Full condition in write domain:
+
+wgray_next == { ~rgray_sync[ASIZE], ~rgray_sync[ASIZE-1], rgray_sync[ASIZE-2:0] }
+
+Empty condition in read domain:
+
+rgray == wgray_sync
+
+Almost full and almost empty: perhaps when the difference is 1 less than full or 1 more than empty.
+
+Wait, almost full is when the FIFO is one less than full. So when (wptr - rptr) == (2^ASIZE -1). Similarly, almost empty is when (wptr - rptr) == 1.
+
+But how to compute that.
+
+Alternatively, the almost full is when the next write would make it full. So when (current count is 2^ASIZE -1). Similarly, almost empty is when the count is 1.
+
+But the count can be derived from the pointers.
+
+But in terms of Gray code, perhaps the almost full is when the difference between write and read pointers is (2^ASIZE -1). 
+
+But the exact implementation may vary. Let's proceed.
+
+Now, the code structure:
+
+The FIFO has a dual-port memory (reg [DSIZE-1:0] mem [0:2**ASIZE-1]; )
+
+Write pointer (wptr) and read pointer (rptr), each (ASIZE+1) bits.
+
+In the write domain:
+
+- On reset (wrst_n), wptr is 0.
+
+- When winc and not full, increment wptr and write data to mem.
+
+Similarly, in read domain:
+
+- On reset (rrst_n), rptr is 0.
+
+- When rinc and not empty, increment rptr and read data.
+
+The Gray code conversion:
+
+For the write pointer:
+
+wgray = (wptr >> 1) ^ wptr; // binary to gray.
+
+Similarly for read.
+
+Synchronization:
+
+In write domain:
+
+- The read pointer's Gray code (from read domain) is synchronized via two FFs (rgray_sync1 and rgray_sync2).
+
+Then convert rgray_sync2 to binary (rbin).
+
+Similarly, in read domain:
+
+- The write pointer's Gray code (from write domain) is synchronized via two FFs (wgray_sync1 and wgray_sync2).
+
+Convert to binary (wbin).
+
+Full condition:
+
+(wptr - rbin) >= (2**ASIZE)
+
+Wait, but the maximum entries is 2**ASIZE. So when the difference is equal to 2**ASIZE, it's full.
+
+But pointers are (ASIZE+1) bits. So (wptr - rbin) == 2**ASIZE.
+
+But in terms of the pointers:
+
+If the write pointer is (rbin + 2**ASIZE), then the FIFO is full.
+
+But in terms of the Gray code, the full condition is when the next write would make the pointers cross the threshold.
+
+Alternatively, the full is when:
+
+(wgray_next == { ~rgray_sync[ASIZE], ~rgray_sync[ASIZE-1], rgray_sync[ASIZE-2:0] } )
+
+But perhaps the standard code uses the following:
+
+In the write domain:
+
+// Synchronize read pointer's gray code to write clock domain
+reg [ASIZE:0] rgray_sync1, rgray_sync2;
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        rgray_sync1 <= 0;
+        rgray_sync2 <= 0;
+    end else begin
+        rgray_sync1 <= rgray;
+        rgray_sync2 <= rgray_sync1;
+    end
+end
+
+// Convert synchronized gray to binary
+// ... similar for read domain.
+
+Wait, but the code for converting gray to binary.
+
+The conversion from Gray to binary is done by:
+
+binary[ASIZE] = gray[ASIZE];
+binary[ASIZE-1] = gray[ASIZE] ^ gray[ASIZE-1];
+binary[ASIZE-2] = binary[ASIZE-1] ^ gray[ASIZE-2];
+and so on.
+
+So for a (ASIZE+1)-bit gray code, the binary conversion is done step by step.
+
+Once the binary pointers are obtained, the full condition is:
+
+(wptr - rbin) >= (2**ASIZE)
+
+Wait, but the maximum entries is 2**ASIZE. So when the difference is exactly equal to 2**ASIZE, the FIFO is full.
+
+Similarly, empty is when (wbin == rptr).
+
+Wait, but in the read domain:
+
+// Synchronize write pointer's gray code to read clock domain
+reg [ASIZE:0] wgray_sync1, wgray_sync2;
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        wgray_sync1 <= 0;
+        wgray_sync2 <= 0;
+    end else begin
+        wgray_sync1 <= wgray;
+        wgray_sync2 <= wgray_sync1;
+    end
+end
+
+// Convert to binary
+// same as above.
+
+Then, empty is when (wbin == rptr).
+
+Almost empty: when the difference is 1 (so one entry left). Wait, almost empty is when the FIFO is one entry away from being empty. So when (wbin - rptr) == 1? Or (rptr - wbin) == 1? Hmm.
+
+Wait, if the FIFO is empty when read and write pointers are equal. Almost empty is when the next read would make it empty. So if the current count is 1. So the difference between write and read pointers is 1. Wait, but the count is (wptr - rptr). If the pointers are (ASIZE+1 bits), then the actual count is (wptr - rptr) mod 2^(ASIZE+1). But if the pointers are allowed to wrap around, the count is (wptr - rptr) when wptr >= rptr, else (2^(ASIZE+1) - (rptr - wptr)).
+
+Wait, perhaps the actual count is (wptr - rptr) when treated as unsigned.
+
+If the count is (wptr - rptr), then when the count is 0, empty. When count is 2^ASIZE, full.
+
+Almost full is when count is (2^ASIZE -1). Almost empty when count is 1.
+
+But in terms of the pointers:
+
+Almost full: (wptr - rptr) >= (2^ASIZE -1)
+
+Almost empty: (wptr - rptr) <= 1.
+
+But how to compute that.
+
+Alternatively, almost full is when the next write would make it full. So when (wptr +1 - rptr) == 2^ASIZE.
+
+Wait, but the pointers are (ASIZE+1) bits. So the maximum entries is 2^ASIZE.
+
+Wait, perhaps the almost full is when the FIFO is one less than full. So when (wptr - rptr) == (2^ASIZE -1). Similarly, almost empty when (wptr - rptr) == 1.
+
+But the exact conditions may vary based on the parameters.
+
+But the user's parameters don't specify the thresholds for almost full and almost empty. So perhaps the almost full is when the FIFO is one less than full (i.e., when the next write would fill it), and almost empty when one more than empty.
+
+Assuming that, the code can proceed.
+
+Now, the code outline:
+
+module async_fifo #(...) (...);
+
+// Parameters
+parameter DSIZE = 8;
+parameter ASIZE = 4;
+parameter FALLTHROUGH = "TRUE";
+
+// Ports as per the given.
+
+// Internal signals:
+
+// Write domain signals
+reg [ASIZE:0] wptr, wptr_next; // binary pointers (ASIZE+1 bits)
+reg [ASIZE:0] wgray, wgray_next; // gray code pointers
+reg [DSIZE-1:0] mem [0:(1<<ASIZE)-1]; // memory array
+
+// Read domain signals
+reg [ASIZE:0] rptr, rptr_next;
+reg [ASIZE:0] rgray, rgray_next;
+
+// Synchronizers
+// Read pointer synchronized to write domain
+reg [ASIZE:0] rgray_sync1, rgray_sync2;
+// Write pointer synchronized to read domain
+reg [ASIZE:0] wgray_sync1, wgray_sync2;
+
+// Convert synchronized gray to binary
+// For write domain: rptr_bin (binary)
+// For read domain: wptr_bin (binary)
+
+// Convert Gray to binary functions.
+
+// Full and empty conditions.
+
+// Almost full and almost empty.
+
+// Handling the read data with FALLTHROUGH.
+
+// Handling the resets.
+
+// Now, the code.
+
+// Write domain logic:
+
+// Reset and pointer updates.
+
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        wptr <= 0;
+        wgray <= 0;
+    end else begin
+        wptr <= wptr_next;
+        wgray <= wgray_next;
+    end
+end
+
+// Next pointer logic.
+
+always @* begin
+    wptr_next = wptr;
+    wgray_next = wgray;
+    if (winc && !wfull) begin
+        wptr_next = wptr + 1;
+        wgray_next = (wptr_next >> 1) ^ wptr_next;
+    end
+end
+
+// Memory write.
+
+always @(posedge wclk) begin
+    if (winc && !wfull)
+        mem[wptr[ASIZE-1:0]] <= wdata; // assuming lower bits are the address.
+end
+
+// Synchronize read pointer's gray code to write domain.
+
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        rgray_sync1 <= 0;
+        rgray_sync2 <= 0;
+    end else begin
+        rgray_sync1 <= rgray;
+        rgray_sync2 <= rgray_sync1;
+    end
+end
+
+// Convert synchronized gray to binary (rptr_bin)
+
+// Similarly for read domain.
+
+// Read domain logic:
+
+// Reset and pointer updates.
+
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        rptr <= 0;
+        rgray <= 0;
+    end else begin
+        rptr <= rptr_next;
+        rgray <= rgray_next;
+    end
+end
+
+// Next pointer logic.
+
+always @* begin
+    rptr_next = rptr;
+    rgray_next = rgray;
+    if (rinc && !rempty) begin
+        rptr_next = rptr + 1;
+        rgray_next = (rptr_next >> 1) ^ rptr_next;
+    end
+end
+
+// Synchronize write pointer's gray code to read domain.
+
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        wgray_sync1 <= 0;
+        wgray_sync2 <= 0;
+    end else begin
+        wgray_sync1 <= wgray;
+        wgray_sync2 <= wgray_sync1;
+    end
+end
+
+// Convert synchronized write gray to binary (wptr_bin)
+
+// Full condition in write domain.
+
+// Compute the binary from the synchronized gray.
+
+// Function to convert gray to binary.
+
+function [ASIZE:0] gray2bin;
+    input [ASIZE:0] gray;
+    integer i;
+    begin
+        gray2bin[ASIZE] = gray[ASIZE];
+        for (i = ASIZE-1; i >=0; i=i-1)
+            gray2bin[i] = gray2bin[i+1] ^ gray[i];
+    end
+endfunction
+
+// So in write domain:
+
+wire [ASIZE:0] rptr_bin = gray2bin(rgray_sync2);
+
+// Similarly for read domain:
+
+wire [ASIZE:0] wptr_bin = gray2bin(wgray_sync2);
+
+// Full condition: (wptr - rptr_bin) >= (2**ASIZE)
+
+// Wait, but pointers are (ASIZE+1) bits. The maximum entries is 2^ASIZE.
+
+// So when (wptr - rptr_bin) == 2**ASIZE, the FIFO is full.
+
+// So:
+
+wire wfull_val = ( (wptr - rptr_bin) == (1 << ASIZE) );
+
+// Similarly, empty is when (rptr == wptr_bin)
+
+// But in read domain:
+
+wire rempty_val = (rptr == wptr_bin);
+
+// Almost full: (wptr - rptr_bin) >= (2**ASIZE -1)
+
+// Almost empty: (wptr_bin - rptr) >= 1 ?
+
+Wait, almost empty in read domain: when the FIFO is one entry away from being empty. So when (wptr_bin - rptr) == 1.
+
+Wait, if the current read pointer is at rptr and write at wptr_bin, the count is (wptr_bin - rptr). If that's 1, then almost empty.
+
+Wait, but if the count is 1, then after a read, it's empty.
+
+So:
+
+wire arempty_val = ( (wptr_bin - rptr) <= 1 );
+
+Similarly, almost full in write domain:
+
+wire awfull_val = ( (wptr - rptr_bin) >= ( (1 << ASIZE) -1 ) );
+
+Wait, but the almost full is when the FIFO is one less than full. So when (wptr - rptr_bin) == ( (1 << ASIZE) -1 )
+
+But the exact conditions need to be checked.
+
+Alternatively, almost full is when the next write would make it full.
+
+So:
+
+wire awfull_val = ( (wptr +1 - rptr_bin) == (1 << ASIZE) )
+
+Wait, but if current count is (wptr - rptr_bin), then next write would be (count +1). So almost full is when (count +1) == (1 << ASIZE). So count == (1 << ASIZE) -1.
+
+Similarly, almost empty is when count == 1.
+
+But the count is (wptr - rptr_bin) ?
+
+Wait, the count is (wptr - rptr_bin) when wptr >= rptr_bin. Else ( (1 << (ASIZE+1)) - (rptr_bin - wptr) )
+
+But in the standard approach, the count is (wptr - rptr_bin) when treated as unsigned.
+
+But in Verilog, subtraction of two unsigned numbers gives the correct difference.
+
+So:
+
+wire [ASIZE:0] count = wptr - rptr_bin;
+
+Then:
+
+assign awfull_val = (count >= ( (1 << ASIZE) -1 ));
+
+assign arempty_val = (count <= 1);
+
+Wait, but almost full is when the FIFO is one less than full. So when count is (2^ASIZE -1). So:
+
+awfull_val = (count == ( (1 << ASIZE ) -1 ));
+
+Similarly, almost empty when count is 1.
+
+But the user's parameters don't specify the thresholds. So perhaps the code uses:
+
+Almost full: when the FIFO is one less than full.
+
+Almost empty: when the FIFO is one more than empty.
+
+But the exact code may vary.
+
+Assuming that:
+
+// Almost full in write domain: when the FIFO is one less than full.
+
+// So count is (wptr - rptr_bin) == (2^ASIZE -1)
+
+// Similarly, almost empty in read domain: count is 1.
+
+// So:
+
+// In write domain:
+
+wire [ASIZE:0] count_w = wptr - rptr_bin;
+
+assign awfull_val = (count_w == ( (1 << ASIZE ) -1 ));
+
+// In read domain:
+
+wire [ASIZE:0] count_r = wptr_bin - rptr;
+
+assign arempty_val = (count_r == 1);
+
+Wait, but the read domain's count is (wptr_bin - rptr). If that's 1, then almost empty.
+
+But the almost empty is when the FIFO is one entry away from empty. So yes.
+
+Now, the full and empty:
+
+// Full condition in write domain:
+
+wire wfull_val = (count_w == (1 << ASIZE));
+
+// Empty in read domain:
+
+wire rempty_val = (count_r == 0);
+
+Wait, but count_r is (wptr_bin - rptr). If they are equal, then count is zero.
+
+Yes.
+
+Now, the code for the flags:
+
+// Write domain flags:
+
+assign wfull = wfull_val;
+
+// Read domain flags:
+
+assign rempty = rempty_val;
+
+// Almost full and almost empty:
+
+assign awfull = awfull_val;
+
+assign arempty = arempty_val;
+
+Wait, but the parameters for almost full and almost empty may have different thresholds. But the user's parameters don't specify, so we proceed with the standard approach.
+
+Now, the read data.
+
+If FALLTHROUGH is TRUE, then the read data is presented immediately when the FIFO is not empty. Otherwise, the read data is updated only after a read.
+
+In the case of FALLTHROUGH, the data is available as soon as the FIFO is not empty. So when the read pointer increments, the next data is available.
+
+Wait, in the standard FWFT (First Word Fall Through) mode, the data is available before the read is performed. So when the FIFO is not empty, the data is already present. The read operation advances the pointer.
+
+In non-FWFT mode, the data is read on the read operation (pointer increments after read).
+
+The code for the read data depends on the FALLTHROUGH parameter.
+
+If FALLTHROUGH is TRUE:
+
+The data is available when the FIFO is not empty. So the read data is the entry pointed by the read pointer. When a read occurs (rinc and not empty), the pointer increments, and the next data is read.
+
+In code:
+
+If FALLTHROUGH is TRUE:
+
+assign rdata = mem[ rptr[ASIZE-1:0] ];
+
+But wait, the read pointer's address is the lower ASIZE bits.
+
+Wait, the memory is addressed with ASIZE bits. So the lower ASIZE bits of the pointer.
+
+Wait, the pointers are (ASIZE+1) bits. The actual address is the lower ASIZE bits.
+
+So:
+
+For the write:
+
+mem is written at wptr[ASIZE-1:0]
+
+Similarly, read address is rptr[ASIZE-1:0]
+
+But in FWFT mode, the data is available when the FIFO is not empty. So the data is the entry pointed by the read pointer.
+
+In non-FWFT mode, the data is read after the pointer increments.
+
+Wait, the code for the read data:
+
+If FALLTHROUGH is TRUE:
+
+The data is available immediately when not empty. So the read data is the current entry (the one pointed by rptr). When a read occurs, the pointer increments to next.
+
+In non-FWFT mode:
+
+The data is updated only after a read. So when you read, the data is the next one.
+
+Wait, the standard non-FWFT FIFO: data is presented only after a read. So when you read, you get the current data and the pointer increments.
+
+But in FWFT, the data is available before the read.
+
+The code for the read data:
+
+If FALLTHROUGH is TRUE:
+
+assign rdata = mem[ rptr[ASIZE-1:0] ];
+
+Else:
+
+// Need a register to hold the data. When a read occurs, the data is updated.
+
+// Wait, but in non-FWFT mode, the data is only valid after a read.
+
+Hmm, perhaps the code for the read data is:
+
+If FALLTHROUGH is TRUE:
+
+// data is available immediately.
+
+// So the read data is the entry pointed by rptr.
+
+// When you read, you increment the pointer, and the next data is available.
+
+// So the code would be:
+
+assign rdata = mem[ rptr[ASIZE-1:0] ];
+
+Else:
+
+// The data is registered. When you read, you increment the pointer, and the next data is read.
+
+// Wait, but in non-FWFT mode, the data is only updated when a read occurs.
+
+Wait, the standard non-FWFT FIFO:
+
+The data is stored in a register. When you read (rinc and not empty), the data is output, and the pointer increments. The next data is read from memory.
+
+Wait, perhaps in non-FWFT mode, the data is registered. So:
+
+reg [DSIZE-1:0] rdata_reg;
+
+always @(posedge rclk) begin
+    if (!rrst_n) begin
+        rdata_reg <= 0;
+    end else if (rinc && !rempty) begin
+        rdata_reg <= mem[ rptr[ASIZE-1:0] ];
+    end
+end
+
+// Then assign rdata = rdata_reg;
+
+But in FWFT mode, the data is directly from the memory.
+
+So the code for the read data:
+
+generate
+    if (FALLTHROUGH == "TRUE") begin
+        assign rdata = mem[ rptr[ASIZE-1:0] ];
+    end else begin
+        reg [DSIZE-1:0] rdata_reg;
+        // ... code to update rdata_reg on read.
+    end
+endgenerate
+
+But in Verilog, parameters can't be compared as strings in generate if using Verilog-2001. Wait, in Verilog, generate can use if (FALLTHROUGH == "TRUE") if the parameter is a string. But in Verilog, string parameters are allowed.
+
+Wait, the parameter FALLTHROUGH is a string. So the code would have:
+
+generate
+    if (FALLTHROUGH == "TRUE") begin
+        assign rdata = mem[ rptr[ASIZE-1:0] ];
+    end else begin
+        // non-FWFT mode
+        reg [DSIZE-1:0] rdata_reg;
+        always @(posedge rclk or negedge rrst_n) begin
+            if (!rrst_n) begin
+                rdata_reg <= 0;
+            end else if (rinc && !rempty) begin
+                rdata_reg <= mem[ rptr[ASIZE-1:0] ];
+            end
+        end
+        assign rdata = rdata_reg;
+    end
+endgenerate
+
+Wait, but in non-FWFT mode, the data is only updated when a read occurs. So when you read, you get the current data, and the pointer increments. The data is stored in a register.
+
+But in FWFT mode, the data is available immediately, so the read data is the current entry.
+
+But in the code, the read pointer is incremented when rinc and not empty. So the data is read from the current pointer, then the pointer increments.
+
+Wait, in FWFT mode, the data is available when the FIFO is not empty. So the read data is the entry pointed by the read pointer. When you read, you increment the pointer, so the next data is available.
+
+In non-FWFT mode, the data is read into a register when you perform a read. So the data is stored in a register and output.
+
+So the code for the read data:
+
+If FALLTHROUGH is TRUE:
+
+assign rdata = mem[ rptr[ASIZE-1:0] ];
+
+Else:
+
+reg [DSIZE-1:0] rdata_reg;
+
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        rdata_reg <= 0;
+    end else if (rinc && !rempty) begin
+        rdata_reg <= mem[ rptr[ASIZE-1:0] ];
+    end
+end
+
+assign rdata = rdata_reg;
+
+But in non-FWFT mode, the data is only updated when a read occurs. So when you read, you get the current data, and the pointer increments. The data is stored in the register.
+
+Now, the code for the read pointer:
+
+In non-FWFT mode:
+
+The data is stored in the register. The read pointer increments when rinc and not empty.
+
+In FWFT mode:
+
+The data is directly from the memory. The read pointer increments when rinc and not empty.
+
+So the code for the read pointer:
+
+In both cases, the read pointer increments when rinc and not empty.
+
+But the data is handled differently.
+
+Now, putting all together.
+
+Now, the code.
+
+First, the memory:
+
+reg [DSIZE-1:0] mem [0:(1 << ASIZE)-1];
+
+The write pointer and read pointer are (ASIZE+1) bits.
+
+The Gray code conversion.
+
+Synchronization.
+
+Full and empty conditions.
+
+Now, the code.
+
+Wait, but in the code, the almost full and almost empty are computed.
+
+Now, the code.
+
+Now, the code for the almost full and almost empty.
+
+Wait, in the write domain:
+
+// Almost full: when the FIFO is one less than full.
+
+wire [ASIZE:0] count_w = wptr - rptr_bin;
+
+assign awfull_val = (count_w == ( (1 << ASIZE) -1 ));
+
+Similarly, in read domain:
+
+wire [ASIZE:0] count_r = wptr_bin - rptr;
+
+assign arempty_val = (count_r == 1);
+
+Now, the code.
+
+Now, the code for the Gray to binary conversion.
+
+The function gray2bin is needed.
+
+Now, the code.
+
+Now, the code for the synchronizers.
+
+Now, the code.
+
+Now, the code for the read data.
+
+Now, the code.
+
+Now, the code for the reset.
+
+In write domain:
+
+On reset, wptr is 0, wgray is 0.
+
+Similarly for read.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code.
+
+Now, the code

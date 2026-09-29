@@ -12,6 +12,18 @@ failures at the RTL site, and gives SystemVerilog assertions that can
 live in an **open-source testbench** so a normal `xrun` / Icarus / Verilator
 run flags CDC bugs without JasperGold.
 
+> **Current-checkout release blocker (29 September 2026):** The enhanced
+> 44-circuit typed CDC testbench and structural-lint directories described in
+> the later September progress report are not present in this checkout. The
+> assertion examples in this document are design guidance, not a complete
+> installed public checker. Only three active canonical testbenches currently
+> emit generic `ASSERT FAIL` protocol messages. Therefore, current
+> `strict_pass` measurements must not be published as validated CDC-clean or
+> first-pass-screen rates. See
+> [`AK_PUBLIC_CDC_RELEASE_GAP_AND_PLAN.md`](AK_PUBLIC_CDC_RELEASE_GAP_AND_PLAN.md)
+> for the blocking evidence, ten-rule open-source target, implementation
+> sequence, and mutation-based release gates.
+
 ---
 
 ## 1. What “clean” means

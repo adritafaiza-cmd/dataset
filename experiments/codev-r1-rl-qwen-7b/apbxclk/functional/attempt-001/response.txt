@@ -1,0 +1,1160 @@
+<think>Okay, I need to design an APB clock domain bridge called apbxclk. Let's start by understanding the requirements. The bridge has two APB interfaces: S_APB (source) and M_APB (destination). The clocks are asynchronous and independent, so I need to handle clock domain crossing properly.
+
+The parameters include C_APB_ADDR_WIDTH and C_APB_DATA_WIDTH. OPT_REGISTERED determines if the payload and response are registered. The resets are S_PRESETn (active low) and M_PRESETn, which is an output. The resets should not create transactions, so during reset, both interfaces should be inactive.
+
+First, the module declaration. The ports are given, so I need to make sure all the inputs and outputs are correctly declared with their directions and widths. The parameters are set as per the user's code.
+
+Now, the main functionality. The bridge should forward APB transactions from the source to the destination clock domain. Since the clocks are asynchronous, I need to synchronize signals between the two domains. But APB is a synchronous protocol, so the bridge must handle the handshake between the two.
+
+APB transfers have two phases: setup and access. The bridge needs to latch the source signals when PSEL is asserted and PENABLE is low (setup phase), then in the next cycle, PENABLE is high (access phase). The destination side must wait until PREADY is high.
+
+Wait, but the M_APB_PREADY is an input here. So the bridge's M_APB side is acting as a master, and the destination is a slave. The bridge's M_APB interface is connected to a slave device. The bridge's S_APB is the source initiating the transaction.
+
+The key here is that the bridge must transfer the request from S_APB to M_APB domain. Since the clocks are asynchronous, we need to synchronize the control signals and data.
+
+The OPT_REGISTERED parameter affects whether the payload and response are registered. If OPT_REGISTERED is set, then the data and response are registered in the destination domain. Otherwise, they might be combinational? Wait, the description says that when OPT_REGISTERED is set, the crossing is explicit. So the behavior must stay the same regardless of the parameter. Hmm.
+
+Wait, the behavior must stay the same. So the parameter affects how the signals are registered. For example, if OPT_REGISTERED is 1, then the payload and response are registered in the destination clock domain. Otherwise, they are not. But the functionality (like not losing transactions) must be preserved.
+
+So the main idea is that when OPT_REGISTERED is 1, the signals crossing the clock domains are registered, which would add a cycle of latency but ensure proper synchronization. If it's 0, maybe they are not registered, but that could lead to metastability issues. Wait, but the user says that the behavior must stay the same. So the code must handle both cases.
+
+Wait, the user says: "OPT_REGISTERED selects whether crossing payload and response fields are explicitly registered. Both parameter settings must preserve APB behavior." So regardless of the setting, the APB protocol is followed, but the way the signals are registered (or not) affects the timing.
+
+Hmm. Let's think about the standard APB protocol. The bridge must forward the request to the destination domain. The source side (S_APB) is in S_APB_PCLK domain, destination (M_APB) in M_APB_PCLK.
+
+The bridge's S_APB side receives the transaction and then needs to transfer the request to M_APB's domain. The M_APB side is a master, so when the bridge's M_APB is active, it's initiating the transaction with the slave.
+
+The key steps:
+
+1. When S_APB_PSEL is asserted and PENABLE is low (setup phase), the bridge must latch the address, write data, etc., in the S_APB domain.
+
+2. Then, in the next cycle (access phase), PENABLE is high. The bridge must then pass this to the M_APB side.
+
+But since the clocks are asynchronous, the bridge must synchronize the control signals between the two domains.
+
+Wait, but APB is a synchronous protocol. The bridge's S_APB is in S_APB_PCLK, and M_APB is in M_APB_PCLK. The bridge must handle the transfer across these two.
+
+The standard approach for clock domain crossing is to use synchronizers for control signals and FIFOs for data. But APB is a simple protocol, so maybe a handshake mechanism is better.
+
+Alternatively, the bridge can have a state machine in each domain.
+
+Wait, the bridge has to handle the transfer from S_APB to M_APB. Let's outline the steps:
+
+In the source domain (S_APB_PCLK):
+
+- When S_APB_PSEL is high and PENABLE is low (setup phase), the bridge latches the inputs (address, data, etc.) into a register.
+
+- Then, in the next cycle, PENABLE is high (access phase). The bridge must then forward this to the M_APB side.
+
+But since the M_APB is in a different clock domain, the bridge must transfer the request across.
+
+The M_APB side (destination) operates on M_APB_PCLK. The bridge's M_APB_PSEL, etc., are outputs that need to be synchronized to M_APB_PCLK.
+
+Wait, but the M_APB_PSEL is generated by the bridge. So the bridge's logic in the M_APB domain must generate the M_APB_PSEL, etc., based on the source's transaction.
+
+The standard approach here is to use a handshake between the two domains. For example:
+
+In the source domain (S_APB):
+
+- When a transaction starts (S_APB_PSEL and PENABLE), the bridge latches the data and starts a transfer.
+
+- Then, the bridge needs to pass the request to the destination domain. To do this, it can use a toggle signal that is synchronized across the two domains.
+
+But perhaps a simpler approach is to have a state machine in the source domain that captures the request and then sends it to the destination domain via a FIFO or a register that's synchronized.
+
+Alternatively, the bridge can have a request and acknowledge handshake.
+
+Wait, but the APB protocol requires that once a transfer starts (PSEL and PENABLE), it must complete. So the bridge can't have a long wait. So the bridge must handle the transfer in a way that the source side waits until the destination completes.
+
+But since the clocks are asynchronous, the bridge must handle the transfer with proper synchronization.
+
+Another approach is to use a two-stage synchronizer for the control signals. Let's think of the steps:
+
+When the source initiates a transfer (S_APB_PSEL and PENABLE), the bridge must latch the data and then pass it to the destination domain. The M_APB side must then process the transfer and send back the response (PREADY, PRDATA, etc.), which is synchronized back to the source domain.
+
+The key is that the bridge must handle the handshake between the two domains.
+
+Let's outline the possible states:
+
+In the source domain (S_APB):
+
+- IDLE: Waiting for a transaction.
+
+- When S_APB_PSEL is high and PENABLE is low (setup phase), latch the data and move to SETUP state.
+
+Wait, APB protocol: The setup phase is when PSEL is asserted and PENABLE is low. Then the next cycle is the access phase (PENABLE high). The transfer completes when PREADY is high.
+
+So the bridge must capture the setup phase and then the access phase.
+
+But the bridge's M_APB side is in a different clock domain. So the bridge must transfer the setup and access phases across.
+
+Wait, the M_APB side is acting as a master. So the bridge's M_APB interface is a master, initiating transactions on the M_APB bus.
+
+Wait, the M_APB_PREADY is an input to the bridge. So the bridge's M_APB is a master, and the slave responds with PREADY. So the bridge's M_APB side is initiating a transaction, and the slave responds.
+
+Wait, the M_APB is connected to a slave device. So the bridge's M_APB is acting as a master towards that slave.
+
+Wait, the M_APB_PREADY is an input to the bridge. So the bridge's M_APB is a master, and the slave is on the M_APB side. So the bridge's M_APB is initiating a transaction, and the slave responds with PREADY.
+
+In that case, the bridge's M_APB is a master, and the S_APB is a master initiating a transaction that the bridge forwards to the M_APB (slave) side.
+
+So the bridge's job is to take the S_APB transaction and forward it to the M_APB (slave) side, then return the response back to the S_APB.
+
+So the steps would be:
+
+1. S_APB initiates a transfer (PSEL, PENABLE, etc.)
+
+2. Bridge captures the request and forwards to M_APB (as a master)
+
+3. Wait until the M_APB transaction completes (M_APB_PREADY is high)
+
+4. Then, return the response (PRDATA, PSLVERR) to S_APB.
+
+But the clocks are asynchronous, so the bridge must handle CDC for the control signals.
+
+Now, the main challenge is to transfer the request from S_APB domain to M_APB domain and the response back.
+
+The standard way is to use a handshake mechanism with a request and acknowledge.
+
+But since the APB protocol requires that once a transfer starts, it must complete, the bridge must ensure that the M_APB transaction is properly handled.
+
+Let's outline the possible structure.
+
+In the S_APB domain:
+
+- When a transaction starts (S_APB_PSEL and PENABLE low, then next cycle PENABLE high), the bridge latches the data.
+
+Wait, APB protocol:
+
+The transfer starts when PSEL is high and PENABLE is low (setup phase). Then, the next cycle (PENABLE high) is the access phase. The transfer completes when PREADY is high.
+
+So the bridge must capture the setup phase (when PSEL is high and PENABLE is low) and then the access phase.
+
+But the bridge's M_APB side is a master. So the bridge must generate the M_APB_PSEL, PENABLE, etc., in the M_APB domain.
+
+The M_APB side operates on M_APB_PCLK. So the bridge's logic in M_APB domain must generate the M_APB signals.
+
+The CDC here is between S_APB and M_APB domains.
+
+Possible approach:
+
+Use a FIFO to pass the request from S_APB to M_APB domain. But APB is a simple protocol, so maybe a two-register approach with handshake.
+
+Alternatively, use a register in S_APB domain that holds the request, and a toggle signal to indicate a new request. Then synchronize the toggle to M_APB domain, and when detected, the M_APB side reads the data and processes.
+
+But the M_APB side may take multiple cycles to complete the transaction, so the bridge must wait until the M_APB transaction completes before allowing another transaction.
+
+Wait, the bridge must support one outstanding transaction. So it can't accept a new transaction until the current one is completed.
+
+So the bridge can have a state machine in the S_APB domain:
+
+States:
+
+IDLE: No transaction. When S_APB_PSEL is high and PENABLE is low (setup phase), latch the data and move to SETUP state.
+
+SETUP: Wait for the next cycle (PENABLE high). Then move to ACCESS state.
+
+ACCESS: Wait for M_APB_PREADY to be high. Once that happens, capture the response (PRDATA, PSLVERR) and return to IDLE.
+
+But the M_APB is in a different clock domain. So the bridge must transfer the setup and access phases to the M_APB domain.
+
+Wait, but the M_APB is a master. So the bridge's M_APB side is acting as a master. So the bridge's M_APB_PSEL is generated in the M_APB domain.
+
+Wait, the M_APB_PSEL is an output of the bridge. So the bridge's M_APB side is a master, and the M_APB_PCLK is the clock for that master.
+
+So the bridge's M_APB side operates on M_APB_PCLK. The S_APB is in S_APB_PCLK.
+
+So the bridge's logic in the M_APB domain must generate the M_APB_PSEL, etc., and the S_APB domain's logic must generate the S_APB_PREADY once the M_APB transaction completes.
+
+This is a two-way CDC.
+
+Hmm. Let's think of the steps again.
+
+When the S_APB initiates a transfer:
+
+1. The bridge in S_APB domain latches the request (PADDR, PWRITE, etc.) when S_APB_PSEL is high and PENABLE is low (setup phase).
+
+2. Then, in the next cycle (PENABLE high), the bridge must forward the request to the M_APB domain.
+
+But since the clocks are asynchronous, the bridge must synchronize the control signals.
+
+Wait, but the M_APB is a master. So the bridge's M_APB side is initiating a transaction. The M_APB_PSEL is generated in the M_APB domain.
+
+So the bridge's M_APB side (as a master) would have a state machine:
+
+In M_APB domain:
+
+- IDLE: Wait until the bridge has a pending transaction.
+
+- When a new transaction is available (from S_APB domain), start the M_APB transaction.
+
+- Proceed through setup and access phases.
+
+But how to pass the data from S_APB to M_APB domain.
+
+This is a classic CDC problem. The data (address, write data, etc.) must be transferred across clock domains.
+
+Possible solution:
+
+Use a two-stage synchronizer for the control signals (like a request and acknowledge) and then pass the data through a register in the destination domain.
+
+But the data is multi-bit and needs to be stable once the request is made.
+
+Alternatively, use a handshake with a request and ack.
+
+But given that the bridge must handle one outstanding transaction, the handshake can be:
+
+In S_APB domain:
+
+- When a transaction starts (setup phase), latch the data into a register and set a 'req' flag.
+
+In M_APB domain:
+
+- Detect the 'req' flag (synchronized via two flip-flops to avoid metastability), then capture the data and start the M_APB transaction.
+
+Once the M_APB transaction completes (M_APB_PREADY is high), send an 'ack' back to S_APB domain.
+
+The 'ack' is synchronized in S_APB domain to clear the 'req' and allow a new transaction.
+
+This way, the data is transferred safely across domains.
+
+Now, the data (address, write data, etc.) must be stable once the 'req' is set. So in the S_APB domain, once 'req' is set, the data is held until 'ack' is received.
+
+In code terms:
+
+In S_APB domain:
+
+reg [AW-1:0] addr_reg;
+reg [DW-1:0] wdata_reg;
+// etc.
+
+reg req;
+reg ack;
+
+// Synchronize ack from M_APB domain to S_APB domain.
+
+In M_APB domain:
+
+reg req_sync1, req_sync2;
+always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+  if (!M_PRESETn) begin
+    req_sync1 <= 0;
+    req_sync2 <= 0;
+  end else begin
+    req_sync1 <= req;
+    req_sync2 <= req_sync1;
+  end
+end
+
+When req_sync2 is detected, the M_APB side starts the transaction.
+
+Once the transaction completes (M_APB_PREADY is high), the M_APB side sends an ack signal (which is then synchronized back to S_APB domain).
+
+Once the ack is received, the S_APB domain can clear the req and proceed.
+
+Now, the data (addr, wdata, etc.) must be held in the S_APB domain until the ack comes back.
+
+This ensures that the data is stable during CDC.
+
+Now, the code structure.
+
+First, the S_APB domain:
+
+- Capture the setup phase (S_APB_PSEL and PENABLE low) and latch the data.
+
+Wait, the setup phase is when PSEL is high and PENABLE is low. Then the next cycle is PENABLE high (access phase). The transfer completes when PREADY is high.
+
+So the bridge in S_APB domain must detect the setup phase and then the access phase.
+
+Wait, the S_APB_PENABLE is part of the APB protocol. The transfer is initiated when PSEL is high and PENABLE is low (setup phase). Then in the next cycle, PENABLE is high (access phase). The transfer completes when PREADY is high.
+
+So the bridge's S_APB side must latch the data when the setup phase occurs (PSEL and PENABLE low) and then wait for the access phase.
+
+Once the access phase is done (PENABLE high and PREADY high), the response is captured.
+
+But the bridge must forward this to the M_APB side.
+
+But the M_APB side is a master, so the bridge's M_APB side must generate the PSEL, PENABLE, etc.
+
+Wait, the M_APB is a master, so the bridge's M_APB_PSEL is generated by the bridge's state machine in the M_APB domain.
+
+So the bridge's M_APB side has a state machine that starts a transaction once the S_APB side has a pending request.
+
+Now, the code outline:
+
+In S_APB domain:
+
+- When a transaction starts (S_APB_PSEL and S_APB_PENABLE low, and S_APB_PREADY is low), latch the data.
+
+Wait, the S_APB_PREADY is an output. The bridge's S_APB_PREADY is asserted only when the M_APB transaction completes.
+
+So the S_APB side can't proceed until the M_APB transaction is done.
+
+The steps:
+
+1. S_APB initiates a transfer (PSEL high, PENABLE low). The bridge latches the data and starts the M_APB transaction.
+
+2. Wait until the M_APB transaction completes (M_APB_PREADY high). Then, the response is sent back to S_APB, and S_APB_PREADY is asserted.
+
+But the M_APB transaction is in a different clock domain.
+
+So the S_APB domain must wait for the M_APB transaction to complete.
+
+This requires that the M_APB transaction's completion is synchronized to S_APB domain.
+
+But the M_APB_PREADY is an input to the bridge. So when the M_APB transaction completes (M_APB_PREADY is high), the bridge can capture the response and then allow the S_APB side to proceed.
+
+But the M_APB transaction is initiated by the bridge's M_APB side.
+
+Wait, this is getting complicated. Let's try to outline the code.
+
+First, the S_APB side:
+
+The bridge's S_APB_PREADY is only high when the M_APB transaction has completed.
+
+The M_APB transaction is in the M_APB domain. So the bridge's M_APB side must generate the M_APB_PSEL, etc., and when the transaction completes (M_APB_PREADY is high), the response is sent back to S_APB.
+
+But the M_APB_PREADY is an input to the bridge. So when the M_APB side's transaction completes, the bridge can then return the response.
+
+Now, the code structure:
+
+In S_APB domain:
+
+- When S_APB_PSEL is high and PENABLE is low (setup phase), latch the data into a register (addr_reg, etc.), and set a flag (start_transaction).
+
+- Then, in the next cycle (PENABLE high), wait for the M_APB transaction to complete.
+
+But the M_APB transaction is in a different domain. So the bridge's M_APB side must process the request.
+
+Wait, perhaps the M_APB side is a state machine that starts when there's a pending request from the S_APB side.
+
+The S_APB side's data is transferred to the M_APB domain via synchronizers.
+
+But the data is multi-bit, so using synchronizers for each bit is not feasible. Hence, the data must be held stable once the request is made.
+
+So the S_APB domain latches the data when the transaction starts, and the M_APB domain reads that data once the request is detected.
+
+Now, the code:
+
+In S_APB domain:
+
+reg [AW-1:0] s_addr;
+reg [DW-1:0] s_wdata;
+reg [DW/8-1:0] s_wstrb;
+reg s_pwrite;
+reg [2:0] s_pprot;
+reg s_psel;
+reg s_penable;
+
+// Latch the data when setup phase occurs (S_APB_PSEL and PENABLE low)
+always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+  if (!S_PRESETn) begin
+    // reset
+    s_psel <= 0;
+    s_penable <= 0;
+    // ... other resets
+  end else begin
+    if (S_APB_PSEL && !S_APB_PENABLE) begin
+      // setup phase: latch data
+      s_addr <= S_APB_PADDR;
+      s_wdata <= S_APB_PWDATA;
+      s_wstrb <= S_APB_PWSTRB;
+      s_pwrite <= S_APB_PWRITE;
+      s_pprot <= S_APB_PPROT;
+      s_psel <= 1;
+      s_penable <= 0;
+    end else if (S_APB_PENABLE && !S_APB_PREADY) begin
+      // access phase: wait for M_APB to complete
+      s_penable <= 1;
+    end else if (S_APB_PREADY) begin
+      // transaction done
+      s_psel <= 0;
+      s_penable <= 0;
+    end
+  end
+end
+
+Wait, but the S_APB_PREADY is an output. So the S_APB side can't proceed until the M_APB transaction completes.
+
+Wait, the S_APB_PREADY is only asserted when the M_APB transaction is done.
+
+So the S_APB side's state machine:
+
+When a transaction starts (S_APB_PSEL and PENABLE low), latch the data and start the M_APB transaction.
+
+Once the M_APB transaction completes (M_APB_PREADY is high), the response is captured and S_APB_PREADY is asserted.
+
+But the M_APB transaction is in the M_APB domain.
+
+So the M_APB side's state machine:
+
+Once the S_APB side has a pending transaction, the M_APB side initiates the transaction.
+
+The M_APB side's state machine:
+
+IDLE: Wait for a request from S_APB domain.
+
+Once a request is detected (synchronized), proceed to setup phase.
+
+Wait, but the M_APB protocol requires that the master (bridge's M_APB) initiates the transaction.
+
+The M_APB side's state machine:
+
+- When a request is pending (from S_APB domain), start the M_APB transaction.
+
+In M_APB domain:
+
+reg m_psel;
+reg m_penable;
+reg [AW-1:0] m_addr;
+// etc.
+
+// Synchronize the request from S_APB domain
+// Use two-stage synchronizer for the request signal
+reg req_sync1, req_sync2;
+always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+  if (!M_PRESETn) begin
+    req_sync1 <= 0;
+    req_sync2 <= 0;
+  end else begin
+    req_sync1 <= s_psel; // assuming s_psel is the request
+    req_sync2 <= req_sync1;
+  end
+end
+
+// Once req_sync2 is high, start the transaction
+// M_APB state machine
+localparam M_IDLE = 0;
+localparam M_SETUP = 1;
+localparam M_ACCESS = 2;
+
+reg [1:0] m_state;
+
+always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+  if (!M_PRESETn) begin
+    m_state <= M_IDLE;
+    m_psel <= 0;
+    m_penable <= 0;
+    // ... other resets
+  end else begin
+    case (m_state)
+      M_IDLE: begin
+        if (req_sync2) begin
+          // Start transaction
+          m_addr <= s_addr; // from S_APB domain, need to synchronize
+          // Wait, but s_addr is in S_APB domain. Need to transfer across.
+          // So need to have a register in S_APB domain that holds the data once the request is made.
+          // Then, when the M_APB domain detects the request, it reads the data from the S_APB registers.
+          // But since the data is in S_APB domain, need to handle CDC for multi-bit signals.
+
+          // So the data is latched in S_APB domain when the request is made, then passed to M_APB domain.
+
+          // So in S_APB domain, when the request is made (s_psel is set), the data is stored in a register.
+
+          // Then, in M_APB domain, once the request is detected (req_sync2), the data is read from the S_APB registers.
+
+          // But since the S_APB registers are in a different clock domain, reading them directly can cause metastability.
+
+          // So need to use synchronizers for multi-bit data.
+
+          // Alternatively, use a handshake with a valid signal.
+
+          // For simplicity, assuming that the data is stable once the request is made.
+
+          // So in M_APB domain, when the request is detected (req_sync2), the data is read from the S_APB registers.
+
+          // But in Verilog, if you read a register from another clock domain, you can get metastability.
+
+          // So the data must be transferred via a synchronizer.
+
+          // But multi-bit synchronizers are tricky. So perhaps use a two-register approach for each data bit.
+
+          // But that's not practical for large data.
+
+          // Alternatively, the data is held in the S_APB domain until the M_APB transaction completes.
+
+          // So the S_APB domain has a data register that's only cleared once the M_APB transaction is done.
+
+          // Then, in M_APB domain, once the request is detected (req_sync2), the data is read from the S_APB registers.
+
+          // But in Verilog, if the S_APB registers are in a different clock domain, reading them directly would cause simulation issues.
+
+          // However, in RTL, it's possible if the data is stable.
+
+          // So in code:
+
+          m_psel <= 1;
+          m_penable <= 0;
+          m_addr <= s_addr;
+          m_pwrite <= s_pwrite;
+          m_wdata <= s_wdata;
+          m_wstrb <= s_wstrb;
+          m_pprot <= s_pprot;
+          m_state <= M_SETUP;
+        end
+      end
+      M_SETUP: begin
+        if (M_APB_PREADY) begin
+          // Setup phase completes, move to access
+          m_penable <= 1;
+          m_state <= M_ACCESS;
+        end
+      end
+      M_ACCESS: begin
+        if (M_APB_PREADY) begin
+          // Transaction completes
+          m_psel <= 0;
+          m_penable <= 0;
+          m_state <= M_IDLE;
+          // Send response back to S_APB domain
+          // Need to generate an ack signal
+          ack <= 1;
+        end
+      end
+    endcase
+  end
+end
+
+// Then, the ack signal is synchronized back to S_APB domain to clear the request.
+
+// Now, the S_APB side:
+
+// When ack is received, the request is cleared.
+
+// The S_APB_PREADY is only high when the transaction is done.
+
+// Now, the code for S_APB domain:
+
+// Latch the data when setup phase occurs (S_APB_PSEL and PENABLE low)
+
+reg [AW-1:0] s_addr_reg;
+reg [DW-1:0] s_wdata_reg;
+reg [DW/8-1:0] s_wstrb_reg;
+reg s_pwrite_reg;
+reg [2:0] s_pprot_reg;
+reg s_psel_reg;
+reg s_penable_reg;
+
+// The request is made when S_APB_PSEL is high and PENABLE is low (setup phase)
+// Then, the data is stored in the registers.
+
+// Then, the M_APB domain's ack is synchronized back.
+
+// The S_APB_PREADY is high when the transaction is done.
+
+// Now, the code for the S_APB side:
+
+// S_APB domain:
+
+// Detect setup phase
+wire setup_phase = S_APB_PSEL && !S_APB_PENABLE;
+
+// Latch the data when setup phase occurs
+always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+  if (!S_PRESETn) begin
+    s_addr_reg <= 0;
+    s_wdata_reg <= 0;
+    s_wstrb_reg <= 0;
+    s_pwrite_reg <= 0;
+    s_pprot_reg <= 0;
+    s_psel_reg <= 0;
+    s_penable_reg <= 0;
+  end else begin
+    if (setup_phase) begin
+      s_addr_reg <= S_APB_PADDR;
+      s_wdata_reg <= S_APB_PWDATA;
+      s_wstrb_reg <= S_APB_PWSTRB;
+      s_pwrite_reg <= S_APB_PWRITE;
+      s_pprot_reg <= S_APB_PPROT;
+      s_psel_reg <= 1;
+      s_penable_reg <= 0;
+    end else if (S_APB_PENABLE && !S_APB_PREADY) begin
+      // Access phase: hold PENABLE high
+      s_penable_reg <= 1;
+    end else if (S_APB_PREADY) begin
+      // Transaction done, clear PSEL and PENABLE
+      s_psel_reg <= 0;
+      s_penable_reg <= 0;
+    end
+  end
+end
+
+// Now, the M_APB side's ack is synchronized to S_APB domain.
+
+// The ack is generated in M_APB domain when the transaction completes.
+
+// Then, in S_APB domain, we have a synchronizer for the ack.
+
+reg ack_sync1, ack_sync2;
+
+always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+  if (!S_PRESETn) begin
+    ack_sync1 <= 0;
+    ack_sync2 <= 0;
+  end else begin
+    ack_sync1 <= ack;
+    ack_sync2 <= ack_sync1;
+  end
+end
+
+// Then, the S_APB_PREADY is set when ack_sync2 is high.
+
+// Wait, but S_APB_PREADY is an output. So when the transaction completes, the bridge's S_APB_PREADY is asserted.
+
+// So in S_APB domain:
+
+assign S_APB_PREADY = ack_sync2;
+
+// Now, the M_APB side:
+
+// The M_APB_PSEL is generated in M_APB domain.
+
+// The M_APB_PSEL is connected to M_APB_PSEL output.
+
+// Now, the code for M_APB domain:
+
+// Synchronize the request from S_APB domain.
+
+reg req_sync1, req_sync2;
+
+always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+  if (!M_PRESETn) begin
+    req_sync1 <= 0;
+    req_sync2 <= 0;
+  end else begin
+    req_sync1 <= s_psel_reg;
+    req_sync2 <= req_sync1;
+  end
+end
+
+// State machine for M_APB:
+
+reg [1:0] m_state;
+
+localparam M_IDLE = 0;
+localparam M_SETUP = 1;
+localparam M_ACCESS = 2;
+
+// Data registers in M_APB domain
+reg [AW-1:0] m_addr;
+reg [DW-1:0] m_wdata;
+reg [DW/8-1:0] m_wstrb;
+reg m_pwrite;
+reg [2:0] m_pprot;
+
+// The ack signal to S_APB domain
+reg ack;
+
+// M_APB state machine
+always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+  if (!M_PRESETn) begin
+    m_state <= M_IDLE;
+    M_APB_PSEL <= 0;
+    M_APB_PENABLE <= 0;
+    ack <= 0;
+    // Reset other outputs
+  end else begin
+    ack <= 0; // default
+    case (m_state)
+      M_IDLE: begin
+        if (req_sync2) begin
+          // Capture the data from S_APB domain registers
+          m_addr <= s_addr_reg;
+          m_wdata <= s_wdata_reg;
+          m_wstrb <= s_wstrb_reg;
+          m_pwrite <= s_pwrite_reg;
+          m_pprot <= s_pprot_reg;
+          M_APB_PSEL <= 1;
+          M_APB_PENABLE <= 0;
+          m_state <= M_SETUP;
+        end
+      end
+      M_SETUP: begin
+        if (M_APB_PREADY) begin
+          // Setup phase done, move to access
+          M_APB_PENABLE <= 1;
+          m_state <= M_ACCESS;
+        end
+      end
+      M_ACCESS: begin
+        if (M_APB_PREADY) begin
+          // Transaction done
+          M_APB_PSEL <= 0;
+          M_APB_PENABLE <= 0;
+          ack <= 1;
+          m_state <= M_IDLE;
+        end
+      end
+    endcase
+  end
+end
+
+// Assign the M_APB outputs
+assign M_APB_PADDR = m_addr;
+assign M_APB_PWRITE = m_pwrite;
+assign M_APB_PWDATA = m_wdata;
+assign M_APB_PWSTRB = m_wstrb;
+assign M_APB_PPROT = m_pprot;
+
+// Assign the S_APB outputs
+assign S_APB_PRDATA = M_APB_PRDATA;
+assign S_APB_PSLVERR = M_APB_PSLVERR;
+
+// Now, the OPT_REGISTERED parameter. If set, the payload and response are registered.
+
+// For example, if OPT_REGISTERED is 1, then the M_APB outputs are registered.
+
+// So in the M_APB domain, the outputs are registered.
+
+// So in the code:
+
+// For the M_APB outputs:
+
+reg [AW-1:0] m_addr_reg;
+reg [DW-1:0] m_wdata_reg;
+// etc.
+
+// Then, in the M_APB state machine:
+
+// When in M_SETUP, assign to the registered outputs.
+
+// But this depends on the parameter.
+
+// So generate blocks based on OPT_REGISTERED.
+
+// But in Verilog, generate blocks can be used for conditional code.
+
+// So:
+
+generate
+  if (OPT_REGISTERED) begin
+    // Register the outputs
+    always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+      if (!M_PRESETn) begin
+        M_APB_PSEL <= 0;
+        M_APB_PENABLE <= 0;
+        // ... other outputs
+      end else begin
+        // Assign registered values
+        M_APB_PSEL <= m_psel_reg;
+        // etc.
+      end
+    end
+  end else begin
+    // Non-registered outputs
+    assign M_APB_PSEL = m_psel;
+    // etc.
+  end
+endgenerate
+
+Wait, but the code structure is getting complicated. Let's try to code this.
+
+But considering the time, perhaps the code can be written with the following structure:
+
+The S_APB domain latches the data when the setup phase occurs.
+
+The M_APB domain's state machine starts the transaction once the request is detected.
+
+The M_APB transaction's completion is synchronized back to S_APB domain via ack.
+
+The OPT_REGISTERED parameter controls whether the M_APB outputs are registered.
+
+Now, the code:
+
+module apbxclk #(
+    parameter C_APB_ADDR_WIDTH = 12,
+    parameter C_APB_DATA_WIDTH = 32,
+    parameter [0:0] OPT_REGISTERED = 1'b0,
+    localparam AW = C_APB_ADDR_WIDTH,
+    localparam DW = C_APB_DATA_WIDTH
+) (
+    input wire S_APB_PCLK,
+    input wire S_PRESETn,
+    input wire S_APB_PSEL,
+    input wire S_APB_PENABLE,
+    output reg S_APB_PREADY,
+    input wire [AW-1:0] S_APB_PADDR,
+    input wire S_APB_PWRITE,
+    input wire [DW-1:0] S_APB_PWDATA,
+    input wire [(DW/8)-1:0] S_APB_PWSTRB,
+    input wire [2:0] S_APB_PPROT,
+    output wire [DW-1:0] S_APB_PRDATA,
+    output wire S_APB_PSLVERR,
+    input wire M_APB_PCLK,
+    output reg M_PRESETn,
+    output reg M_APB_PSEL,
+    output reg M_APB_PENABLE,
+    input wire M_APB_PREADY,
+    output wire [AW-1:0] M_APB_PADDR,
+    output wire M_APB_PWRITE,
+    output wire [DW-1:0] M_APB_PWDATA,
+    output wire [(DW/8)-1:0] M_APB_PWSTRB,
+    output wire [2:0] M_APB_PPROT,
+    input wire [DW-1:0] M_APB_PRDATA,
+    input wire M_APB_PSLVERR
+);
+
+// S_APB domain signals
+reg [AW-1:0] s_addr_reg;
+reg [DW-1:0] s_wdata_reg;
+reg [(DW/8)-1:0] s_wstrb_reg;
+reg s_pwrite_reg;
+reg [2:0] s_pprot_reg;
+reg s_psel_reg;
+reg s_penable_reg;
+
+// M_APB domain signals
+reg req_sync1, req_sync2;
+reg [AW-1:0] m_addr_reg;
+reg [DW-1:0] m_wdata_reg;
+reg [(DW/8)-1:0] m_wstrb_reg;
+reg m_pwrite_reg;
+reg [2:0] m_pprot_reg;
+
+// State machine in M_APB domain
+localparam M_IDLE = 0;
+localparam M_SETUP = 1;
+localparam M_ACCESS = 2;
+reg [1:0] m_state;
+
+// Ack signal from M_APB to S_APB
+reg ack;
+
+// Synchronize ack to S_APB domain
+reg ack_sync1, ack_sync2;
+
+// S_APB domain logic
+always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+    if (!S_PRESETn) begin
+        s_psel_reg <= 0;
+        s_penable_reg <= 0;
+        s_addr_reg <= 0;
+        s_wdata_reg <= 0;
+        s_wstrb_reg <= 0;
+        s_pwrite_reg <= 0;
+        s_pprot_reg <= 0;
+    end else begin
+        if (S_APB_PSEL && !S_APB_PENABLE) begin
+            // Setup phase: latch the data
+            s_addr_reg <= S_APB_PADDR;
+            s_wdata_reg <= S_APB_PWDATA;
+            s_wstrb_reg <= S_APB_PWSTRB;
+            s_pwrite_reg <= S_APB_PWRITE;
+            s_pprot_reg <= S_APB_PPROT;
+            s_psel_reg <= 1;
+            s_penable_reg <= 0;
+        end else if (S_APB_PENABLE && !S_APB_PREADY) begin
+            // Access phase: hold PENABLE high
+            s_penable_reg <= 1;
+        end else if (S_APB_PREADY) begin
+            // Transaction done, clear PSEL and PENABLE
+            s_psel_reg <= 0;
+            s_penable_reg <= 0;
+        end
+    end
+end
+
+// Assign S_APB outputs
+assign S_APB_PRDATA = M_APB_PRDATA;
+assign S_APB_PSLVERR = M_APB_PSLVERR;
+
+// S_APB_PREADY is ack synchronized
+always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+    if (!S_PRESETn) begin
+        ack_sync1 <= 0;
+        ack_sync2 <= 0;
+    end else begin
+        ack_sync1 <= ack;
+        ack_sync2 <= ack_sync1;
+    end
+end
+
+assign S_APB_PREADY = ack_sync2;
+
+// M_APB domain logic
+always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+    if (!M_PRESETn) begin
+        req_sync1 <= 0;
+        req_sync2 <= 0;
+        M_PRESETn <= 0;
+        M_APB_PSEL <= 0;
+        M_APB_PENABLE <= 0;
+        m_state <= M_IDLE;
+        ack <= 0;
+        m_addr_reg <= 0;
+        m_wdata_reg <= 0;
+        m_wstrb_reg <= 0;
+        m_pwrite_reg <= 0;
+        m_pprot_reg <= 0;
+    end else begin
+        M_PRESETn <= 1; // Assuming active low, so deassert reset after reset
+        ack <= 0;
+
+        // Synchronize request from S_APB domain
+        req_sync1 <= s_psel_reg;
+        req_sync2 <= req_sync1;
+
+        case (m_state)
+            M_IDLE: begin
+                if (req_sync2) begin
+                    // Capture the data from S_APB domain
+                    m_addr_reg <= s_addr_reg;
+                    m_wdata_reg <= s_wdata_reg;
+                    m_wstrb_reg <= s_wstrb_reg;
+                    m_pwrite_reg <= s_pwrite_reg;
+                    m_pprot_reg <= s_pprot_reg;
+                    M_APB_PSEL <= 1;
+                    M_APB_PENABLE <= 0;
+                    m_state <= M_SETUP;
+                end
+            end
+            M_SETUP: begin
+                if (M_APB_PREADY) begin
+                    M_APB_PENABLE <= 1;
+                    m_state <= M_ACCESS;
+                end
+            end
+            M_ACCESS: begin
+                if (M_APB_PREADY) begin
+                    // Transaction done
+                    M_APB_PSEL <= 0;
+                    M_APB_PENABLE <= 0;
+                    ack <= 1;
+                    m_state <= M_IDLE;
+                end
+            end
+        endcase
+    end
+end
+
+// Assign M_APB outputs based on OPT_REGISTERED
+generate
+    if (OPT_REGISTERED) begin
+        // Registered outputs
+        always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+            if (!M_PRESETn) begin
+                M_APB_PADDR <= 0;
+                M_APB_PWRITE <= 0;
+                M_APB_PWDATA <= 0;
+                M_APB_PWSTRB <= 0;
+                M_APB_PPROT <= 0;
+            end else begin
+                M_APB_PADDR <= m_addr_reg;
+                M_APB_PWRITE <= m_pwrite_reg;
+                M_APB_PWDATA <= m_wdata_reg;
+                M_APB_PWSTRB <= m_wstrb_reg;
+                M_APB_PPROT <= m_pprot_reg;
+            end
+        end
+    end else begin
+        // Non-registered outputs
+        assign M_APB_PADDR = m_addr_reg;
+        assign M_APB_PWRITE = m_pwrite_reg;
+        assign M_APB_PWDATA = m_wdata_reg;
+        assign M_APB_PWSTRB = m_wstrb_reg;
+        assign M_APB_PPROT = m_pprot_reg;
+    end
+endgenerate
+
+endmodule
+</think>
+
+<answer>
+```verilog
+module apbxclk #(
+    parameter C_APB_ADDR_WIDTH = 12,
+    parameter C_APB_DATA_WIDTH = 32,
+    parameter [0:0] OPT_REGISTERED = 1'b0,
+    localparam AW = C_APB_ADDR_WIDTH,
+    localparam DW = C_APB_DATA_WIDTH
+) (
+    input wire S_APB_PCLK,
+    input wire S_PRESETn,
+    input wire S_APB_PSEL,
+    input wire S_APB_PENABLE,
+    output wire S_APB_PREADY,
+    input wire [AW-1:0] S_APB_PADDR,
+    input wire S_APB_PWRITE,
+    input wire [DW-1:0] S_APB_PWDATA,
+    input wire [(DW/8)-1:0] S_APB_PWSTRB,
+    input wire [2:0] S_APB_PPROT,
+    output wire [DW-1:0] S_APB_PRDATA,
+    output wire S_APB_PSLVERR,
+    input wire M_APB_PCLK,
+    output reg M_PRESETn,
+    output reg M_APB_PSEL,
+    output reg M_APB_PENABLE,
+    input wire M_APB_PREADY,
+    output wire [AW-1:0] M_APB_PADDR,
+    output wire M_APB_PWRITE,
+    output wire [DW-1:0] M_APB_PWDATA,
+    output wire [(DW/8)-1:0] M_APB_PWSTRB,
+    output wire [2:0] M_APB_PPROT,
+    input wire [DW-1:0] M_APB_PRDATA,
+    input wire M_APB_PSLVERR
+);
+
+    // S_APB domain registers
+    reg [AW-1:0] s_addr_reg;
+    reg [DW-1:0] s_wdata_reg;
+    reg [(DW/8)-1:0] s_wstrb_reg;
+    reg s_pwrite_reg;
+    reg [2:0] s_pprot_reg;
+    reg s_psel_reg;
+    reg s_penable_reg;
+
+    // M_APB domain signals
+    reg req_sync1, req_sync2;
+    reg [AW-1:0] m_addr_reg;
+    reg [DW-1:0] m_wdata_reg;
+    reg [(DW/8)-1:0] m_wstrb_reg;
+    reg m_pwrite_reg;
+    reg [2:0] m_pprot_reg;
+    reg ack;
+
+    // S_APB domain synchronization
+    reg ack_sync1, ack_sync2;
+
+    // M_APB domain state machine
+    localparam M_IDLE = 0;
+    localparam M_SETUP = 1;
+    localparam M_ACCESS = 2;
+    reg [1:0] m_state;
+
+    // S_APB domain logic
+    always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+        if (!S_PRESETn) begin
+            s_psel_reg <= 0;
+            s_penable_reg <= 0;
+            s_addr_reg <= 0;
+            s_wdata_reg <= 0;
+            s_wstrb_reg <= 0;
+            s_pwrite_reg <= 0;
+            s_pprot_reg <= 0;
+        end else begin
+            if (S_APB_PSEL && !S_APB_PENABLE) begin
+                s_addr_reg <= S_APB_PADDR;
+                s_wdata_reg <= S_APB_PWDATA;
+                s_wstrb_reg <= S_APB_PWSTRB;
+                s_pwrite_reg <= S_APB_PWRITE;
+                s_pprot_reg <= S_APB_PPROT;
+                s_psel_reg <= 1;
+                s_penable_reg <= 0;
+            end else if (S_APB_PENABLE && !S_APB_PREADY) begin
+                s_penable_reg <= 1;
+            end else if (S_APB_PREADY) begin
+                s_psel_reg <= 0;
+                s_penable_reg <= 0;
+            end
+        end
+    end
+
+    // M_APB domain synchronization
+    always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+        if (!M_PRESETn) begin
+            req_sync1 <= 0;
+            req_sync2 <= 0;
+            M_PRESETn <= 0;
+            M_APB_PSEL <= 0;
+            M_APB_PENABLE <= 0;
+            m_state <= M_IDLE;
+            ack <= 0;
+            m_addr_reg <= 0;
+            m_wdata_reg <= 0;
+            m_wstrb_reg <= 0;
+            m_pwrite_reg <= 0;
+            m_pprot_reg <= 0;
+        end else begin
+            M_PRESETn <= 1;
+            ack <= 0;
+            req_sync1 <= s_psel_reg;
+            req_sync2 <= req_sync1;
+
+            case (m_state)
+                M_IDLE: begin
+                    if (req_sync2) begin
+                        m_addr_reg <= s_addr_reg;
+                        m_wdata_reg <= s_wdata_reg;
+                        m_wstrb_reg <= s_wstrb_reg;
+                        m_pwrite_reg <= s_pwrite_reg;
+                        m_pprot_reg <= s_pprot_reg;
+                        M_APB_PSEL <= 1;
+                        M_APB_PENABLE <= 0;
+                        m_state <= M_SETUP;
+                    end
+                end
+                M_SETUP: begin
+                    if (M_APB_PREADY) begin
+                        M_APB_PENABLE <= 1;
+                        m_state <= M_ACCESS;
+                    end
+                end
+                M_ACCESS: begin
+                    if (M_APB_PREADY) begin
+                        M_APB_PSEL <= 0;
+                        M_APB_PENABLE <= 0;
+                        ack <= 1;
+                        m_state <= M_IDLE;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // OPT_REGISTERED handling
+    generate
+        if (OPT_REGISTERED) begin
+            reg [AW-1:0] m_addr_reg;
+            reg [DW-1:0] m_wdata_reg;
+            reg [(DW/8)-1:0] m_wstrb_reg;
+            reg m_pwrite_reg;
+            reg [2:0] m_pprot_reg;
+
+            always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+                if (!M_PRESETn) begin
+                    m_addr_reg <= 0;
+                    m_wdata_reg <= 0;
+                    m_wstrb_reg <= 0;
+                    m_pwrite_reg <= 0;
+                    m_pprot_reg <= 0;
+                end else begin
+                    m_addr_reg <= m_addr_reg;
+                    m_wdata_reg <= m_wdata_reg;
+                    m_wstrb_reg <= m_wstrb_reg;
+                    m_pwrite_reg <= m_pwrite_reg;
+                    m_pprot_reg <= m_pprot_reg;
+                end
+            end
+
+            assign M_APB_PADDR = m_addr_reg;
+            assign M_APB_PWRITE = m_pwrite_reg;
+            assign M_APB_PWDATA = m_wdata_reg;
+            assign M_APB_PWSTRB = m_wstrb_reg;
+            assign M_APB_PPROT = m_pprot_reg;
+        end else begin
+            assign M_APB_PADDR = m_addr_reg;
+            assign M_APB_PWRITE = m_pwrite_reg;
+            assign M_APB_PWDATA = m_wdata_reg;
+            assign M_APB_PWSTRB = m_wstrb_reg;
+            assign M_APB_PPROT = m_pprot_reg;
+        end
+    endgenerate
+
+    // S_APB_PREADY synchronization
+    always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+        if (!S_PRESETn) begin
+            ack_sync1 <= 0;
+            ack_sync2 <= 0;
+        end else begin
+            ack_sync1 <= ack;
+            ack_sync2 <= ack_sync1;
+        end
+    end
+
+    assign S_APB_PREADY = ack_sync2;
+    assign S_APB_PRDATA = M_APB_PRDATA;
+    assign S_APB_PSLVERR = M_APB_PSLVERR;
+
+endmodule
+```
+</answer>

@@ -1,0 +1,1335 @@
+<think>Okay, I need to design an asynchronous FIFO in Verilog. Let's start by recalling the structure of an asynchronous FIFO. The main components are the dual-clock memory, write and read pointers, synchronization of pointers between clock domains, and the generation of flags like full and empty.
+
+First, the parameters: DATA_WIDTH and ADDR_WIDTH. The ADDR_WIDTH determines the depth of the FIFO as 2^ADDR_WIDTH entries. The SYNC_STAGES parameter is for synchronizing the pointers across clock domains. The default is 2 stages, which is common to prevent metastability.
+
+The module has separate clocks for write and read (wclk and rclk), and active-low resets (wrst_n and rrst_n). The resets are asynchronous since they are active-low and probably handled in the always blocks with negedge.
+
+The FIFO needs to handle the write and read pointers. The write pointer increments when winc is asserted and the FIFO isn't full. Similarly, the read pointer increments when rinc is active and FIFO isn't empty. The pointers are one bit larger than the address to distinguish between full and empty states (when pointers are equal, empty; when write pointer is one more than read, full).
+
+Wait, the pointers are ADDR_WIDTH+1 bits. So the actual address is the lower ADDR_WIDTH bits, and the MSB is for the wrap-around detection.
+
+The memory array should be dual-port, with write using wclk and read using rclk. The memory can be a reg array in Verilog.
+
+For the write domain: The write pointer (wptr) is in the write clock domain. The read pointer (rptr) is synchronized into the write domain via two flip-flops (SYNC_STAGES=2). Then, the full condition is when the next write pointer's MSB and the rest equal the synchronized read pointer's MSB and rest.
+
+Similarly, in the read domain: The write pointer is synchronized into the read domain, and empty is when the read pointer equals the synchronized write pointer.
+
+Wait, the standard approach is:
+
+- The write pointer (wptr) is ADDR_WIDTH+1 bits. The actual address is wptr[ADDR_WIDTH-1:0], and the MSB is the wrap-around bit.
+
+- The read pointer (rptr) same.
+
+Full condition: (wptr - rptr_sync) >= depth. Alternatively, when the next write would make the pointers wrap around and equal. Wait, the standard full condition is when the MSBs differ and the rest are equal. For example, if the write pointer is one more than the read pointer in the same address space, but when the MSB differs, that's when the FIFO is full.
+
+Wait, the actual check for full is when the next write pointer (after increment) would have the same lower bits as the read pointer but the MSB is different. Hmm, maybe better to refer to the standard approach.
+
+Wait, here's the standard way:
+
+The FIFO is full when:
+
+(wptr[ADDR_WIDTH] != rptr_sync[ADDR_WIDTH]) and (wptr[ADDR_WIDTH-1:0] == rptr_sync[ADDR_WIDTH-1:0])
+
+Similarly, empty is when the read pointer equals the synchronized write pointer.
+
+Wait, but the pointers are ADDR_WIDTH+1 bits. So the actual depth is 2^ADDR_WIDTH. The pointers can have a range from 0 to 2^(ADDR_WIDTH+1)-1. The full condition is when the write pointer is exactly one full circle ahead of the read pointer. So the difference between the two pointers is equal to the depth.
+
+So when (wptr - rptr) == 2^ADDR_WIDTH, then full. But in terms of the pointers, the full condition is when the MSB of the write pointer and read pointer are different, and the lower bits are equal.
+
+Yes. So:
+
+Full when:
+
+(wptr[ADDR_WIDTH] != rptr_sync[ADDR_WIDTH]) && (wptr[ADDR_WIDTH-1:0] == rptr_sync[ADDR_WIDTH-1:0])
+
+Similarly, empty when:
+
+(rptr == wptr_sync)
+
+Wait, but in the read domain, the synchronized write pointer (wptr_sync) is compared to the read pointer. If they are equal, then empty.
+
+So the steps:
+
+In write domain:
+
+- Generate the next write pointer (wptr_next) when writing (winc and not full).
+
+- Synchronize the read pointer (rptr) into the write domain (rptr_sync).
+
+- Generate full signal based on the comparison.
+
+In read domain:
+
+- Generate next read pointer (rptr_next) when reading (rinc and not empty).
+
+- Synchronize the write pointer (wptr) into the read domain (wptr_sync).
+
+- Generate empty signal based on the comparison.
+
+The memory is written when winc and not full. The read data is available on the next cycle (since it's synchronous read). Wait, in Verilog, if the read is registered, the data comes out on the next cycle. So the FIFO's read data is registered.
+
+Wait, the standard approach for asynchronous FIFO:
+
+The write side:
+
+- Memory array: written on wclk when winc and not full.
+
+- Write pointer increments on winc and not full.
+
+The read side:
+
+- Read pointer increments on rinc and not empty.
+
+- The read data is registered, so the output is registered.
+
+Wait, but the exact implementation can vary. Let's outline the components.
+
+First, the dual-port memory:
+
+reg [DATA_WIDTH-1:0] mem [0:(2**ADDR_WIDTH)-1];
+
+Write side:
+
+always @(posedge wclk or negedge wrst_n) begin
+  if (!wrst_n) begin
+    // reset
+  end else if (winc && !wfull) begin
+    mem[waddr] <= wdata;
+  end
+end
+
+Wait, the address for writing is the lower bits of the write pointer. Wait, the write pointer is ADDR_WIDTH+1 bits. The actual address is the lower ADDR_WIDTH bits. So:
+
+waddr = wptr[ADDR_WIDTH-1:0]
+
+Similarly, raddr is rptr[ADDR_WIDTH-1:0]
+
+Wait, but the pointers are ADDR_WIDTH+1 bits. So the actual address is the lower ADDR_WIDTH bits. So the memory is addressed with ADDR_WIDTH bits.
+
+Wait, the pointers are (ADDR_WIDTH+1) bits. The actual address is the lower ADDR_WIDTH bits. So when you write, you take the lower bits of the write pointer.
+
+So:
+
+For the write pointer:
+
+wire [ADDR_WIDTH:0] waddr = wptr[ADDR_WIDTH-1:0];
+
+Wait, no. Wait, the write pointer is (ADDR_WIDTH+1) bits. The address is the lower ADDR_WIDTH bits. So:
+
+assign waddr = wptr[ADDR_WIDTH-1:0];
+
+Similarly for raddr.
+
+Now, the pointers:
+
+In the write domain:
+
+reg [ADDR_WIDTH:0] wptr, wptr_next;
+
+In the read domain:
+
+reg [ADDR_WIDTH:0] rptr, rptr_next;
+
+The synchronization:
+
+In the write domain, we have the read pointer synchronized (rptr_sync). The read pointer is passed through two flip-flops in the write domain.
+
+Similarly, the write pointer is synchronized into the read domain (wptr_sync).
+
+Now, the full and empty conditions.
+
+Full condition in write domain:
+
+assign wfull = (wptr[ADDR_WIDTH] != rptr_sync[ADDR_WIDTH]) && (wptr[ADDR_WIDTH-1:0] == rptr_sync[ADDR_WIDTH-1:0]);
+
+Empty condition in read domain:
+
+assign rempty = (rptr == wptr_sync);
+
+Wait, but the empty is when the read pointer equals the synchronized write pointer.
+
+Now, the pointers:
+
+The write pointer increments when writing (winc and not full). Similarly, read pointer increments when reading (rinc and not empty).
+
+Wait, but the actual increment is when the operation is allowed. So:
+
+In the write domain:
+
+always @(posedge wclk or negedge wrst_n) begin
+  if (!wrst_n) begin
+    wptr <= 0;
+  end else begin
+    wptr <= wptr_next;
+  end
+end
+
+assign wptr_next = (!wfull && winc) ? wptr + 1 : wptr;
+
+Wait, but the full is generated based on the synchronized read pointer. So the write pointer increments only if not full and winc is active.
+
+Similarly for read pointer.
+
+Wait, but the actual logic for the pointers:
+
+The next write pointer is current +1 when writing (and not full). The next read pointer is current +1 when reading (and not empty).
+
+Wait, but the full and empty are generated based on the synchronized pointers. So the actual conditions are:
+
+In write domain:
+
+If (winc && !wfull) then increment.
+
+Similarly, in read domain.
+
+So the code for the write pointer:
+
+always @(posedge wclk or negedge wrst_n) begin
+  if (!wrst_n) begin
+    wptr <= 0;
+  end else begin
+    if (winc && !wfull) begin
+      wptr <= wptr + 1;
+    end
+  end
+end
+
+Wait, but the increment is conditional. So the pointer increments only when writing (winc) and not full.
+
+Similarly for read pointer.
+
+Now, the synchronization steps:
+
+In the write domain:
+
+We need to synchronize the read pointer (rptr) into the write domain. So we have two stages of flip-flops.
+
+reg [ADDR_WIDTH:0] rptr_sync [1:0];
+
+always @(posedge wclk or negedge wrst_n) begin
+  if (!wrst_n) begin
+    rptr_sync[0] <= 0;
+    rptr_sync[1] <= 0;
+  end else begin
+    rptr_sync[0] <= rptr;
+    rptr_sync[1] <= rptr_sync[0];
+  end
+end
+
+Similarly, in the read domain, synchronize the write pointer:
+
+reg [ADDR_WIDTH:0] wptr_sync [1:0];
+
+always @(posedge rclk or negedge rrst_n) begin
+  if (!rrst_n) begin
+    wptr_sync[0] <= 0;
+    wptr_sync[1] <= 0;
+  end else begin
+    wptr_sync[0] <= wptr;
+    wptr_sync[1] <= wptr_sync[0];
+  end
+end
+
+Wait, but the synchronization is from the other domain. So in the write domain, the read pointer is synchronized via two stages. Similarly for the write pointer in read domain.
+
+Once the pointers are synchronized, generate the full and empty.
+
+Full condition:
+
+wire full = ( (wptr[ADDR_WIDTH] != rptr_sync[1][ADDR_WIDTH]) && (wptr[ADDR_WIDTH-1:0] == rptr_sync[1][ADDR_WIDTH-1:0]) );
+
+Wait, the synchronized read pointer is two stages, so the latest is rptr_sync[1].
+
+Similarly, in read domain:
+
+wire empty = (rptr == wptr_sync[1]);
+
+Wait, but the empty is when the read pointer equals the synchronized write pointer.
+
+Now, the memory:
+
+The memory is written in the write clock domain. The read is in the read clock domain. So:
+
+reg [DATA_WIDTH-1:0] mem [0:(1 << ADDR_WIDTH)-1];
+
+// Write operation
+always @(posedge wclk) begin
+  if (winc && !wfull) begin
+    mem[waddr] <= wdata;
+  end
+end
+
+Wait, but the address is the lower bits of the write pointer. Wait, the write pointer is (ADDR_WIDTH+1) bits. The actual address is the lower ADDR_WIDTH bits. So:
+
+wire [ADDR_WIDTH-1:0] waddr = wptr[ADDR_WIDTH-1:0];
+
+Similarly for read.
+
+Wait, but in Verilog, if the pointer is ADDR_WIDTH+1 bits, the lower bits would be the address. So:
+
+assign waddr = wptr[ADDR_WIDTH-1 : 0];
+
+Wait, if ADDR_WIDTH is 4, then the pointer is 5 bits. The lower 4 bits would be the address (0-15). So yes.
+
+Wait, the address is ADDR_WIDTH bits. So:
+
+wire [ADDR_WIDTH-1:0] waddr = wptr[ADDR_WIDTH-1 : 0];
+
+Similarly for raddr.
+
+Wait, but the pointer is (ADDR_WIDTH+1) bits. So the lower ADDR_WIDTH bits are the address. So the code would be:
+
+assign waddr = wptr[ADDR_WIDTH-1 : 0];
+
+Yes.
+
+Now, the read data:
+
+The read data is stored in a register. The read pointer increments when rinc and not empty. The data is read from the memory and stored into a register.
+
+Wait, in Verilog, the read can be asynchronous, but in practice, the read data is registered. So:
+
+reg [DATA_WIDTH-1:0] rdata_reg;
+
+always @(posedge rclk or negedge rrst_n) begin
+  if (!rrst_n) begin
+    rdata_reg <= 0;
+  end else begin
+    if (rinc && !rempty) begin
+      rdata_reg <= mem[raddr];
+    end
+  end
+end
+
+Wait, but the read data is available on the next cycle. Wait, when you read (rinc and not empty), the data is read from the current address (before increment). Wait, the standard approach is that the read data is available in the same cycle as the read pointer. Wait, but in synchronous FIFOs, the data is read on the next cycle. Hmm.
+
+Wait, in the standard asynchronous FIFO:
+
+The read data is registered. So when you assert rinc and the FIFO is not empty, the read pointer increments, and the data is read from the current address (before increment) and stored into the output register.
+
+Wait, perhaps the code would be:
+
+The memory is read asynchronously. But in Verilog, if the memory is a reg array, you can read it combinationally. However, in practice, for FPGA, it's better to have registered outputs.
+
+Wait, but the code for the read data:
+
+The output data is registered. So:
+
+reg [DATA_WIDTH-1:0] rdata_reg;
+
+// Read address is raddr (current read pointer's lower bits)
+
+always @(posedge rclk or negedge rrst_n) begin
+  if (!rrst_n) begin
+    rdata_reg <= 0;
+  end else begin
+    if (!rempty && rinc) begin
+      rdata_reg <= mem[raddr];
+    end
+  end
+end
+
+Wait, but in the code, the read pointer increments when rinc and not empty. So the data is read from the current address (before increment) and stored into the register. Wait, the read pointer is incremented after the data is read.
+
+Wait, the standard approach is:
+
+When you read (rinc and not empty), the data is available at the output (same cycle?), but in registered outputs, it's stored into a register. Hmm.
+
+Alternatively, the data is read from the memory location pointed by the read pointer (before increment), and the pointer increments. So the data is available in the same cycle as the read operation. Wait, but in Verilog, if the memory is a reg array, the read is combinatorial. So:
+
+assign rdata = mem[raddr];
+
+But if the read pointer is registered, then the address is registered, and the data is read combinationally. Wait, but in the code, the read pointer is updated on the clock edge. So the data would be read from the current address (the one before increment) when the read is allowed.
+
+Wait, perhaps the code for the read data is:
+
+// Read data is asynchronous (combinational read)
+assign rdata = mem[raddr];
+
+But in practice, the read data is registered. Let's check.
+
+In the code:
+
+The read pointer is updated on the clock edge. The address is the lower bits of the read pointer. The data is read from the memory asynchronously (combinational read). So the output data is available immediately. But in FPGAs, this can lead to timing issues. Alternatively, the data is registered.
+
+Wait, the standard approach for registered outputs would have the data stored in a register. So when you read, the data is read from the current address (before increment) and stored into the output register. Then the pointer increments.
+
+Wait, but in the code:
+
+When rinc is active and not empty, the read pointer increments. The data is read from the current address (the one before increment) and stored into the output register.
+
+Wait, perhaps the code for the read data is:
+
+always @(posedge rclk or negedge rrst_n) begin
+  if (!rrst_n) begin
+    rdata_reg <= 0;
+  end else if (rinc && !rempty) begin
+    rdata_reg <= mem[raddr];
+  end
+end
+
+But in that case, the data is registered and available on the next clock edge. Wait, but the read pointer increments on the same clock edge. Hmm.
+
+Alternatively, the read data is read combinationally from the memory, and the pointer increments. So the data is available in the same cycle as the read operation.
+
+But in Verilog, if the memory is a reg array, you can read it combinationally.
+
+Wait, but in the code:
+
+The read pointer is updated on the clock edge. The address is the lower bits of the read pointer. The data is read combinationally from the memory. So when the read pointer is updated, the address changes, and the data is read from the new address. Wait, but the read operation is allowed when rinc and not empty. So the data is read when the read is allowed.
+
+Hmm, perhaps the code for the read data is:
+
+// Combinational read
+assign rdata = mem[raddr];
+
+But in the code, the read pointer is updated on the clock edge. So the address is the current read pointer's lower bits. When the read is allowed (rinc and not empty), the pointer increments on the next clock edge. So the data is read from the current address (before increment) and the pointer moves to next.
+
+Wait, but the data is read combinationally. So the data is available in the same cycle as the read operation.
+
+But in the code, the read pointer is updated on the clock edge. So the data is read from the current address (the one before increment) and the pointer increments on the next edge.
+
+Wait, perhaps the code for the read pointer:
+
+always @(posedge rclk or negedge rrst_n) begin
+  if (!rrst_n) begin
+    rptr <= 0;
+  end else if (rinc && !rempty) begin
+    rptr <= rptr + 1;
+  end
+end
+
+The address is rptr's lower bits. The data is read combinationally from the memory. So the data is available immediately. But in practice, the data is read on the same cycle as the read operation.
+
+But in Verilog, if the memory is a reg array, the read is allowed in combinational logic.
+
+Wait, but in the code:
+
+The read data is assigned as:
+
+assign rdata = mem[raddr];
+
+But the raddr is the lower bits of the read pointer. So when the read pointer is updated (on the clock edge), the address changes, and the data is read from the new address. Wait, but the read is allowed only when not empty. So the data is valid when the FIFO is not empty.
+
+Hmm, perhaps the code for the read data is:
+
+// Combinational read
+assign rdata = mem[raddr];
+
+But the read pointer is updated on the clock edge. So the data is read from the current address (before increment) when the read is allowed.
+
+Wait, but the pointer increments after the read. So the data is read from the current address (before increment) and then the pointer increments.
+
+Wait, the standard approach is that when you read, you get the data at the current read pointer's address, then the pointer increments. So the data is read first, then the pointer moves.
+
+In code:
+
+When rinc is active and not empty:
+
+- The data is read from the current address (raddr) and output.
+
+- The read pointer increments.
+
+So the data is read combinationally (since the pointer hasn't changed yet). Wait, but in Verilog, the pointer is updated on the clock edge. So the read data is read from the current address (before the increment) and the pointer increments on the next edge.
+
+Wait, perhaps the code for the read data is:
+
+// The read data is the memory content at the current read address (before increment)
+assign rdata = mem[raddr];
+
+// The read pointer increments on the clock edge when rinc and not empty.
+
+Yes. So the data is read combinationally from the current address. The pointer increments on the next clock edge. So the data is available immediately.
+
+Now, the code outline:
+
+module async_fifo #(...) (...);
+
+// Parameters and ports.
+
+// Memory declaration
+reg [DATA_WIDTH-1:0] mem [0:(1 << ADDR_WIDTH)-1];
+
+// Write domain signals
+reg [ADDR_WIDTH:0] wptr;
+wire [ADDR_WIDTH:0] waddr = wptr[ADDR_WIDTH-1:0]; // Wait, no. Wait, the address is ADDR_WIDTH bits.
+
+Wait, the write pointer is ADDR_WIDTH+1 bits. The actual address is the lower ADDR_WIDTH bits.
+
+Wait, the code:
+
+wire [ADDR_WIDTH-1:0] waddr = wptr[ADDR_WIDTH-1:0];
+
+Similarly for read.
+
+Wait, in Verilog, if the pointer is (ADDR_WIDTH+1) bits, then:
+
+For example, if ADDR_WIDTH is 4, the pointer is 5 bits. The lower 4 bits are the address.
+
+So:
+
+wire [ADDR_WIDTH-1:0] waddr = wptr[ADDR_WIDTH-1:0];
+
+Yes.
+
+Now, the code:
+
+// Write pointer and next
+reg [ADDR_WIDTH:0] wptr;
+wire [ADDR_WIDTH:0] wptr_next;
+
+// Read pointer and next
+reg [ADDR_WIDTH:0] rptr;
+wire [ADDR_WIDTH:0] rptr_next;
+
+// Synchronization registers
+reg [ADDR_WIDTH:0] rptr_sync [1:0];
+reg [ADDR_WIDTH:0] wptr_sync [1:0];
+
+// Full and empty signals
+wire wfull;
+wire rempty;
+
+// Memory
+reg [DATA_WIDTH-1:0] mem [0:(1 << ADDR_WIDTH)-1];
+
+// Write domain logic
+always @(posedge wclk or negedge wrst_n) begin
+  if (!wrst_n) begin
+    wptr <= 0;
+  end else begin
+    if (winc && !wfull) begin
+      wptr <= wptr + 1;
+    end
+  end
+end
+
+// Next write pointer
+assign wptr_next = winc && !wfull ? wptr + 1 : wptr;
+
+// Synchronize read pointer to write domain
+always @(posedge wclk or negedge wrst_n) begin
+  if (!wrst_n) begin
+    rptr_sync[0] <= 0;
+    rptr_sync[1] <= 0;
+  end else begin
+    rptr_sync[0] <= rptr;
+    rptr_sync[1] <= rptr_sync[0];
+  end
+end
+
+// Full condition
+assign wfull = ( (wptr[ADDR_WIDTH] != rptr_sync[1][ADDR_WIDTH]) && 
+                 (wptr[ADDR_WIDTH-1:0] == rptr_sync[1][ADDR_WIDTH-1:0]) );
+
+// Read domain logic
+always @(posedge rclk or negedge rrst_n) begin
+  if (!rrst_n) begin
+    rptr <= 0;
+  end else begin
+    if (rinc && !rempty) begin
+      rptr <= rptr + 1;
+    end
+  end
+end
+
+// Synchronize write pointer to read domain
+always @(posedge rclk or negedge rrst_n) begin
+  if (!rrst_n) begin
+    wptr_sync[0] <= 0;
+    wptr_sync[1] <= 0;
+  end else begin
+    wptr_sync[0] <= wptr;
+    wptr_sync[1] <= wptr_sync[0];
+  end
+end
+
+// Empty condition
+assign rempty = (rptr == wptr_sync[1]);
+
+// Memory write
+always @(posedge wclk) begin
+  if (winc && !wfull) begin
+    mem[waddr] <= wdata;
+  end
+end
+
+// Read data
+assign rdata = mem[raddr];
+
+// Assign outputs
+assign waddr = wptr[ADDR_WIDTH-1:0];
+assign raddr = rptr[ADDR_WIDTH-1:0];
+
+Wait, but in Verilog, the assignments for waddr and raddr would need to be wires. Wait, in the code:
+
+wire [ADDR_WIDTH-1:0] waddr;
+assign waddr = wptr[ADDR_WIDTH-1:0];
+
+Similarly for raddr.
+
+Wait, but in the code, the outputs are:
+
+output wire [ADDR_WIDTH:0] waddr,
+output wire [ADDR_WIDTH:0] raddr,
+
+Wait, the module's outputs are:
+
+output wire [ADDR_WIDTH:0] waddr,
+output wire [ADDR_WIDTH:0] raddr,
+
+Wait, the pointers are ADDR_WIDTH+1 bits. So the output addresses are the same as the pointers.
+
+Wait, the code:
+
+assign waddr = wptr;
+assign raddr = rptr;
+
+Wait, but the pointers are ADDR_WIDTH+1 bits. So the outputs are the full pointers.
+
+Wait, the user's module has:
+
+output wire [ADDR_WIDTH:0] waddr,
+
+Wait, the output is the address, which is the same as the pointer. Wait, no. Wait, the pointers are ADDR_WIDTH+1 bits. The actual address is the lower bits. But the output is the pointer (ADDR_WIDTH+1 bits). Hmm.
+
+Wait, the user's interface:
+
+output wire [ADDR_WIDTH:0] waddr,
+
+Wait, the waddr is the address output. Wait, but in the code, the address is the lower bits of the pointer.
+
+Wait, perhaps the code should output the current write and read pointers (ADDR_WIDTH+1 bits). But the user's interface says:
+
+output wire [ADDR_WIDTH:0] waddr,
+
+Wait, the user's code:
+
+output wire [ADDR_WIDTH:0] waddr,
+
+Wait, the width is ADDR_WIDTH+1 bits. So the pointers are ADDR_WIDTH+1 bits. So the code would have:
+
+output wire [ADDR_WIDTH:0] waddr,
+
+Which matches.
+
+So the code for the outputs:
+
+assign waddr = wptr;
+assign raddr = rptr;
+
+Wait, but the pointers are ADDR_WIDTH+1 bits. So the outputs are the full pointers.
+
+Yes.
+
+Now, the code for the memory:
+
+The memory is written when winc and not full. The address is the lower bits.
+
+Wait, in the code:
+
+always @(posedge wclk) begin
+  if (winc && !wfull) begin
+    mem[waddr] <= wdata;
+  end
+end
+
+Wait, but the address is the lower bits of the write pointer. Wait, the code:
+
+wire [ADDR_WIDTH-1:0] waddr = wptr[ADDR_WIDTH-1:0];
+
+Wait, but in Verilog, if the pointer is ADDR_WIDTH+1 bits, the lower bits are [ADDR_WIDTH:0]?
+
+Wait, no. Wait, if the pointer is declared as [ADDR_WIDTH:0], then the bits are from ADDR_WIDTH downto 0. So the lower ADDR_WIDTH bits are [ADDR_WIDTH-1 :0], and the MSB is ADDR_WIDTH.
+
+Wait, for example, if ADDR_WIDTH is 4, the pointer is 5 bits (4 downto 0). The lower 4 bits are [3:0], and the MSB is [4].
+
+Wait, the code:
+
+wire [ADDR_WIDTH-1:0] waddr = wptr[ADDR_WIDTH-1 :0];
+
+Wait, no. Wait, the pointer is [ADDR_WIDTH:0], which is (ADDR_WIDTH+1) bits. The lower ADDR_WIDTH bits would be [ADDR_WIDTH-1 :0], but the pointer's bits are numbered from ADDR_WIDTH downto 0.
+
+Wait, for example:
+
+ADDR_WIDTH =4:
+
+pointer is [4:0], 5 bits.
+
+The lower 4 bits are [3:0], but the pointer's bits are 4 downto 0.
+
+Wait, the code:
+
+wire [ADDR_WIDTH-1:0] waddr = wptr[ADDR_WIDTH-1 :0];
+
+Wait, no. Wait, if the pointer is declared as [ADDR_WIDTH:0], then the bits are from ADDR_WIDTH (the MSB) down to 0 (LSB). So the lower ADDR_WIDTH bits are [ADDR_WIDTH-1 :0], but the address is ADDR_WIDTH bits. Wait, the address is the same as the lower ADDR_WIDTH bits of the pointer. Wait, the address is the same as the pointer's lower ADDR_WIDTH bits. Wait, no. Wait, the address is the pointer's lower ADDR_WIDTH bits. For example, if the pointer is 5 bits (ADDR_WIDTH=4), the address is 4 bits (0-15). So the lower 4 bits of the pointer.
+
+Wait, the code:
+
+wire [ADDR_WIDTH-1:0] waddr = wptr[ADDR_WIDTH-1 :0];
+
+Yes.
+
+So:
+
+assign waddr = wptr[ADDR_WIDTH-1 :0];
+
+Similarly for raddr.
+
+Now, the code for the full and empty:
+
+Full condition:
+
+wire full_condition = ( (wptr[ADDR_WIDTH] != rptr_sync[1][ADDR_WIDTH]) && (wptr[ADDR_WIDTH-1:0] == rptr_sync[1][ADDR_WIDTH-1:0]) );
+
+assign wfull = full_condition;
+
+Similarly, empty:
+
+assign rempty = (rptr == wptr_sync[1]);
+
+Now, the synchronization registers:
+
+In the write domain:
+
+reg [ADDR_WIDTH:0] rptr_sync [1:0]; // two stages
+
+In the read domain:
+
+reg [ADDR_WIDTH:0] wptr_sync [1:0];
+
+Now, the code for the synchronization:
+
+In the write domain:
+
+always @(posedge wclk or negedge wrst_n) begin
+  if (!wrst_n) begin
+    rptr_sync[0] <= 0;
+    rptr_sync[1] <= 0;
+  end else begin
+    rptr_sync[0] <= rptr;
+    rptr_sync[1] <= rptr_sync[0];
+  end
+end
+
+In the read domain:
+
+always @(posedge rclk or negedge rrst_n) begin
+  if (!rrst_n) begin
+    wptr_sync[0] <= 0;
+    wptr_sync[1] <= 0;
+  end else begin
+    wptr_sync[0] <= wptr;
+    wptr_sync[1] <= wptr_sync[0];
+  end
+end
+
+Now, the code for the pointers:
+
+In write domain:
+
+always @(posedge wclk or negedge wrst_n) begin
+  if (!wrst_n) begin
+    wptr <= 0;
+  end else if (winc && !wfull) begin
+    wptr <= wptr + 1;
+  end
+end
+
+Similarly for read:
+
+always @(posedge rclk or negedge rrst_n) begin
+  if (!rrst_n) begin
+    rptr <= 0;
+  end else if (rinc && !rempty) begin
+    rptr <= rptr + 1;
+  end
+end
+
+Wait, but the pointers are allowed to increment only when the operation is allowed (winc and not full, etc.)
+
+Now, the code for the memory write:
+
+always @(posedge wclk) begin
+  if (winc && !wfull) begin
+    mem[waddr] <= wdata;
+  end
+end
+
+The read data is assigned combinationally:
+
+assign rdata = mem[raddr];
+
+Now, the outputs:
+
+assign waddr = wptr[ADDR_WIDTH-1:0];
+assign raddr = rptr[ADDR_WIDTH-1:0];
+
+Wait, but the outputs are declared as:
+
+output wire [ADDR_WIDTH:0] waddr,
+
+Wait, the code in the module:
+
+output wire [ADDR_WIDTH:0] waddr,
+
+But the code for waddr is:
+
+wire [ADDR_WIDTH-1:0] waddr;
+
+Wait, no. Wait, the output is ADDR_WIDTH+1 bits. Wait, the pointer is ADDR_WIDTH+1 bits. So:
+
+output wire [ADDR_WIDTH:0] waddr,
+
+Wait, the code:
+
+reg [ADDR_WIDTH:0] wptr;
+
+assign waddr = wptr;
+
+Similarly for raddr.
+
+Yes.
+
+Putting all together.
+
+Now, the code:
+
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    // Memory declaration
+    reg [DATA_WIDTH-1:0] mem [0:(1 << ADDR_WIDTH)-1];
+
+    // Write domain signals
+    reg [ADDR_WIDTH:0] wptr;
+    wire [ADDR_WIDTH:0] wptr_next;
+    reg [ADDR_WIDTH:0] rptr_sync [SYNC_STAGES-1:0];
+
+    // Read domain signals
+    reg [ADDR_WIDTH:0] rptr;
+    wire [ADDR_WIDTH:0] rptr_next;
+    reg [ADDR_WIDTH:0] wptr_sync [SYNC_STAGES-1:0];
+
+    // Full and empty conditions
+    wire full_condition;
+    wire empty_condition;
+
+    // Write pointer logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= 0;
+        end else begin
+            if (winc && !wfull) begin
+                wptr <= wptr + 1;
+            end
+        end
+    end
+
+    // Read pointer synchronization to write domain
+    generate
+        genvar i;
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin: sync_rd
+            always @(posedge wclk or negedge wrst_n) begin
+                if (!wrst_n) begin
+                    rptr_sync[i] <= 0;
+                end else begin
+                    rptr_sync[i] <= (i == 0) ? rptr : rptr_sync[i-1];
+                end
+            end
+        end
+    endgenerate
+
+    // Full condition
+    assign full_condition = ( (wptr[ADDR_WIDTH] != rptr_sync[SYNC_STAGES-1][ADDR_WIDTH]) &&
+                              (wptr[ADDR_WIDTH-1:0] == rptr_sync[SYNC_STAGES-1][ADDR_WIDTH-1:0]) );
+
+    assign wfull = full_condition;
+
+    // Read pointer logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= 0;
+        end else begin
+            if (rinc && !rempty) begin
+                rptr <= rptr + 1;
+            end
+        end
+    end
+
+    // Write pointer synchronization to read domain
+    generate
+        genvar j;
+        for (j = 0; j < SYNC_STAGES; j = j + 1) begin: sync_wr
+            always @(posedge rclk or negedge rrst_n) begin
+                if (!rrst_n) begin
+                    wptr_sync[j] <= 0;
+                end else begin
+                    wptr_sync[j] <= (j == 0) ? wptr : wptr_sync[j-1];
+                end
+            end
+        end
+    endgenerate
+
+    // Empty condition
+    assign empty_condition = (rptr == wptr_sync[SYNC_STAGES-1]);
+
+    assign rempty = empty_condition;
+
+    // Memory write
+    always @(posedge wclk) begin
+        if (winc && !wfull) begin
+            mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+        end
+    end
+
+    // Memory read
+    assign rdata = mem[rptr[ADDR_WIDTH-1:0]];
+
+    // Assign outputs
+    assign waddr = wptr;
+    assign raddr = rptr;
+
+endmodule
+
+Wait, but the generate loops for synchronization. The code uses generate blocks to create the synchronization stages.
+
+Wait, the code for synchronization:
+
+In the write domain, the read pointer is synchronized through SYNC_STAGES.
+
+In the read domain, the write pointer is synchronized through SYNC_STAGES.
+
+The generate loops create the stages.
+
+Wait, but in Verilog, the generate loops can be used to create the synchronization registers.
+
+Wait, the code for the read pointer synchronization:
+
+reg [ADDR_WIDTH:0] rptr_sync [SYNC_STAGES-1:0];
+
+generate
+    genvar i;
+    for (i=0; i < SYNC_STAGES; i=i+1) begin : sync_rd
+        always @(posedge wclk or negedge wrst_n) begin
+            if (!wrst_n) begin
+                rptr_sync[i] <= 0;
+            end else begin
+                if (i == 0)
+                    rptr_sync[i] <= rptr;
+                else
+                    rptr_sync[i] <= rptr_sync[i-1];
+            end
+        end
+    end
+endgenerate
+
+Similarly for the write pointer.
+
+But in the code I wrote earlier, the generate loops are written with a for loop.
+
+Wait, the code for the synchronization:
+
+In the write domain:
+
+The read pointer is synchronized into the write domain via SYNC_STAGES.
+
+Similarly for the other direction.
+
+Now, the code for the synchronization:
+
+In the write domain:
+
+reg [ADDR_WIDTH:0] rptr_sync [SYNC_STAGES-1:0];
+
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        rptr_sync[0] <= 0;
+        rptr_sync[1] <= 0;
+    end else begin
+        rptr_sync[0] <= rptr;
+        rptr_sync[1] <= rptr_sync[0];
+    end
+end
+
+But if SYNC_STAGES is a parameter, the code should use generate to handle variable stages.
+
+But in the code, the parameter SYNC_STAGES is given as 2. So the code can be written with generate loops.
+
+But in the code, the generate loop would create the stages.
+
+But perhaps the code can be written as:
+
+// Read pointer synchronization to write domain
+reg [ADDR_WIDTH:0] rptr_sync [SYNC_STAGES-1:0];
+
+generate
+    genvar i;
+    for (i=0; i < SYNC_STAGES; i=i+1) begin : sync_rd
+        always @(posedge wclk or negedge wrst_n) begin
+            if (!wrst_n) begin
+                rptr_sync[i] <= 0;
+            end else begin
+                if (i == 0)
+                    rptr_sync[i] <= rptr;
+                else
+                    rptr_sync[i] <= rptr_sync[i-1];
+            end
+        end
+    end
+endgenerate
+
+Similarly for the write pointer synchronization.
+
+Now, the code for the full and empty conditions.
+
+Full condition:
+
+assign full_condition = ( (wptr[ADDR_WIDTH] != rptr_sync[SYNC_STAGES-1][ADDR_WIDTH]) &&
+                          (wptr[ADDR_WIDTH-1:0] == rptr_sync[SYNC_STAGES-1][ADDR_WIDTH-1:0]) );
+
+assign wfull = full_condition;
+
+Empty condition:
+
+assign rempty = (rptr == wptr_sync[SYNC_STAGES-1]);
+
+Now, the code for the pointers:
+
+In the write domain:
+
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        wptr <= 0;
+    end else if (winc && !wfull) begin
+        wptr <= wptr + 1;
+    end
+end
+
+Similarly for read.
+
+Now, the code for the memory:
+
+The write address is the lower bits of the write pointer.
+
+always @(posedge wclk) begin
+    if (winc && !wfull) begin
+        mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+    end
+end
+
+The read address is the lower bits of the read pointer.
+
+assign rdata = mem[rptr[ADDR_WIDTH-1:0]];
+
+Now, the code for the outputs:
+
+assign waddr = wptr;
+assign raddr = rptr;
+
+Putting all together.
+
+Final code:
+
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    // Memory declaration
+    reg [DATA_WIDTH-1:0] mem [0:(1 << ADDR_WIDTH)-1];
+
+    // Write domain signals
+    reg [ADDR_WIDTH:0] wptr;
+    reg [ADDR_WIDTH:0] rptr_sync [SYNC_STAGES-1:0];
+
+    // Read domain signals
+    reg [ADDR_WIDTH:0] rptr;
+    reg [ADDR_WIDTH:0] wptr_sync [SYNC_STAGES-1:0];
+
+    // Full and empty conditions
+    wire full_condition;
+    wire empty_condition;
+
+    // Write pointer logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= 0;
+        end else if (winc && !wfull) begin
+            wptr <= wptr + 1;
+        end
+    end
+
+    // Read pointer synchronization to write domain
+    generate
+        genvar i;
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : sync_rd
+            always @(posedge wclk or negedge wrst_n) begin
+                if (!wrst_n) begin
+                    rptr_sync[i] <= 0;
+                end else begin
+                    if (i == 0)
+                        rptr_sync[i] <= rptr;
+                    else
+                        rptr_sync[i] <= rptr_sync[i-1];
+                end
+            end
+        end
+    endgenerate
+
+    // Full condition
+    assign full_condition = ( (wptr[ADDR_WIDTH] != rptr_sync[SYNC_STAGES-1][ADDR_WIDTH]) &&
+                              (wptr[ADDR_WIDTH-1:0] == rptr_sync[SYNC_STAGES-1][ADDR_WIDTH-1:0]) );
+
+    assign wfull = full_condition;
+
+    // Read pointer logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= 0;
+        end else if (rinc && !rempty) begin
+            rptr <= rptr + 1;
+        end
+    end
+
+    // Write pointer synchronization to read domain
+    generate
+        genvar j;
+        for (j = 0; j < SYNC_STAGES; j = j + 1) begin : sync_wr
+            always @(posedge rclk or negedge rrst_n) begin
+                if (!rrst_n) begin
+                    wptr_sync[j] <= 0;
+                end else begin
+                    if (j == 0)
+                        wptr_sync[j] <= wptr;
+                    else
+                        wptr_sync[j] <= wptr_sync[j-1];
+                end
+            end
+        end
+    endgenerate
+
+    // Empty condition
+    assign empty_condition = (rptr == wptr_sync[SYNC_STAGES-1]);
+
+    assign rempty = empty_condition;
+
+    // Memory write
+    always @(posedge wclk) begin
+        if (winc && !wfull) begin
+            mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+        end
+    end
+
+    // Memory read
+    assign rdata = mem[rptr[ADDR_WIDTH-1:0]];
+
+    // Assign outputs
+    assign waddr = wptr;
+    assign raddr = rptr;
+
+endmodule
+
+Wait, but in the generate blocks for the synchronization, the code uses:
+
+rptr_sync[i] <= rptr when i=0.
+
+But in the code, the generate loop for the read pointer synchronization:
+
+In the generate block for i from 0 to SYNC_STAGES-1.
+
+Wait, the code:
+
+generate
+    genvar i;
+    for (i=0; i < SYNC_STAGES; i=i+1) begin : sync_rd
+        always @(posedge wclk or negedge wrst_n) begin
+            if (!wrst_n) begin
+                rptr_sync[i] <= 0;
+            end else begin
+                if (i == 0)
+                    rptr_sync[i] <= rptr;
+                else
+                    rptr_sync[i] <= rptr_sync[i-1];
+            end
+        end
+    end
+endgenerate
+
+Yes. So the first stage (i=0) takes the rptr from the read domain and synchronizes it into the write domain. The rest stages are the previous synchronized ones.
+
+Similarly for the write pointer.
+
+Now, the code for the full and empty conditions.
+
+Full condition is when the write pointer's MSB is different from the synchronized read pointer's MSB, and the lower bits are equal.
+
+Empty condition is when the read pointer equals the synchronized write pointer.
+
+Now, the code for the memory:
+
+The write address is the lower bits of the write pointer (ADDR_WIDTH bits).
+
+Similarly for read.
+
+Now, the code should be correct.
+
+Testing for possible errors:
+
+- The generate loops for synchronization.
+
+- The full and empty conditions.
+
+- The memory read and write.
+
+Yes.
+
+Now, the code should be complete.
+</think>
+
+<answer>
+```verilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    // Memory declaration
+    reg [DATA_WIDTH-1:0] mem [0:(1 << ADDR_WIDTH)-1];
+
+    // Write domain signals
+    reg [ADDR_WIDTH:0] wptr;
+    reg [ADDR_WIDTH:0] rptr_sync [SYNC_STAGES-1:0];
+
+    // Read domain signals
+    reg [ADDR_WIDTH:0] rptr;
+    reg [ADDR_WIDTH:0] wptr_sync [SYNC_STAGES-1:0];
+
+    // Full and empty conditions
+    wire full_condition;
+    wire empty_condition;
+
+    // Write pointer logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= 0;
+        end else if (winc && !wfull) begin
+            wptr <= wptr + 1;
+        end
+    end
+
+    // Read pointer synchronization to write domain
+    generate
+        genvar i;
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : sync_rd
+            always @(posedge wclk or negedge wrst_n) begin
+                if (!wrst_n) begin
+                    rptr_sync[i] <= 0;
+                end else begin
+                    if (i == 0)
+                        rptr_sync[i] <= rptr;
+                    else
+                        rptr_sync[i] <= rptr_sync[i-1];
+                end
+            end
+        end
+    endgenerate
+
+    // Full condition
+    assign full_condition = ( (wptr[ADDR_WIDTH] != rptr_sync[SYNC_STAGES-1][ADDR_WIDTH]) &&
+                              (wptr[ADDR_WIDTH-1:0] == rptr_sync[SYNC_STAGES-1][ADDR_WIDTH-1:0]) );
+
+    assign wfull = full_condition;
+
+    // Read pointer logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= 0;
+        end else if (rinc && !rempty) begin
+            rptr <= rptr + 1;
+        end
+    end
+
+    // Write pointer synchronization to read domain
+    generate
+        genvar j;
+        for (j = 0; j < SYNC_STAGES; j = j + 1) begin : sync_wr
+            always @(posedge rclk or negedge rrst_n) begin
+                if (!rrst_n) begin
+                    wptr_sync[j] <= 0;
+                end else begin
+                    if (j == 0)
+                        wptr_sync[j] <= wptr;
+                    else
+                        wptr_sync[j] <= wptr_sync[j-1];
+                end
+            end
+        end
+    endgenerate
+
+    // Empty condition
+    assign empty_condition = (rptr == wptr_sync[SYNC_STAGES-1]);
+
+    assign rempty = empty_condition;
+
+    // Memory write
+    always @(posedge wclk) begin
+        if (winc && !wfull) begin
+            mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+        end
+    end
+
+    // Memory read
+    assign rdata = mem[rptr[ADDR_WIDTH-1:0]];
+
+    // Assign outputs
+    assign waddr = wptr;
+    assign raddr = rptr;
+
+endmodule
+```
+</answer>

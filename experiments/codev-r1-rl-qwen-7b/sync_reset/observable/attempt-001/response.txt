@@ -1,0 +1,979 @@
+<think>Okay, I need to create a Verilog module for a destination-clock reset synchronizer. The parameters and ports are given. The reset is active-high. The main goal is to assert the reset immediately and then release it cleanly after N clock edges. 
+
+First, I remember that a standard reset synchronizer uses a chain of flip-flops to synchronize the release of the reset to the destination clock domain. The active assertion is immediate, but the de-assertion is synchronized to avoid metastability.
+
+The module has parameters N, which is the number of local clock edges to wait before releasing. Wait, the user says "after the configured number of local clock edges". So when rst is released, the output stays asserted for N cycles? Or the release happens after N cycles?
+
+Wait, the description says: "Assert reset promptly and release the output cleanly after the configured number of local clock edges." So when the external reset (rst) is de-asserted, the internal synchronized reset should de-assert after N clock edges. 
+
+Wait, the standard approach is that when the asynchronous reset is asserted (active high), the synchronized reset is immediately asserted. Then, when the async reset is de-asserted, the synchronized reset is de-asserted after passing through a chain of flip-flops in the destination clock domain. The number of flip-flops is typically 2, but here it's parameter N.
+
+So the code structure would be:
+
+- When rst is high, the synchronized reset is immediately high (asserted)
+- When rst is de-asserted (goes low), the synchronized reset stays asserted for N clock cycles (or until the chain propagates the de-assertion)
+
+Wait, the standard synchronizer for reset release uses two flip-flops. The first flop samples the de-asserted reset, then the second flop samples the first's output. The synchronized reset is the AND of both flops. Wait, no. Wait, the typical code is:
+
+reg [1:0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= 2'b11;
+    end else begin
+        sync_reg <= {sync_reg[0], 1'b0};
+    end
+end
+
+assign out = sync_reg[1];
+
+Wait, but that's for a 2-stage synchronizer. But here the parameter N is configurable. Hmm.
+
+Wait, the user's requirement is to assert reset promptly (when rst is high, output is high immediately). Then, when rst is released (goes low), the output should de-assert after N clock edges. Wait, but in the standard synchronizer, the de-assertion is synchronized. So the number of stages (N) would be the number of flip-flops in the chain.
+
+Wait, the code structure would be:
+
+The reset is asynchronous assertion. When rst is high, the synchronized reset is immediately high. When rst is de-asserted, the synchronized reset stays high until the chain of flip-flops propagates the de-assertion through N stages.
+
+Wait, the code would have a shift register that's N bits long. The initial state is all ones (asserted). When rst is de-asserted, the first flop gets 0, then each subsequent flop shifts the 0 through. After N cycles, the output becomes 0.
+
+Wait, but the parameter N is the number of clock edges to wait. So the code would have a register array of size N. Let's think.
+
+The code:
+
+reg [N-1:0] sync_chain;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_chain <= {N{1'b1}};
+    end else begin
+        sync_chain <= {sync_chain[N-2:0], 1'b0};
+    end
+end
+
+Wait, but if N is 2, then the chain is two bits. Wait, but the standard two-flop synchronizer uses two stages. Wait, perhaps the code is:
+
+The reset is asynchronously asserted. When rst is high, the sync_chain is all ones. When rst is low, the chain shifts in zeros. The output is the last bit of the chain. So after N cycles, the output becomes zero.
+
+Wait, but the code would be:
+
+reg [N-1 : 0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[N-2:0], 1'b0};
+    end
+end
+
+Wait, but for N=2, the code would have two bits. Wait, if N is the number of stages, the code would have N flip-flops. The initial state is all ones. When rst is de-asserted, each cycle shifts in a zero. The output is the last bit. So after N cycles, the output becomes zero.
+
+Wait, but in Verilog, the syntax for the concatenation would be:
+
+For N=2, the code would be:
+
+sync_reg <= {sync_reg[0], 1'b0}; // Wait, no. Wait, if N is the number of stages, the code would be:
+
+Wait, the standard two-stage synchronizer:
+
+reg q1, q2;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        q1 <= 1;
+        q2 <= 1;
+    end else begin
+        q1 <= 0;
+        q2 <= q1;
+    end
+end
+
+assign out = q2;
+
+Wait, but here, when rst is de-asserted, q1 becomes 0, then q2 becomes 0 after one cycle. So two stages. So the parameter N would be the number of stages. So in code, the shift register would have N bits. Wait, but if N is 2, the code would have two flip-flops.
+
+Wait, perhaps the code is:
+
+reg [N-1 : 0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[N-2:0], 1'b0};
+    end
+end
+
+Wait, but if N is 1, then the code would have a single bit. Wait, but in Verilog, if N is 1, the code would have:
+
+sync_reg <= {sync_reg[ -1 : 0], 1'b0}; which is invalid. Hmm. So maybe N must be at least 2? Or perhaps the code is written with N >= 2.
+
+Wait, the user's parameter N is the number of local clock edges. So the code should have N flip-flops in the chain. So for N=2, two stages. So the code would be:
+
+reg [N-1 : 0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[N-2 : 0], 1'b0};
+    end
+end
+
+Wait, but for N=1, the code would have:
+
+sync_reg <= {sync_reg[-1:0], 1'b0} which is invalid. So perhaps the code is written with N >= 2. But the user's parameter N is given as a parameter. So perhaps the code should handle N >= 1.
+
+Wait, but the standard practice is to have at least two stages. But the user's code allows N as a parameter. So the code must handle N >= 1.
+
+Alternatively, the code can be written as:
+
+If N is 1, then the code would have a single flop. But in that case, the output would de-assert after 1 cycle. But in practice, two stages are recommended. However, the user's code allows N to be any value.
+
+Wait, the user's instruction says "after the configured number of local clock edges". So if N is 2, then after two edges, the reset is released.
+
+So the code would have a shift register of N bits. The initial state is all ones. When rst is de-asserted, each clock cycle shifts in a zero. The output is the last bit of the shift register. So after N cycles, the output becomes zero.
+
+Wait, but the code would be:
+
+reg [N-1 : 0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[N-2 : 0], 1'b0};
+    end
+end
+
+Wait, but when N is 1, the code would have:
+
+sync_reg <= {sync_reg[ -1 : 0], 1'b0}; which is invalid. So perhaps the code should have N >= 2. But the user's code allows N as a parameter. Hmm.
+
+Alternatively, the code can be written as:
+
+If N is 1, then the code is a single flop. But in practice, two stages are better. But the user's code allows N to be any value.
+
+Wait, but the code in Verilog can't have a variable width of the array. Wait, in Verilog, the array size can be parameterized. So for N=1, the code would have a 1-bit register. Wait, but the code would be:
+
+reg [N-1 : 0] sync_reg;
+
+If N is 1, then the array is [0:0], which is a single bit. Then the code would be:
+
+sync_reg <= {sync_reg[0-1 : 0], 1'b0}; Wait, no. Wait, the code for N=1 would be:
+
+Wait, if N is 1, the code would have:
+
+sync_reg <= {sync_reg[N-2 :0], 1'b0} → N-2 would be -1. That's invalid.
+
+Hmm. So perhaps the code is written as:
+
+If N is 1, then the code is:
+
+reg sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= 1'b1;
+    end else begin
+        sync_reg <= 1'b0;
+    end
+end
+
+assign out = sync_reg;
+
+Wait, but that's a single flop. So the reset would de-assert after one cycle. But the code for N=1 would be:
+
+Wait, but the code in the module is supposed to have a parameter N. So perhaps the code uses a generate loop for N stages.
+
+Alternatively, the code can use a shift register with N stages. Let's think again.
+
+The code:
+
+The reset is asynchronous. When rst is high, the output is high. When rst is low, the output is high until N clock cycles have passed.
+
+Wait, the code would have a shift register of N bits. The initial state is all ones. When rst is de-asserted, each clock cycle shifts in a zero. The output is the last bit of the shift register. So after N cycles, the output becomes zero.
+
+Wait, but the code would be:
+
+reg [N-1 : 0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[N-2 :0], 1'b0};
+    end
+end
+
+assign out = sync_reg[N-1];
+
+Wait, but for N=1, the code would have:
+
+sync_reg is [0:0], and the code would shift in 0. Wait, but when N=1, the code would have:
+
+sync_reg <= {sync_reg[ -1 :0], 1'b0} → which is invalid. So perhaps N must be >=2. But the user's code allows N as a parameter.
+
+Alternatively, the code can be written as:
+
+If N is 1, the code is a single flop. But the code would be:
+
+reg sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= 1'b1;
+    end else begin
+        sync_reg <= 1'b0;
+    end
+end
+
+assign out = sync_reg;
+
+But in that case, the reset is de-asserted after one cycle. But the code for N=1 would be allowed.
+
+But the user's code allows N as a parameter. So perhaps the code can be written as:
+
+reg [N-1 : 0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[N-2 :0], 1'b0};
+    end
+end
+
+assign out = sync_reg[N-1];
+
+But when N is 1, the code would have:
+
+sync_reg is [0:0], and the code would have:
+
+sync_reg <= {sync_reg[ -1 :0], 1'b0} → invalid.
+
+So perhaps the code is written with N >=2. But the user's code allows N as a parameter. Hmm.
+
+Alternatively, the code can be written as:
+
+If N is 1, then the code is a single flop. Otherwise, the code uses a shift register.
+
+Wait, but the user's code says N is a parameter. So perhaps the code can handle N >=1.
+
+Wait, but in Verilog, if N is 1, the code would have:
+
+reg [0:0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= 1;
+    end else begin
+        sync_reg <= 0;
+    end
+end
+
+assign out = sync_reg;
+
+But that's a single flop. So the output would de-assert after one cycle. But the code would be allowed.
+
+But the code for N=1 would be:
+
+Wait, but the code would have:
+
+sync_reg <= {sync_reg[N-2 :0], 1'b0} → when N=1, N-2 is -1. So that's invalid.
+
+So perhaps the code can't handle N=1. But the user's code allows N as a parameter. Hmm.
+
+Alternatively, the code uses a generate loop to create N stages.
+
+Wait, perhaps the code is:
+
+reg [N-1 : 0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[N-2 :0], 1'b0};
+    end
+end
+
+assign out = sync_reg[N-1];
+
+But when N=1, the code would have:
+
+sync_reg is [0:0], and the code would have:
+
+sync_reg <= {sync_reg[-1:0], 1'b0} → which is invalid.
+
+So perhaps the code is written with N >=2. But the user's code allows N as a parameter. Hmm.
+
+Alternatively, the code uses a loop variable. Wait, but in Verilog, the array indices can't be negative.
+
+Wait, perhaps the code can be written as:
+
+If N is 1, then the code is a single flop. Else, the code uses a shift register.
+
+But in Verilog, parameters can be handled with generate statements.
+
+Wait, but the code can be written as:
+
+reg [N-1 : 0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[N-2 :0], 1'b0};
+    end
+end
+
+assign out = sync_reg[N-1];
+
+But when N is 1, the code would have:
+
+sync_reg is [0:0], and the code would have:
+
+sync_reg <= {sync_reg[-1 :0], 1'b0} → which is invalid. So perhaps the code is written with N >=2.
+
+But the user's code allows N as a parameter. Hmm. Maybe the code uses a generate block to handle N=1 and N>1.
+
+Alternatively, the code can be written as:
+
+If N is 1, the code is a single flop. Else, the code uses a shift register.
+
+But the code in Verilog can't have a variable array size based on generate. Hmm.
+
+Alternatively, the code can use a loop variable. Wait, but in Verilog, the array indices can't be negative.
+
+Alternatively, the code can be written as:
+
+reg [N-1 :0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[N-2 :0], 1'b0};
+    end
+end
+
+But when N=1, the code would have:
+
+sync_reg <= {sync_reg[-1:0], 1'b0} → invalid.
+
+So perhaps the code is written with N >=2. But the user's code allows N as a parameter. Hmm.
+
+But the user's code says "the configured number of local clock edges". So if N is 2, the code waits two edges. So the code must have N stages.
+
+Wait, the standard two-stage synchronizer. So the code for N=2 would have two flip-flops.
+
+In that case, the code would be:
+
+reg q1, q2;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        q1 <= 1;
+        q2 <= 1;
+    end else begin
+        q1 <= 0;
+        q2 <= q1;
+    end
+end
+
+assign out = q2;
+
+So the output is de-asserted after two cycles.
+
+So the code for N stages would be:
+
+reg [N-1 :0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[N-2 :0], 1'b0};
+    end
+end
+
+assign out = sync_reg[N-1];
+
+But for N=1, the code would have:
+
+sync_reg is [0:0], and the code would have:
+
+sync_reg <= {sync_reg[-1:0], 1'b0} → invalid.
+
+Thus, the code can't handle N=1. But the user's code allows N as a parameter. Hmm.
+
+But the user's code says "the configured number of local clock edges". So if N is 2, then two edges. So the code must have N stages.
+
+Assuming that N is >=2. But the code can't enforce that. So perhaps the code uses N >=2.
+
+But the user's code allows N as a parameter. So the code can be written as:
+
+module sync_reset #(
+    parameter N = 2
+) (
+    input clk,
+    input rst,
+    output out
+);
+
+reg [N-1 :0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[N-2 :0], 1'b0};
+    end
+end
+
+assign out = sync_reg[N-1];
+
+endmodule
+
+Wait, but when N is 1, this code would have:
+
+reg [0:0] sync_reg;
+
+always @(...) begin
+    if (rst) sync_reg <= 1;
+    else sync_reg <= {sync_reg[-1:0], 1'b0}; // invalid.
+
+So the code would fail for N=1. But the user's code allows N as a parameter. Hmm.
+
+But the user's example uses N as a parameter with default 2. So perhaps the code is written with N >=2.
+
+But the user's code allows N as a parameter. So the code must handle N >=1.
+
+Hmm. Maybe the code uses a generate block to handle N=1 and N>1.
+
+Alternatively, the code can use a loop variable.
+
+Wait, but in Verilog, you can't have a variable in the array slice. Hmm.
+
+Alternatively, the code can use a shift register with N bits, and the code for N=1 would have a single bit.
+
+Wait, but in Verilog, if N is 1, the code would have:
+
+reg [0:0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= 1;
+    end else begin
+        sync_reg <= 0;
+    end
+end
+
+assign out = sync_reg;
+
+Which is a single flop. So the reset would de-assert after one cycle.
+
+But the code would be allowed.
+
+So the code can be written as:
+
+reg [N-1 :0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[N-2 :0], 1'b0};
+    end
+end
+
+assign out = sync_reg[N-1];
+
+But when N=1, the code would have:
+
+sync_reg is [0:0], and the code would have:
+
+sync_reg <= {sync_reg[-1:0], 1'b0} → invalid.
+
+Thus, the code would fail for N=1.
+
+But the user's code allows N as a parameter. Hmm.
+
+Alternatively, the code can use a loop variable. Wait, but in Verilog, the array indices can't be negative.
+
+Alternatively, the code can use a generate loop for N stages.
+
+Wait, here's an alternative approach. The code uses a shift register of N bits. The initial state is all ones. When rst is de-asserted, each cycle shifts in a zero. The output is the last bit of the shift register.
+
+The code would be:
+
+reg [N-1 :0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[N-2 :0], 1'b0};
+    end
+end
+
+assign out = sync_reg[N-1];
+
+But for N=1, this code would have:
+
+sync_reg is [0:0], and the code would have:
+
+sync_reg <= {sync_reg[-1:0], 1'b0} → invalid.
+
+Thus, the code can't handle N=1. So perhaps the code is written with N >=2.
+
+But the user's code allows N as a parameter. Hmm.
+
+Alternatively, the code can use a generate block to handle N=1 and N>1.
+
+Wait, but in Verilog, generate blocks can't create variables with variable indices.
+
+Alternatively, the code can use a loop variable. Wait, but in Verilog, the array indices can't be negative.
+
+Alternatively, the code can use a for loop in the always block.
+
+Wait, but the code would have:
+
+reg [N-1 :0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= sync_reg << 1;
+        sync_reg[0] <= 1'b0;
+    end
+end
+
+Wait, no. Wait, shifting left would lose the MSB. Hmm.
+
+Alternatively, the code can use a loop:
+
+integer i;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        for (i=0; i<N; i=i+1) begin
+            sync_reg[i] <= 1'b1;
+        end
+    end else begin
+        for (i=0; i<N-1; i=i+1) begin
+            sync_reg[i] <= sync_reg[i+1];
+        end
+        sync_reg[N-1] <= 1'b0;
+    end
+end
+
+assign out = sync_reg[0];
+
+Wait, but this would shift the bits. Wait, if N=2:
+
+sync_reg[0] is the first stage, sync_reg[1] the second.
+
+When rst is de-asserted:
+
+sync_reg[0] becomes 0, and sync_reg[1] takes the previous sync_reg[0] (which was 1). Wait, no. Hmm.
+
+Wait, the code would have:
+
+In the non-reset case:
+
+For i from 0 to N-2:
+
+sync_reg[i] <= sync_reg[i+1]
+
+Then sync_reg[N-1] <= 0.
+
+Wait, but this would shift the bits to the left, and the last bit is set to zero.
+
+Wait, but the code would have:
+
+sync_reg[0] <= sync_reg[1]
+
+sync_reg[1] <= 0.
+
+Wait, but that's for N=2.
+
+Hmm. Maybe this approach can work.
+
+But in Verilog, the for loop in the always block can be used.
+
+But the code would be:
+
+reg [N-1 :0] sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= {N{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[N-2 :0], 1'b0};
+    end
+end
+
+Wait, but again, when N=1, the code would have:
+
+sync_reg <= {sync_reg[-1:0], 1'b0} → invalid.
+
+Hmm.
+
+But perhaps the code can be written as:
+
+If N is 1, then the code is a single flop. Else, the code uses the shift register.
+
+But in Verilog, generate statements can conditionally generate code.
+
+So:
+
+generate
+    if (N == 1) begin
+        reg sync_reg;
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                sync_reg <= 1'b1;
+            end else begin
+                sync_reg <= 1'b0;
+            end
+        end
+        assign out = sync_reg;
+    end else begin
+        reg [N-1 :0] sync_reg;
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                sync_reg <= {N{1'b1}};
+            end else begin
+                sync_reg <= {sync_reg[N-2 :0], 1'b0};
+            end
+        end
+        assign out = sync_reg[N-1];
+    end
+endgenerate
+
+But this code would have generate blocks for N=1 and N>1. But the code for N=1 is a single flop.
+
+But the code for N=1 would have:
+
+sync_reg is a single bit. When rst is de-asserted, the sync_reg becomes 0 after one cycle. So the output is de-asserted after one cycle.
+
+But the code would be allowed.
+
+But the user's code allows N as a parameter. So this code would handle N=1 and N>=2.
+
+But the code for N=1 would have:
+
+reg sync_reg;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        sync_reg <= 1;
+    end else begin
+        sync_reg <= 0;
+    end
+end
+
+assign out = sync_reg;
+
+Which is correct. So the code can handle N=1.
+
+Thus, the code would be written with generate blocks.
+
+But the user's code says to use Verilog-2001. So generate blocks are allowed.
+
+Thus, the code can be written as:
+
+module sync_reset #(
+    parameter N = 2
+) (
+    input clk,
+    input rst,
+    output out
+);
+
+generate
+    if (N == 1) begin : gen_single
+        reg sync_reg;
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                sync_reg <= 1'b1;
+            end else begin
+                sync_reg <= 1'b0;
+            end
+        end
+        assign out = sync_reg;
+    end else begin : gen_multiple
+        reg [N-1 :0] sync_reg;
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                sync_reg <= {N{1'b1}};
+            end else begin
+                sync_reg <= {sync_reg[N-2 :0], 1'b0};
+            end
+        end
+        assign out = sync_reg[N-1];
+    end
+endgenerate
+
+endmodule
+
+Wait, but in the else block (N>1), the code uses {sync_reg[N-2 :0], 1'b0}.
+
+For example, N=2:
+
+sync_reg is [1:0]. The code would shift in the lower bits and append 0.
+
+Wait, for N=2:
+
+sync_reg <= {sync_reg[0], 1'b0} ?
+
+Wait, if N=2, the code would have:
+
+sync_reg is [1:0]. The code would have:
+
+sync_reg <= {sync_reg[0], 1'b0} ?
+
+Wait, no. Wait, the code in the else block is:
+
+sync_reg <= {sync_reg[N-2 :0], 1'b0};
+
+For N=2:
+
+N-2 is 0. So the code would be:
+
+sync_reg <= {sync_reg[0 :0], 1'b0} → which is {sync_reg[0], 1'b0} → two bits.
+
+Wait, but the code would have:
+
+sync_reg is [1:0]. So the code would take the lower N-1 bits (for N=2, N-1=1 bit) and append 0.
+
+Wait, but in Verilog, the syntax {sync_reg[N-2 :0], 1'b0} when N=2 would be:
+
+sync_reg[0:0], which is the first bit (assuming [1:0] is the array). Wait, no. Wait, the array indices in Verilog are [msb:lsb]. So if the array is [N-1 :0], then the first element is N-1, and the last is 0.
+
+Wait, for N=2, the array is [1:0]. So N-2 is 0. So the code would take sync_reg[0:0], which is the lower bit (bit 0), and append 1'b0. So the new array would be [0, 0].
+
+Wait, but the code would shift left. Hmm.
+
+Alternatively, perhaps the code should shift the existing bits and add a zero at the end.
+
+Wait, the code in the else block for N>1:
+
+sync_reg <= {sync_reg[N-2 :0], 1'b0};
+
+For N=2:
+
+sync_reg is [1:0]. The code would take bits [0:0] (the lower bit) and append 0. So the new value would be {sync_reg[0], 0}.
+
+Which is a shift left, with the new LSB being 0. Wait, but that's not correct.
+
+Wait, the code for N=2 would have two flip-flops. The first flop is the first bit, the second is the second.
+
+When rst is de-asserted, the first flop gets 0, and the second flop gets the previous first flop's value.
+
+Wait, the code would be:
+
+sync_reg[0] <= 0 (after rst is de-asserted)
+
+sync_reg[1] <= previous sync_reg[0]
+
+Wait, but the code in the else block for N=2 would have:
+
+sync_reg <= {sync_reg[0], 1'b0}
+
+Which would set the higher bit to the lower bit and the lower bit to 0.
+
+Wait, but that's not correct. The standard two-stage synchronizer would have:
+
+sync_reg[0] <= 0 (after rst de-asserted)
+
+sync_reg[1] <= sync_reg[0]
+
+Wait, but in the code:
+
+For N=2:
+
+sync_reg <= {sync_reg[0], 1'b0}
+
+Which would be:
+
+sync_reg[1] = sync_reg[0]
+
+sync_reg[0] = 0.
+
+Wait, but that's a shift left. Hmm.
+
+Wait, perhaps the code is incorrect.
+
+Alternatively, the code should shift right.
+
+Wait, the code in the else block for N>1:
+
+sync_reg <= {sync_reg[N-2 :0], 1'b0};
+
+Which for N=2 would be:
+
+sync_reg <= {sync_reg[0], 1'b0}
+
+Which would make the array [0, 0].
+
+Wait, but the first flop (index 0) gets 0, and the second flop (index 1) gets the previous index 0's value.
+
+Wait, but in the standard two-stage synchronizer, when rst is de-asserted:
+
+q1 <= 0;
+
+q2 <= q1;
+
+So the code would have:
+
+sync_reg[0] <= 0;
+
+sync_reg[1] <= sync_reg[0] (previous value)
+
+But in the code, the code is:
+
+sync_reg <= {sync_reg[N-2 :0], 1'b0}
+
+Which for N=2:
+
+sync_reg[1] = sync_reg[0]
+
+sync_reg[0] = 0.
+
+Which is equivalent to:
+
+sync_reg[1] <= sync_reg[0]
+
+sync_reg[0] <= 0.
+
+Which is correct.
+
+Yes. So the code for N=2 would have:
+
+After rst is de-asserted:
+
+First cycle:
+
+sync_reg[0] becomes 0, sync_reg[1] becomes previous sync_reg[0] (which was 1, since rst was just de-asserted)
+
+Wait, no. Wait, when rst is de-asserted, the code would start shifting.
+
+Wait, initial state after rst is de-asserted:
+
+sync_reg is all 1's. Then, in the first cycle:
+
+sync_reg <= {sync_reg[0], 0} → if N=2, sync_reg is [1:0], so:
+
+sync_reg[1] = sync_reg[0] (which was 1)
+
+sync_reg[0] = 0.
+
+So after first cycle, sync_reg is 1 followed by 0.
+
+Wait, but the first flop (index 0) is 0, second (index 1) is 1.
+
+Wait, but the output is sync_reg[1], which is 1. So the reset is still active.
+
+After second cycle:
+
+sync_reg <= {sync_reg[0], 0} → sync_reg[0] is 0, so new sync_reg is 0 followed by 0.
+
+Output becomes 0.
+
+So after two cycles, the reset is released.
+
+Which is correct.
+
+Thus, the code for N>1 is correct.
+
+Thus, the code can be written with generate blocks for N=1 and N>1.
+
+Thus, the final code would be:
+
+module sync_reset #(
+    parameter N = 2
+) (
+    input clk,
+    input rst,
+    output out
+);
+
+generate
+    if (N == 1) begin : gen_single
+        reg sync_reg;
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                sync_reg <= 1'b1;
+            end else begin
+                sync_reg <= 1'b0;
+            end
+        end
+        assign out = sync_reg;
+    end else begin : gen_multiple
+        reg [N-1 :0] sync_reg;
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                sync_reg <= {N{1'b1}};
+            end else begin
+                sync_reg <= {sync_reg[N-2 :0], 1'b0};
+            end
+        end
+        assign out = sync_reg[N-1];
+    end
+endgenerate
+
+endmodule
+
+This code handles N=1 and N>1. For N=1, the reset is de-asserted after one cycle. For N>1, the code uses a shift register with N stages.
+
+Yes, this should meet the requirements.
+
+Testing for N=2:
+
+The code would have two flip-flops. The output is the second one. After two cycles, the output is de-asserted.
+
+Thus, the code should be correct.
+</think>
+
+<answer>
+```verilog
+module sync_reset #(
+    parameter N = 2
+) (
+    input clk,
+    input rst,
+    output out
+);
+
+generate
+    if (N == 1) begin : gen_single
+        reg sync_reg;
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                sync_reg <= 1'b1;
+            end else begin
+                sync_reg <= 1'b0;
+            end
+        end
+        assign out = sync_reg;
+    end else begin : gen_multiple
+        reg [N-1 :0] sync_reg;
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                sync_reg <= {N{1'b1}};
+            end else begin
+                sync_reg <= {sync_reg[N-2 :0], 1'b0};
+            end
+        end
+        assign out = sync_reg[N-1];
+    end
+endgenerate
+
+endmodule
+```
+</answer>

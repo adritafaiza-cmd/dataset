@@ -1,0 +1,855 @@
+<think>Okay, I need to create a Verilog module for a destination-clock bit synchronizer with edge detection. Let's start by understanding the requirements.
+
+The module is called sync_wedge. The parameters include STAGES, which defaults to 2. The inputs are clk_i, rst_ni (active-low reset), en_i (enable), and serial_i. The outputs are r_edge_o (rising edge), f_edge_o (falling edge), and serial_o (the synchronized bit).
+
+The main goal is to synchronize the serial_i bit into the clk_i domain. Since it's a synchronizer, we probably need a multi-stage flip-flop chain to mitigate metastability. The STAGES parameter determines the number of flip-flops in the synchronizer. Typically, two stages are used, but the parameter allows flexibility.
+
+Once synchronized, we need to detect edges. Edge detection usually involves comparing the current value with the previous one. For rising edge, current is 1 and previous was 0. For falling edge, current is 0 and previous was 1. But since the enable signal (en_i) is involved, maybe the edge detection is only active when enabled.
+
+Wait, the problem says "give a short indication when it rises or falls, when enabled." So the edge outputs (r_edge_o and f_edge_o) should only be active if en_i is high. Hmm, but how does en_i affect the synchronization? Maybe the enable is for the edge detection. Or perhaps the entire process is gated by en_i. Need to clarify.
+
+Wait, the description says: "Bring the incoming bit into the local clock domain and give a short indication when it rises or falls, when enabled." So the edge detection is conditional on en_i being active. So when en_i is high, the edge outputs are generated based on transitions in the synchronized bit. Otherwise, they are inactive.
+
+So the steps are:
+
+1. Synchronize serial_i into clk_i domain using STAGES flip-flops. The output is serial_o.
+
+2. Then, detect edges on serial_o. The edges are only reported if en_i is active.
+
+Wait, but edge detection is a separate process. Let's think.
+
+First, the synchronization chain. Let's create a shift register with STAGES flip-flops. The first stage is the first synchronization, then the rest. The output of the last stage is serial_o.
+
+Then, the edge detection: we need to track the previous value of serial_o. So we can have a register that holds the previous value. Then:
+
+r_edge_o = (serial_o && !prev_serial) && en_i;
+
+Similarly, f_edge_o = (!serial_o && prev_serial) && en_i;
+
+Wait, but the enable might be part of the edge detection. The problem says "when enabled", so the edge outputs are only active when en_i is high.
+
+Wait, the wording: "give a short indication when it rises or falls, when enabled." So edge outputs are pulses that are high for one cycle when a transition occurs and en_i is active.
+
+So the edge detection is conditional on en_i. So the edge outputs are only generated if en_i is high. Otherwise, they stay low.
+
+So the steps:
+
+- Synchronize serial_i into clk_i domain via STAGES FFs. The output is serial_o.
+
+- Then, track the previous value of serial_o (using another FF).
+
+- Then, compute edges as (current != previous) when en_i is active.
+
+Wait, but edge detection is a pulse. So:
+
+If en_i is high, then:
+
+r_edge_o is 1 when current is 1 and previous was 0.
+
+Similarly for f_edge_o.
+
+But if en_i is low, then edges are not considered. So the edge outputs would be 0.
+
+Wait, but the enable could be part of the synchronization process. Hmm.
+
+Alternatively, the enable could gate the synchronization. Wait, the problem says "when enabled" the edge is indicated. So the edge detection is only active when en_i is high. So even if the bit transitions, if en_i is low, the edge outputs don't trigger.
+
+So the edge detection logic is:
+
+r_edge_o = en_i && (serial_o && !prev_serial);
+
+f_edge_o = en_i && (!serial_o && prev_serial);
+
+So the edge outputs are only active if en_i is high and the edge occurred.
+
+Now, the synchronization process:
+
+The input serial_i is asynchronous to clk_i. So we need to pass it through a synchronizer chain (two or more stages) to prevent metastability.
+
+The standard approach is to have a chain of flip-flops. The first stage samples the input, the second stage samples the first, etc. The output of the last stage is considered stable.
+
+In Verilog, for STAGES=2, the code would have two registers.
+
+But the parameter STAGES can be variable. So the code needs to generate a shift register with STAGES number of stages.
+
+Wait, but in Verilog, we can use a generate loop for variable stages.
+
+Wait, but for the code, the STAGES parameter is given. Let's proceed.
+
+First, create the synchronization chain.
+
+reg [STAGES-1:0] sync_chain;
+
+Wait, no. Wait, the first stage is the first flip-flop. For example, if STAGES is 2, the code would have:
+
+reg sync_0, sync_1;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_0 <= 0;
+    sync_1 <= 0;
+  end else begin
+    sync_0 <= serial_i;
+    sync_1 <= sync_0;
+  end
+end
+
+Then, the output is sync_1. Wait, but the number of stages can be more than two. Wait, in standard practice, two stages are used. But the parameter allows for more.
+
+Wait, the code should have a shift register with STAGES number of stages. The output is the last stage.
+
+So:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{1'b0}};
+  end else begin
+    sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, but in Verilog, the syntax for concatenation may vary. Wait, if STAGES is the number of stages, the first stage is the first flip-flop. Wait, perhaps the code can be written as:
+
+genvar i;
+generate
+  for (i=0; i < STAGES; i=i+1) begin : sync_stages
+    if (i == 0) begin
+      // first stage
+      always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          sync_reg[i] <= 1'b0;
+        end else begin
+          sync_reg[i] <= serial_i;
+        end
+      end
+    end else begin
+      always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          sync_reg[i] <= 1'b0;
+        end else begin
+          sync_reg[i] <= sync_reg[i-1];
+        end
+      end
+    end
+  end
+endgenerate
+
+Wait, but in Verilog, you can't have a generate loop with multiple always blocks. Alternatively, create a shift register with a loop.
+
+Alternatively, create a vector and shift.
+
+Wait, perhaps:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{1'b0}};
+  end else begin
+    sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, but if STAGES is 1, then the code would have sync_reg[0] <= serial_i. But the code may need to handle STAGES >=1.
+
+Wait, but the parameter is STAGES, which is probably at least 2. But the code should handle any STAGES >=1.
+
+But in Verilog, if STAGES is 1, the code would have:
+
+sync_reg <= {sync_reg[0], serial_i} ?
+
+Wait, no. Wait, the code {sync_reg[STAGES-2:0], serial_i} would take the lower STAGES-1 bits and append serial_i. Wait, if STAGES is 2, then STAGES-2 is 0, so the slice is [0:0], which is one bit. Then concatenated with serial_i (1 bit) gives two bits. Wait, but that's not correct.
+
+Wait, the standard approach for a multi-stage synchronizer is:
+
+The first stage is the first flip-flop. The second stage is the second, etc. So for STAGES=2:
+
+stage1 <= serial_i;
+
+stage2 <= stage1;
+
+Then, the output is stage2.
+
+So the code can be written as:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{1'b0}};
+  end else begin
+    sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, if STAGES is 2, then sync_reg is [1:0]. The code would take sync_reg[0] (the first stage) and append serial_i. Wait, no. Wait, the code {sync_reg[STAGES-2:0], serial_i} would take the lower STAGES-1 bits and append the new input. Wait, for STAGES=2:
+
+sync_reg is [1:0]. The code would take [0], and append serial_i. So the new value is {sync_reg[0], serial_i} ?
+
+Wait, no. Wait, if STAGES is 2, then STAGES-2 is 0. So the slice is [0:0], which is one bit. Then concatenating with serial_i (1 bit) gives two bits. So the code would shift left, discarding the oldest bit and adding the new one. Wait, but in a synchronizer, each stage is the previous one's value. So the first stage is the first flip-flop, then the second, etc.
+
+Wait, perhaps the code should be:
+
+sync_reg[0] <= serial_i;
+
+for i from 1 to STAGES-1:
+
+sync_reg[i] <= sync_reg[i-1]
+
+But in Verilog, you can't have a loop variable in the index. So using generate loops.
+
+Alternatively, create a generate loop for each stage.
+
+Let me think. For STAGES=2:
+
+stage 0: first flip-flop, takes serial_i.
+
+stage 1: second flip-flop, takes stage 0's output.
+
+Then, the output is stage 1.
+
+In code:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{1'b0}};
+  end else begin
+    sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, if STAGES is 2, then sync_reg is [1:0]. The code would take sync_reg[0], and append serial_i. So the new value would be {sync_reg[0], serial_i} ?
+
+Wait, no. Wait, the code {sync_reg[STAGES-2:0], serial_i} would take the lower STAGES-1 bits (for STAGES=2, that's 1 bit: index 0) and concatenate with serial_i. So the new sync_reg would be [1:0], where [1] is the previous [0], and [0] is the new serial_i. Wait, that's not correct. Because in a synchronizer, each stage is the previous one's value. So the first stage is the first flip-flop, then the second, etc.
+
+Wait, perhaps the code should be:
+
+sync_reg[0] <= serial_i;
+
+for (i=1; i < STAGES; i++) sync_reg[i] <= sync_reg[i-1];
+
+But in Verilog, you can't write that in a loop. So using generate.
+
+So:
+
+genvar i;
+generate
+  for (i=0; i < STAGES; i=i+1) begin : gen_sync
+    if (i == 0) begin
+      // first stage
+      always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+          sync_reg[i] <= 1'b0;
+        else
+          sync_reg[i] <= serial_i;
+      end
+    end else begin
+      always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+          sync_reg[i] <= 1'b0;
+        else
+          sync_reg[i] <= sync_reg[i-1];
+      end
+    end
+  end
+endgenerate
+
+Wait, but in Verilog, the generate loop can create multiple always blocks. So this would create each stage.
+
+But the code would need to declare sync_reg as a reg array.
+
+Wait, but in Verilog, the syntax for generate loops can be a bit tricky.
+
+Alternatively, declare the sync_reg as a vector of STAGES bits.
+
+reg [STAGES-1:0] sync_reg;
+
+Then, the first stage is sync_reg[0], the next is sync_reg[1], etc.
+
+Then, the code would be:
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{1'b0}};
+  end else begin
+    sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, for STAGES=2:
+
+sync_reg is [1:0]. The code would take the lower 1 bit (sync_reg[0]) and append serial_i. So the new value would be {sync_reg[0], serial_i} ?
+
+Wait, but in a two-stage synchronizer, the first stage is the first flip-flop, the second is the second. So the code would have:
+
+stage0 <= serial_i;
+
+stage1 <= stage0;
+
+So the code would be:
+
+sync_reg[0] <= serial_i;
+
+sync_reg[1] <= sync_reg[0];
+
+Which can be written as:
+
+sync_reg <= {sync_reg[0], serial_i} ?
+
+Wait, no. Wait, if the vector is [1:0], then the code:
+
+sync_reg[1] <= sync_reg[0];
+
+sync_reg[0] <= serial_i;
+
+But in Verilog, the code would have to assign each bit.
+
+Alternatively, using a shift register approach.
+
+Wait, perhaps the code can be written as:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{1'b0}};
+  end else begin
+    sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, if STAGES is 2, then:
+
+sync_reg is [1:0]. The code {sync_reg[0], serial_i} would create a two-bit vector where the first bit is the previous sync_reg[0], and the second is the new input. Wait, but that's a shift left. Wait, but in a synchronizer, the first stage is the first flip-flop, then the next.
+
+Wait, maybe the code is correct. Let's see.
+
+If STAGES is 2:
+
+sync_reg[1] is the first stage, and sync_reg[0] is the second.
+
+Wait, no. Wait, the code {sync_reg[STAGES-2:0], serial_i} would take the lower STAGES-1 bits (for STAGES=2, that's 1 bit: index 0) and append the new input. So the new vector is [1:0], where [1] is the previous [0], and [0] is the new input.
+
+Wait, but in that case, the first stage is [0], the second is [1]. Wait, but in the code, the output would be the last stage. Wait, but in a synchronizer, the output is the last stage. So in this code, the output would be sync_reg[STAGES-1], which for STAGES=2 would be sync_reg[1].
+
+Wait, but in the code above, the code is written as:
+
+sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+
+Wait, if STAGES is 2, then STAGES-2 is 0. So the slice is [0:0], which is one bit. Then concatenated with serial_i (1 bit) gives two bits. So the new sync_reg would be {sync_reg[0], serial_i}.
+
+Wait, but that's a shift left. Wait, the first stage is the first flip-flop, then the second. So the code would be:
+
+stage0 <= serial_i;
+
+stage1 <= stage0;
+
+So the code would have:
+
+sync_reg[0] <= serial_i;
+
+sync_reg[1] <= sync_reg[0];
+
+Which in Verilog can be written as:
+
+sync_reg <= {sync_reg[0], serial_i};
+
+Wait, but in that case, the code for STAGES=2 would be:
+
+sync_reg[1] is the first stage (stage0), and sync_reg[0] is the second (stage1). Wait, no. Wait, the code {sync_reg[0], serial_i} would create a two-bit vector where the first bit is the previous sync_reg[0], and the second is the new input. Wait, but that's not correct.
+
+Hmm, perhaps the code is written as:
+
+The first stage is the first flip-flop. The code for STAGES=2 would have:
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    stage0 <= 0;
+    stage1 <= 0;
+  end else begin
+    stage0 <= serial_i;
+    stage1 <= stage0;
+  end
+end
+
+Then, the output is stage1.
+
+In code, for variable stages, perhaps the code can use a generate loop.
+
+But maybe the code can be written as:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{1'b0}};
+  end else begin
+    sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+  end
+end
+
+Then, the output is the last stage:
+
+assign serial_o = sync_reg[STAGES-1];
+
+Wait, but for STAGES=2, the code would have sync_reg[1], which is the second stage.
+
+Yes. So the code would have:
+
+sync_reg[0] is first stage, sync_reg[1] is second.
+
+Wait, no. Wait, if STAGES is 2, the code {sync_reg[0], serial_i} would create a two-bit vector where the first bit is the previous sync_reg[0], and the second is the new input. Wait, but in that case, the first stage is the first element.
+
+Wait, perhaps the code is correct. Let's proceed.
+
+Once the synchronization is done, the output is the last stage (sync_reg[STAGES-1]).
+
+Then, we need to track the previous value of that to detect edges.
+
+So:
+
+reg prev_serial;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    prev_serial <= 0;
+  end else begin
+    prev_serial <= serial_o;
+  end
+end
+
+Then:
+
+assign r_edge_o = en_i && (serial_o && !prev_serial);
+assign f_edge_o = en_i && (!serial_o && prev_serial);
+
+Wait, but edge detection is a pulse. So when the current value is different from previous, and en_i is active.
+
+Wait, but the edge is only detected once. So the code would generate a one-cycle pulse when the edge occurs and en_i is high.
+
+Yes.
+
+Putting it all together:
+
+The code would have:
+
+- The synchronization chain.
+
+- The edge detection.
+
+Now, code:
+
+module sync_wedge #(
+    parameter STAGES = 2
+) (
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    // Synchronizer chain
+    reg [STAGES-1:0] sync_reg;
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            sync_reg <= {STAGES{1'b0}};
+        end else begin
+            sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+        end
+    end
+
+    assign serial_o = sync_reg[STAGES-1];
+
+    // Edge detection
+    reg prev_serial;
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            prev_serial <= 1'b0;
+        end else begin
+            prev_serial <= serial_o;
+        end
+    end
+
+    assign r_edge_o = en_i && (serial_o && !prev_serial);
+    assign f_edge_o = en_i && (!serial_o && prev_serial);
+
+endmodule
+
+Wait, but in the code for the synchronizer, when STAGES is 1, the code would have:
+
+sync_reg is [0:0], and the code {sync_reg[STAGES-2:0], serial_i} would be {sync_reg[-1:0], serial_i} which is invalid.
+
+Wait, but the parameter STAGES is supposed to be at least 2? Or the code should handle STAGES >=1.
+
+Wait, the code uses STAGES=2 as default. But if someone uses STAGES=1, the code would have:
+
+sync_reg[0] <= {sync_reg[-1:0], serial_i} which is invalid.
+
+So the code should have a check for STAGES >=2? Or the code is written to handle STAGES >=1.
+
+Wait, in Verilog, if STAGES is 1, the code would have:
+
+sync_reg <= {sync_reg[ (1-2):0 ], serial_i} → {sync_reg[-1:0], serial_i} → which is invalid.
+
+So the code would have a problem if STAGES is 1.
+
+But the code's parameter is given as STAGES=2. But the code should handle STAGES >=1.
+
+Hmm. So perhaps the code should have:
+
+If STAGES is 1, the code is just a single flip-flop.
+
+Wait, but the code as written would have:
+
+For STAGES=1:
+
+sync_reg is [0:0]
+
+The code {sync_reg[STAGES-2:0], serial_i} → {sync_reg[-1:0], serial_i} → which is invalid.
+
+So the code would fail for STAGES=1.
+
+So the code should handle STAGES >=2. But the parameter is given as 2.
+
+But the user's code may have STAGES as a parameter. So the code should handle STAGES >=1.
+
+Alternative approach: use a generate loop for the stages.
+
+Let's try that.
+
+Declare the sync_reg as a vector of STAGES bits.
+
+Then, generate each stage.
+
+For example:
+
+reg [STAGES-1:0] sync_reg;
+
+generate
+  genvar i;
+  for (i=0; i < STAGES; i=i+1) begin : sync_stages
+    if (i == 0) begin
+      // first stage
+      always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+          sync_reg[i] <= 1'b0;
+        else
+          sync_reg[i] <= serial_i;
+      end
+    end else begin
+      always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+          sync_reg[i] <= 1'b0;
+        else
+          sync_reg[i] <= sync_reg[i-1];
+      end
+    end
+  end
+endgenerate
+
+Then, assign serial_o = sync_reg[STAGES-1];
+
+This way, for any STAGES >=1, the code works.
+
+Yes.
+
+So the code would be:
+
+module sync_wedge #(
+    parameter STAGES = 2
+) (
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+    reg prev_serial;
+
+    generate
+        genvar i;
+        for (i=0; i < STAGES; i=i+1) begin : sync_stages
+            if (i == 0) begin
+                // First stage
+                always @(posedge clk_i or negedge rst_ni) begin
+                    if (!rst_ni)
+                        sync_reg[i] <= 1'b0;
+                    else
+                        sync_reg[i] <= serial_i;
+                end
+            end else begin
+                // Subsequent stages
+                always @(posedge clk_i or negedge rst_ni) begin
+                    if (!rst_ni)
+                        sync_reg[i] <= 1'b0;
+                    else
+                        sync_reg[i] <= sync_reg[i-1];
+                end
+            end
+        end
+    endgenerate
+
+    // Edge detection
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+            prev_serial <= 1'b0;
+        else
+            prev_serial <= serial_o;
+    end
+
+    assign serial_o = sync_reg[STAGES-1];
+    assign r_edge_o = en_i && (serial_o && !prev_serial);
+    assign f_edge_o = en_i && (!serial_o && prev_serial);
+
+endmodule
+
+Wait, but in Verilog, the generate loop can't have the always blocks inside the generate loop like that. Wait, no. The generate loop can create multiple always blocks.
+
+Wait, in Verilog, generate loops can have for loops that create multiple instances of code.
+
+Wait, but in Verilog, the generate block can have for loops, and inside the loop, the code can have always blocks.
+
+Wait, but in Verilog, the generate loop variable (i) is a genvar, and the code inside the generate loop can have always blocks.
+
+Wait, but the code inside the generate loop would need to have the variables declared properly.
+
+Wait, in the code above, the generate loop creates for each i from 0 to STAGES-1.
+
+Wait, the code for the generate loop:
+
+for (i=0; i < STAGES; i=i+1) begin : sync_stages
+
+Wait, if STAGES is 2, then i runs from 0 to 1 (since i < STAGES). So two stages.
+
+Wait, the code for i=0 is the first stage, and for i=1, the second.
+
+Wait, but the code for the first stage (i=0) is the first flip-flop, then the next stages.
+
+Wait, the code for the first stage (i=0) is:
+
+sync_reg[0] <= serial_i;
+
+Then, for i=1:
+
+sync_reg[1] <= sync_reg[0];
+
+Yes.
+
+Thus, the code would create a chain of STAGES flip-flops.
+
+Then, the output is the last one (sync_reg[STAGES-1]).
+
+Then, the edge detection is based on that.
+
+Yes.
+
+Now, the code for the generate loop.
+
+Wait, but in Verilog, the generate loop can't have the always blocks inside the generate loop. Wait, no. The generate loop can have generate blocks with always blocks.
+
+Wait, perhaps the code should be written as:
+
+generate
+  genvar i;
+  for (i=0; i < STAGES; i=i+1) begin : sync_stages
+    if (i == 0) begin
+      // first stage
+      always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+          sync_reg[i] <= 1'b0;
+        else
+          sync_reg[i] <= serial_i;
+      end
+    end else begin
+      // other stages
+      always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+          sync_reg[i] <= 1'b0;
+        else
+          sync_reg[i] <= sync_reg[i-1];
+      end
+    end
+  end
+endgenerate
+
+Yes. So this code would generate the correct number of stages.
+
+Now, the edge detection:
+
+We need to track the previous value of serial_o (the synchronized output). So:
+
+reg prev_serial;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni)
+    prev_serial <= 0;
+  else
+    prev_serial <= serial_o;
+end
+
+Then assign the edge outputs.
+
+assign r_edge_o = en_i && (serial_o && !prev_serial);
+assign f_edge_o = en_i && (!serial_o && prev_serial);
+
+Yes.
+
+Now, the code.
+
+Putting it all together:
+
+module sync_wedge #(
+    parameter STAGES = 2
+) (
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+    reg prev_serial;
+
+    generate
+        genvar i;
+        for (i=0; i < STAGES; i=i+1) begin : sync_stages
+            if (i == 0) begin
+                // First stage
+                always @(posedge clk_i or negedge rst_ni) begin
+                    if (!rst_ni)
+                        sync_reg[i] <= 1'b0;
+                    else
+                        sync_reg[i] <= serial_i;
+                end
+            end else begin
+                // Subsequent stages
+                always @(posedge clk_i or negedge rst_ni) begin
+                    if (!rst_ni)
+                        sync_reg[i] <= 1'b0;
+                    else
+                        sync_reg[i] <= sync_reg[i-1];
+                end
+            end
+        end
+    endgenerate
+
+    // Previous value for edge detection
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+            prev_serial <= 1'b0;
+        else
+            prev_serial <= serial_o;
+    end
+
+    assign serial_o = sync_reg[STAGES-1];
+    assign r_edge_o = en_i && (serial_o && !prev_serial);
+    assign f_edge_o = en_i && (!serial_o && prev_serial);
+
+endmodule
+
+Wait, but in Verilog, the generate loop's variables (i) are genvars. The code inside the generate loop can have always blocks.
+
+Yes.
+
+Now, check for STAGES=1.
+
+If STAGES=1:
+
+sync_reg is [0:0].
+
+The generate loop runs for i=0.
+
+In the first stage (i=0), the code:
+
+always @(posedge clk_i ...) sync_reg[0] <= serial_i.
+
+Then, the output is sync_reg[0], which is the first (and only) stage.
+
+Yes.
+
+Thus, the code should handle any STAGES >=1.
+
+Now, the edge detection: when en_i is high, the edges are detected.
+
+Yes.
+
+Now, the code uses nonblocking assignments for the flip-flops, which is correct.
+
+The reset is active-low (rst_ni), so when rst_ni is 0, the registers are reset to 0.
+
+Yes.
+
+Thus, the code should be correct.
+</think>
+
+<answer>
+```verilog
+module sync_wedge #(
+    parameter STAGES = 2
+) (
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+    reg prev_serial;
+
+    generate
+        genvar i;
+        for (i = 0; i < STAGES; i = i + 1) begin : sync_stages
+            if (i == 0) begin
+                // First stage
+                always @(posedge clk_i or negedge rst_ni) begin
+                    if (!rst_ni)
+                        sync_reg[i] <= 1'b0;
+                    else
+                        sync_reg[i] <= serial_i;
+                end
+            end else begin
+                // Subsequent stages
+                always @(posedge clk_i or negedge rst_ni) begin
+                    if (!rst_ni)
+                        sync_reg[i] <= 1'b0;
+                    else
+                        sync_reg[i] <= sync_reg[i-1];
+                end
+            end
+        end
+    endgenerate
+
+    // Previous value for edge detection
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+            prev_serial <= 1'b0;
+        else
+            prev_serial <= serial_o;
+    end
+
+    assign serial_o = sync_reg[STAGES-1];
+    assign r_edge_o = en_i && (serial_o && !prev_serial);
+    assign f_edge_o = en_i && (!serial_o && prev_serial);
+
+endmodule
+```
+</answer>

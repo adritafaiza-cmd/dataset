@@ -1,0 +1,901 @@
+<think>Okay, I need to write a Verilog module called areset_deassert_sync. The purpose is to synchronize the deassertion of a reset. Let me recall how reset synchronizers work.
+
+First, the module has parameters CHAINS and RST_POL. The CHAINS parameter determines the number of flip-flops in the synchronizer chain. The RST_POL tells if the reset is active high or low. Wait, the problem says RST_POL is 1 for active high. So when RST_POL is 1, async_rst_i is active high. So when async_rst_i is asserted (1), the reset is active. Then, when it's deasserted (0), the deassertion needs to be synchronized.
+
+The behavior required: sync_rst_o must assert immediately when async_rst_i is asserted. But when deasserting, it can only deassert after the safe deassertion on the clock. So the assertion is asynchronous, deassertion is synchronous.
+
+Wait, the standard practice is to have the reset assertion be asynchronous (so that the reset takes effect immediately), and the deassertion is synchronized to the clock. So the sync_rst_o would follow the async_rst_i asynchronously when it's active, but when it's released, it's synchronized through the flip-flops.
+
+Wait, the problem says:
+
+- sync_rst_o must follow assertion immediately. So when async_rst_i is asserted (active), sync_rst_o is active immediately. Then, when async_rst_i is deasserted, the deassertion is synchronized through the clock edges.
+
+So the standard approach is to have the reset synchronizer with a chain of flip-flops that capture the deasserted state. Let me think.
+
+The typical code for a reset synchronizer (deassertion) is:
+
+reg [CHAINS-1:0] sync_reg;
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {CHAINS{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[CHAINS-2:0], 1'b0};
+    end
+end
+
+Then the synchronized reset is the OR of all the sync_reg bits. Wait, but the exact code depends on the parameters.
+
+Wait, but the RST_POL parameter here. If RST_POL is 1, then active high. So when async_rst_i is high, the reset is active. So the code would have the flip-flops reset when async_rst_i is active.
+
+Wait, in Verilog, the reset in the sensitivity list is active high if posedge is used. Wait, if the reset is active high, then the code would have:
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        // reset logic
+    end else begin
+        // normal operation
+    end
+end
+
+But in this case, the reset is asynchronous. So the code for the synchronizer.
+
+Wait, the standard approach is:
+
+When the async reset is asserted (active), the sync_rst_o is immediately asserted. Then, when the async reset is deasserted, the deassertion is synchronized through the flip-flop chain.
+
+So the code would have a chain of flip-flops that are reset asynchronously. When async_rst_i is active (1), all the flip-flops are set to 1 (if active high). Then, when async_rst_i is deasserted, the first flip-flop samples 0 on the next clock edge, then the next one, etc. The synchronized reset is the AND of all the flip-flops (if active high). Wait, maybe.
+
+Wait, let's think again.
+
+If RST_POL is 1 (active high), then:
+
+When async_rst_i is 1, the sync_rst_o is 1 (asserted). When async_rst_i is 0, the sync_rst_o is deasserted (0) after the synchronization.
+
+The synchronizer chain is used to deassert the reset in a way that it's synchronized to the clock. So the code would have:
+
+The flip-flops are asynchronously reset when async_rst_i is active. Then, when async_rst_i is released (goes low), the first flip-flop samples 0 on the next clock edge, then the next, etc. The synchronized reset is the OR of all the flip-flops. Wait, no. Wait, if the flip-flops are set to 1 when reset is active, then when reset is released, they shift in 0s. So the synchronized reset is the AND of all the flip-flops. Wait, perhaps.
+
+Wait, let's model the code.
+
+Let me think of the code structure.
+
+The flip-flops are in a chain. The first flop's D input is tied to 0 (if active high). Wait, no. Wait, the chain is used to delay the deassertion.
+
+Wait, here's a standard approach:
+
+The reset synchronizer has two flip-flops. The first is asynchronously reset. When the async reset is active, both are set. Then, when async reset is released, the first flop gets 0 on the next clock edge, then the second flop gets the first's value, etc. The synchronized reset is the OR of all the flops (if active high). Wait, no. Wait, if the flops are set to 1 when reset is active, then when reset is released, they start shifting in 0s. So the synchronized reset is the AND of all the flops. Wait, if all flops are 1 (reset active), then when deasserted, they become 0 one by one. So the synchronized reset is the OR of all the flops? Wait, no. Wait, if all flops are 1 (active), then when deasserted, the first flop gets 0, then the next, etc. So the synchronized reset would be the OR of all the flops? Wait, no. Wait, if the flops are all 1 when reset is active. Then when reset is released, the first flop (after clock) becomes 0. Then the next flop would take the previous value. So the synchronized reset would be the OR of all the flops? Wait, no. Wait, if the flops are all 1 when reset is active. Then, after reset is released, the first flop (after the first clock) becomes 0. Then the second flop (after the second clock) becomes 0. So the synchronized reset would be 1 only when all flops are 1. Wait, perhaps the synchronized reset is the AND of all flops. Wait, if all flops are 1, then the reset is active. Once any of them is 0, the reset is deasserted. Wait, but that's the opposite.
+
+Wait, maybe the code is:
+
+reg [CHAINS-1:0] sync_reg;
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {CHAINS{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[CHAINS-2:0], 1'b0};
+    end
+end
+
+Then, the synchronized reset is ~&sync_reg; // if active high.
+
+Wait, if RST_POL is 1, then the sync_rst_o is active high. So when all the sync_reg bits are 1, the reset is active. When any of them is 0, the reset is deasserted.
+
+Wait, but in the code above, when async_rst_i is asserted (1), the sync_reg is filled with 1's. Then, when async_rst_i is deasserted (0), the first flop gets 0, then the next, etc. So after CHAINS clock cycles, the sync_reg becomes all 0s. Then the synchronized reset would be the OR of all the bits? Wait, no. Wait, if the sync_reg is all 1s, the reset is active. When deasserted, the first flop becomes 0, then the next, etc. So the synchronized reset is active (1) when any of the bits are 1? Wait, no. Wait, if the reset is active when the sync_reg is all 1s. Then, when the sync_reg has any 1, the reset is active. Wait, no. Wait, if the reset is active when the sync_reg is all 1s, then the reset is deasserted once all the bits are 0. Wait, perhaps the code is:
+
+sync_rst_o = |sync_reg; // if active high.
+
+Wait, if the sync_reg is all 1s, then the OR is 1 (active). Then when the sync_reg shifts in 0s, the OR becomes 0 once all bits are 0. Wait, but the code above shifts in 0s. Wait, the code in the always block:
+
+When async_rst_i is 0 (deasserted), the code shifts in a 0. Wait, the code is:
+
+sync_reg <= {sync_reg[CHAINS-2:0], 1'b0};
+
+Wait, if CHAINS is 2, then the code would be:
+
+sync_reg[1] <= sync_reg[0], and sync_reg[0] <= 0.
+
+Wait, no. Wait, the code {sync_reg[CHAINS-2:0], 1'b0} would take the lower CHAINS-1 bits and append a 0. Wait, for example, if CHAINS is 2, then:
+
+sync_reg is [1:0]. Then, after shifting, the new value is {sync_reg[0], 1'b0} ?
+
+Wait, maybe the code is:
+
+The first flop is the first in the chain. The D input is 0. So the first flop's input is 0. Then the next flop's input is the first's output. So the chain is filled with 0s once the reset is released.
+
+Wait, perhaps the code should be:
+
+The sync_reg is initialized to all ones when async_rst_i is active. Then, when async_rst_i is deasserted, each flop takes the previous value. Wait, but the code in the always block would have:
+
+If async_rst_i is active (1), then sync_reg is all 1's. Then, when async_rst_i is 0, the code shifts in 0's.
+
+Wait, but in the code:
+
+sync_reg <= {sync_reg[CHAINS-2:0], 1'b0};
+
+Wait, if CHAINS is 2, then the code would take the lower CHAIN-1 bits (1 bit) and append a 0. So the first flop would get the previous second flop's value, and the second flop gets 0. Wait, perhaps the code is written as a shift register where the first flop gets 0, and others shift.
+
+Wait, perhaps the code is:
+
+The first flop's D is 0, and the rest are connected in a chain. So the code would be:
+
+reg [CHAINS-1 : 0] sync_reg;
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {CHAINS{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[CHAINS-2:0], 1'b0};
+    end
+end
+
+Wait, for example, if CHAINS is 2:
+
+sync_reg is [1:0]. When async_rst_i is 0, the code would shift left, and the LSB is 0.
+
+Wait, but in Verilog, the left part is the higher indices. So {sync_reg[0], 1'b0} would be the new value.
+
+Wait, but if CHAINS is 2, then the code would be:
+
+sync_reg <= {sync_reg[0], 1'b0} ?
+
+Wait, the code {sync_reg[CHAINS-2:0], 1'b0} would take the lower CHAINS-1 bits (indices CHAINS-2 downto 0) and append a 0. For example, if CHAINS is 3, then CHAINS-2 is 1. So indices 1 downto 0 of sync_reg, then append 0. So the new sync_reg would be [1:0] of old, then 0. So the length remains the same.
+
+Wait, but the code is written as:
+
+sync_reg <= {sync_reg[CHAINS-2:0], 1'b0};
+
+Assuming that CHAINS is at least 1. Wait, but CHAINS is the number of stages. So if CHAINS is 2, the code would have two flip-flops. So the code would shift the existing bits and add a 0 at the end.
+
+Wait, but in that case, the first flip-flop would get the previous second, and the second would get 0. Wait, perhaps the code is intended to have the first flop's input as 0, and the rest shift.
+
+Wait, perhaps the code is:
+
+The first flop's input is 0. The second flop's input is the first's output. So the chain is filled with 0's once the reset is released.
+
+But in that case, the code would have:
+
+sync_reg[0] <= 0;
+
+sync_reg[1] <= sync_reg[0];
+
+But in the code above, the code is:
+
+sync_reg <= {sync_reg[CHAINS-2:0], 1'b0};
+
+Wait, if CHAINS is 2, then CHAINS-2 is 0. So the code would take sync_reg[0], and append 0. So the new sync_reg would be [sync_reg[0], 0]. Wait, but that's a 2-bit vector. Wait, but the original sync_reg is 2 bits. So if the original is [1:0], then after the shift, the new value is [0:0], but that's not correct.
+
+Hmm, perhaps the code is written as:
+
+The code for the chain is that each stage is shifted left, and the LSB is 0. Wait, but in Verilog, the code {sync_reg[CHAINS-2:0], 1'b0} would take the lower CHAINS-1 bits and append a zero. So for example, if CHAINS is 3, then the code would take bits [1:0] of the current sync_reg and append a 0. So the new sync_reg is [1:0] of old, then 0. So the length remains the same.
+
+Wait, but in that case, the code would have a chain of CHAINS flip-flops. The first flip-flop's input is 0, and each subsequent one takes the previous one's value.
+
+Wait, but the code in the always block would be:
+
+When async_rst_i is not active, the code shifts in a 0 into the LSB. So the chain would have the 0 propagating through each stage. So after CHAINS clock cycles, all the bits are 0. Then the synchronized reset would be the OR of all bits? Wait, if the reset is active when any of the bits are 1 (if RST_POL is 1). Wait, but in the code, when async_rst_i is active, the sync_reg is all 1s. So the OR of all bits would be 1 (active). Then, when async_rst_i is deasserted, the first flop gets 0, then the next, etc. So after CHAINS cycles, all bits are 0. So the OR would be 0 (inactive). So the code would have:
+
+sync_rst_o = |sync_reg;
+
+Wait, but if RST_POL is 1, then active high. So the code would have:
+
+If RST_POL is 1, then the reset is active high. So when sync_reg is all 1s, the reset is active. Then, when the sync_reg becomes all 0s, the reset is deasserted.
+
+Wait, but in the code above, the sync_reg is filled with 1s when async_rst_i is active. Then, when async_rst_i is deasserted, the code shifts in 0s. So the OR of the bits would be 1 until all bits are 0. Wait, but that would mean the reset is active as long as any of the bits are 1. Wait, but if the reset is active when the sync_reg is all 1s, then the OR would be 1. Wait, but the code would have:
+
+If RST_POL is 1, then the reset is active when sync_rst_o is 1.
+
+So the code would have:
+
+assign sync_rst_o = (|sync_reg) ? 1'b1 : 1'b0;
+
+Wait, but if the sync_reg is all 1s (after reset), then OR is 1. Then, when the sync_reg shifts in 0s, the OR becomes 0 once all bits are 0. So the code would have:
+
+sync_rst_o = |sync_reg;
+
+But in the code, the sync_reg is initialized to all 1s when async_rst_i is active. Then, when async_rst_i is released, the code shifts in 0s. So the OR would be 1 until all bits are 0. Wait, but that would mean the reset is active (1) until all the bits are 0. Wait, but that's the opposite of the intended behavior.
+
+Wait, perhaps the code is:
+
+The sync_reg is all 1s when reset is active. When the reset is deasserted, the first flop gets 0, then the next, etc. So the synchronized reset is active (1) until all the flops are 0. Wait, but that would take CHAINS cycles. Wait, but the code would have:
+
+After the reset is deasserted, the first flop (sync_reg[0]) becomes 0 on the first clock edge. Then the next flop (sync_reg[1]) becomes 0 on the next edge. Wait, but in the code, the code is shifting in 0s. Wait, the code in the always block is:
+
+sync_reg <= {sync_reg[CHAINS-2:0], 1'b0};
+
+So for example, if CHAINS is 2:
+
+sync_reg is [1:0]. The code would take bits [0] (the lower bit) and append a 0. So the new value is {sync_reg[0], 1'b0}.
+
+Wait, but if the initial value after reset is all 1s (when async_rst_i is active), then when async_rst_i is released, the first clock edge would shift in a 0 into the LSB. So the new sync_reg would be [1:0] = {1, 0} (assuming previous was all 1s). Wait, no. Wait, if the initial is all 1s (after reset), then when async_rst_i is deasserted, the code shifts in a 0. So the first flop (LSB) becomes 0, the next flop (MSB) takes the previous LSB. Wait, but the code is written as:
+
+sync_reg <= {sync_reg[CHAINS-2:0], 1'b0};
+
+If CHAINS is 2, then CHAINS-2 is 0. So the code would take sync_reg[0], and append 0. So the new sync_reg would be [sync_reg[0], 0]. Wait, but if the original sync_reg was all 1s (after reset), then after the first clock edge, the new sync_reg would be [1, 0]. Then the next clock edge would take the lower bit (0) and append 0 again. So the sync_reg becomes [0, 0]. So after two cycles, all bits are 0.
+
+So the OR of the bits would be 1 until all bits are 0. Wait, but in the first cycle after deassertion, the OR is 1 (since one bit is 1 and the other is 0). Wait, but the code would have:
+
+If RST_POL is 1, the sync_rst_o is active when any of the bits are 1. Wait, but that's not correct. Because when the reset is active (async_rst_i is high), the sync_rst_o should be active immediately. Wait, the code in the always block is:
+
+When async_rst_i is active (1), the sync_reg is all 1s. So the OR would be 1 (active). Then, when async_rst_i is deasserted (0), the code shifts in 0s. So the OR becomes 0 after CHAINS cycles. Wait, but in the first cycle after deassertion, the OR is 1 (since one bit is 1 and the other is 0). Wait, but the code would have:
+
+If CHAINS is 2:
+
+After deassertion:
+
+Cycle 0: sync_reg = 11 → OR is 1 (active)
+Cycle 1: sync_reg becomes 10 → OR is 1 (active)
+Cycle 2: sync_reg becomes 00 → OR is 0 (inactive)
+
+Wait, but the code would take two cycles to deassert. So the deassertion is delayed by CHAINS cycles. So the code would have:
+
+sync_rst_o = |sync_reg;
+
+But in that case, the code would have the reset active for CHAINS cycles after deassertion. Wait, but the code's purpose is to have the deassertion synchronized. So the code would have the reset deassert after CHAINS clock cycles.
+
+But the code in the always block is shifting in 0s. Wait, but the code is:
+
+When async_rst_i is deasserted, the code shifts in 0s. So the first flop gets 0, then the next, etc. So the number of cycles needed to deassert is equal to the number of stages. So the code would have:
+
+sync_rst_o is active (1) when any of the sync_reg bits are 1. So the code would have:
+
+assign sync_rst_o = |sync_reg;
+
+But in the code, when async_rst_i is active, the sync_reg is all 1s → OR is 1 (active). When async_rst_i is deasserted, the first flop gets 0, then the next. So after CHAINS cycles, all bits are 0 → OR is 0 (inactive). So the code would have:
+
+assign sync_rst_o = (|sync_reg) ? 1'b1 : 1'b0;
+
+Wait, but if RST_POL is 1, then the reset is active high. So the code would have:
+
+assign sync_rst_o = (|sync_reg);
+
+But in the code, the sync_reg is all 1s when async_rst_i is active. So the OR is 1. When async_rst_i is deasserted, the OR becomes 0 after CHAINS cycles.
+
+Wait, but the code would have:
+
+If the code is written as:
+
+sync_reg is initialized to all 1's when async_rst_i is active.
+
+Then, when async_rst_i is deasserted, each clock cycle shifts in a 0. So the first flop (LSB) becomes 0, then the next, etc. So after CHAINS cycles, all bits are 0. So the OR becomes 0. So the code would have:
+
+sync_rst_o = |sync_reg;
+
+But in that case, the code would have the reset active for CHAINS cycles after deassertion. Wait, but the code's purpose is to have the deassertion synchronized. So the code would have:
+
+The deassertion is delayed by CHAINS clock cycles. So the code would have:
+
+The code for the synchronizer:
+
+reg [CHAINS-1 : 0] sync_reg;
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {CHAINS{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[CHAINS-2:0], 1'b0};
+    end
+end
+
+assign sync_rst_o = |sync_reg;
+
+Wait, but in this case, the code would have the OR of all the bits. So when any of them is 1, the reset is active. So the reset is active as long as any of the sync_reg bits are 1. So when async_rst_i is active, all bits are 1 → OR is 1. Then, when async_rst_i is deasserted, the bits shift in 0s. So after CHAINS cycles, all bits are 0 → OR is 0. So the reset deasserts after CHAINS cycles. That's correct.
+
+But in the code, the initial value of the sync_reg is all 1s. Then, when async_rst_i is deasserted, the code shifts in 0s. So the first flop (LSB) becomes 0 on the first clock edge, then the next, etc. So the code would have the deassertion after CHAINS cycles.
+
+But the code in the always block is written as:
+
+sync_reg <= {sync_reg[CHAINS-2:0], 1'b0};
+
+Wait, for example, if CHAINS is 2:
+
+sync_reg is [1:0]. The code would take bits [0] (the lower bit) and append 0. So the new value is {sync_reg[0], 1'b0}.
+
+Wait, but if the initial value after reset is all 1s (11), then after first clock edge, the code would take the lower bit (1) and append 0 → new sync_reg is 10. Then next clock edge: take lower bit (0) and append 0 → 00. So after two cycles, all bits are 0. So the OR becomes 0. So the code would have the reset deassert after CHAINS cycles.
+
+Yes. So the code would have:
+
+sync_rst_o = |sync_reg;
+
+But in the code, the parameters are CHAINS and RST_POL.
+
+Wait, but the code's RST_POL is 1 for active high. So the code would have:
+
+If RST_POL is 1, the code is as above. If RST_POL is 0, the code would invert the logic.
+
+But the code in the problem statement says:
+
+Parameters:
+
+CHAINS: depth of the release pipeline.
+
+RST_POL: 1 for active high.
+
+So the code should be written with RST_POL as 1.
+
+So the code would have:
+
+The sync_reg is all 1s when async_rst_i is active. When async_rst_i is deasserted, the code shifts in 0s. The OR of the sync_reg gives the synchronized reset.
+
+Wait, but in the code, the code is written as:
+
+sync_reg <= {sync_reg[CHAINS-2:0], 1'b0};
+
+Wait, but if CHAINS is 2, the code would take the lower bit (index 0) and append a 0. So the new sync_reg is [sync_reg[0], 0]. Wait, but in Verilog, the left part is the higher indices. Wait, if CHAINS is 2, the indices are [1:0]. So the code would take bits [0] (the LSB) and append 0. So the new value is {sync_reg[0], 1'b0}.
+
+Wait, but in the initial state after reset, sync_reg is all 1s. So when async_rst_i is deasserted, the first clock edge would shift in a 0 into the LSB. So the new sync_reg would be [1, 0]. Then the next clock edge would take the LSB (0) and append 0 again → [0, 0]. So after two cycles, all bits are 0. So the OR becomes 0.
+
+Thus, the code would have:
+
+assign sync_rst_o = |sync_reg;
+
+But in the code, the RST_POL is 1. So the code is correct.
+
+Now, the code for the module:
+
+Parameters:
+
+CHAINS: number of flip-flops in the chain.
+
+RST_POL: 1 for active high.
+
+The code:
+
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    reg [CHAINS-1:0] sync_reg;
+
+    always @(posedge clk or posedge async_rst_i) begin
+        if (async_rst_i) begin
+            sync_reg <= {CHAINS{1'b1}};
+        end else begin
+            sync_reg <= {sync_reg[CHAINS-2:0], 1'b0};
+        end
+    end
+
+    assign sync_rst_o = |sync_reg;
+
+endmodule
+
+Wait, but wait. The code uses RST_POL. Wait, the code is written for active high. If RST_POL is 0, the code would need to invert.
+
+Wait, the code in the always block uses posedge async_rst_i. If RST_POL is 0 (active low), then the sensitivity would be posedge of the negated async_rst_i. Wait, but the code's parameters are RST_POL. Wait, the problem says:
+
+Parameters:
+
+RST_POL: 1 means async_rst_i is active-high.
+
+So the code uses async_rst_i as active high. So the code is correct as written.
+
+Wait, but the code's always block uses posedge async_rst_i. So when async_rst_i is 1 (active), the sync_reg is set to all 1s. Then, when async_rst_i is 0, the code shifts in 0s.
+
+Yes. So the code is correct.
+
+Wait, but the code uses {sync_reg[CHAINS-2:0], 1'b0} when CHAINS is 2. Wait, if CHAINS is 1, then CHAINS-2 would be -1, which is invalid. So the code should have a check for CHAINS >= 2? Or the code is written assuming CHAINS >= 2.
+
+But the problem says "Choose a safe crossing yourself." So the code should have CHAINS >= 2. But the code should handle CHAINS >=1.
+
+Wait, if CHAINS is 1, then the code would have:
+
+sync_reg <= {sync_reg[-1:0], 1'b0}; which is invalid.
+
+So the code should have a check for CHAINS >=2. But the code in the problem statement says "Choose a safe crossing yourself." So the code can assume that CHAINS is at least 2.
+
+Alternatively, the code can use a generate loop to handle all cases.
+
+Wait, but the code as written would have:
+
+For CHAINS=1:
+
+sync_reg is [0:0]. The code would have:
+
+sync_reg <= {sync_reg[CHAINS-2:0], 1'b0} → CHAINS-2 is -1. Which is invalid.
+
+Thus, the code would need to have a generate block to handle CHAINS=1.
+
+But the problem says "Choose a safe crossing yourself." So perhaps the code is written with CHAINS >=2.
+
+But the code in the answer should handle all CHAINS >=1.
+
+Hmm. Let's think again.
+
+If CHAINS is 1, then the code would have:
+
+sync_reg <= {sync_reg[CHAINS-2:0], 1'b0} → CHAINS-2 is -1. So the code would have:
+
+sync_reg <= {sync_reg[-1:0], 1'b0} → which is invalid.
+
+Thus, the code would need to handle CHAINS >=2.
+
+But the code in the answer uses CHAINS as a parameter. So perhaps the code should have a generate block to handle CHAINS=1 and higher.
+
+Alternatively, the code can use a different approach.
+
+Wait, another approach for the synchronizer:
+
+The code uses a shift register where the first flop is asynchronously reset, and the rest are not. Wait, but the standard approach is to have all flops asynchronously reset.
+
+Wait, the code for the synchronizer:
+
+The code can be written as:
+
+reg [CHAINS-1:0] sync_reg;
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {CHAINS{1'b1}};
+    end else begin
+        sync_reg <= {sync_reg[CHAINS-2:0], 1'b0};
+    end
+end
+
+assign sync_rst_o = |sync_reg;
+
+But if CHAINS is 1, then the code would have:
+
+sync_reg <= {sync_reg[-1:0], 1'b0} → invalid.
+
+Thus, the code would need to have a check for CHAINS >=2. But the problem says "Choose a safe crossing yourself." So perhaps the code is written with CHAINS >=2.
+
+Alternatively, the code can use a loop to shift in the 0.
+
+Wait, another way to write the code:
+
+For CHAINS >=1:
+
+The code can have:
+
+sync_reg <= (sync_reg << 1) | 1'b0;
+
+Wait, but that's not correct. Wait, if you shift left and insert 0 in LSB.
+
+Wait, but the code would have:
+
+sync_reg <= (sync_reg << 1) | 0;
+
+Wait, but that's the same as shifting left and adding 0.
+
+But in Verilog, shifting left would multiply by 2, which is equivalent to shifting bits to the left.
+
+But the code would have:
+
+If CHAINS is 2:
+
+sync_reg starts as 11.
+
+After first clock: 10.
+
+After second: 00.
+
+Thus, the code would have:
+
+sync_reg <= (sync_reg << 1) | 0;
+
+But in Verilog, the << operator would shift left, filling with zeros.
+
+Wait, but the code would have:
+
+sync_reg <= (sync_reg << 1);
+
+Which for CHAINS=2:
+
+sync_reg is 2 bits. After shifting left, the MSB is lost. Wait, no. Wait, if the reg is [1:0], shifting left would multiply by two. For example, 11 <<1 is 10 (binary 11 shifted left becomes 110, but if the reg is 2 bits, it's 10).
+
+Wait, but in Verilog, if you have a reg [1:0] a = 2'b11; then a <<1 would be 3 bits? No. Wait, in Verilog, the shift operator doesn't change the size. So shifting a 2-bit reg left by 1 would result in the same size, with the MSB lost. Wait, no. Wait, in Verilog, the left shift operator for a register of fixed size will shift and fill with zeros. So:
+
+reg [1:0] a = 2'b11;
+
+a <<1 would be 2'b10.
+
+Yes.
+
+So the code can be written as:
+
+sync_reg <= (sync_reg << 1);
+
+Which would shift left, filling with zero. So the code would have:
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {CHAINS{1'b1}};
+    end else begin
+        sync_reg <= (sync_reg << 1);
+    end
+end
+
+But then, the code would shift left, filling with zeros. So for CHAINS=2:
+
+Initial: 11 → after shift: 10 → after another shift: 00.
+
+Thus, the OR would be 1 for two cycles after deassertion.
+
+But the code would have:
+
+assign sync_rst_o = |sync_reg;
+
+Which would be correct.
+
+But in this case, the code would have:
+
+sync_reg <= (sync_reg << 1);
+
+Which is equivalent to shifting left and inserting 0 in LSB.
+
+Thus, the code would have:
+
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    reg [CHAINS-1:0] sync_reg;
+
+    always @(posedge clk or posedge async_rst_i) begin
+        if (async_rst_i) begin
+            sync_reg <= {CHAINS{1'b1}};
+        end else begin
+            sync_reg <= (sync_reg << 1);
+        end
+    end
+
+    assign sync_rst_o = |sync_reg;
+
+endmodule
+
+This code would work for any CHAINS >=1.
+
+For example, CHAINS=1:
+
+sync_reg is 1 bit. After reset, it's 1. When async_rst_i is deasserted, shifting left (which is same as multiplying by 2, but since it's 1 bit, shifting left would result in 0. So after one cycle, sync_reg becomes 0. So the OR is 0.
+
+Wait, but if CHAINS is 1:
+
+The code would have:
+
+sync_reg <= (sync_reg << 1). So if CHAINS is 1, the reg is [0:0]. Shifting left would multiply by two, but since it's a single bit, shifting left would result in 0. So after deassertion, the sync_reg becomes 0. So the OR is 0 immediately. So the code would have the reset deassert in one cycle.
+
+But the code's CHAINS parameter is the number of stages. So for CHAINS=1, the code would have one stage. But the code's shift would take one cycle.
+
+But the code's code for the OR would be |sync_reg. So if CHAINS is 1, the code would have:
+
+When async_rst_i is active, sync_reg is 1 → OR is 1. When async_rst_i is deasserted, the code shifts left (0) → OR is 0. So the code would have the reset deassert after one cycle.
+
+But the code's CHAINS parameter is the number of stages. So if CHAINS is 1, the code would have one stage. But the code's code would have the deassertion after one cycle. But the code's code for the shift is equivalent to shifting in a zero.
+
+But the code's code for the shift would be:
+
+sync_reg <= (sync_reg << 1);
+
+Which for CHAINS=1:
+
+sync_reg is 1 bit. So shifting left would multiply by two, but since it's a single bit, shifting left would result in 0.
+
+Thus, the code would have:
+
+After deassertion, the first clock edge would shift in 0. So the code would have the reset deassert after one cycle.
+
+Thus, the code would work for any CHAINS >=1.
+
+Thus, the code can be written as:
+
+reg [CHAINS-1:0] sync_reg;
+
+always @(posedge clk or posedge async_rst_i) begin
+    if (async_rst_i) begin
+        sync_reg <= {CHAINS{1'b1}};
+    end else begin
+        sync_reg <= (sync_reg << 1);
+    end
+end
+
+assign sync_rst_o = |sync_reg;
+
+This code would handle any CHAINS >=1.
+
+Thus, the code would be:
+
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    reg [CHAINS-1:0] sync_reg;
+
+    always @(posedge clk or posedge async_rst_i) begin
+        if (async_rst_i) begin
+            sync_reg <= {CHAINS{1'b1}};
+        end else begin
+            sync_reg <= (sync_reg << 1);
+        end
+    end
+
+    assign sync_rst_o = |sync_reg;
+
+endmodule
+
+Wait, but the code uses RST_POL. Wait, the code is written for active high. If RST_POL is 0, then the code would need to invert.
+
+Wait, the code's parameters are RST_POL. If RST_POL is 0 (active low), then the code's sensitivity list would have negedge async_rst_i. But the code's parameters are RST_POL.
+
+Wait, the code's parameters:
+
+RST_POL: 1 means async_rst_i is active high.
+
+So the code's current code is correct for active high. If RST_POL is 0, the code would need to invert.
+
+But the code's code uses posedge async_rst_i. If RST_POL is 0 (active low), then the code would need to use negedge async_rst_i.
+
+But the code's parameters are given as RST_POL. So the code should have:
+
+If RST_POL is 1, the code uses posedge async_rst_i.
+
+If RST_POL is 0, the code uses negedge.
+
+Thus, the code should have:
+
+always @(posedge clk or posedge async_rst_i) if RST_POL is 1.
+
+But if RST_POL is 0, the code would have:
+
+always @(posedge clk or negedge async_rst_i)
+
+But the code's parameters are RST_POL. So the code should have:
+
+The sensitivity list depends on RST_POL.
+
+Thus, the code should have:
+
+always @(posedge clk or (RST_POL ? posedge async_rst_i : negedge async_rst_i)) 
+
+But in Verilog, you can't conditionally have posedge or negedge in the sensitivity list. So the code must use generate blocks.
+
+Thus, the code can be written as:
+
+generate
+    if (RST_POL) begin
+        always @(posedge clk or posedge async_rst_i) begin
+            if (async_rst_i) begin
+                sync_reg <= {CHAINS{1'b1}};
+            end else begin
+                sync_reg <= (sync_reg << 1);
+            end
+        end
+    end else begin
+        always @(posedge clk or negedge async_rst_i) begin
+            if (~async_rst_i) begin
+                sync_reg <= {CHAINS{1'b1}};
+            end else begin
+                sync_reg <= (sync_reg << 1);
+            end
+        end
+    end
+endgenerate
+
+But this complicates the code. However, the problem states that RST_POL is 1 for active high. So the code can assume RST_POL is 1. Wait, the code's parameters are given as RST_POL, but the code in the problem statement says:
+
+Parameters:
+
+RST_POL: 1 means async_rst_i is active-high.
+
+Thus, the code can use RST_POL to invert if needed.
+
+But the code in the answer must have RST_POL as a parameter. So the code must handle both cases.
+
+Thus, the code would have:
+
+The always block's sensitivity list depends on RST_POL.
+
+Thus, the code would have:
+
+generate
+    if (RST_POL == 1'b1) begin
+        always @(posedge clk or posedge async_rst_i) begin
+            if (async_rst_i) begin
+                sync_reg <= {CHAINS{1'b1}};
+            end else begin
+                sync_reg <= (sync_reg << 1);
+            end
+        end
+    end else begin
+        // RST_POL is 0: active low
+        always @(posedge clk or negedge async_rst_i) begin
+            if (~async_rst_i) begin
+                sync_reg <= {CHAINS{1'b1}};
+            end else begin
+                sync_reg <= (sync_reg << 1);
+            end
+        end
+    end
+endgenerate
+
+But the code's parameters are given as RST_POL. So the code must handle both cases.
+
+Thus, the code would have:
+
+// Inside the module:
+
+reg [CHAINS-1:0] sync_reg;
+
+generate
+    if (RST_POL) begin
+        // Active high
+        always @(posedge clk or posedge async_rst_i) begin
+            if (async_rst_i) begin
+                sync_reg <= {CHAINS{1'b1}};
+            end else begin
+                sync_reg <= (sync_reg << 1);
+            end
+        end
+    end else begin
+        // Active low
+        always @(posedge clk or negedge async_rst_i) begin
+            if (~async_rst_i) begin
+                sync_reg <= {CHAINS{1'b1}};
+            end else begin
+                sync_reg <= (sync_reg << 1);
+            end
+        end
+    end
+endgenerate
+
+assign sync_rst_o = |sync_reg;
+
+Thus, the code would have RST_POL as a parameter to handle active high or low.
+
+But the problem says RST_POL is 1 for active high. So the code can use generate blocks to handle both cases.
+
+Thus, the code would have:
+
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    reg [CHAINS-1:0] sync_reg;
+
+    generate
+        if (RST_POL == 1'b1) begin
+            // Active high
+            always @(posedge clk or posedge async_rst_i) begin
+                if (async_rst_i) begin
+                    sync_reg <= {CHAINS{1'b1}};
+                end else begin
+                    sync_reg <= (sync_reg << 1);
+                end
+            end
+        end else begin
+            // Active low
+            always @(posedge clk or negedge async_rst_i) begin
+                if (~async_rst_i) begin
+                    sync_reg <= {CHAINS{1'b1}};
+                end else begin
+                    sync_reg <= (sync_reg << 1);
+                end
+            end
+        end
+    endgenerate
+
+    assign sync_rst_o = |sync_reg;
+
+endmodule
+
+This code would handle both active high and active low resets based on RST_POL.
+
+Thus, the code is correct.
+
+Now, the code uses generate blocks to handle RST_POL. The code uses the shift left operator to shift in zeros. The OR of the sync_reg gives the synchronized reset.
+
+Thus, the code should be written as above.
+
+But the code uses generate blocks. However, the code in the problem statement's example uses a single module with parameters. So the code would have generate blocks.
+
+Thus, the final code would be:
+
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    reg [CHAINS-1:0] sync_reg;
+
+    generate
+        if (RST_POL) begin
+            // Active high
+            always @(posedge clk or posedge async_rst_i) begin
+                if (async_rst_i) begin
+                    sync_reg <= {CHAINS{1'b1}};
+                end else begin
+                    sync_reg <= (sync_reg << 1);
+                end
+            end
+        end else begin
+            // Active low
+            always @(posedge clk or negedge async_rst_i) begin
+                if (~async_rst_i) begin
+                    sync_reg <= {CHAINS{1'b1}};
+                end else begin
+                    sync_reg <= (sync_reg << 1);
+                end
+            end
+        end
+    endgenerate
+
+    assign sync_rst_o = |sync_reg;
+
+endmodule
+
+This code should satisfy the requirements.
+
+Testing for CHAINS=2:
+
+When async_rst_i is asserted (1), sync_reg is all 1s → sync_rst_o is 1. When async_rst_i is deasserted (0), the code shifts in 0s. After two clock cycles, sync_reg is 00 → sync_rst_o is 0.
+
+Thus, the code meets the requirements.
+
+Thus, the code is correct.
+</think>
+
+<answer>
+```verilog
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    reg [CHAINS-1:0] sync_reg;
+
+    generate
+        if (RST_POL) begin
+            // Active high reset
+            always @(posedge clk or posedge async_rst_i) begin
+                if (async_rst_i) begin
+                    sync_reg <= {CHAINS{1'b1}};
+                end else begin
+                    sync_reg <= (sync_reg << 1);
+                end
+            end
+        end else begin
+            // Active low reset
+            always @(posedge clk or negedge async_rst_i) begin
+                if (~async_rst_i) begin
+                    sync_reg <= {CHAINS{1'b1}};
+                end else begin
+                    sync_reg <= (sync_reg << 1);
+                end
+            end
+        end
+    endgenerate
+
+    assign sync_rst_o = |sync_reg;
+
+endmodule
+```
+</answer>

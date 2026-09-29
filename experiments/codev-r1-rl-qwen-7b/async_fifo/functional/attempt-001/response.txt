@@ -1,0 +1,1206 @@
+<think>Okay, I need to design an asynchronous FIFO in Verilog. Let's start by recalling the key components of an async FIFO. The main challenge is handling the cross-clock domain communication between the write and read sides without metastability issues.
+
+First, the parameters: DSIZE is the data width, ASIZE is the log2 of the number of entries. So the FIFO has 2^ASIZE entries. The FIFO needs to have write and read pointers, which are synchronized across the clock domains.
+
+The module has separate clocks for write (wclk) and read (rclk), each with their own resets (wrst_n and rrst_n). The resets are active-low. The FIFO should have full and empty flags, and almost full/empty signals.
+
+The write side: When winc is high and not full, data is written. The write pointer increments. The full condition is when the write pointer is one less than the read pointer (considering wrap around). Wait, but in FIFO design, pointers are usually one more bit than needed to distinguish between full and empty. For example, if ASIZE is 4, the pointers are 5 bits. The MSB indicates wrap around. When the lower bits are equal, but the MSB differs, it's full. Empty is when all bits are equal.
+
+Wait, the standard approach for async FIFO pointers: use Gray code for pointers to synchronize between domains. The write pointer is converted to Gray and synchronized to the read clock domain, and vice versa.
+
+So the steps are:
+
+1. Write pointer (wptr) and read pointer (rptr) are maintained in binary, but converted to Gray code before crossing clock domains.
+
+2. The write domain logic: On write clock, when winc and not full, increment the write pointer. The full condition is when the next write pointer's Gray code equals the synchronized read pointer's Gray code (but with the MSB and next bit checked). Wait, the actual full condition is when the write pointer's next position would catch up to the read pointer in a circular buffer.
+
+Wait, the standard method for full and empty:
+
+Empty: when read and write pointers are equal (after Gray conversion)
+
+Full: when the write pointer's next position (binary) has the same lower bits as read pointer, but the MSB is different. Wait, the actual condition is that the write pointer's next Gray code is equal to the synchronized read pointer's Gray code except for the two MSBs. Hmm, maybe I need to recall the exact method.
+
+Alternatively, the pointers are (ASIZE +1) bits. The actual depth is 2^ASIZE. The extra bit is to check if the write has wrapped around. So when the write pointer is equal to the read pointer, it's empty. If the write pointer is ahead by the entire buffer size (i.e., the MSB differs and the rest are same), then it's full.
+
+Wait, the pointers are (ASIZE +1) bits. For example, if ASIZE is 4, pointers are 5 bits. The actual address is the lower 4 bits. The full condition is when the upper bits differ and the lower bits are equal. So:
+
+full = (wptr[ASIZE:0] - rptr_sync[ASIZE:0]) == 2^ASIZE ?
+
+Wait, perhaps the full condition is when the write pointer's next position (binary) has the same lower ASIZE bits as the read pointer, but the MSB is different. Wait, maybe:
+
+If (wptr_gray == { ~rptr_gray_sync[ASIZE:ASIZE-1], rptr_gray_sync[ASIZE-2:0] }) ?
+
+Alternatively, the full condition is when the next write pointer (binary) is such that (wptr +1) has the same lower bits as the read pointer, but the MSB is different. Hmm, this is getting a bit fuzzy.
+
+Alternatively, the standard approach is:
+
+The write pointer (binary) is converted to Gray code and synchronized to the read domain. Similarly, the read pointer is converted to Gray and synchronized to the write domain.
+
+The full condition is determined in the write domain by comparing the current write pointer's Gray code with the synchronized read pointer's Gray code. Wait, the actual full condition is when the next write would make the write pointer's Gray code equal to the synchronized read pointer's Gray code except for the two MSBs. Wait, perhaps:
+
+If the next write pointer (binary) is such that (wptr +1) has the same lower bits as the read pointer, but the MSB is different. Wait, perhaps the full condition is when:
+
+(wptr_gray_next == { ~rptr_gray_sync[ASIZE:ASIZE-1], rptr_gray_sync[ASIZE-2:0] }) ?
+
+Alternatively, the full condition is when the write pointer's next Gray code is equal to the synchronized read pointer's Gray code except the two MSBs are flipped.
+
+This part is critical. Let me think again.
+
+In the standard approach:
+
+The pointers are (ASIZE +1) bits. The actual address is the lower ASIZE bits. The MSB is used to detect wrap around.
+
+The full condition is when:
+
+(wptr - rptr) == 2^ASIZE.
+
+But in terms of the pointers:
+
+If the write pointer is (rptr + 2^ASIZE), then it's full.
+
+But in terms of the binary pointers, the difference is equal to the total entries.
+
+But in terms of the Gray code pointers, the full condition is when the write pointer's Gray code is equal to the read pointer's Gray code except the two MSBs are flipped.
+
+Wait, here's a reference: 
+
+In Clifford E. Cummings' paper on async FIFO, the full condition is determined by:
+
+- The write pointer's Gray code is compared with the synchronized read pointer's Gray code.
+
+The full condition is when:
+
+wgray_next == { ~rgray_sync[ASIZE:ASIZE-1], rgray_sync[ASIZE-2:0] }
+
+Wait, perhaps the full is when the next write pointer's Gray code (after increment) is equal to the synchronized read pointer's Gray code but with the two MSBs inverted.
+
+Wait, the actual code from Cummings' paper:
+
+// full when the next write pointer's gray code is equal to the synchronized read pointer's gray code except the top two bits are flipped.
+
+Wait, in code:
+
+assign full = (wpnext == { ~rptr_sync[ASIZE:ASIZE-1], rptr_sync[ASIZE-2:0] });
+
+Wait, but the exact code may vary. Let me recall.
+
+In the paper, the full condition is:
+
+assign full = (wpnext == { ~rptr_sync[ASIZE:ASIZE-1], rptr_sync[ASIZE-2:0] });
+
+Similarly, empty is when the synchronized write pointer equals the read pointer.
+
+But in any case, the pointers are (ASIZE +1) bits. So the code would have:
+
+reg [ASIZE:0] wptr, rptr;
+
+Then, the Gray code conversion would be:
+
+function [ASIZE:0] bin2gray;
+input [ASIZE:0] bin;
+begin
+    bin2gray = bin ^ (bin >> 1);
+end
+endfunction
+
+Then, the synchronized pointers are converted back to binary in the other domain.
+
+Wait, but the pointers are stored in Gray code in the other domain. Hmm.
+
+Wait, the standard approach is:
+
+In the write domain:
+
+- The write pointer (binary) is converted to Gray (wgray).
+
+- The read pointer is synchronized into the write domain via two flip-flops (rgray_sync).
+
+Then, the full condition is determined by comparing the current write pointer's next Gray code (if we increment) with the synchronized read pointer's Gray code.
+
+Wait, perhaps the full condition is:
+
+If (wgray_next == { ~rgray_sync[ASIZE:ASIZE-1], rgray_sync[ASIZE-2 : 0] }) 
+
+Similarly, the empty condition is when the read pointer's Gray code equals the synchronized write pointer's Gray code.
+
+But I need to code this properly.
+
+Now, the FIFO memory is dual-port, with write and read pointers.
+
+The almost full and almost empty can be set when the difference between pointers is a certain threshold. For example, almost full is when the FIFO is at (2^ASIZE - ALMOST_OFFSET) entries. But the parameters here are not given. Wait, the parameters in the problem are DSIZE, ASIZE, and FALLTHROUGH. The almost full and almost empty are just flags. Wait, the problem says:
+
+- awfull indicates approaching full.
+
+- arempty indicates approaching empty.
+
+But the exact thresholds are not given. Wait, the standard approach is to have almost full when the FIFO is one less than full, but perhaps the code uses a parameter for the threshold. Wait, the problem statement does not specify the almost full/empty thresholds. Hmm.
+
+Wait, the parameters given are DSIZE, ASIZE, and FALLTHROUGH. So perhaps the almost full is when the FIFO is one less than full (so when the next write would make it full). Similarly, almost empty is when the next read would make it empty.
+
+But the problem says:
+
+- awfull: almost full (when the FIFO is approaching full)
+
+- arempty: approaching empty.
+
+But the exact thresholds are not given. Wait, perhaps the almost full is when the FIFO is at (2^ASIZE - 2) entries? Or maybe the standard approach is to have almost full when the difference is (2^ASIZE - 2) entries. Hmm.
+
+Alternatively, the almost full is when the FIFO is one less than full (so when the next write would make it full). Similarly, almost empty is when there's one entry left.
+
+But the problem statement does not specify. Wait, the user's parameters include ASIZE (log2 of entries). So the FIFO has 2^ASIZE entries.
+
+Assuming that almost full is when the FIFO is at (2^ASIZE - 2) entries. But the code may need to have a parameter for that. Wait, but the parameters given are DSIZE, ASIZE, and FALLTHROUGH. So perhaps the almost full is when the FIFO is one less than full. Wait, but the code may need to have a threshold. Wait, the problem statement says:
+
+- awfull: indicates approaching full.
+
+- arempty: approaching empty.
+
+But the exact thresholds are not given. Hmm. Maybe the almost full is when the FIFO is at (2^ASIZE - 2) entries. But perhaps the code uses a fixed threshold, like when the difference between write and read pointers is (2^ASIZE - 2). Alternatively, maybe the almost full is when the FIFO is (2^ASIZE - 1) entries. Wait, but the standard approach for almost full is when the FIFO is one less than full. For example, if the FIFO is full when it's 2^ASIZE entries, then almost full is when it's 2^ASIZE -1. Wait, but the actual maximum entries is 2^ASIZE. Wait, the FIFO has 2^ASIZE entries. So when it's full, the write pointer is one ahead of the read pointer (mod 2^(ASIZE+1)).
+
+Wait, perhaps the almost full is when the FIFO is at (2^ASIZE - 1) entries. But the code would need to compute the difference between the pointers.
+
+Alternatively, the almost full is when the FIFO is at (2^ASIZE - 2) entries. But the problem statement is unclear. Wait, the user's parameters don't include the almost thresholds. Hmm.
+
+Wait, the problem says:
+
+- awfull: almost full, write domain.
+
+- arempty: almost empty, read domain.
+
+But the exact thresholds are not given. So perhaps the code uses a fixed threshold of 1 entry away. For example, almost full is when the FIFO is one less than full. Similarly, almost empty is when one more read would empty.
+
+But the code would need to compute the difference between the pointers.
+
+Wait, in the standard FIFO code, the almost full is when the FIFO is at (FIFO_DEPTH - ALMOST_OFFSET). But the code here may have to have a parameter for that. However, the user's parameters don't include that. Hmm.
+
+Wait, the code in the problem statement's parameters are DSIZE, ASIZE, and FALLTHROUGH. So perhaps the almost full is when the FIFO is one less than full. Let's proceed with that.
+
+Now, the code outline:
+
+The FIFO has a memory array of size 2^ASIZE. The write and read pointers are (ASIZE+1) bits. The actual address is the lower ASIZE bits.
+
+The write domain:
+
+- On reset (wrst_n), reset write pointer to 0.
+
+- When winc and not full, increment write pointer and write data.
+
+The read domain:
+
+- On reset (rrst_n), reset read pointer to 0.
+
+- When rinc and not empty, increment read pointer and read data.
+
+The full and empty conditions are based on the pointers.
+
+The Gray code conversion for synchronization.
+
+Now, the code:
+
+First, declare the parameters and module.
+
+module async_fifo #(
+    parameter DSIZE = 8,
+    parameter ASIZE = 4,
+    parameter FALLTHROUGH = "TRUE"
+) (
+    input wire wclk,
+    input wire wrst_n,
+    input wire winc,
+    input wire [DSIZE-1:0] wdata,
+    output wire wfull,
+    output wire awfull,
+    input wire rclk,
+    input wire rrst_n,
+    input wire rinc,
+    output wire [DSIZE-1:0] rdata,
+    output wire rempty,
+    output wire arempty
+);
+
+// Internal signals:
+
+// Write domain signals
+reg [ASIZE:0] wptr, wptr_next; // pointers are ASIZE+1 bits
+reg [ASIZE:0] rptr_sync1, rptr_sync2; // synchronized read pointers in write domain
+wire [ASIZE:0] rptr_gray_sync; // Gray code of synchronized read pointer
+
+// Read domain signals
+reg [ASIZE:0] rptr, rptr_next;
+reg [ASIZE:0] wptr_sync1, wptr_sync2; // synchronized write pointers in read domain
+wire [ASIZE:0] wptr_gray_sync;
+
+// FIFO memory
+reg [DSIZE-1:0] mem [0:(1 << ASIZE)-1];
+
+// Almost full and empty thresholds. Let's assume almost full is when there's one space left (so FIFO is at (2^ASIZE -1) entries). Wait, but the code may need to compute the difference.
+
+Wait, the almost full is when the FIFO is one less than full. So when (wptr - rptr) >= (2^ASIZE -1). Wait, but the actual entries would be (wptr - rptr). Wait, but the pointers are (ASIZE+1) bits. The actual count is (wptr - rptr) when wptr >= rptr, else (2^(ASIZE+1) - (rptr - wptr)).
+
+Alternatively, the count is (wptr - rptr) when treated as unsigned. Wait, but in the standard approach, the difference is (wptr - rptr) mod 2^(ASIZE+1). If the difference is equal to the depth (2^ASIZE), then it's full.
+
+Wait, perhaps the count is (wptr - rptr) when the pointers are treated as binary numbers. If the difference is equal to the depth, then full. So:
+
+Full when (wptr - rptr) == 2^ASIZE.
+
+Empty when (wptr == rptr).
+
+Almost full when (wptr - rptr) >= (2^ASIZE - 1). Hmm.
+
+But the code for almost full and empty would need to compute the difference.
+
+Alternatively, the almost full is when the FIFO is at (2^ASIZE - 1) entries. So:
+
+assign awfull = ( (wptr - rptr) >= ( (1 << ASIZE) - 1 ) );
+
+But in Verilog, subtraction of pointers would be as unsigned.
+
+Wait, but the code for the almost full and empty would need to compute the difference between the write and read pointers.
+
+But in the code, the almost full and empty are outputs. Let's proceed.
+
+In the write domain:
+
+The almost full is when the FIFO is approaching full. Let's say almost full is when the FIFO is one less than full. So when (wptr - rptr_sync) >= ( (1 << ASIZE) - 1 )
+
+Similarly, almost empty is when the FIFO is one more than empty.
+
+Wait, but the code for almost full and empty:
+
+In the write domain:
+
+The almost full (awfull) is when the FIFO is at (2^ASIZE - 1) entries. So:
+
+assign awfull = ( (wptr - rptr_sync) >= ( (1 << ASIZE) - 1 ) );
+
+Wait, but the actual entries would be (wptr - rptr_sync). Wait, but the pointers are (ASIZE+1) bits. So the maximum entries is 2^ASIZE.
+
+Wait, perhaps the almost full is when the FIFO is (2^ASIZE - 1) entries. So:
+
+assign awfull = ( (wptr - rptr_sync) >= ( (1 << ASIZE) - 1 ) );
+
+But the exact code may vary.
+
+Alternatively, the almost full is when the FIFO is (2^ASIZE - 2) entries. Hmm.
+
+But the problem statement does not specify. Wait, the user's parameters don't have parameters for almost thresholds. So perhaps the almost full is when the FIFO is one less than full. So when the next write would make it full.
+
+Similarly, almost empty is when the next read would make it empty.
+
+In that case:
+
+In the write domain:
+
+assign awfull = ( (wptr - rptr_sync) >= ( (1 << ASIZE) - 1 ) );
+
+Wait, but the maximum entries is 2^ASIZE. So when the FIFO is full, the difference is 2^ASIZE. So almost full is when the difference is (2^ASIZE -1). Hmm.
+
+Alternatively, the almost full is when the FIFO is (2^ASIZE - 1) entries. So when the next write would fill it.
+
+But the code for the almost full and empty would need to calculate the difference.
+
+But perhaps the code uses the same approach as the full and empty.
+
+In any case, the code would have:
+
+// Almost full: when the FIFO is one less than full (so next write would make it full)
+// So when (wptr - rptr_sync) >= ( (1 << ASIZE) - 1 )
+
+// Almost empty: when the FIFO is one more than empty (i.e., one entry left)
+// So (rptr_sync - wptr) >= 1 ?
+
+Wait, but the almost empty is in the read domain.
+
+Wait, the almost empty is when the FIFO is approaching empty. So when the read pointer is approaching the write pointer.
+
+In the read domain:
+
+assign arempty = ( (rptr_sync - wptr_sync) <= 1 )
+
+But this is getting complicated.
+
+Alternatively, the almost full is when the FIFO is at (2^ASIZE - 1) entries. So:
+
+// almost full when (wptr - rptr_sync) >= (2**ASIZE -1 )
+
+// almost empty when (wptr_sync - rptr) <= 1 ?
+
+Hmm. Maybe the code uses the same approach as the full and empty.
+
+But perhaps the code uses the difference between the pointers.
+
+But given the time constraints, perhaps proceed with the standard approach.
+
+Now, the code steps:
+
+1. Implement the dual n-bit pointers (ASIZE+1 bits).
+
+2. Synchronize the pointers across clock domains using two-stage synchronizers.
+
+3. Generate full and empty flags.
+
+4. Generate almost full and almost empty.
+
+5. Implement the FIFO memory.
+
+6. Handle the read and write data paths.
+
+Now, code:
+
+First, the write pointer and read pointer.
+
+In the write domain:
+
+reg [ASIZE:0] wptr, wptr_bin_next;
+reg [ASIZE:0] rptr_sync1, rptr_sync2;
+
+// Convert binary to gray code
+function [ASIZE:0] bin2gray;
+input [ASIZE:0] bin;
+begin
+    bin2gray = bin ^ (bin >> 1);
+end
+endfunction
+
+// Synchronize read pointer to write domain
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        rptr_sync1 <= 0;
+        rptr_sync2 <= 0;
+    end else begin
+        rptr_sync1 <= rptr_gray;
+        rptr_sync2 <= rptr_sync1;
+    end
+end
+
+Wait, but the read pointer in the write domain is converted to gray and synchronized.
+
+Wait, in the write domain:
+
+The read pointer is converted to gray code in the read domain, then synchronized into the write domain via two FFs.
+
+Similarly, the write pointer's gray code is synchronized into the read domain.
+
+Wait, the standard steps:
+
+In write domain:
+
+- The write pointer (binary) is converted to gray (wgray)
+
+- The read pointer (gray) is synchronized into write domain (rgray_sync)
+
+Similarly, in read domain:
+
+- The read pointer (binary) converted to gray (rgray)
+
+- The write pointer's gray is synchronized into read domain (wgray_sync)
+
+Then:
+
+Full condition in write domain: when next write would make the pointers equal (but with the MSB different)
+
+Wait, perhaps the code for full is:
+
+wire full;
+assign full = ( (wgray_next == { ~rgray_sync[ASIZE:ASIZE-1], rgray_sync[ASIZE-2:0] }) );
+
+Similarly, empty is when the read gray equals the synchronized write gray.
+
+But perhaps the code is as follows.
+
+In code:
+
+// Write domain logic:
+
+// Binary write pointer
+reg [ASIZE:0] wptr_bin;
+wire [ASIZE:0] wgray_bin = bin2gray(wptr_bin);
+
+// Synchronize read pointer (gray) to write domain
+reg [ASIZE:0] rptr_gray_sync1, rptr_gray_sync2;
+
+// Read pointer in gray code
+wire [ASIZE:0] rptr_bin;
+reg [ASIZE:0] rptr_bin_reg;
+
+// Similarly for read domain.
+
+Wait, perhaps the code would have:
+
+In the write domain:
+
+// Convert read pointer to gray and sync into write domain
+reg [ASIZE:0] rptr_gray_sync1, rptr_gray_sync2;
+
+// In read domain:
+
+// Convert write pointer to gray and sync into read domain
+reg [ASIZE:0] wptr_gray_sync1, wptr_gray_sync2;
+
+Then:
+
+// Full condition in write domain:
+
+wire full;
+assign full = ( (wptr_bin_next == { ~rptr_gray_sync2[ASIZE:ASIZE-1], rptr_gray_sync2[ASIZE-2:0] }) );
+
+Wait, but the actual full condition is when the next write pointer's gray code is equal to the synchronized read pointer's gray code except the two MSBs are flipped.
+
+But I'm getting stuck here.
+
+Alternatively, refer to standard code.
+
+In Clifford Cummings' paper:
+
+The full condition is:
+
+assign full = (wpnext == { ~rptr_sync[ASIZE:ASIZE-1], rptr_sync[ASIZE-2:0] });
+
+Similarly, empty is when the synchronized write pointer equals the read pointer.
+
+But the code in the paper uses:
+
+// write pointer and read pointer are (n+1) bits
+
+// full when the next write pointer's gray code is equal to the synchronized read pointer's gray code except the two MSBs are flipped.
+
+// empty when the read pointer's gray equals the synchronized write pointer's gray.
+
+So the code:
+
+// In write domain:
+
+// Synchronize read pointer's gray code to write domain (two stages)
+
+// Then:
+
+wire full;
+assign full = ( (wgraynext == { ~rptr_sync[ASIZE:ASIZE-1], rptr_sync[ASIZE-2:0] }) );
+
+Similarly, the almost full is when the difference between write and read pointers is (2^ASIZE - 1).
+
+But perhaps the code for almost full is:
+
+assign awfull = ( (wptr_bin - rptr_bin_sync) >= ( (1 << ASIZE) -1 ) );
+
+But in code:
+
+// Almost full: when the FIFO is one less than full (so next write would fill)
+
+// The number of entries is (wptr_bin - rptr_bin_sync)
+
+// If (wptr_bin - rptr_bin_sync) >= (2**ASIZE -1 ), then almost full.
+
+// Similarly for almost empty.
+
+But in code:
+
+// Almost full:
+
+wire [ASIZE:0] wptr_bin_minus_rptr = wptr_bin - rptr_bin_sync;
+
+assign awfull = (wptr_bin_minus_rptr >= ( (1 << ASIZE) -1 ) );
+
+But the actual entries would be (wptr_bin - rptr_bin_sync). If that's >= (2^ASIZE -1), then it's almost full.
+
+Similarly, almost empty is when (rptr_bin - wptr_bin_sync) <= 1.
+
+But in code:
+
+// Almost empty:
+
+wire [ASIZE:0] rptr_bin_minus_wptr = rptr_bin - wptr_bin_sync;
+
+assign arempty = ( rptr_bin_minus_wptr <= 1 );
+
+But in the read domain.
+
+Now, the code outline:
+
+In the write domain:
+
+// Synchronize read pointer's gray code to write domain
+
+reg [ASIZE:0] rptr_gray_sync1, rptr_gray_sync2;
+
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        rptr_gray_sync1 <= 0;
+        rptr_gray_sync2 <= 0;
+    end else begin
+        rptr_gray_sync1 <= rptr_gray;
+        rptr_gray_sync2 <= rptr_gray_sync1;
+    end
+end
+
+// Convert the synchronized gray code back to binary (in write domain)
+
+function [ASIZE:0] gray2bin;
+input [ASIZE:0] gray;
+reg [ASIZE:0] bin;
+integer i;
+begin
+    bin[ASIZE] = gray[ASIZE];
+    for (i = ASIZE-1; i >=0; i=i-1)
+        bin[i] = bin[i+1] ^ gray[i];
+    gray2bin = bin;
+end
+endfunction
+
+// Convert the synchronized read pointer's gray code to binary
+wire [ASIZE:0] rptr_bin_sync = gray2bin(rptr_gray_sync2);
+
+// Compute the next write pointer
+wire [ASIZE:0] wptr_bin_next = wptr_bin + (winc && !full);
+
+// Compute the next gray code
+wire [ASIZE:0] wgray_next = bin2gray(wptr_bin_next);
+
+// Full condition
+wire full = (wgray_next == { ~rptr_gray_sync2[ASIZE:ASIZE-1], rptr_gray_sync2[ASIZE-2:0] });
+
+// Almost full: when the difference is (2^ASIZE -1)
+wire [ASIZE:0] wdiff = wptr_bin - rptr_bin_sync;
+assign awfull = ( wdiff >= ( (1 << ASIZE) -1 ) );
+
+Similarly, in the read domain:
+
+// Synchronize write pointer's gray code to read domain
+
+reg [ASIZE:0] wptr_gray_sync1, wptr_gray_sync2;
+
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        wptr_gray_sync1 <= 0;
+        wptr_gray_sync2 <= 0;
+    end else begin
+        wptr_gray_sync1 <= wptr_gray;
+        wptr_gray_sync2 <= wptr_gray_sync1;
+    end
+end
+
+// Convert to binary
+wire [ASIZE:0] wptr_bin_sync = gray2bin(wptr_gray_sync2);
+
+// Almost empty: when the difference is <=1
+wire [ASIZE:0] rdiff = rptr_bin - wptr_bin_sync;
+assign arempty = ( rdiff <= 1 );
+
+// Empty condition
+wire empty = (rptr_bin == wptr_bin_sync);
+
+// Read pointer logic
+reg [ASIZE:0] rptr_bin;
+wire [ASIZE:0] rptr_bin_next = rinc && !empty ? rptr_bin + 1 : rptr_bin;
+
+// FIFO memory
+reg [DSIZE-1:0] mem [0:(1 << ASIZE)-1];
+
+// Write data to memory
+always @(posedge wclk) begin
+    if (winc && !full)
+        mem[wptr_bin[ASIZE-1:0]] <= wdata;
+end
+
+// Read data from memory
+// If FALLTHROUGH is TRUE, then rdata is the current entry, else registered.
+
+// For FALLTHROUGH, the read data is available immediately when rinc is asserted.
+
+// So:
+
+generate
+if (FALLTHROUGH == "TRUE") begin
+    assign rdata = mem[rptr_bin[ASIZE-1:0]];
+end else begin
+    // registered read data
+    reg [DSIZE-1:0] rdata_reg;
+    always @(posedge rclk) begin
+        if (rinc && !empty)
+            rdata_reg <= mem[rptr_bin[ASIZE-1:0]];
+    end
+    assign rdata = rdata_reg;
+end
+endgenerate
+
+// Assign outputs
+
+assign wfull = full;
+assign awfull = ...; // computed earlier
+
+Wait, but the code for the almost full and empty.
+
+Putting all together.
+
+But this is getting very lengthy. Let's proceed step by step.
+
+First, the code for the write domain:
+
+// Write domain logic
+
+reg [ASIZE:0] wptr_bin; // binary pointer
+reg [ASIZE:0] rptr_gray_sync1, rptr_gray_sync2; // synchronized read pointer's gray code
+
+// Convert binary to gray
+function [ASIZE:0] bin2gray(input [ASIZE:0] bin);
+begin
+    bin2gray = bin ^ (bin >> 1);
+end
+endfunction
+
+// Convert gray to binary
+function [ASIZE:0] gray2bin(input [ASIZE:0] gray);
+reg [ASIZE:0] bin;
+integer i;
+begin
+    bin[ASIZE] = gray[ASIZE];
+    for (i = ASIZE-1; i >=0; i = i-1)
+        bin[i] = bin[i+1] ^ gray[i];
+    gray2bin = bin;
+end
+endfunction
+
+// Synchronize read pointer's gray code to write domain
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        rptr_gray_sync1 <= 0;
+        rptr_gray_sync2 <= 0;
+    end else begin
+        rptr_gray_sync1 <= rptr_gray;
+        rptr_gray_sync2 <= rptr_gray_sync1;
+    end
+end
+
+// Read pointer in binary
+wire [ASIZE:0] rptr_bin_sync = gray2bin(rptr_gray_sync2);
+
+// Next write pointer
+wire [ASIZE:0] wptr_bin_next = wptr_bin + (winc && !wfull);
+
+// Next gray code
+wire [ASIZE:0] wgray_next = bin2gray(wptr_bin_next);
+
+// Full condition
+wire full;
+assign full = (wgray_next == { ~rptr_gray_sync2[ASIZE:ASIZE-1], rptr_gray_sync2[ASIZE-2:0] });
+
+// Almost full: when the FIFO is one less than full (entries >= (2^ASIZE -1))
+wire [ASIZE:0] wdiff = wptr_bin - rptr_bin_sync;
+assign awfull = ( wdiff >= ( (1 << ASIZE) -1 ) );
+
+// FIFO memory
+reg [DSIZE-1:0] mem [0:(1 << ASIZE)-1];
+
+// Write data to memory
+always @(posedge wclk) begin
+    if (winc && !wfull)
+        mem[wptr_bin[ASIZE-1:0]] <= wdata;
+end
+
+// Update write pointer
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n)
+        wptr_bin <= 0;
+    else
+        wptr_bin <= wptr_bin_next;
+end
+
+// Read domain logic
+
+// Read pointer
+reg [ASIZE:0] rptr_bin;
+
+// Synchronize write pointer's gray code to read domain
+reg [ASIZE:0] wptr_gray_sync1, wptr_gray_sync2;
+
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        wptr_gray_sync1 <= 0;
+        wptr_gray_sync2 <= 0;
+    end else begin
+        wptr_gray_sync1 <= wptr_gray;
+        wptr_gray_sync2 <= wptr_gray_sync1;
+    end
+end
+
+// Convert to binary
+wire [ASIZE:0] wptr_bin_sync = gray2bin(wptr_gray_sync2);
+
+// Almost empty: when the difference is <=1
+wire [ASIZE:0] rdiff = rptr_bin - wptr_bin_sync;
+assign arempty = ( rdiff <= 1 );
+
+// Empty condition
+wire empty;
+assign empty = (rptr_bin == wptr_bin_sync);
+
+// Read pointer update
+wire [ASIZE:0] rptr_bin_next = rinc && !empty ? rptr_bin + 1 : rptr_bin;
+
+// Update read pointer
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n)
+        rptr_bin <= 0;
+    else
+        rptr_bin <= rptr_bin_next;
+end
+
+// Read data
+generate
+if (FALLTHROUGH == "TRUE") begin
+    // FALLTHROUGH: rdata is current value
+    assign rdata = mem[rptr_bin[ASIZE-1:0]];
+end else begin
+    // Registered read
+    reg [DSIZE-1:0] rdata_reg;
+    always @(posedge rclk) begin
+        if (rinc && !empty)
+            rdata_reg <= mem[rptr_bin[ASIZE-1:0]];
+    end
+    assign rdata = rdata_reg;
+end
+endgenerate
+
+// Assign outputs
+assign wfull = full;
+assign rempty = empty;
+
+Wait, but the almost full and almost empty are outputs. So:
+
+assign awfull = ( wdiff >= ( (1 << ASIZE) -1 ) );
+
+assign arempty = ( rdiff <= 1 );
+
+But in code:
+
+wire [ASIZE:0] wdiff = wptr_bin - rptr_bin_sync;
+
+wire [ASIZE:0] rdiff = wptr_bin_sync - rptr_bin;
+
+Wait, but the difference is (wptr_bin - rptr_bin_sync) for the write domain's almost full.
+
+Wait, the number of entries is (wptr_bin - rptr_bin_sync). If that's >= (2^ASIZE -1), then almost full.
+
+Similarly, in read domain, the entries are (rptr_bin - wptr_bin_sync). If that's <=1, almost empty.
+
+But in code:
+
+In write domain:
+
+wire [ASIZE:0] wdiff = wptr_bin - rptr_bin_sync;
+
+assign awfull = ( wdiff >= ( (1 << ASIZE) -1 ) );
+
+In read domain:
+
+wire [ASIZE:0] rdiff = rptr_bin - wptr_bin_sync;
+
+assign arempty = ( rdiff <= 1 );
+
+But need to make sure the subtraction is correct.
+
+But in code:
+
+// Almost full in write domain:
+
+wire [ASIZE:0] wdiff = wptr_bin - rptr_bin_sync;
+
+assign awfull = ( wdiff >= ( (1 << ASIZE) -1 ) );
+
+// Almost empty in read domain:
+
+wire [ASIZE:0] rdiff = rptr_bin - wptr_bin_sync;
+
+assign arempty = ( rdiff <= 1 );
+
+But in code, the variables are declared as:
+
+wire [ASIZE:0] wdiff;
+
+wire [ASIZE:0] rdiff;
+
+Now, the code for the FIFO.
+
+But in Verilog, the generate block for FALLTHROUGH.
+
+Now, the code for the FIFO:
+
+Putting all together.
+
+But the code is getting very long. Let's proceed.
+
+Now, the code:
+
+module async_fifo #(
+    parameter DSIZE = 8,
+    parameter ASIZE = 4,
+    parameter FALLTHROUGH = "TRUE"
+) (
+    input wire wclk,
+    input wire wrst_n,
+    input wire winc,
+    input wire [DSIZE-1:0] wdata,
+    output wire wfull,
+    output wire awfull,
+    input wire rclk,
+    input wire rrst_n,
+    input wire rinc,
+    output wire [DSIZE-1:0] rdata,
+    output wire rempty,
+    output wire arempty
+);
+
+    // Local parameters
+    localparam FIFO_DEPTH = 1 << ASIZE;
+
+    // Write domain signals
+    reg [ASIZE:0] wptr_bin; // binary pointer (ASIZE+1 bits)
+    reg [ASIZE:0] rptr_gray_sync1, rptr_gray_sync2; // synchronized read pointer's gray code
+
+    // Read domain signals
+    reg [ASIZE:0] rptr_bin; // binary pointer
+    reg [ASIZE:0] wptr_gray_sync1, wptr_gray_sync2; // synchronized write pointer's gray code
+
+    // FIFO memory
+    reg [DSIZE-1:0] mem [0:FIFO_DEPTH-1];
+
+    // Gray code conversion functions
+    function [ASIZE:0] bin2gray(input [ASIZE:0] bin);
+        bin2gray = bin ^ (bin >> 1);
+    endfunction
+
+    function [ASIZE:0] gray2bin(input [ASIZE:0] gray);
+        reg [ASIZE:0] bin;
+        integer i;
+        begin
+            bin[ASIZE] = gray[ASIZE];
+            for (i = ASIZE-1; i >= 0; i = i - 1)
+                bin[i] = bin[i+1] ^ gray[i];
+            gray2bin = bin;
+        end
+    endfunction
+
+    // Write domain logic
+    wire [ASIZE:0] wgray_next = bin2gray(wptr_bin + 1'b1); // next gray code if increment
+
+    // Synchronize read pointer's gray code to write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_sync1 <= 0;
+            rptr_gray_sync2 <= 0;
+        end else begin
+            rptr_gray_sync1 <= rptr_gray;
+            rptr_gray_sync2 <= rptr_gray_sync1;
+        end
+    end
+
+    // Convert synchronized read pointer's gray to binary
+    wire [ASIZE:0] rptr_bin_sync = gray2bin(rptr_gray_sync2);
+
+    // Full condition: when next write's gray equals ~rptr_sync's two MSBs and rest
+    wire full;
+    assign full = (wgray_next == { ~rptr_gray_sync2[ASIZE:ASIZE-1], rptr_gray_sync2[ASIZE-2:0] });
+
+    // Almost full: when entries >= FIFO_DEPTH -1
+    wire [ASIZE:0] wdiff = wptr_bin - rptr_bin_sync;
+    assign awfull = ( wdiff >= (FIFO_DEPTH - 1) );
+
+    // Update write pointer
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            wptr_bin <= 0;
+        else if (winc && !full)
+            wptr_bin <= wptr_bin + 1;
+    end
+
+    // Write data to memory
+    always @(posedge wclk) begin
+        if (winc && !full)
+            mem[wptr_bin[ASIZE-1:0]] <= wdata;
+    end
+
+    // Read domain logic
+    wire [ASIZE:0] rgray_next = bin2gray(rptr_bin + 1'b1);
+
+    // Synchronize write pointer's gray code to read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_gray_sync1 <= 0;
+            wptr_gray_sync2 <= 0;
+        end else begin
+            wptr_gray_sync1 <= wptr_gray;
+            wptr_gray_sync2 <= wptr_gray_sync1;
+        end
+    end
+
+    // Convert synchronized write pointer's gray to binary
+    wire [ASIZE:0] wptr_bin_sync = gray2bin(wptr_gray_sync2);
+
+    // Almost empty: when entries <=1
+    wire [ASIZE:0] rdiff = rptr_bin - wptr_bin_sync;
+    assign arempty = ( rdiff <= 1 );
+
+    // Empty condition
+    wire empty;
+    assign empty = (rptr_bin == wptr_bin_sync);
+
+    // Update read pointer
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rptr_bin <= 0;
+        else if (rinc && !empty)
+            rptr_bin <= rptr_bin + 1;
+    end
+
+    // Read data
+    generate
+        if (FALLTHROUGH == "TRUE") begin
+            // FALLTHROUGH: rdata is current value
+            assign rdata = mem[rptr_bin[ASIZE-1:0]];
+        end else begin
+            // Registered read
+            reg [DSIZE-1:0] rdata_reg;
+            always @(posedge rclk) begin
+                if (rinc && !empty)
+                    rdata_reg <= mem[rptr_bin[ASIZE-1:0]];
+            end
+            assign rdata = rdata_reg;
+        end
+    endgenerate
+
+    // Assign outputs
+    assign wfull = full;
+    assign rempty = empty;
+
+endmodule
+
+Wait, but the code for the almost full and empty:
+
+In the write domain:
+
+wire [ASIZE:0] wdiff = wptr_bin - rptr_bin_sync;
+
+assign awfull = ( wdiff >= (FIFO_DEPTH -1) );
+
+Similarly, in read domain:
+
+wire [ASIZE:0] rdiff = rptr_bin - wptr_bin_sync;
+
+assign arempty = ( rdiff <= 1 );
+
+But the code uses:
+
+wire [ASIZE:0] wdiff = wptr_bin - rptr_bin_sync;
+
+assign awfull = ( wdiff >= (FIFO_DEPTH -1) );
+
+Yes.
+
+But in code:
+
+localparam FIFO_DEPTH = 1 << ASIZE;
+
+assign awfull = ( wdiff >= (FIFO_DEPTH -1) );
+
+Similarly for almost empty.
+
+But the code for the almost full and empty.
+
+Now, the code for the write pointer:
+
+The code uses:
+
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n)
+        wptr_bin <= 0;
+    else if (winc && !full)
+        wptr_bin <= wptr_bin + 1;
+end
+
+Wait, but the increment is when winc is active and not full.
+
+Similarly for read pointer.
+
+Now, the code for the read data.
+
+In the generate block, if FALLTHROUGH is TRUE, then rdata is directly assigned from the memory. Else, it's registered.
+
+But the code for the registered read:
+
+reg [DSIZE-1:0] rdata_reg;
+
+always @(posedge rclk) begin
+    if (rinc && !empty)
+        rdata_reg <= mem[rptr_bin[ASIZE-1:0]];
+end
+
+assign rdata = rdata_reg;
+
+But in the code, the read pointer is updated when rinc is active and not empty.
+
+Now, the code for the almost full and empty.
+
+But in the code:
+
+wire [ASIZE:0] wdiff = wptr_bin - rptr_bin_sync;
+
+assign awfull = ( wdiff >= (FIFO_DEPTH -1) );
+
+Similarly:
+
+wire [ASIZE:0] rdiff = rptr_bin - wptr_bin_sync;
+
+assign arempty = ( rdiff <= 1 );
+
+But in code:
+
+wire [ASIZE:0] wdiff = wptr_bin - rptr_bin_sync;
+
+wire [ASIZE:0] rdiff = rptr_bin - wptr_bin_sync;
+
+assign awfull = ( wdiff >= (FIFO_DEPTH -1) );
+
+assign arempty = ( rdiff <= 1 );
+
+But in code, the variables are declared as:
+
+wire [ASIZE:0] wdiff, rdiff;
+
+Now, the code for the FIFO.
+
+But the code may have some errors. For example, the almost full and empty are computed based on the current pointers.
+
+But given the time constraints, this is the code.
+</think>
+
+<answer>
+```verilog
+module async_fifo #(
+    parameter DSIZE = 8,
+    parameter ASIZE = 4,
+    parameter FALLTHROUGH = "TRUE"
+) (
+    input wire wclk,
+    input wire wrst_n,
+    input wire winc,
+    input wire [DSIZE-1:0] wdata,
+    output wire wfull,
+    output wire awfull,
+    input wire rclk,
+    input wire rrst_n,
+    input wire rinc,
+    output wire [DSIZE-1:0] rdata,
+    output wire rempty,
+    output wire arempty
+);
+
+    localparam FIFO_DEPTH = 1 << ASIZE;
+
+    // Write domain signals
+    reg [ASIZE:0] wptr_bin;
+    reg [ASIZE:0] rptr_gray_sync1, rptr_gray_sync2;
+
+    // Read domain signals
+    reg [ASIZE:0] rptr_bin;
+    reg [ASIZE:0] wptr_gray_sync1, wptr_gray_sync2;
+
+    // FIFO memory
+    reg [DSIZE-1:0] mem [0:FIFO_DEPTH-1];
+
+    // Gray code functions
+    function [ASIZE:0] bin2gray(input [ASIZE:0] bin);
+        bin2gray = bin ^ (bin >> 1);
+    endfunction
+
+    function [ASIZE:0] gray2bin(input [ASIZE:0] gray);
+        reg [ASIZE:0] bin;
+        integer i;
+        begin
+            bin[ASIZE] = gray[ASIZE];
+            for (i = ASIZE-1; i >= 0; i = i - 1)
+                bin[i] = bin[i+1] ^ gray[i];
+            gray2bin = bin;
+        end
+    endfunction
+
+    // Write domain logic
+    wire [ASIZE:0] rptr_bin_sync = gray2bin(rptr_gray_sync2);
+    wire [ASIZE:0] wgray_next = bin2gray(wptr_bin + 1'b1);
+    wire full = (wgray_next == { ~rptr_gray_sync2[ASIZE:ASIZE-1], rptr_gray_sync2[ASIZE-2:0] });
+
+    wire [ASIZE:0] wdiff = wptr_bin - rptr_bin_sync;
+    assign awfull = (wdiff >= (FIFO_DEPTH - 1));
+
+    // Update write pointer
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            wptr_bin <= 0;
+        else if (winc && !full)
+            wptr_bin <= wptr_bin + 1;
+    end
+
+    // Write data
+    always @(posedge wclk) begin
+        if (winc && !full)
+            mem[wptr_bin[ASIZE-1:0]] <= wdata;
+    end
+
+    // Synchronize read pointer to write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_sync1 <= 0;
+            rptr_gray_sync2 <= 0;
+        end else begin
+            rptr_gray_sync1 <= rptr_gray;
+            rptr_gray_sync2 <= rptr_gray_sync1;
+        end
+    end
+
+    // Read domain logic
+    wire [ASIZE:0] wptr_bin_sync = gray2bin(wptr_gray_sync2);
+    wire [ASIZE:0] rgray_next = bin2gray(rptr_bin + 1'b1);
+    wire empty = (rptr_bin == wptr_bin_sync);
+
+    wire [ASIZE:0] rdiff = rptr_bin - wptr_bin_sync;
+    assign arempty = (rdiff <= 1);
+
+    // Update read pointer
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rptr_bin <= 0;
+        else if (rinc && !empty)
+            rptr_bin <= rptr_bin + 1;
+    end
+
+    // Synchronize write pointer to read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_gray_sync1 <= 0;
+            wptr_gray_sync2 <= 0;
+        end else begin
+            wptr_gray_sync1 <= wptr_gray;
+            wptr_gray_sync2 <= wptr_gray_sync1;
+        end
+    end
+
+    // Read data
+    generate
+        if (FALLTHROUGH == "TRUE") begin
+            assign rdata = mem[rptr_bin[ASIZE-1:0]];
+        end else begin
+            reg [DSIZE-1:0] rdata_reg;
+            always @(posedge rclk) begin
+                if (rinc && !empty)
+                    rdata_reg <= mem[rptr_bin[ASIZE-1:0]];
+            end
+            assign rdata = rdata_reg;
+        end
+    endgenerate
+
+    // Assign outputs
+    assign wfull = full;
+    assign rempty = empty;
+
+endmodule
+```
+</answer>

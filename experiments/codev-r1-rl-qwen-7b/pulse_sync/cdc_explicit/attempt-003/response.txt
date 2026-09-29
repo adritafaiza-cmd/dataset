@@ -1,0 +1,1447 @@
+<think>Okay, I need to create a Verilog module called pulse_sync that synchronizes a one-cycle pulse from clock domain A to B. The requirements mention busy_o to prevent new pulses while a transfer is ongoing. Let's think about the standard approach for clock domain crossing (CDC) of pulses.
+
+First, the basic idea is to convert the pulse into a toggle signal in the source domain, synchronize that toggle to the destination domain, and then detect the edge in the destination domain to recreate the pulse. But since there's a busy signal, we need to manage the state so that new pulses are ignored until the current one is safely transferred.
+
+Wait, the busy signal should be high when a pulse is in transit. So when pulseA_i comes in, we set busy, toggle the source signal, and then wait until the synchronized signal in the destination domain is detected. Once that's done, we can lower busy again.
+
+Let me outline the steps:
+
+In domain A:
+1. When pulseA_i is detected and busy is low, we generate a toggle (like a flip-flop that inverts each time a pulse is sent).
+2. The toggle is synchronized to domain B using a multi-stage synchronizer (like 2 or more stages).
+3. In domain B, we detect the edge of the synchronized toggle to generate pulseB_o. Once detected, we can reset the toggle's state in B? Wait, no. Wait, the toggle in A is toggled each time a pulse is sent. The B side can detect the change in the synchronized toggle and generate a pulse once.
+
+Wait, the standard approach for pulse synchronization is:
+
+- Source domain: When a pulse comes, toggle a register (toggle_src). Then synchronize this toggle to the destination domain via two flip-flops. Then in the destination domain, compare the current and previous synchronized values. If they differ, generate a pulse (since the toggle changed). 
+
+But in this case, the busy signal is needed. So the busy should be active when the toggle has been sent but the destination hasn't yet acknowledged it. Wait, but the toggle approach doesn't have an explicit acknowledgment. Hmm.
+
+Alternatively, the busy signal is set when a pulse is sent and remains high until the toggle has been synchronized and the destination has generated the pulse. Wait, but the toggle approach doesn't have an explicit handshake. Let's think again.
+
+Wait, the standard method for pulse synchronization across asynchronous clocks:
+
+In domain A:
+
+- When a pulse comes in (pulseA_i), if busy is low (not busy), then set a flag (like a register) to indicate a pulse is being sent. Then, synchronize this flag to domain B. Once the flag is detected in B, generate the pulse and then send an acknowledgment back to domain A to clear the flag.
+
+But this requires a two-way synchronization (acknowledgment from B to A). However, the busy signal in the problem is supposed to prevent new pulses until the current one is sent. So the busy is set when a pulse is sent and cleared once the destination has processed it.
+
+But the standard approach for a pulse synchronizer with busy:
+
+The steps would be:
+
+In domain A:
+
+1. When pulseA_i is high and busy is low, set a request (req) to 1. Then busy is set to 1.
+
+2. The req is synchronized to domain B via a two-stage synchronizer.
+
+3. In domain B, once the synchronized req is detected, generate pulseB_o and send an ack back to domain A.
+
+4. The ack is synchronized in domain A, and when it's detected, busy is cleared, allowing new pulses.
+
+But this requires two signals (req and ack) crossing domains. However, the busy is supposed to be in the source domain (A) and indicates that a pulse is in flight.
+
+Alternatively, the busy is set when a pulse is sent and remains until the synchronized signal in B is detected. Wait, but the standard approach for a pulse synchronizer with a single pulse.
+
+Wait, here's a possible approach:
+
+In domain A:
+
+- Have a register (let's call it pulse_reg) that is set when pulseA_i is high and busy is low.
+
+- The pulse_reg is then synchronized to domain B via a two-stage synchronizer.
+
+- In domain B, when the synchronized pulse_reg changes, generate pulseB_o.
+
+But the problem is that the pulse_reg in A is a single bit. Wait, but if the pulse is a single cycle, then the pulse_reg would be set to 1 for one cycle. But when crossing to B, the two-stage synchronizer would capture it, but the pulse could be missed if the clocks are asynchronous.
+
+Wait, the standard way is to convert the pulse into a level change (toggle) that can be safely synchronized. Let's think again.
+
+Another approach:
+
+In domain A:
+
+- When a pulse comes in (pulseA_i) and busy is low, toggle a signal (toggle_a). Then busy is set to 1.
+
+- The toggle_a is synchronized to domain B via two flip-flops (sync1 and sync2 in B).
+
+- In domain B, the edge between sync1 and sync2 is detected (if they differ, then a pulse occurred). Then pulseB_o is generated. Once that's done, busy can be cleared.
+
+Wait, but how to track the busy? The busy in A is set when the toggle is sent and cleared once the synchronized toggle in B has been detected.
+
+Wait, here's a possible structure:
+
+In domain A:
+
+- toggle_reg: starts at 0.
+
+- When pulseA_i is high and busy is 0:
+
+   toggle_reg <= ~toggle_reg;
+
+   busy <= 1;
+
+- The toggle_reg is synchronized to domain B via two stages (sync1 and sync2).
+
+In domain B:
+
+- The synchronized value is compared to previous value. If they differ, generate pulseB_o (one cycle pulse). Then, once that's done, the busy can be cleared.
+
+Wait, but how to track the busy in A. Hmm.
+
+Alternatively, the busy is set in A once the toggle is sent and remains until the toggle is detected in B. Wait, but the toggle is a level change. So in B, once the toggle is detected, the pulse is generated. Then, the toggle in A is toggled again. Wait, but the busy would be set when the toggle is sent and cleared once the toggle is detected in B.
+
+Wait, perhaps the steps are:
+
+In domain A:
+
+- When pulseA_i is high and busy is 0:
+
+   toggle_reg <= ~toggle_reg;
+
+   busy <= 1;
+
+In domain B:
+
+- The toggle is synchronized via two stages (sync1 and sync2). Then, the edge is detected (sync1 != sync2). When that's detected, pulseB_o is generated. Then, the toggle is synchronized again. Wait, but the edge detection would generate a pulse once.
+
+But the busy in A must be cleared once the toggle has been detected in B. Wait, but how to track that.
+
+Alternatively, the busy is cleared once the synchronized toggle in B has been detected. But the toggle in A is toggled each time a pulse is sent. So the B side can track the toggle and generate a pulse each time it changes.
+
+But the busy in A would be set when a pulse is sent and cleared once the toggle has been synchronized in B. Wait, but the toggle in B is a level, so the edge detection is needed.
+
+Wait, here's a possible structure:
+
+In domain A:
+
+- toggle_reg: starts at 0.
+
+- When pulseA_i is high and busy is 0:
+
+   toggle_reg <= ~toggle_reg;
+
+   busy <= 1;
+
+In domain B:
+
+- The toggle_reg is synchronized via two stages (sync1 and sync2). 
+
+- Then, the pulseB_o is generated when sync1 and sync2 differ (i.e., on the edge). 
+
+But the pulseB_o would be a single cycle pulse when the toggle changes.
+
+Once the pulseB_o is generated, the busy can be cleared. Wait, but how to know that the toggle has been detected. Hmm.
+
+Wait, the busy in A is set when a pulse is sent (toggle_reg toggled). Then, the toggle is synchronized to B. Once the toggle is detected in B (after synchronization), the pulse is generated. But how to know that the toggle has been processed in B. Wait, the toggle in B is a level, so the edge is the transition. So the pulse in B is generated once per toggle. Then, the busy can be cleared once the toggle in B has been detected. But the toggle in A is toggled again. Wait, but the busy is set once, and after the toggle is detected in B, the busy can be cleared.
+
+Wait, but the busy is in the A domain. So the busy is set when the toggle is sent (pulseA is received and not busy). Then, the busy remains until the toggle has been detected in B. But how to track that.
+
+Alternatively, the busy is set when the toggle is sent (pulseA_i is received and not busy). Then, the busy is cleared once the synchronized toggle in B has been detected (i.e., the pulseB is generated). Wait, but the pulseB is generated once per toggle. So the busy would be set once and then cleared once the toggle is detected. But the toggle in A is toggled again if another pulse comes in. Wait, but the busy is supposed to prevent overlapping.
+
+Wait, perhaps the busy is set when the toggle is sent (pulseA comes in and busy is 0). Then, the busy remains high until the toggle has been synchronized and the pulse in B is generated. Once the pulseB is generated, the busy can be cleared. But the pulseB is generated once per toggle. So the busy is set once and cleared once the pulse is generated. But the toggle in A can be toggled again only after the busy is cleared.
+
+Wait, but the toggle in A is toggled once per pulse. So the busy is set once, and after the pulse is sent in B, the busy is cleared. So the steps would be:
+
+In A:
+
+- When pulseA_i is high and busy is 0:
+
+   toggle_reg <= ~toggle_reg;
+
+   busy <= 1;
+
+In B:
+
+- The toggle is synchronized via two stages (sync1 and sync2). Then, the edge is detected (sync1 != sync2). When that's detected, pulseB_o is generated (1 cycle). Then, the busy can be cleared. Wait, but how to know that the edge was detected. Wait, the edge detection in B would generate a pulse once. So once that's done, the busy can be cleared. But how to send the clear back to A.
+
+Hmm, this is getting complicated. Let's think of the standard approach for a pulse synchronizer with a busy flag.
+
+The standard approach for a pulse synchronizer with a busy signal:
+
+The idea is that the source domain (A) toggles a signal each time a pulse is sent. The destination domain (B) synchronizes the toggle and detects the edge to generate a pulse. The busy signal is set when a pulse is sent and cleared once the toggle has been detected in B.
+
+Wait, but how to track the toggle in B. Let's outline:
+
+In A:
+
+- When pulseA_i is high and busy is low:
+
+   toggle <= ~toggle;
+
+   busy <= 1;
+
+In B:
+
+- The toggle is synchronized via two stages (sync1 and sync2).
+
+- The edge is detected when sync1 and sync2 differ. Then pulseB is generated (1 cycle).
+
+Once the pulse is generated, the busy can be cleared. Wait, but how to send the clear back to A. Hmm.
+
+Alternatively, the busy is cleared once the toggle in B has been detected. But the toggle in A is toggled again. Wait, but the busy is set once per pulse. So the busy is set when the toggle is sent and cleared once the edge is detected in B. Then, the next pulse can be sent.
+
+Wait, but the toggle in A is toggled once per pulse. So the edge in B would be detected once per toggle. So the pulse in B is generated once per toggle. So the busy can be cleared once the edge is detected.
+
+But how to send the edge detection back to A. Wait, perhaps the busy is set in A when a pulse is sent. Then, the edge in B is detected (pulseB). Then, the busy is cleared in A once the edge is detected. But since the two clocks are asynchronous, the edge detection in B can't directly affect A's state. So this would require a handshake.
+
+Alternatively, the busy is cleared in A once the toggle has been synchronized in B. Wait, but the toggle is a level. Hmm.
+
+Alternatively, the busy is set when a pulse is sent (toggle) and remains until the toggle is detected in B. Once the toggle is detected (edge), then the busy is cleared. But the toggle in A is toggled again only when the busy is low.
+
+Wait, perhaps the steps are:
+
+In A:
+
+- When pulseA_i is high and busy is 0:
+
+   toggle <= ~toggle;
+
+   busy <= 1;
+
+In B:
+
+- The toggle is synchronized via two stages (sync1 and sync2). The edge is detected (sync1 ^ sync2). Then pulseB is generated (1 cycle). 
+
+Once the pulseB is generated, the busy can be cleared. But how to send the clear back to A. Wait, but the busy is in A's domain. So the B side can't directly write to the busy register. So this approach may not work.
+
+Hmm. Maybe the busy is cleared once the toggle in B has been detected. Wait, but the toggle in B is a level. Wait, perhaps the busy is cleared once the toggle in B is the same as the previous state. Wait, not sure.
+
+Alternatively, the busy is set in A when the toggle is sent. Then, the B side, after detecting the toggle change, sends an acknowledgment back to A. But this requires a two-way handshake.
+
+But the problem says that busy is high while a pulse is in flight. So the busy is in the source domain (A) and indicates that a pulse is being transferred.
+
+So the standard approach for a pulse synchronizer with busy:
+
+The steps:
+
+In domain A:
+
+1. When a pulse comes in (pulseA_i) and busy is 0:
+
+   a. Toggle a register (toggle_reg).
+
+   b. Set busy to 1.
+
+In domain B:
+
+2. Synchronize the toggle_reg to B via two flip-flops (sync1 and sync2).
+
+3. Detect the edge (sync1 != sync2) to generate a pulse (pulseB_o).
+
+4. Once the pulse is generated, send an ack to domain A.
+
+In domain A:
+
+5. When the ack arrives (synchronized), clear busy.
+
+But this requires two-way synchronization (toggle and ack). The busy is cleared once the ack is received.
+
+But the problem says the busy is high while the pulse is in flight. So the ack would be the signal that the pulse has been received in B.
+
+But the code would need:
+
+In A:
+
+- toggle_reg and busy.
+
+In B:
+
+- sync_toggle, edge detection, pulseB, and ack.
+
+In A:
+
+- ack_sync (synchronized from B's ack).
+
+Once ack_sync is detected, busy is cleared.
+
+But this requires two synchronizers (toggle from A to B, ack from B to A).
+
+But the code would look like:
+
+In A:
+
+reg toggle_a;
+reg busy_a;
+
+always @(posedge clk_a or negedge rstn_a) begin
+   if (!rstn_a) begin
+      toggle_a <= 0;
+      busy_a <= 0;
+   end else begin
+      if (pulseA_i && !busy_a) begin
+         toggle_a <= ~toggle_a;
+         busy_a <= 1;
+      end else if (ack_sync) begin // ack from B
+         busy_a <= 0;
+      end
+   end
+end
+
+In B:
+
+reg [1:0] sync_toggle;
+reg toggle_synced;
+
+always @(posedge clk_b or negedge rstn_b) begin
+   if (!rstn_b) begin
+      sync_toggle <= 0;
+      toggle_synced <= 0;
+   end else begin
+      sync_toggle <= {sync_toggle[0], toggle_a};
+      toggle_synced <= sync_toggle[1];
+   end
+end
+
+// Edge detection
+wire pulseB = (toggle_synced != sync_toggle[1]);
+
+// Generate pulseB_o for one cycle.
+
+// Then, send ack back to A.
+
+But the ack would need to be synchronized from B to A.
+
+Wait, but the ack in this case would be the edge detection in B. Wait, but the edge detection in B is a pulse. So the ack would be the pulseB_o. Wait, but pulseB_o is a single pulse. So the ack would be the same as pulseB.
+
+Wait, but in that case, the ack is the pulse in B. So the code would be:
+
+In B:
+
+// Synchronize toggle from A
+reg [1:0] sync_toggle;
+always @(posedge clk_b or negedge rstn_b) begin
+   if (!rstn_b) begin
+      sync_toggle <= 0;
+   end else begin
+      sync_toggle <= {sync_toggle[0], toggle_a};
+   end
+end
+
+// Edge detection
+wire pulseB = (sync_toggle[1] ^ sync_toggle[0]);
+
+// Then, pulseB is the pulse in B.
+
+Then, the ack is the pulseB. Then, the ack is synchronized back to A.
+
+Wait, but the ack is a pulse. So in A, the ack is synchronized via two stages.
+
+But in code:
+
+In A:
+
+// Synchronize the ack (pulseB) from B to A.
+
+reg [1:0] ack_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+   if (!rstn_a) begin
+      ack_sync <= 0;
+   end else begin
+      ack_sync <= {ack_sync[0], pulseB};
+   end
+end
+
+// Then, when ack_sync[1] is high, the ack is received.
+
+Wait, but pulseB is a single pulse. So the ack_sync would have a pulse two cycles after the original pulse in B.
+
+But in this case, the busy would be set when the pulseA comes in and cleared when the ack arrives.
+
+But the code would have:
+
+In A:
+
+reg toggle_a;
+reg busy_a;
+
+// Synchronize the ack (pulseB) from B to A.
+
+reg [1:0] ack_sync;
+
+// pulseB is the ack.
+
+// Wait, but pulseB is the pulse in B. So the ack is pulseB.
+
+Wait, but in the code, the pulseB is generated in B. So the ack is pulseB. So in A, the ack is the pulseB synchronized via two stages.
+
+Wait, but the pulseB is a single pulse. So the ack_sync would have a pulse two cycles after the original pulse.
+
+But in that case, the busy would be cleared once the ack arrives.
+
+But the code would have:
+
+In A:
+
+always @(posedge clk_a or negedge rstn_a) begin
+   if (!rstn_a) begin
+      toggle_a <= 0;
+      busy_a <= 0;
+   end else begin
+      if (pulseA_i && !busy_a) begin
+         toggle_a <= ~toggle_a;
+         busy_a <= 1;
+      end else if (ack_sync[1]) begin // ack received
+         busy_a <= 0;
+      end
+   end
+end
+
+// Synchronize the ack (pulseB) to A.
+
+reg [1:0] ack_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+   if (!rstn_a) begin
+      ack_sync <= 0;
+   end else begin
+      ack_sync <= {ack_sync[0], pulseB};
+   end
+end
+
+Wait, but pulseB is in domain B. So the ack_sync is the pulseB synchronized to A.
+
+But the pulseB is a single pulse. So the ack_sync would have a pulse two cycles after the original pulse in B.
+
+But the code in B would generate pulseB once per toggle.
+
+But in this case, the code would have:
+
+In B:
+
+// Synchronize the toggle from A.
+
+reg [1:0] sync_toggle;
+
+always @(posedge clk_b or negedge rstn_b) begin
+   if (!rstn_b) begin
+      sync_toggle <= 0;
+   end else begin
+      sync_toggle <= {sync_toggle[0], toggle_a};
+   end
+end
+
+// Edge detection
+
+wire pulseB = (sync_toggle[1] ^ sync_toggle[0]);
+
+// Then, pulseB is the pulse in B.
+
+But the pulseB is a single cycle pulse. So the ack is the pulseB.
+
+Then, the ack is synchronized to A.
+
+But the code for the pulse_sync module would have:
+
+Parameters: STAGES (default 2). So the number of stages for synchronization.
+
+Wait, the code for the toggle synchronizer and the ack synchronization.
+
+But the code for the pulse_sync module would have:
+
+In domain A:
+
+- The toggle_reg and busy.
+
+In domain B:
+
+- The two-stage synchronizer for the toggle.
+
+- Edge detection to generate pulseB.
+
+- Then, the pulseB is synchronized back to A as an ack.
+
+But the code would need:
+
+In A:
+
+reg toggle_a;
+reg busy_a;
+
+// Synchronize the ack (pulseB) from B to A.
+
+reg [1:0] ack_sync;
+
+// pulseB is the ack.
+
+// Wait, but in the code, pulseB is generated in B. So the ack is pulseB.
+
+Wait, but the code in B would generate pulseB once per toggle.
+
+But the code for the pulse_sync module would have:
+
+In A:
+
+// Toggle and busy logic.
+
+// Synchronize the toggle to B.
+
+// Generate ack (pulseB) in B.
+
+// Synchronize the ack back to A.
+
+But this is getting complicated.
+
+Alternatively, the standard approach for a pulse synchronizer with busy is as follows:
+
+In domain A:
+
+- When a pulse comes in and busy is 0:
+
+   toggle_reg <= ~toggle_reg;
+
+   busy <= 1;
+
+In domain B:
+
+- Synchronize the toggle_reg via two stages.
+
+- The edge is detected (current and previous synchronized values differ).
+
+- Generate pulseB for one cycle.
+
+- The edge detection in B is a pulse. Then, the busy is cleared once the pulse is generated.
+
+But how to send the clear back to A. Hmm.
+
+Alternatively, the busy is cleared once the edge is detected. But since the edge is in B's domain, the busy in A can't be cleared directly. So this approach may not work.
+
+Alternatively, the busy is cleared in A once the toggle has been synchronized in B. Wait, but the toggle is a level. Hmm.
+
+Wait, maybe the busy is set when the toggle is sent (pulseA comes in and busy is 0). Then, the busy remains high until the toggle has been detected in B. Once the toggle is detected (edge), the busy is cleared.
+
+But the toggle in B is a level. So the edge is the transition. Once the edge is detected (pulseB), the busy can be cleared.
+
+But the code would have:
+
+In A:
+
+reg toggle_a;
+reg busy_a;
+
+// Synchronize the toggle to B.
+
+// Edge detection in B.
+
+// Then, the pulseB is generated.
+
+// The pulseB is synchronized back to A as ack.
+
+// Then, busy is cleared.
+
+But the code would have:
+
+In A:
+
+// Toggle and busy.
+
+// Synchronize the toggle to B.
+
+// Generate ack (pulseB) in B.
+
+// Synchronize ack to A.
+
+// Then, busy is cleared.
+
+But the code would look like:
+
+In A:
+
+reg toggle_a;
+reg busy_a;
+
+// Synchronize the toggle to B.
+
+// Edge detection in B.
+
+// pulseB is generated.
+
+// Then, the ack is pulseB.
+
+// Synchronize ack (pulseB) to A.
+
+// Once ack arrives, clear busy.
+
+In code:
+
+// Domain A:
+
+// Toggle and busy.
+
+always @(posedge clk_a or negedge rstn_a) begin
+   if (!rstn_a) begin
+      toggle_a <= 0;
+      busy_a <= 0;
+   end else begin
+      if (pulseA_i && !busy_a) begin
+         toggle_a <= ~toggle_a;
+         busy_a <= 1;
+      end else if (ack_sync) begin // ack from B (pulseB)
+         busy_a <= 0;
+      end
+   end
+end
+
+// Synchronize the toggle to B.
+
+// Domain B:
+
+reg [1:0] sync_toggle;
+
+always @(posedge clk_b or negedge rstn_b) begin
+   if (!rstn_b) begin
+      sync_toggle <= 0;
+   end else begin
+      sync_toggle <= {sync_toggle[0], toggle_a};
+   end
+end
+
+// Edge detection.
+
+wire pulseB = (sync_toggle[1] ^ sync_toggle[0]);
+
+// Then, pulseB is the pulse in B.
+
+// Synchronize pulseB back to A.
+
+reg [1:0] ack_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+   if (!rstn_a) begin
+      ack_sync <= 0;
+   end else begin
+      ack_sync <= {ack_sync[0], pulseB};
+   end
+end
+
+Wait, but pulseB is a single pulse. So the ack_sync would have a pulse two cycles after the original pulse in B.
+
+But in the code, the busy is cleared when ack_sync[1] is high (the synchronized pulseB). 
+
+But in this case, the code would have:
+
+In A:
+
+When pulseA comes in and busy is 0:
+
+   toggle and set busy.
+
+In B:
+
+   sync toggle, generate pulseB (edge detected).
+
+   pulseB is synchronized to A as ack.
+
+Once ack arrives, busy is cleared.
+
+This would work.
+
+Now, the code for the parameters. The STAGES parameter is for the synchronizers. The default is 2. So the synchronizers for the toggle and the ack would use STAGES.
+
+Wait, but the code for the toggle synchronization in B is two stages. But the parameter is called STAGES. So perhaps the code uses STAGES for the synchronizers.
+
+Wait, the code for the toggle synchronization would have:
+
+In B:
+
+reg [STAGES-1:0] sync_toggle;
+
+always @(posedge clk_b or negedge rstn_b) begin
+   if (!rstn_b) begin
+      sync_toggle <= 0;
+   end else begin
+      sync_toggle <= {sync_toggle[STAGES-2:0], toggle_a};
+   end
+end
+
+Wait, but the standard two-stage synchronizer uses two flip-flops. So if STAGES is 2, then the code would have two stages.
+
+Wait, the code for the synchronizer would be:
+
+reg [STAGES-1:0] sync;
+
+always @(posedge clk or ...) begin
+   sync <= {sync[STAGES-2:0], input_signal};
+end
+
+Wait, but the code for a two-stage synchronizer would have two registers. So for STAGES=2, the code would be:
+
+reg sync_stage1, sync_stage2;
+
+always @(posedge clk) begin
+   sync_stage1 <= input;
+   sync_stage2 <= sync_stage1;
+end
+
+So in code, the STAGES parameter can be used to generate the synchronizer.
+
+But in the code, the STAGES is the number of stages. So the code would have:
+
+For the toggle synchronization in B:
+
+reg [STAGES-1:0] sync_toggle;
+
+always @(posedge clk_b or negedge rstn_b) begin
+   if (!rstn_b) begin
+      sync_toggle <= 0;
+   end else begin
+      sync_toggle <= {sync_toggle[STAGES-2:0], toggle_a};
+   end
+end
+
+Wait, but if STAGES is 2, then the code would have two stages. Wait, the code for STAGES=2 would be:
+
+sync_toggle[0] is first stage, sync_toggle[1] is second.
+
+Wait, perhaps the code for the synchronizer is:
+
+reg [STAGES-1:0] sync;
+
+always @(posedge clk or negedge rst) begin
+   if (!rst) begin
+      sync <= 0;
+   end else begin
+      sync <= {sync[STAGES-2:0], input};
+   end
+end
+
+Wait, but the standard way is to have a chain of registers. For example, for two stages:
+
+sync[0] <= input;
+
+sync[1] <= sync[0];
+
+So for STAGES=2, the code would have:
+
+sync <= {sync[0], input};
+
+Wait, but the code for a parameterized synchronizer would be:
+
+genvar i;
+
+reg [STAGES:0] sync;
+
+always @(posedge clk or negedge rstn) begin
+   if (!rstn) begin
+      sync <= 0;
+   end else begin
+      sync <= {sync[STAGES-1:0], input};
+   end
+end
+
+Wait, but the code for two stages would be:
+
+reg sync0, sync1;
+
+always @(posedge clk) begin
+   sync0 <= input;
+   sync1 <= sync0;
+end
+
+So for STAGES=2, the code would have two registers.
+
+But in code, the parameter can be used as:
+
+localparam STAGES = 2; // default.
+
+reg [STAGES-1:0] sync;
+
+always @(posedge clk or negedge rstn) begin
+   if (!rstn) begin
+      sync <= 0;
+   end else begin
+      sync <= {sync[STAGES-2:0], input};
+   end
+end
+
+Wait, but for STAGES=2, the code would have:
+
+sync[1:0] <= {sync[0], input}
+
+Wait, but the code would have:
+
+sync[0] is first stage, sync[1] is second.
+
+Wait, perhaps the code for the synchronizer is:
+
+reg [STAGES-1:0] sync;
+
+always @(posedge clk or negedge rstn) begin
+   if (!rstn) begin
+      sync <= 0;
+   end else begin
+      sync <= {sync[STAGES-2:0], input};
+   end
+end
+
+Wait, but for STAGES=2, the code would have:
+
+sync[1:0] <= {sync[0], input}
+
+Which is correct.
+
+So in code:
+
+For the toggle synchronization in B:
+
+reg [STAGES-1:0] sync_toggle;
+
+always @(posedge clk_b or negedge rstn_b) begin
+   if (!rstn_b) begin
+      sync_toggle <= 0;
+   end else begin
+      sync_toggle <= {sync_toggle[STAGES-2:0], toggle_a};
+   end
+end
+
+Similarly for the ack synchronization.
+
+Now, putting all together.
+
+The code for the pulse_sync module:
+
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // Domain A signals
+    reg toggle_a;
+    reg busy_a;
+
+    // Synchronize toggle to B
+    reg [STAGES-1:0] sync_toggle_b;
+
+    // Domain B signals
+    reg [STAGES-1:0] sync_toggle_a;
+
+    // Edge detection in B
+    wire pulseB;
+
+    // Synchronize pulseB to A
+    reg [STAGES-1:0] sync_pulseB_a;
+
+    // Assign outputs
+    assign busy_o = busy_a;
+    assign pulseB_o = pulseB;
+
+    // Domain A logic
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            toggle_a <= 0;
+            busy_a <= 0;
+        end else begin
+            // If pulseA comes and not busy, toggle and set busy
+            if (pulseA_i && !busy_a) begin
+                toggle_a <= ~toggle_a;
+                busy_a <= 1;
+            end
+            // Clear busy when ack arrives (synchronized pulseB)
+            if (sync_pulseB_a[STAGES-1]) begin
+                busy_a <= 0;
+            end
+        end
+    end
+
+    // Synchronize toggle_a to B
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            sync_toggle_b <= 0;
+        end else begin
+            sync_toggle_b <= {sync_toggle_b[STAGES-2:0], toggle_a};
+        end
+    end
+
+    // Edge detection in B (toggle)
+    assign pulseB = (sync_toggle_b[STAGES-1] ^ sync_toggle_b[STAGES-2]);
+
+    // Synchronize pulseB to A
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            sync_pulseB_a <= 0;
+        end else begin
+            sync_pulseB_a <= {sync_pulseB_a[STAGES-2:0], pulseB};
+        end
+    end
+
+endmodule
+
+Wait, but in the code above, the synchronization of the toggle in B uses STAGES. The edge detection is between the last two stages. The pulseB is the XOR of the last two stages.
+
+Then, the pulseB is synchronized back to A via STAGES stages.
+
+But the code for the synchronization of the pulseB to A would need to have STAGES stages.
+
+Wait, but the pulseB is a single-cycle pulse. So when it's synchronized to A, it's possible that it's stretched over multiple cycles. So the code for the synchronization of pulseB to A would have:
+
+reg [STAGES-1:0] sync_pulseB_a;
+
+always @(posedge clk_a or negedge rstn_a) begin
+   if (!rstn_a) begin
+      sync_pulseB_a <= 0;
+   end else begin
+      sync_pulseB_a <= {sync_pulseB_a[STAGES-2:0], pulseB};
+   end
+end
+
+Then, the ack is when the last stage is high.
+
+Wait, but if pulseB is a single pulse, then the synchronization would capture it as a single pulse in A. But if STAGES is larger than 2, the pulse may be missed. Hmm.
+
+Alternatively, the pulseB is a single pulse. So the synchronization would have to capture it.
+
+But in the code, the pulseB is generated in B as a single pulse. Then, when synchronized to A, it's possible that the pulse is captured as a single pulse in A.
+
+But the code for the synchronization of pulseB to A would have:
+
+reg [STAGES-1:0] sync_pulseB_a;
+
+always @(posedge clk_a or negedge rstn_a) begin
+   if (!rstn_a) begin
+      sync_pulseB_a <= 0;
+   end else begin
+      sync_pulseB_a <= {sync_pulseB_a[STAGES-2:0], pulseB};
+   end
+end
+
+Then, the ack is when the last stage is high.
+
+But in the code, the busy is cleared when the ack arrives.
+
+Wait, in the code:
+
+In domain A:
+
+The busy is set when a pulse comes in (pulseA_i and not busy).
+
+Then, when the ack arrives (the synchronized pulseB), busy is cleared.
+
+But the code for the busy in A:
+
+In the always block:
+
+if (pulseA_i && !busy_a) begin ... }
+
+if (sync_pulseB_a[STAGES-1]) busy_a <= 0;
+
+But the code may have a race condition if the two conditions are in the same always block.
+
+Wait, in Verilog, the non-blocking assignments are evaluated at the end of the block. So the order of the if statements may not matter.
+
+But the code would have:
+
+In the always block:
+
+if (pulseA_i && !busy_a) begin
+   toggle and set busy to 1
+end
+
+if (ack arrives) then clear busy.
+
+But if the ack arrives in the same cycle as the pulseA, then the busy would be set and cleared in the same cycle. But that's possible.
+
+But the code would have:
+
+In the always block:
+
+if (rstn_a) begin
+
+   if (pulseA_i && !busy_a) begin
+      toggle and set busy to 1
+   end
+
+   if (ack_sync) begin
+      busy <= 0;
+   end
+
+end
+
+But the ack_sync is the synchronized pulseB.
+
+But the code for the ack_sync is:
+
+sync_pulseB_a is a shift register. The last stage is sync_pulseB_a[STAGES-1].
+
+So the code:
+
+// Synchronize pulseB to A
+
+reg [STAGES-1:0] sync_pulseB_a;
+
+always @(posedge clk_a or negedge rstn_a) begin
+   if (!rstn_a) begin
+      sync_pulseB_a <= 0;
+   end else begin
+      sync_pulseB_a <= {sync_pulseB_a[STAGES-2:0], pulseB};
+   end
+end
+
+Then, the ack is when sync_pulseB_a[STAGES-1] is high.
+
+So in the always block:
+
+if (pulseA_i && !busy_a) begin
+   toggle and set busy to 1
+end
+
+if (sync_pulseB_a[STAGES-1]) begin
+   busy <= 0;
+end
+
+This way, when the ack arrives (after STAGES cycles), the busy is cleared.
+
+Now, the code for the edge detection in B:
+
+In B:
+
+The toggle from A is synchronized via STAGES stages.
+
+Then, the edge is detected between the last two stages.
+
+assign pulseB = (sync_toggle_b[STAGES-1] ^ sync_toggle_b[STAGES-2]);
+
+Then, pulseB is a single-cycle pulse.
+
+Now, the code for the synchronization of the toggle in B:
+
+reg [STAGES-1:0] sync_toggle_b;
+
+always @(posedge clk_b or negedge rstn_b) begin
+   if (!rstn_b) begin
+      sync_toggle_b <= 0;
+   end else begin
+      sync_toggle_b <= {sync_toggle_b[STAGES-2:0], toggle_a};
+   end
+end
+
+Wait, but the code for the synchronizer would have:
+
+For STAGES=2:
+
+sync_toggle_b[0] <= toggle_a;
+
+sync_toggle_b[1] <= sync_toggle_b[0];
+
+So the code would be:
+
+sync_toggle_b <= {sync_toggle_b[0], toggle_a};
+
+Wait, but the code for the synchronizer is:
+
+reg [STAGES-1:0] sync_toggle_b;
+
+always @(posedge clk_b or negedge rstn_b) begin
+   if (!rstn_b) begin
+      sync_toggle_b <= 0;
+   end else begin
+      sync_toggle_b <= {sync_toggle_b[STAGES-2:0], toggle_a};
+   end
+end
+
+Wait, for STAGES=2, the code would have:
+
+sync_toggle_b[1:0] <= {sync_toggle_b[0], toggle_a}
+
+Which is correct.
+
+Now, the code for the pulse_sync module.
+
+Putting all together:
+
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // Domain A signals
+    reg toggle_a;
+    reg busy_a;
+
+    // Synchronize toggle to B
+    reg [STAGES-1:0] sync_toggle_b;
+
+    // Domain B signals
+    reg [STAGES-1:0] sync_toggle_a;
+
+    // Edge detection in B
+    wire pulseB;
+
+    // Synchronize pulseB to A
+    reg [STAGES-1:0] sync_pulseB_a;
+
+    // Assign outputs
+    assign busy_o = busy_a;
+    assign pulseB_o = pulseB;
+
+    // Domain A logic
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            toggle_a <= 0;
+            busy_a <= 0;
+        end else begin
+            // If pulseA comes and not busy, toggle and set busy
+            if (pulseA_i && !busy_a) begin
+                toggle_a <= ~toggle_a;
+                busy_a <= 1;
+            end
+            // Clear busy when ack arrives (synchronized pulseB)
+            if (sync_pulseB_a[STAGES-1]) begin
+                busy_a <= 0;
+            end
+        end
+    end
+
+    // Synchronize toggle_a to B
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            sync_toggle_b <= 0;
+        end else begin
+            sync_toggle_b <= {sync_toggle_b[STAGES-2:0], toggle_a};
+        end
+    end
+
+    // Edge detection in B (toggle)
+    assign pulseB = (sync_toggle_b[STAGES-1] ^ sync_toggle_b[STAGES-2]);
+
+    // Synchronize pulseB to A
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            sync_pulseB_a <= 0;
+        end else begin
+            sync_pulseB_a <= {sync_pulseB_a[STAGES-2:0], pulseB};
+        end
+    end
+
+endmodule
+
+Wait, but in the code for the synchronization of the toggle in B, the code uses sync_toggle_b. Wait, but the code in B is supposed to synchronize the toggle from A. So the code for the B domain:
+
+Wait, the code for the B domain:
+
+The toggle from A is in toggle_a. So in B, the code would have:
+
+reg [STAGES-1:0] sync_toggle;
+
+always @(posedge clk_b or negedge rstn_b) begin
+   if (!rstn_b) begin
+      sync_toggle <= 0;
+   end else begin
+      sync_toggle <= {sync_toggle[STAGES-2:0], toggle_a};
+   end
+end
+
+Then, the edge is between sync_toggle[STAGES-1] and sync_toggle[STAGES-2].
+
+So the code for the edge detection would be:
+
+assign pulseB = (sync_toggle[STAGES-1] ^ sync_toggle[STAGES-2]);
+
+But in the code above, the code uses sync_toggle_b, which may be a typo.
+
+But in the code I wrote earlier, the code for the B domain's synchronization is named sync_toggle_b. But the code should have:
+
+In B:
+
+reg [STAGES-1:0] sync_toggle;
+
+always @(posedge clk_b ...) 
+
+But in the code I wrote earlier, the code for the B synchronization is named sync_toggle_b. But perhaps that's a typo.
+
+But in any case, the code for the synchronization in B is:
+
+reg [STAGES-1:0] sync_toggle;
+
+always @(posedge clk_b or negedge rstn_b) begin
+   if (!rstn_b) begin
+      sync_toggle <= 0;
+   end else begin
+      sync_toggle <= {sync_toggle[STAGES-2:0], toggle_a};
+   end
+end
+
+Then, the edge detection.
+
+But in the code I wrote earlier, the code for the synchronization in B is named sync_toggle_b. But perhaps that's a mistake.
+
+But in any case, the code should have:
+
+In B:
+
+reg [STAGES-1:0] sync_toggle;
+
+always @(posedge clk_b or negedge rstn_b) begin
+   if (!rstn_b) begin
+      sync_toggle <= 0;
+   end else begin
+      sync_toggle <= {sync_toggle[STAGES-2:0], toggle_a};
+   end
+end
+
+Then, the edge detection.
+
+assign pulseB = (sync_toggle[STAGES-1] ^ sync_toggle[STAGES-2]);
+
+Then, the pulseB is synchronized to A.
+
+So the code would have:
+
+// Synchronize pulseB to A
+
+reg [STAGES-1:0] sync_pulseB_a;
+
+always @(posedge clk_a or negedge rstn_a) begin
+   if (!rstn_a) begin
+      sync_pulseB_a <= 0;
+   end else begin
+      sync_pulseB_a <= {sync_pulseB_a[STAGES-2:0], pulseB};
+   end
+end
+
+Then, the ack is when sync_pulseB_a[STAGES-1] is high.
+
+In the code for the busy in A:
+
+if (sync_pulseB_a[STAGES-1]) begin
+   busy_a <= 0;
+end
+
+Putting all together, the code should be:
+
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // Domain A signals
+    reg toggle_a;
+    reg busy_a;
+
+    // Synchronize toggle to B
+    reg [STAGES-1:0] sync_toggle_b;
+
+    // Domain B signals
+    reg [STAGES-1:0] sync_toggle;
+
+    // Edge detection in B
+    wire pulseB;
+
+    // Synchronize pulseB to A
+    reg [STAGES-1:0] sync_pulseB_a;
+
+    // Assign outputs
+    assign busy_o = busy_a;
+    assign pulseB_o = pulseB;
+
+    // Domain A logic
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            toggle_a <= 0;
+            busy_a <= 0;
+        end else begin
+            // If pulseA comes and not busy, toggle and set busy
+            if (pulseA_i && !busy_a) begin
+                toggle_a <= ~toggle_a;
+                busy_a <= 1;
+            end
+            // Clear busy when ack arrives (synchronized pulseB)
+            if (sync_pulseB_a[STAGES-1]) begin
+                busy_a <= 0;
+            end
+        end
+    end
+
+    // Synchronize toggle_a to B
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            sync_toggle <= 0;
+        end else begin
+            sync_toggle <= {sync_toggle[STAGES-2:0], toggle_a};
+        end
+    end
+
+    // Edge detection in B (toggle)
+    assign pulseB = (sync_toggle[STAGES-1] ^ sync_toggle[STAGES-2]);
+
+    // Synchronize pulseB to A
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            sync_pulseB_a <= 0;
+        end else begin
+            sync_pulseB_a <= {sync_pulseB_a[STAGES-2:0], pulseB};
+        end
+    end
+
+endmodule
+
+Wait, but in the code for the synchronization in B, the code uses 'sync_toggle' which is a reg array. The code for the B domain's synchronization is:
+
+reg [STAGES-1:0] sync_toggle;
+
+always @(posedge clk_b or negedge rstn_b) begin
+   if (!rstn_b) begin
+      sync_toggle <= 0;
+   end else begin
+      sync_toggle <= {sync_toggle[STAGES-2:0], toggle_a};
+   end
+end
+
+This is correct for a parameterized synchronizer.
+
+Then, the edge detection is between the last two stages.
+
+The pulseB is assigned as the XOR of the last two stages.
+
+Then, the pulseB is synchronized to A via STAGES stages.
+
+The code for the synchronization of pulseB to A is:
+
+reg [STAGES-1:0] sync_pulseB_a;
+
+always @(posedge clk_a or negedge rstn_a) begin
+   if (!rstn_a) begin
+      sync_pulseB_a <= 0;
+   end else begin
+      sync_pulseB_a <= {sync_pulseB_a[STAGES-2:0], pulseB};
+   end
+end
+
+Then, the ack is when the last stage is high.
+
+In the code for domain A:
+
+if (sync_pulseB_a[STAGES-1]) begin
+   busy_a <= 0;
+end
+
+This should work.
+
+Now, the code for the initial conditions:
+
+After reset, pulseB and busy are low.
+
+In the code:
+
+When rstn_a is low, toggle_a and busy_a are 0.
+
+Similarly for B.
+
+The code should have:
+
+In B:
+
+When rstn_b is low, sync_toggle is 0.
+
+In A:
+
+When rstn_a is low, sync_pulseB_a is 0.
+
+Thus, after reset, everything is initialized.
+
+Now, the code should be correct.
+
+But the code uses STAGES for the synchronization of the toggle and the pulseB.
+
+Thus, the final code should be as above.
+</think>
+
+<answer>
+```verilog
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // Domain A signals
+    reg toggle_a;
+    reg busy_a;
+
+    // Synchronize toggle to B
+    reg [STAGES-1:0] sync_toggle_b;
+
+    // Domain B signals
+    reg [STAGES-1:0] sync_toggle;
+
+    // Edge detection in B
+    wire pulseB;
+
+    // Synchronize pulseB to A
+    reg [STAGES-1:0] sync_pulseB_a;
+
+    // Assign outputs
+    assign busy_o = busy_a;
+    assign pulseB_o = pulseB;
+
+    // Domain A logic
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            toggle_a <= 0;
+            busy_a <= 0;
+        end else begin
+            // If pulseA comes and not busy, toggle and set busy
+            if (pulseA_i && !busy_a) begin
+                toggle_a <= ~toggle_a;
+                busy_a <= 1;
+            end
+            // Clear busy when ack arrives (synchronized pulseB)
+            if (sync_pulseB_a[STAGES-1]) begin
+                busy_a <= 0;
+            end
+        end
+    end
+
+    // Synchronize toggle_a to B
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            sync_toggle <= 0;
+        end else begin
+            sync_toggle <= {sync_toggle[STAGES-2:0], toggle_a};
+        end
+    end
+
+    // Edge detection in B (toggle)
+    assign pulseB = (sync_toggle[STAGES-1] ^ sync_toggle[STAGES-2]);
+
+    // Synchronize pulseB to A
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            sync_pulseB_a <= 0;
+        end else begin
+            sync_pulseB_a <= {sync_pulseB_a[STAGES-2:0], pulseB};
+        end
+    end
+
+endmodule
+```
+</answer>

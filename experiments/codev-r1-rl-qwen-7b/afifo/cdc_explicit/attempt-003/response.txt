@@ -1,0 +1,1642 @@
+<think>Okay, I need to design an asynchronous FIFO in Verilog with the given specifications. Let's start by understanding the requirements.
+
+First, the module is called afifo, and it has parameters LGFIFO (log2 of entries), WIDTH (data width), NFF (probably the number of flip-flops for CDC?), WRITE_ON_POSEDGE, and OPT_REGISTER_READS. The clocks are asynchronous, so the FIFO needs to handle CDC properly.
+
+The inputs and outputs are given. The FIFO has separate write and read clocks and resets. The resets are active-low. The write side has i_wr, data, and the read side has i_rd. The outputs are full, empty, and data.
+
+Behavior points: Writes when i_wr is high and not full. Reads when i_rd is high and not empty. Data must be in write order. Resets set full low and empty high. The WRITE_ON_POSEDGE determines the write clock edge (probably posedge if 1, negedge if 0?), and OPT_REGISTER_READS affects whether the read data is registered.
+
+CDC requirements: Need to handle clock domain crossings safely. So, the pointers need to be synchronized between the write and read domains. Common approaches are using Gray codes for pointers to minimize metastability issues.
+
+The FIFO size is 2^LGFIFO entries. So the depth is a power of two. The pointers can be of size LGFIFO+1 bits (to distinguish between full and empty when pointers are equal).
+
+Wait, standard asynchronous FIFO design uses Gray code pointers. The write pointer increments on write, read pointer increments on read. The full condition is when the write pointer's MSB differs and the rest are same as read pointer. Empty when pointers are same.
+
+But the exact implementation can vary. Let's outline the components:
+
+- Dual-clock FIFO with separate write and read pointers.
+- Convert pointers to Gray code for CDC.
+- Synchronize the read pointer to write clock domain and vice versa.
+- Generate full and empty flags based on synchronized pointers.
+
+Wait, but the parameters here include NFF. Hmm. NFF is the number of flip-flops for CDC? Maybe the number of stages for synchronization. Typically, two stages are used for CDC. But the parameter allows flexibility.
+
+Wait, the user says "NFF: Implementation parameter. Choose a safe crossing yourself." So perhaps NFF is the number of flip-flops used for CDC synchronization. For safe CDC, two stages are standard. So maybe NFF is set to 2. But the user says "choose a safe crossing yourself", so the code should use NFF as the number of stages. So in the code, when synchronizing pointers, we have NFF stages.
+
+Wait, but in standard practice, two flip-flops are used for CDC synchronization. So if NFF is 2, that's standard. Let's proceed with that.
+
+Now, the FIFO structure:
+
+The write pointer (wptr) and read pointer (rptr) are (LGFIFO+1) bits. The actual address is the lower LGFIFO bits. The MSB is used to detect full/empty.
+
+The Gray code conversion is done for each pointer. Then, the synchronized versions are used to generate the flags.
+
+Wait, the standard approach is:
+
+- The write pointer is converted to Gray and synchronized to the read clock domain.
+- The read pointer is converted to Gray and synchronized to the write clock domain.
+
+Then, the full condition is when the next write pointer (if written) would have the same Gray code as the synchronized read pointer (but with the MSB and next bit different). Wait, maybe I need to recall the exact condition.
+
+Alternatively, the full condition is when the write pointer's next value (if incremented) would equal the read pointer's synchronized value in the write domain. Wait, perhaps:
+
+Full is when (wptr - rptr_sync) >= depth. Wait, but pointers are (LGFIFO+1) bits. The actual condition is:
+
+Full when (wptr_gray == { ~rptr_sync_gray[LGFIFO], ~rptr_sync_gray[LGFIFO-1:0] } )
+
+Wait, maybe not. Let's think again.
+
+In the standard approach:
+
+The write pointer (binary) is converted to Gray and passed through synchronizers to the read domain. Similarly, read pointer is converted and passed to write domain.
+
+The full condition is when the next write pointer (wptr +1) would have the same lower bits as the read pointer (synchronized), but the MSB differs. Wait, perhaps:
+
+Full is when:
+
+(wptr_gray ^ (wptr_gray >> 1)) == (rptr_sync_gray ^ (rptr_sync_gray >>1 )) )
+
+Wait, maybe not. Let's refer to standard FIFO design.
+
+The full condition occurs when the write pointer has wrapped around and is one less than the read pointer (in terms of the full (LGFIFO+1) bits). Wait, the actual condition is:
+
+If the write pointer's next position would equal the read pointer's synchronized value, then the FIFO is full.
+
+Wait, the standard approach for full is:
+
+If (wptr - rptr_sync) >= depth, then full.
+
+But since pointers are (LGFIFO+1) bits, the actual check is:
+
+If (wptr's MSB is different from rptr_sync's MSB, and the remaining bits are equal, then the FIFO is full.
+
+Similarly, empty is when the pointers are equal.
+
+Wait, the standard full condition is when the write pointer is exactly one less than the read pointer (modulo 2^(LGFIFO+1)), but that's when the FIFO is full. Wait, perhaps:
+
+Full when (wptr == { ~rptr_sync[LGFIFO], rptr_sync[LGFIFO-1:0] } )
+
+Wait, perhaps the actual condition is:
+
+Full when (wptr's next position would make the FIFO full. So when the next write would make the write pointer equal to the read pointer, but since the pointers are one more bit, the actual check is:
+
+If (wptr's next value (binary) minus rptr_sync (binary) equals the depth. Wait, but binary pointers have (LGFIFO+1) bits. So the maximum entries are 2^LGFIFO. So when the difference is equal to 2^LGFIFO, the FIFO is full.
+
+But in terms of the pointers, the full condition is when:
+
+(wptr - rptr_sync) == 2^LGFIFO.
+
+But since pointers are (LGFIFO+1) bits, the actual check is:
+
+(wptr's MSB is different from rptr_sync's MSB, and the lower bits are equal. So:
+
+(wptr_gray == (rptr_sync_gray ^ ( (1 << LGFIFO) )) )
+
+Wait, perhaps the Gray code approach is better here.
+
+Alternatively, the Gray code pointers are used, and the full condition is when the next Gray code of the write pointer is equal to the synchronized read pointer's Gray code, except the two MSBs are flipped.
+
+Hmm, this is getting complicated. Let's proceed step by step.
+
+First, the FIFO has a memory array of size 2^LGFIFO. The write and read pointers are (LGFIFO+1) bits. The actual address is the lower LGFIFO bits.
+
+The write pointer increments when a write occurs (if not full). Similarly for read.
+
+The full condition is when the write pointer's next value (if written) would equal the read pointer's synchronized value. Wait, but the pointers are (LGFIFO+1) bits. So:
+
+Full is when ( (wptr +1 - rptr_sync) >= 2^LGFIFO )
+
+But in terms of the pointers, the full condition is when:
+
+(wptr's MSB is different from rptr_sync's MSB, and the lower bits are equal. So:
+
+(wptr_gray == (rptr_sync_gray ^ ( (1 << (LGFIFO)) )) )
+
+Wait, perhaps the standard approach is:
+
+The full condition is when the write pointer's Gray code is equal to the synchronized read pointer's Gray code except that the two MSBs are flipped.
+
+Wait, here's a standard approach:
+
+The write pointer (binary) is converted to Gray code. The Gray code is synchronized to the read domain. Similarly for read.
+
+The full condition is determined in the write domain by comparing the current write pointer and the synchronized read pointer (from read domain). The full condition is:
+
+(wptr - rptr_sync) >= (2^LGFIFO)
+
+But since pointers are (LGFIFO+1) bits, the maximum entries are 2^LGFIFO. So when the difference is exactly 2^LGFIFO, the FIFO is full.
+
+But in terms of the pointers:
+
+If (wptr's next value (binary) - rptr_sync (binary) ) == 2^LGFIFO, then full.
+
+But how to compute that.
+
+Alternatively, the full condition is:
+
+(wptr_gray == { ~rptr_sync_gray[LGFIFO:LGFIFO-1], rptr_sync_gray[LGFIFO-2:0] } )
+
+Wait, perhaps not. Let's refer to the standard method.
+
+In Clifford E. Cummings' paper on asynchronous FIFOs, the full condition is determined by:
+
+If the write pointer's Gray code is equal to the synchronized read pointer's Gray code except that the two MSBs are flipped.
+
+Wait, the exact code from the paper:
+
+assign full = (wpnext == { ~rptr_sync[addr_width:addr_width-1], rptr_sync[addr_width-2:0] });
+
+Wait, but the pointers are (addr_width +1) bits. Hmm.
+
+Alternatively, the full condition is when the next write pointer's Gray code is equal to the synchronized read pointer's Gray code, except the top two bits are flipped.
+
+Wait, perhaps the code in the paper is:
+
+// full when the next write pointer's gray code is equal to the synchronized read pointer's gray code except the two MSBs are flipped.
+
+Wait, the code from the paper:
+
+// full when the next write pointer's gray code is equal to the synchronized read pointer's gray code except the two MSBs are flipped.
+
+Wait, in the code example:
+
+// full when the next write pointer's gray code is equal to the synchronized read pointer's gray code except the two MSBs are flipped.
+
+// So:
+
+if ( (wpnext_gray == { ~rptr_sync_gray[addr_width], ~rptr_sync_gray[addr_width-1], rptr_sync_gray[addr_width-2:0] }) )
+
+But perhaps the exact code is:
+
+// full when the next write pointer's gray code is equal to the synchronized read pointer's gray code except the two MSBs are flipped.
+
+Wait, perhaps the code in the paper is:
+
+// full when the next write pointer's gray code is equal to the synchronized read pointer's gray code except the two MSBs are flipped.
+
+// So:
+
+full = (wpnext_gray == { ~rptr_sync_gray[addr_width], ~rptr_sync_gray[addr_width-1], rptr_sync_gray[addr_width-2:0] });
+
+But I need to adjust for the parameters here.
+
+In any case, the standard approach is to use Gray code pointers and synchronize them across domains.
+
+Now, the FIFO structure:
+
+The memory is dual-port (write on write clock, read on read clock). The write pointer increments on write, read pointer increments on read.
+
+The pointers are converted to Gray code and synchronized across domains.
+
+The full and empty flags are generated based on the synchronized pointers.
+
+Now, the parameters:
+
+LGFIFO is log2 of entries. So the depth is 2^LGFIFO.
+
+The code needs to generate the FIFO with that.
+
+Now, the code outline:
+
+- Declare the memory array as reg [WIDTH-1:0] mem [0: (1<<LGFIFO)-1];
+
+- Write pointer (wptr) and read pointer (rptr) as (LGFIFO+1)-bit registers.
+
+- Convert pointers to Gray code.
+
+- Synchronize the read pointer's Gray code to the write clock domain (using NFF flip-flops).
+
+- Similarly, synchronize the write pointer's Gray code to the read clock domain.
+
+- Generate full and empty conditions.
+
+Now, the code:
+
+First, the parameters:
+
+module afifo #(
+    parameter LGFIFO = 3,
+    parameter WIDTH = 16,
+    parameter NFF = 2,
+    parameter WRITE_ON_POSEDGE = 1'b1,
+    parameter OPT_REGISTER_READS = 1'b1
+) (
+    input wire i_wclk, i_wr_reset_n, i_wr,
+    input wire [WIDTH-1:0] i_wr_data,
+    output reg o_wr_full,
+    input wire i_rclk, i_rd_reset_n, i_rd,
+    output reg [WIDTH-1:0] o_rd_data,
+    output reg o_rd_empty
+);
+
+// Local parameters
+localparam PTR_WIDTH = LGFIFO + 1;
+
+// Pointers
+reg [PTR_WIDTH-1:0] wptr, rptr;
+reg [PTR_WIDTH-1:0] wptr_gray, rptr_gray;
+
+// Synchronized pointers
+reg [PTR_WIDTH-1:0] rptr_sync [NFF-1:0];
+reg [PTR_WIDTH-1:0] wptr_sync [NFF-1:0];
+
+// Memory
+reg [WIDTH-1:0] mem [0:(1 << LGFIFO)-1];
+
+// Full and empty conditions
+wire full, empty;
+
+// Write and read logic
+// Write side
+always @(posedge i_wclk or negedge i_wr_reset_n) begin
+    if (!i_wr_reset_n) begin
+        wptr <= 0;
+        wptr_gray <= 0;
+    end else begin
+        if (WRITE_ON_POSEDGE) begin
+            if (i_wr && !o_wr_full) begin
+                wptr <= wptr + 1;
+                mem[wptr[PTR_WIDTH-2:0]] <= i_wr_data;
+            end
+        end else begin
+            // Wait, the parameter WRITE_ON_POSEDGE selects the edge. If it's 1, posedge, else negedge?
+            // Wait, the parameter is called WRITE_ON_POSEDGE. If it's 1, then the write is done on posedge, else negedge?
+            // The description says: WRITE_ON_POSEDGE selects the write edge. So if 1, use posedge, else negedge.
+
+            // So the code would have:
+
+            if (i_wr && !o_wr_full) begin
+                wptr <= wptr + 1;
+                mem[wptr[PTR_WIDTH-2:0]] <= i_wr_data;
+            end
+        end
+    end
+end
+
+Wait, but the code for the write side would be:
+
+The write pointer increments on the clock edge (posedge or negedge based on parameter). The data is written to the memory.
+
+Similarly for read side.
+
+Wait, the code for the write pointer:
+
+If WRITE_ON_POSEDGE is 1, then the write is done on posedge. Else, on negedge.
+
+Wait, the parameter is called WRITE_ON_POSEDGE. So if it's 1, the write is done on posedge. So the code would use posedge i_wclk if WRITE_ON_POSEDGE is 1, else negedge.
+
+But in Verilog, you can't conditionally choose the edge in the sensitivity list. So perhaps the code uses generate blocks.
+
+Wait, but the code can't have generate blocks inside the always block. Hmm.
+
+Alternatively, the code can use a variable in the sensitivity list. Wait, but Verilog doesn't allow variables in sensitivity lists. So perhaps the code uses a ternary condition.
+
+Wait, but in Verilog, the sensitivity list can't be dynamic. So the code must use generate blocks to create separate always blocks based on the parameter.
+
+Wait, but the code can't have generate blocks inside the module. Hmm.
+
+Alternatively, the code can use a variable to hold the edge.
+
+Wait, perhaps:
+
+If WRITE_ON_POSEDGE is 1, then:
+
+always @(posedge i_wclk or negedge i_wr_reset_n) begin ... end
+
+Else:
+
+always @(negedge i_wclk or negedge i_wr_reset_n) begin ... end
+
+But in Verilog, you can't generate always blocks conditionally based on parameters. Wait, you can use generate if.
+
+Wait, but the code would have:
+
+generate
+    if (WRITE_ON_POSEDGE) begin
+        // posedge
+        always @(posedge i_wclk or negedge i_wr_reset_n) begin
+            if (!i_wr_reset_n) begin
+                // reset
+            end else begin
+                // write logic
+            end
+        end
+    end else begin
+        // negedge
+        always @(negedge i_wclk or negedge i_wr_reset_n) begin
+            if (!i_wr_reset_n) begin
+                // reset
+            end else begin
+                // write logic
+            end
+        end
+    end
+endgenerate
+
+But the code for the write pointer and data.
+
+Similarly for the read side.
+
+But the code may get complicated.
+
+Alternatively, the code can use a variable edge.
+
+But in Verilog, you can't have a variable in the sensitivity list. So generate blocks are needed.
+
+So the code would have generate blocks for the write and read clock edges.
+
+But the code for the write pointer:
+
+If WRITE_ON_POSEDGE is 1, then:
+
+always @(posedge i_wclk or negedge i_wr_reset_n) begin
+    if (!i_wr_reset_n) begin
+        wptr <= 0;
+        wptr_gray <= 0;
+    end else begin
+        if (i_wr && !o_wr_full) begin
+            wptr <= wptr + 1;
+            mem[wptr[PTR_WIDTH-2:0]] <= i_wr_data;
+        end
+    end
+end
+
+Else:
+
+always @(negedge i_wclk or negedge i_wr_reset_n) begin
+    if (!i_wr_reset_n) begin
+        wptr <= 0;
+        wptr_gray <= 0;
+    end else begin
+        if (i_wr && !o_wr_full) begin
+            wptr <= wptr + 1;
+            mem[wptr[PTR_WIDTH-2:0]] <= i_wr_data;
+        end
+    end
+end
+
+Similarly for read side.
+
+But in Verilog, generate blocks can conditionally generate the code.
+
+So:
+
+generate
+    if (WRITE_ON_POSEDGE) begin
+        // posedge write clock
+        always @(posedge i_wclk or negedge i_wr_reset_n) begin
+            if (!i_wr_reset_n) begin
+                wptr <= 0;
+                wptr_gray <= 0;
+            end else begin
+                if (i_wr && !o_wr_full) begin
+                    wptr <= wptr + 1;
+                    mem[wptr[PTR_WIDTH-2:0]] <= i_wr_data;
+                end
+            end
+        end
+    end else begin
+        // negedge write clock
+        always @(negedge i_wclk or negedge i_wr_reset_n) begin
+            if (!i_wr_reset_n) begin
+                wptr <= 0;
+                wptr_gray <= 0;
+            end else begin
+                if (i_wr && !o_wr_full) begin
+                    wptr <= wptr + 1;
+                    mem[wptr[PTR_WIDTH-2:0]] <= i_wr_data;
+                end
+            end
+        end
+    end
+endgenerate
+
+Similarly for the read side.
+
+Wait, but the read side's clock edge is determined by another parameter? Wait, the parameter is WRITE_ON_POSEDGE for the write edge. The read side's edge is not specified. Wait, the parameter is only for the write edge. The read edge is always posedge? Or is there a similar parameter?
+
+Wait, the parameters given are:
+
+WRITE_ON_POSEDGE: selects the write edge. OPT_REGISTER_READS: selects whether reads are registered.
+
+So the read clock is always posedge? Or the read side's edge is fixed? Hmm.
+
+The problem statement says:
+
+WRITE_ON_POSEDGE selects the write edge. OPT_REGISTER_READS selects whether reads are registered.
+
+So the read side's clock edge is not specified. Wait, the clocks are given as i_wclk and i_rclk. The read side's edge is determined by the parameter? Or is it always posedge?
+
+Wait, the problem statement says:
+
+Behavior:
+
+- WRITE_ON_POSEDGE selects the write edge.
+
+- OPT_REGISTER_READS selects whether reads are registered.
+
+So the read side's clock edge is not controlled by a parameter. The code uses posedge for read clock? Or negedge?
+
+Wait, the problem statement does not mention a parameter for the read edge. So perhaps the read is always on posedge.
+
+Wait, the code for the read side:
+
+The read pointer increments when i_rd is high and not empty.
+
+The read data is registered if OPT_REGISTER_READS is set.
+
+Wait, OPT_REGISTER_READS: if 1, then the read data is registered. So the output is registered, which adds a pipeline stage.
+
+So the code for the read side:
+
+If OPT_REGISTER_READS is 1:
+
+The read data is stored in a register. So when you read, you get the data from the memory, and the output is registered.
+
+Else, the data is read directly from memory (combinational read).
+
+But in Verilog, the memory is usually synchronous read if using registers. Wait, but in standard FIFO designs, the read is combinational (asynchronous read from memory array). But if OPT_REGISTER_READS is enabled, the data is registered.
+
+Wait, the code for the read side:
+
+If OPT_REGISTER_READS is 1:
+
+The data is read from the memory and stored in a register. The output is that register.
+
+Else:
+
+The data is read directly from the memory array (combinational read).
+
+But in Verilog, the memory is usually addressed with a register, and the read is combinational.
+
+Wait, but in Verilog, if you have:
+
+reg [WIDTH-1:0] mem [0: ...];
+assign o_rd_data = mem[rptr[...]];
+
+But that's combinational. If you have a registered read, you have a register that holds the data.
+
+So the code would have:
+
+If OPT_REGISTER_READS is 1:
+
+always @(posedge i_rclk) begin
+    if (read_enable) begin
+        o_rd_data <= mem[...];
+    end
+end
+
+Else:
+
+assign o_rd_data = mem[...];
+
+But in the code, the output is a reg. So in Verilog, you can't use assign for reg variables. Wait, no: the output is declared as reg, so you can use procedural assignments.
+
+Wait, the code for the read side:
+
+The read pointer increments on the clock edge (posedge i_rclk) when i_rd is high and not empty.
+
+If OPT_REGISTER_READS is 1:
+
+The data is read from the memory and stored in a register. So the output is registered.
+
+Else:
+
+The data is read directly from the memory array (combinational read).
+
+Wait, but in Verilog, the memory is a reg array. So reading is done via an address. If the read is registered, the data is stored in a register.
+
+So:
+
+If OPT_REGISTER_READS is 1:
+
+always @(posedge i_rclk or negedge i_rd_reset_n) begin
+    if (!i_rd_reset_n) begin
+        o_rd_data <= 0;
+    end else begin
+        if (i_rd && !o_rd_empty) begin
+            o_rd_data <= mem[rptr[PTR_WIDTH-2:0]];
+        end
+    end
+end
+
+Else:
+
+The data is read combinationally. Wait, but the output is a reg. So in Verilog, you can't have a combinational assignment to a reg. Wait, no: you can use always @* blocks.
+
+Wait, but the code would have:
+
+If OPT_REGISTER_READS is 0:
+
+The data is read from the memory array asynchronously (combinational read). So:
+
+assign o_rd_data = mem[rptr[PTR_WIDTH-2:0]];
+
+But since o_rd_data is declared as reg, that's not allowed. Wait, in Verilog, you can't assign a reg with an assign statement. So if the output is a reg, you have to assign it in procedural blocks.
+
+Wait, perhaps the code uses:
+
+If OPT_REGISTER_READS is 0:
+
+The data is read combinationally. So:
+
+always @* begin
+    o_rd_data = mem[rptr[PTR_WIDTH-2:0]];
+end
+
+But in Verilog, the output is declared as reg, so that's allowed.
+
+But in the code, the output is declared as reg, so in Verilog, you can use always @*.
+
+But the code for the read side:
+
+The read pointer increments on the clock edge (posedge i_rclk) when i_rd is high and not empty.
+
+If OPT_REGISTER_READS is 1:
+
+The data is read from memory and stored in a register. So the output is registered.
+
+Else:
+
+The data is read combinationally from memory.
+
+So:
+
+generate
+    if (OPT_REGISTER_READS) begin
+        // registered read
+        always @(posedge i_rclk or negedge i_rd_reset_n) begin
+            if (!i_rd_reset_n) begin
+                o_rd_data <= 0;
+            end else begin
+                if (i_rd && !o_rd_empty) begin
+                    o_rd_data <= mem[rptr[PTR_WIDTH-2:0]];
+                end
+            end
+        end
+    end else begin
+        // combinational read
+        always @* begin
+            o_rd_data = mem[rptr[PTR_WIDTH-2:0]];
+        end
+    end
+endgenerate
+
+But the output o_rd_data is declared as reg, so the combinational block is allowed.
+
+Wait, but in Verilog, if you have a combinational block, you need to cover all branches. But in this case, the o_rd_data is always assigned to the memory location. So the else block would have:
+
+always @* begin
+    o_rd_data = mem[rptr[PTR_WIDTH-2:0]];
+end
+
+But in Verilog, the always @* would trigger whenever rptr changes, and the data is read.
+
+But in the code, the read pointer is updated on the clock edge. So the data would be updated after the clock edge.
+
+But the code for the read pointer:
+
+The read pointer increments on the clock edge (posedge i_rclk) when i_rd is high and not empty.
+
+So the code for the read pointer:
+
+generate
+    if (WRITE_ON_POSEDGE) begin
+        // Wait, the read side's edge is not controlled by a parameter. The code uses posedge for read clock.
+
+        // Wait, the parameter is only for the write edge. The read edge is fixed as posedge?
+
+        // The problem statement says:
+
+        // WRITE_ON_POSEDGE selects the write edge.
+
+        // OPT_REGISTER_READS selects whether reads are registered.
+
+        // So the read clock is always on posedge.
+
+        // So the code for read pointer:
+
+        always @(posedge i_rclk or negedge i_rd_reset_n) begin
+            if (!i_rd_reset_n) begin
+                rptr <= 0;
+                rptr_gray <= 0;
+            end else begin
+                if (i_rd && !o_rd_empty) begin
+                    rptr <= rptr + 1;
+                end
+            end
+        end
+
+    end else begin
+        // negedge?
+        // Wait, no. The parameter is only for write edge. So the read edge is posedge.
+
+        // So the code for read pointer is always on posedge.
+
+        // So the code for read pointer:
+
+        always @(posedge i_rclk or negedge i_rd_reset_n) begin
+            if (!i_rd_reset_n) begin
+                rptr <= 0;
+                rptr_gray <= 0;
+            end else begin
+                if (i_rd && !o_rd_empty) begin
+                    rptr <= rptr + 1;
+                end
+            end
+        end
+
+    end
+endgenerate
+
+Wait, but the parameter is only for the write edge. So the read edge is fixed as posedge.
+
+Now, the code for the read pointer:
+
+always @(posedge i_rclk or negedge i_rd_reset_n) begin
+    if (!i_rd_reset_n) begin
+        rptr <= 0;
+        rptr_gray <= 0;
+    end else begin
+        if (i_rd && !o_rd_empty) begin
+            rptr <= rptr + 1;
+        end
+    end
+end
+
+Now, the Gray code conversion:
+
+The code for converting binary to Gray:
+
+function [PTR_WIDTH-1:0] bin2gray;
+    input [PTR_WIDTH-1:0] bin;
+    begin
+        bin2gray = bin ^ (bin >> 1);
+    end
+endfunction
+
+Then, assign wptr_gray = bin2gray(wptr);
+
+Similarly for rptr_gray.
+
+Now, synchronizing the read pointer's Gray code to the write clock domain.
+
+The code for synchronization:
+
+// Synchronize read pointer to write clock domain
+genvar i;
+generate
+    for (i=0; i < NFF; i=i+1) begin: sync_rd2wr
+        always @(posedge i_wclk or negedge i_wr_reset_n) begin
+            if (!i_wr_reset_n) begin
+                rptr_sync[i] <= 0;
+            end else begin
+                rptr_sync[i] <= rptr_gray;
+            end
+        end
+    end
+endgenerate
+
+Wait, but the standard approach is to have two flip-flops for synchronization. So NFF is the number of stages. So the code would have NFF stages.
+
+Wait, the code for synchronizing the read pointer's Gray code into the write domain:
+
+reg [PTR_WIDTH-1:0] rptr_sync [NFF-1:0];
+
+always @(posedge i_wclk or negedge i_wr_reset_n) begin
+    if (!i_wr_reset_n) begin
+        rptr_sync[0] <= 0;
+        // ... other stages
+    end else begin
+        rptr_sync[0] <= rptr_gray;
+        rptr_sync[1] <= rptr_sync[0];
+        // etc.
+    end
+end
+
+But with NFF stages, the code would have a generate loop.
+
+Wait, but in Verilog, arrays can be declared as reg [PTR_WIDTH-1:0] rptr_sync [0:NFF-1]; and then generate for loop.
+
+But the code for synchronization:
+
+// Synchronize read pointer to write clock domain
+reg [PTR_WIDTH-1:0] rptr_sync [NFF-1:0];
+integer j;
+always @(posedge i_wclk or negedge i_wr_reset_n) begin
+    if (!i_wr_reset_n) begin
+        for (j=0; j < NFF; j=j+1) begin
+            rptr_sync[j] <= 0;
+        end
+    end else begin
+        rptr_sync[0] <= rptr_gray;
+        for (j=1; j < NFF; j=j+1) begin
+            rptr_sync[j] <= rptr_sync[j-1];
+        end
+    end
+end
+
+Similarly for the write pointer synchronization into read domain.
+
+Once the synchronized pointers are obtained, the full and empty conditions are generated.
+
+The empty condition is when the read pointer equals the synchronized write pointer.
+
+Wait, no. The empty condition is when the read and write pointers are equal.
+
+Wait, the empty condition is when the read pointer equals the write pointer.
+
+Wait, the empty condition is when the read pointer's Gray code equals the synchronized write pointer's Gray code.
+
+Wait, no. The empty condition is when the read pointer equals the write pointer. But since the pointers are in different clock domains, the synchronized pointers are used.
+
+Wait, the empty condition is determined in the read domain by comparing the read pointer (binary) with the synchronized write pointer (binary). Wait, no.
+
+Wait, the empty condition is when the read pointer equals the write pointer. But since the write pointer is synchronized to the read domain (via Gray code), the code would convert the synchronized write pointer's Gray code back to binary and compare.
+
+Alternatively, the empty condition is when the read pointer's Gray code equals the synchronized write pointer's Gray code.
+
+But the standard approach is:
+
+Empty is when the read pointer's Gray code equals the synchronized write pointer's Gray code.
+
+Similarly, full is when the write pointer's Gray code equals the synchronized read pointer's Gray code (after flipping the top two bits).
+
+But this is getting complicated.
+
+Alternatively:
+
+The empty condition is when the read pointer's binary equals the synchronized write pointer's binary.
+
+But the synchronized write pointer is in the read domain and may have been delayed.
+
+Wait, perhaps the code for empty is:
+
+assign empty = (rptr == wptr_sync_bin);
+
+But the synchronized write pointer is in the read domain, but converted from Gray code.
+
+Wait, perhaps the steps are:
+
+1. Convert the binary write pointer to Gray code, synchronize to read domain.
+
+2. Convert the synchronized Gray code back to binary.
+
+3. Compare read pointer (binary) with synchronized write pointer (binary) to determine empty.
+
+Similarly for full.
+
+But this requires converting Gray code back to binary.
+
+Alternatively, the code uses the Gray code pointers directly.
+
+But this is getting too involved.
+
+Let's proceed step by step.
+
+First, the write pointer's Gray code is synchronized to the read domain.
+
+Similarly, the read pointer's Gray code is synchronized to the write domain.
+
+Then:
+
+Full condition in write domain:
+
+full = (wptr_gray == { ~rptr_sync_gray[PTR_WIDTH-1 : PTR_WIDTH-2], rptr_sync_gray[PTR_WIDTH-3 : 0] } )
+
+Wait, perhaps the full condition is when the next write pointer's Gray code is equal to the synchronized read pointer's Gray code, except the two MSBs are flipped.
+
+In code:
+
+wire [PTR_WIDTH-1:0] wgray_next = bin2gray(wptr + 1);
+
+assign full = (wgray_next == { ~rptr_sync_gray[PTR_WIDTH-1], ~rptr_sync_gray[PTR_WIDTH-2], rptr_sync_gray[PTR_WIDTH-3:0] });
+
+But this depends on the parameters.
+
+Alternatively, the code uses:
+
+// Full condition: next write pointer's gray code equals the synchronized read pointer's gray code with the two MSBs flipped.
+
+// So:
+
+wire [PTR_WIDTH-1:0] wgray_next = bin2gray(wptr + 1);
+
+assign full = (wgray_next == { ~rptr_sync_gray[PTR_WIDTH-1 : PTR_WIDTH-2], rptr_sync_gray[PTR_WIDTH-3 : 0] });
+
+Similarly, empty is when the read pointer's gray code equals the synchronized write pointer's gray code.
+
+// Empty condition: rptr_gray equals the synchronized write pointer's gray code.
+
+assign empty = (rptr_gray == wptr_sync_gray);
+
+Now, the code for the full and empty flags.
+
+Once the synchronized pointers are obtained, the full and empty can be generated.
+
+Now, the code for the write side:
+
+The full flag is registered.
+
+Similarly, the empty flag is registered.
+
+Now, the code for the full and empty flags.
+
+The code:
+
+// Convert synchronized Gray code back to binary.
+
+// For full:
+
+// The synchronized read pointer's Gray code (after NFF stages) is converted to binary.
+
+// Similarly for empty.
+
+But converting Gray to binary requires a function.
+
+function [PTR_WIDTH-1:0] gray2bin;
+    input [PTR_WIDTH-1:0] gray;
+    reg [PTR_WIDTH-1:0] bin;
+    integer i;
+    begin
+        bin[PTR_WIDTH-1] = gray[PTR_WIDTH-1];
+        for (i = PTR_WIDTH-2; i >=0; i = i -1) begin
+            bin[i] = bin[i+1] ^ gray[i];
+        end
+        gray2bin = bin;
+    end
+endfunction
+
+Then:
+
+wire [PTR_WIDTH-1:0] rptr_sync_bin = gray2bin(rptr_sync_gray);
+
+Similarly for the write domain.
+
+But this adds complexity.
+
+Alternatively, the code uses the Gray code directly for comparisons.
+
+But this is getting too involved.
+
+Given the time constraints, perhaps the code can be written as follows.
+
+The code:
+
+- Memory array.
+
+- Write pointer and read pointer.
+
+- Gray code conversion.
+
+- Synchronization of pointers.
+
+- Full and empty conditions.
+
+Now, the code:
+
+// Gray code conversion functions
+function [PTR_WIDTH-1:0] bin2gray (input [PTR_WIDTH-1:0] bin);
+    bin2gray = bin ^ (bin >> 1);
+endfunction
+
+function [PTR_WIDTH-1:0] gray2bin (input [PTR_WIDTH-1:0] gray);
+    reg [PTR_WIDTH-1:0] bin;
+    integer i;
+    begin
+        bin[PTR_WIDTH-1] = gray[PTR_WIDTH-1];
+        for (i = PTR_WIDTH-2; i >=0; i = i -1)
+            bin[i] = bin[i+1] ^ gray[i];
+        gray2bin = bin;
+    end
+endfunction
+
+// Synchronization of read pointer to write domain
+reg [PTR_WIDTH-1:0] rptr_sync [NFF-1:0];
+integer i;
+
+always @(posedge i_wclk or negedge i_wr_reset_n) begin
+    if (!i_wr_reset_n) begin
+        for (i=0; i < NFF; i=i+1)
+            rptr_sync[i] <= 0;
+    end else begin
+        rptr_sync[0] <= rptr_gray;
+        for (i=1; i < NFF; i=i+1)
+            rptr_sync[i] <= rptr_sync[i-1];
+    end
+end
+
+// Synchronization of write pointer to read domain
+reg [PTR_WIDTH-1:0] wptr_sync [NFF-1:0];
+integer j;
+
+always @(posedge i_rclk or negedge i_rd_reset_n) begin
+    if (!i_rd_reset_n) begin
+        for (j=0; j < NFF; j=j+1)
+            wptr_sync[j] <= 0;
+    end else begin
+        wptr_sync[0] <= wptr_gray;
+        for (j=1; j < NFF; j=j+1)
+            wptr_sync[j] <= wptr_sync[j-1];
+    end
+end
+
+// Full condition in write domain
+wire [PTR_WIDTH-1:0] wgray_next = bin2gray(wptr + 1);
+wire full = (wgray_next == { ~rptr_sync[NFF-1][PTR_WIDTH-1 : PTR_WIDTH-2], rptr_sync[NFF-1][PTR_WIDTH-3 : 0] });
+
+// Empty condition in read domain
+wire empty = (rptr_gray == wptr_sync[NFF-1]);
+
+// Assign outputs
+assign o_wr_full = full;
+assign o_rd_empty = empty;
+
+Wait, but the outputs are declared as reg. So need to assign them in always blocks.
+
+Wait, in the code:
+
+The outputs o_wr_full and o_rd_empty are declared as reg. So they need to be assigned in procedural blocks.
+
+Wait, but in the code above, full and empty are wires. So the code would have:
+
+always @* begin
+    o_wr_full = full;
+    o_rd_empty = empty;
+end
+
+But in Verilog, if the outputs are declared as reg, they can be assigned in procedural blocks.
+
+Alternatively, the code uses:
+
+// Full and empty flags
+reg full, empty;
+
+// Assign outputs
+assign o_wr_full = full;
+assign o_rd_empty = empty;
+
+But the outputs are declared as reg. So the code can assign them in procedural blocks.
+
+Wait, but in Verilog, if you declare a reg and assign it via a continuous assignment, it's not allowed. So the code must use procedural assignments.
+
+Thus:
+
+// Full and empty flags
+always @* begin
+    // Compute full and empty here
+end
+
+But this is getting complicated.
+
+Alternatively, the code uses:
+
+// Full and empty flags
+always @* begin
+    // Compute full and empty
+end
+
+But the code for full and empty is as follows.
+
+Wait, the code for full:
+
+The full condition is when the next write pointer's Gray code equals the synchronized read pointer's Gray code with the two MSBs flipped.
+
+In code:
+
+wire [PTR_WIDTH-1:0] wgray_next = bin2gray(wptr + 1);
+
+// The synchronized read pointer's Gray code after NFF stages
+wire [PTR_WIDTH-1:0] rptr_sync_gray = rptr_sync[NFF-1];
+
+// Full condition
+assign full = (wgray_next == { ~rptr_sync_gray[PTR_WIDTH-1], ~rptr_sync_gray[PTR_WIDTH-2], rptr_sync_gray[PTR_WIDTH-3:0] });
+
+Similarly for empty.
+
+But this depends on the parameter NFF. If NFF is 2, then the code would have:
+
+rptr_sync_gray = rptr_sync[1];
+
+But the code uses NFF as the number of stages.
+
+But this is getting too involved.
+
+Given time constraints, perhaps the code can be written with NFF=2.
+
+But the code must use the parameter.
+
+But the code can't use generate blocks for the full and empty conditions.
+
+Alternatively, the code uses:
+
+// Full condition
+wire [PTR_WIDTH-1:0] wgray_next = bin2gray(wptr + 1);
+wire full = (wgray_next == ( { ~rptr_sync_gray[PTR_WIDTH-1], ~rptr_sync_gray[PTR_WIDTH-2], rptr_sync_gray[PTR_WIDTH-3:0] } ));
+
+// Empty condition
+wire empty = (rptr_gray == wptr_sync_gray);
+
+But the code for synchronization:
+
+// Synchronize read pointer to write domain
+reg [PTR_WIDTH-1:0] rptr_sync [NFF-1:0];
+integer i;
+always @(posedge i_wclk or negedge i_wr_reset_n) begin
+    if (!i_wr_reset_n) begin
+        for (i=0; i < NFF; i=i+1)
+            rptr_sync[i] <= 0;
+    end else begin
+        rptr_sync[0] <= rptr_gray;
+        for (i=1; i < NFF; i=i+1)
+            rptr_sync[i] <= rptr_sync[i-1];
+    end
+end
+
+// Synchronize write pointer to read domain
+reg [PTR_WIDTH-1:0] wptr_sync [NFF-1:0];
+integer j;
+always @(posedge i_rclk or negedge i_rd_reset_n) begin
+    if (!i_rd_reset_n) begin
+        for (j=0; j < NFF; j=j+1)
+            wptr_sync[j] <= 0;
+    end else begin
+        wptr_sync[0] <= wptr_gray;
+        for (j=1; j < NFF; j=j+1)
+            wptr_sync[j] <= wptr_sync[j-1];
+    end
+end
+
+// Full and empty conditions
+wire [PTR_WIDTH-1:0] rptr_sync_gray = rptr_sync[NFF-1];
+wire [PTR_WIDTH-1:0] wptr_sync_gray = wptr_sync[NFF-1];
+
+// Full condition: next write pointer's gray equals the synchronized read pointer's gray with two MSBs flipped
+wire [PTR_WIDTH-1:0] wgray_next = bin2gray(wptr + 1);
+wire full = (wgray_next == { ~rptr_sync_gray[PTR_WIDTH-1 : PTR_WIDTH-2], rptr_sync_gray[PTR_WIDTH-3 : 0] });
+
+// Empty condition: read pointer's gray equals synchronized write pointer's gray
+wire empty = (rptr_gray == wptr_sync_gray);
+
+// Assign outputs
+always @* begin
+    o_wr_full = full;
+    o_rd_empty = empty;
+end
+
+Wait, but the outputs are declared as reg. So in Verilog, the assignments must be in procedural blocks.
+
+Thus:
+
+// Full and empty flags
+always @* begin
+    o_wr_full = full;
+    o_rd_empty = empty;
+end
+
+But the code for full and empty is as above.
+
+Now, the code for the read data:
+
+If OPT_REGISTER_READS is 1:
+
+The data is registered. So:
+
+always @(posedge i_rclk or negedge i_rd_reset_n) begin
+    if (!i_rd_reset_n) begin
+        o_rd_data <= 0;
+    end else begin
+        if (i_rd && !o_rd_empty) begin
+            o_rd_data <= mem[rptr[PTR_WIDTH-2:0]];
+        end
+    end
+end
+
+Else:
+
+The data is read combinationally.
+
+But in Verilog, the output is a reg. So:
+
+generate
+    if (OPT_REGISTER_READS) begin
+        // Registered read
+        always @(posedge i_rclk or negedge i_rd_reset_n) begin
+            if (!i_rd_reset_n) begin
+                o_rd_data <= 0;
+            end else begin
+                if (i_rd && !o_rd_empty) begin
+                    o_rd_data <= mem[rptr[PTR_WIDTH-2:0]];
+                end
+            end
+        end
+    end else begin
+        // Combinational read
+        always @* begin
+            o_rd_data = mem[rptr[PTR_WIDTH-2:0]];
+        end
+    end
+endgenerate
+
+But the combinational block may not be allowed if the output is a reg. Wait, in Verilog, you can use always @* blocks for combinational assignments.
+
+Now, the code for the read pointer:
+
+always @(posedge i_rclk or negedge i_rd_reset_n) begin
+    if (!i_rd_reset_n) begin
+        rptr <= 0;
+        rptr_gray <= 0;
+    end else begin
+        if (i_rd && !o_rd_empty) begin
+            rptr <= rptr + 1;
+        end
+    end
+end
+
+Similarly for the write pointer:
+
+generate
+    if (WRITE_ON_POSEDGE) begin
+        // posedge
+        always @(posedge i_wclk or negedge i_wr_reset_n) begin
+            if (!i_wr_reset_n) begin
+                wptr <= 0;
+                wptr_gray <= 0;
+            end else begin
+                if (i_wr && !o_wr_full) begin
+                    wptr <= wptr + 1;
+                    mem[wptr[PTR_WIDTH-2:0]] <= i_wr_data;
+                end
+            end
+        end
+    end else begin
+        // negedge
+        always @(negedge i_wclk or negedge i_wr_reset_n) begin
+            if (!i_wr_reset_n) begin
+                wptr <= 0;
+                wptr_gray <= 0;
+            end else begin
+                if (i_wr && !o_wr_full) begin
+                    wptr <= wptr + 1;
+                    mem[wptr[PTR_WIDTH-2:0]] <= i_wr_data;
+                end
+            end
+        end
+    end
+endgenerate
+
+Now, the initial conditions:
+
+After reset, o_wr_full is 0, o_rd_empty is 1.
+
+Wait, the code for reset:
+
+When i_wr_reset_n is low, the write domain resets.
+
+Similarly for read domain.
+
+The code for write reset:
+
+always @(posedge i_wclk or negedge i_wr_reset_n) begin
+    if (!i_wr_reset_n) begin
+        wptr <= 0;
+        wptr_gray <= 0;
+        o_wr_full <= 0; // Wait, no. The full and empty flags are outputs.
+
+Wait, the outputs o_wr_full and o_rd_empty are regs. So their reset values are set during reset.
+
+Wait, the initial state after reset:
+
+After write reset (i_wr_reset_n is low), o_wr_full is 0 (since FIFO is empty).
+
+Wait, no. Wait, the FIFO is empty after reset. So o_rd_empty is 1, o_wr_full is 0.
+
+Wait, the initial state after reset:
+
+o_wr_full = 0.
+
+o_rd_empty = 1.
+
+So in the code:
+
+// Reset conditions
+always @(posedge i_wclk or negedge i_wr_reset_n) begin
+    if (!i_wr_reset_n) begin
+        wptr <= 0;
+        wptr_gray <= 0;
+        o_wr_full <= 0;
+    end else begin
+        // normal operation
+    end
+end
+
+Similarly for read side:
+
+always @(posedge i_rclk or negedge i_rd_reset_n) begin
+    if (!i_rd_reset_n) begin
+        rptr <= 0;
+        rptr_gray <= 0;
+        o_rd_empty <= 1;
+    end else begin
+        // normal operation
+    end
+end
+
+But the full and empty flags are computed based on the pointers.
+
+Wait, the initial state after reset:
+
+The write pointer and read pointer are both 0. So the FIFO is empty. o_rd_empty is 1.
+
+o_wr_full is 0.
+
+Thus, in the code:
+
+// Write domain reset
+always @(posedge i_wclk or negedge i_wr_reset_n) begin
+    if (!i_wr_reset_n) begin
+        wptr <= 0;
+        wptr_gray <= 0;
+        o_wr_full <= 0;
+    end else begin
+        // update wptr and flags
+    end
+end
+
+// Read domain reset
+always @(posedge i_rclk or negedge i_rd_reset_n) begin
+    if (!i_rd_reset_n) begin
+        rptr <= 0;
+        rptr_gray <= 0;
+        o_rd_empty <= 1;
+    end else begin
+        // update rptr and flags
+    end
+end
+
+But the flags (o_wr_full and o_rd_empty) are computed based on the synchronized pointers.
+
+But in the code, the flags are combinational.
+
+Wait, no. The flags are registered outputs.
+
+Thus, the code for the flags:
+
+// Full and empty flags are registered.
+
+// In write domain:
+always @(posedge i_wclk or negedge i_wr_reset_n) begin
+    if (!i_wr_reset_n) begin
+        o_wr_full <= 0;
+    end else begin
+        o_wr_full <= full;
+    end
+end
+
+// In read domain:
+always @(posedge i_rclk or negedge i_rd_reset_n) begin
+    if (!i_rd_reset_n) begin
+        o_rd_empty <= 1;
+    end else begin
+        o_rd_empty <= empty;
+    end
+end
+
+Wait, but the full and empty conditions are combinational.
+
+But in reality, the flags are registered to avoid glitches.
+
+Thus, the code for the flags:
+
+// Registered full flag in write domain
+always @(posedge i_wclk or negedge i_wr_reset_n) begin
+    if (!i_wr_reset_n) begin
+        o_wr_full <= 0;
+    end else begin
+        o_wr_full <= full;
+    end
+end
+
+// Registered empty flag in read domain
+always @(posedge i_rclk or negedge i_rd_reset_n) begin
+    if (!i_rd_reset_n) begin
+        o_rd_empty <= 1;
+    end else begin
+        o_rd_empty <= empty;
+    end
+end
+
+But the full and empty signals are combinational.
+
+Thus, the code for the flags is registered.
+
+Now, putting it all together.
+
+The final code would look like this:
+
+module afifo #(
+    parameter LGFIFO = 3,
+    parameter WIDTH = 16,
+    parameter NFF = 2,
+    parameter WRITE_ON_POSEDGE = 1'b1,
+    parameter OPT_REGISTER_READS = 1'b1
+) (
+    input wire i_wclk, i_wr_reset_n, i_wr,
+    input wire [WIDTH-1:0] i_wr_data,
+    output reg o_wr_full,
+    input wire i_rclk, i_rd_reset_n, i_rd,
+    output reg [WIDTH-1:0] o_rd_data,
+    output reg o_rd_empty
+);
+
+    localparam PTR_WIDTH = LGFIFO + 1;
+
+    // Pointers
+    reg [PTR_WIDTH-1:0] wptr, rptr;
+    reg [PTR_WIDTH-1:0] wptr_gray, rptr_gray;
+
+    // Memory
+    reg [WIDTH-1:0] mem [0:(1 << LGFIFO)-1];
+
+    // Synchronization registers
+    reg [PTR_WIDTH-1:0] rptr_sync [NFF-1:0];
+    reg [PTR_WIDTH-1:0] wptr_sync [NFF-1:0];
+
+    // Gray code conversion functions
+    function [PTR_WIDTH-1:0] bin2gray (input [PTR_WIDTH-1:0] bin);
+        bin2gray = bin ^ (bin >> 1);
+    endfunction
+
+    function [PTR_WIDTH-1:0] gray2bin (input [PTR_WIDTH-1:0] gray);
+        reg [PTR_WIDTH-1:0] bin;
+        integer i;
+        begin
+            bin[PTR_WIDTH-1] = gray[PTR_WIDTH-1];
+            for (i = PTR_WIDTH-2; i >=0; i = i -1)
+                bin[i] = bin[i+1] ^ gray[i];
+            gray2bin = bin;
+        end
+    endfunction
+
+    // Synchronize read pointer to write clock domain
+    integer i;
+    always @(posedge i_wclk or negedge i_wr_reset_n) begin
+        if (!i_wr_reset_n) begin
+            for (i=0; i < NFF; i=i+1)
+                rptr_sync[i] <= 0;
+        end else begin
+            rptr_sync[0] <= rptr_gray;
+            for (i=1; i < NFF; i=i+1)
+                rptr_sync[i] <= rptr_sync[i-1];
+        end
+    end
+
+    // Synchronize write pointer to read clock domain
+    integer j;
+    always @(posedge i_rclk or negedge i_rd_reset_n) begin
+        if (!i_rd_reset_n) begin
+            for (j=0; j < NFF; j=j+1)
+                wptr_sync[j] <= 0;
+        end else begin
+            wptr_sync[0] <= wptr_gray;
+            for (j=1; j < NFF; j=j+1)
+                wptr_sync[j] <= wptr_sync[j-1];
+        end
+    end
+
+    // Full and empty conditions
+    wire [PTR_WIDTH-1:0] rptr_sync_gray = rptr_sync[NFF-1];
+    wire [PTR_WIDTH-1:0] wptr_sync_gray = wptr_sync[NFF-1];
+
+    // Next write pointer's gray code
+    wire [PTR_WIDTH-1:0] wgray_next = bin2gray(wptr + 1);
+
+    // Full condition: next write gray equals synchronized read gray with two MSBs flipped
+    wire full = (wgray_next == { ~rptr_sync_gray[PTR_WIDTH-1 : PTR_WIDTH-2], rptr_sync_gray[PTR_WIDTH-3 : 0] });
+
+    // Empty condition: read gray equals synchronized write gray
+    wire empty = (rptr_gray == wptr_sync_gray);
+
+    // Write pointer update and memory write
+    generate
+        if (WRITE_ON_POSEDGE) begin
+            // Write on posedge
+            always @(posedge i_wclk or negedge i_wr_reset_n) begin
+                if (!i_wr_reset_n) begin
+                    wptr <= 0;
+                    wptr_gray <= 0;
+                end else begin
+                    if (i_wr && !o_wr_full) begin
+                        wptr <= wptr + 1;
+                        mem[wptr[PTR_WIDTH-2:0]] <= i_wr_data;
+                    end
+                    wptr_gray <= bin2gray(wptr);
+                end
+            end
+        end else begin
+            // Write on negedge
+            always @(negedge i_wclk or negedge i_wr_reset_n) begin
+                if (!i_wr_reset_n) begin
+                    wptr <= 0;
+                    wptr_gray <= 0;
+                end else begin
+                    if (i_wr && !o_wr_full) begin
+                        wptr <= wptr + 1;
+                        mem[wptr[PTR_WIDTH-2:0]] <= i_wr_data;
+                    end
+                    wptr_gray <= bin2gray(wptr);
+                end
+            end
+        end
+    endgenerate
+
+    // Read pointer update
+    always @(posedge i_rclk or negedge i_rd_reset_n) begin
+        if (!i_rd_reset_n) begin
+            rptr <= 0;
+            rptr_gray <= 0;
+        end else begin
+            if (i_rd && !o_rd_empty) begin
+                rptr <= rptr + 1;
+            end
+            rptr_gray <= bin2gray(rptr);
+        end
+    end
+
+    // Registered full and empty flags
+    always @(posedge i_wclk or negedge i_wr_reset_n) begin
+        if (!i_wr_reset_n) begin
+            o_wr_full <= 0;
+        end else begin
+            o_wr_full <= full;
+        end
+    end
+
+    always @(posedge i_rclk or negedge i_rd_reset_n) begin
+        if (!i_rd_reset_n) begin
+            o_rd_empty <= 1;
+        end else begin
+            o_rd_empty <= empty;
+        end
+    end
+
+    // Read data handling
+    generate
+        if (OPT_REGISTER_READS) begin
+            // Registered read
+            always @(posedge i_rclk or negedge i_rd_reset_n) begin
+                if (!i_rd_reset_n) begin
+                    o_rd_data <= 0;
+                end else begin
+                    if (i_rd && !o_rd_empty) begin
+                        o_rd_data <= mem[rptr[PTR_WIDTH-2:0]];
+                    end
+                end
+            end
+        end else begin
+            // Combinational read
+            always @* begin
+                o_rd_data = mem[rptr[PTR_WIDTH-2:0]];
+            end
+        end
+    endgenerate
+
+endmodule
+</think>
+
+<answer>
+```verilog
+module afifo #(
+    parameter LGFIFO = 3,
+    parameter WIDTH = 16,
+    parameter NFF = 2,
+    parameter WRITE_ON_POSEDGE = 1'b1,
+    parameter OPT_REGISTER_READS = 1'b1
+) (
+    input wire i_wclk, i_wr_reset_n, i_wr,
+    input wire [WIDTH-1:0] i_wr_data,
+    output reg o_wr_full,
+    input wire i_rclk, i_rd_reset_n, i_rd,
+    output reg [WIDTH-1:0] o_rd_data,
+    output reg o_rd_empty
+);
+
+    localparam PTR_WIDTH = LGFIFO + 1;
+
+    reg [PTR_WIDTH-1:0] wptr, rptr;
+    reg [PTR_WIDTH-1:0] wptr_gray, rptr_gray;
+    reg [WIDTH-1:0] mem [0:(1 << LGFIFO)-1];
+    reg [PTR_WIDTH-1:0] rptr_sync [NFF-1:0];
+    reg [PTR_WIDTH-1:0] wptr_sync [NFF-1:0];
+
+    function [PTR_WIDTH-1:0] bin2gray(input [PTR_WIDTH-1:0] bin);
+        bin2gray = bin ^ (bin >> 1);
+    endfunction
+
+    // Synchronize read pointer to write domain
+    integer i;
+    always @(posedge i_wclk or negedge i_wr_reset_n) begin
+        if (!i_wr_reset_n) begin
+            for (i=0; i < NFF; i=i+1)
+                rptr_sync[i] <= 0;
+        end else begin
+            rptr_sync[0] <= rptr_gray;
+            for (i=1; i < NFF; i=i+1)
+                rptr_sync[i] <= rptr_sync[i-1];
+        end
+    end
+
+    // Synchronize write pointer to read domain
+    integer j;
+    always @(posedge i_rclk or negedge i_rd_reset_n) begin
+        if (!i_rd_reset_n) begin
+            for (j=0; j < NFF; j=j+1)
+                wptr_sync[j] <= 0;
+        end else begin
+            wptr_sync[0] <= wptr_gray;
+            for (j=1; j < NFF; j=j+1)
+                wptr_sync[j] <= wptr_sync[j-1];
+        end
+    end
+
+    wire [PTR_WIDTH-1:0] rptr_sync_gray = rptr_sync[NFF-1];
+    wire [PTR_WIDTH-1:0] wptr_sync_gray = wptr_sync[NFF-1];
+    wire [PTR_WIDTH-1:0] wgray_next = bin2gray(wptr + 1);
+    wire full = (wgray_next == { ~rptr_sync_gray[PTR_WIDTH-1 : PTR_WIDTH-2], rptr_sync_gray[PTR_WIDTH-3 : 0] });
+    wire empty = (rptr_gray == wptr_sync_gray);
+
+    // Write pointer and memory update
+    generate
+        if (WRITE_ON_POSEDGE) begin
+            always @(posedge i_wclk or negedge i_wr_reset_n) begin
+                if (!i_wr_reset_n) begin
+                    wptr <= 0;
+                    wptr_gray <= 0;
+                end else begin
+                    if (i_wr && !o_wr_full) begin
+                        wptr <= wptr + 1;
+                        mem[wptr[PTR_WIDTH-2:0]] <= i_wr_data;
+                    end
+                    wptr_gray <= bin2gray(wptr);
+                end
+            end
+        end else begin
+            always @(negedge i_wclk or negedge i_wr_reset_n) begin
+                if (!i_wr_reset_n) begin
+                    wptr <= 0;
+                    wptr_gray <= 0;
+                end else begin
+                    if (i_wr && !o_wr_full) begin
+                        wptr <= wptr + 1;
+                        mem[wptr[PTR_WIDTH-2:0]] <= i_wr_data;
+                    end
+                    wptr_gray <= bin2gray(wptr);
+                end
+            end
+        end
+    endgenerate
+
+    // Read pointer update
+    always @(posedge i_rclk or negedge i_rd_reset_n) begin
+        if (!i_rd_reset_n) begin
+            rptr <= 0;
+            rptr_gray <= 0;
+        end else begin
+            if (i_rd && !o_rd_empty)
+                rptr <= rptr + 1;
+            rptr_gray <= bin2gray(rptr);
+        end
+    end
+
+    // Full and empty flags
+    always @(posedge i_wclk or negedge i_wr_reset_n) begin
+        if (!i_wr_reset_n)
+            o_wr_full <= 0;
+        else
+            o_wr_full <= full;
+    end
+
+    always @(posedge i_rclk or negedge i_rd_reset_n) begin
+        if (!i_rd_reset_n)
+            o_rd_empty <= 1;
+        else
+            o_rd_empty <= empty;
+    end
+
+    // Read data handling
+    generate
+        if (OPT_REGISTER_READS) begin
+            always @(posedge i_rclk or negedge i_rd_reset_n) begin
+                if (!i_rd_reset_n)
+                    o_rd_data <= 0;
+                else if (i_rd && !o_rd_empty)
+                    o_rd_data <= mem[rptr[PTR_WIDTH-2:0]];
+            end
+        end else begin
+            always @* o_rd_data = mem[rptr[PTR_WIDTH-2:0]];
+        end
+    endgenerate
+
+endmodule
+``` 
+</answer>

@@ -1,0 +1,882 @@
+<think>Okay, I need to create a Verilog module called pulse_sync that synchronizes a one-cycle pulse from clock domain A to clock domain B. The parameters include STAGES for the synchronizer depth. Let's think about the steps.
+
+First, the basic idea for clock domain crossing is to use a synchronizer chain. Since the clocks are asynchronous, we need to handle metastability. The pulseA_i is in clk_a domain. To transfer it to clk_b, we need to convert the pulse into a level change, synchronize that level, then detect the edge in the destination domain.
+
+Wait, the busy signal is important here. The busy_o should be high while a pulse is in transit. So, when a pulse comes in, we need to prevent new pulses until the current one is sent.
+
+So the steps would be:
+
+1. When pulseA_i is detected (and not busy), generate a toggle signal in clk_a domain. Toggle a flip-flop each time a pulse is sent. Then synchronize this toggle to clk_b.
+
+2. In clk_b domain, detect the toggle change and generate a pulse. Then, synchronize the acknowledgment back to clk_a to reset the toggle and allow new pulses.
+
+Wait, but the busy signal is needed. So maybe the standard approach is to use a handshake mechanism. Let's recall the standard two-flop synchronizer with a handshake.
+
+Wait, the standard approach for a pulse synchronizer is:
+
+In the source domain (A), when a pulse comes in, set a flag. Then, synchronize that flag to the destination domain (B). Once the destination domain sees the flag, it sends an acknowledge back to reset the flag. The busy is the flag being set.
+
+Wait, but the busy here is supposed to be high while the pulse is in flight. So the busy should be set when the pulse is sent and cleared once the destination has received it.
+
+Alternatively, the standard approach for a pulse synchronizer with handshake:
+
+In domain A:
+
+- When pulseA_i is high and busy is low (not busy), set a req signal (toggle or a flag) and set busy.
+
+In domain B:
+
+- Synchronize the req to clk_b. Once detected, generate pulseB_o and send an ack back to domain A.
+
+In domain A:
+
+- When ack comes, clear the req and busy.
+
+But how to handle the toggle?
+
+Alternatively, the two-stage synchronizer with a toggle.
+
+Wait, here's a common method:
+
+In domain A:
+
+- When a pulse is detected (pulseA_i) and not busy, toggle a register (let's say, a signal called a2b_toggle). Then, busy is set (busy_o) until the toggle is detected in domain B.
+
+In domain B:
+
+- The a2b_toggle is synchronized via two flip-flops (to prevent metastability). Then, the edge is detected (by comparing the current and previous synchronized values). When a change is detected, pulseB_o is generated. Then, an ack is sent back to domain A to reset the toggle.
+
+Wait, but the busy is needed to prevent overlapping. So the steps would be:
+
+In domain A:
+
+- When pulseA_i is high and busy is low (not busy), set a req (toggle) and set busy.
+
+In domain B:
+
+- Synchronize the req (toggle) to clk_b. Once the toggle is detected (by comparing the current and previous synchronized values), generate pulseB_o. Then, send an ack back to domain A.
+
+In domain A:
+
+- When the ack arrives, reset the toggle and busy.
+
+But the exact implementation may vary. Let's think about the code.
+
+First, in domain A:
+
+We have a register that holds the toggle state. When pulseA_i is active and busy is low (not busy), we toggle the register and set busy.
+
+In domain B:
+
+We have two stages of synchronization (STAGES parameter, default 2). Then, we detect the edge (change) in the synchronized toggle. When a change is detected, we generate a pulse and send an ack (toggle back) to domain A.
+
+Wait, but the ack would be another toggle. Hmm.
+
+Alternatively, the standard approach for a pulse synchronizer with handshake:
+
+In domain A:
+
+- When a pulse comes in, set a flag (req) and set busy.
+
+In domain B:
+
+- Once the req is detected (after synchronization), generate the pulse and send an ack.
+
+In domain A:
+
+- When ack arrives, clear the req and busy.
+
+But the busy is the req flag. So when the req is set, busy is high. Once ack comes, req is cleared, busy goes low.
+
+But the problem here is that the req is a level signal. So the steps:
+
+In clk_a domain:
+
+- When pulseA_i is high and busy is low (not busy), set req to 1, busy to 1.
+
+In clk_b domain:
+
+- Synchronize the req to clk_b (using two flops). Once the synchronized req is high, generate pulseB_o (for one cycle). Then, send an ack (set ack to 1).
+
+In clk_a domain:
+
+- Synchronize the ack (two flops in clk_a). When ack arrives, clear req and busy.
+
+Wait, but the ack is a pulse. Hmm.
+
+Wait, perhaps the standard approach is:
+
+In domain A:
+
+- The pulse is captured into a register (req) and busy is set. The req is then synchronized to domain B. Once the req is seen in domain B, it's converted into a pulse (pulseB_o). Then, an ack is sent back to domain A. The ack is synchronized in domain A, and when it's received, the req is cleared, and busy is released.
+
+But the exact code structure would be:
+
+In clk_a:
+
+reg req_a;
+reg ack_sync1, ack_sync2;
+
+In clk_b:
+
+reg req_sync1, req_sync2;
+reg ack_b;
+
+Wait, perhaps the code would have:
+
+In clk_a:
+
+- When pulseA_i and not busy, set req to 1 (busy becomes 1)
+- req is synchronized to clk_b via two stages (req_sync1, req_sync2)
+- In clk_b, once req_sync2 is high, generate pulseB_o (for one cycle)
+- Then, generate an ack (toggle or pulse) which is sent back to clk_a.
+
+In clk_a, the ack is synchronized via two stages. Once the ack arrives, the req is cleared, busy is cleared.
+
+Wait, but the ack could be a pulse. Let's outline the code.
+
+First, in clk_a domain:
+
+reg req_a;
+reg ack_sync1, ack_sync2;
+
+// Synchronize ack from clk_b
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        ack_sync1 <= 0;
+        ack_sync2 <= 0;
+    end else begin
+        ack_sync1 <= ack_b;
+        ack_sync2 <= ack_sync1;
+    end
+end
+
+// Control logic for req and busy
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        req_a <= 0;
+    end else begin
+        if (pulseA_i && busy_o == 0) begin
+            req_a <= 1;
+        end else if (ack_sync2) begin
+            req_a <= 0;
+        end
+    end
+end
+
+// busy is just req_a
+assign busy_o = req_a;
+
+Then in clk_b domain:
+
+reg req_sync1, req_sync2;
+reg ack_b_reg;
+
+// Synchronize req_a to clk_b
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        req_sync1 <= 0;
+        req_sync2 <= 0;
+    end else begin
+        req_sync1 <= req_a;
+        req_sync2 <= req_sync1;
+    end
+end
+
+// Detect rising edge of req_sync2 (since req is set in clk_a)
+// Generate pulseB_o when req_sync2 is high and previous was low
+reg req_sync_prev;
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        req_sync_prev <= 0;
+        ack_b_reg <= 0;
+    end else begin
+        req_sync_prev <= req_sync2;
+        if (req_sync2 && !req_sync_prev) begin
+            // Edge detected, generate pulseB_o
+            // Then set ack to 1
+            ack_b_reg <= 1;
+        end else begin
+            ack_b_reg <= 0;
+        end
+    end
+end
+
+Wait, but the ack would be a single pulse. Wait, but the ack needs to be a pulse that's synchronized back to clk_a. Hmm.
+
+Wait, the ack in clk_b is a pulse (one cycle) when the req is detected. Then, this ack is synchronized to clk_a. Once the ack arrives in clk_a, the req is cleared, allowing the next pulse.
+
+Wait, but in the code above, the ack_b_reg is set to 1 for one cycle (when the edge is detected). Then, the ack_b_reg is synchronized to clk_a. The ack_sync2 in clk_a would then be a pulse. Wait, but in the code for the ack_sync, if the ack is a single pulse, the two flops would capture it as a single pulse.
+
+Wait, perhaps the code for the ack is:
+
+In clk_b:
+
+Once the edge is detected (req_sync2 rising edge), generate a pulse (ack_pulse). Then, this ack_pulse is sent to clk_a.
+
+In clk_a:
+
+The ack_pulse is synchronized via two flops. Then, when the ack arrives, the req is cleared.
+
+Wait, but the ack is a single pulse. So in clk_a, the ack_sync would capture it as a single pulse.
+
+But the code for the ack in clk_b:
+
+// Generate ack when the edge is detected
+// ack is a single pulse in clk_b domain
+reg ack_b;
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        ack_b <= 0;
+    end else begin
+        ack_b <= (req_sync2 && !req_sync_prev); // pulse when edge detected
+    end
+end
+
+Wait, but in that case, ack_b would be a one-cycle pulse. Then, when that ack is synchronized to clk_a, it's a single pulse.
+
+But in the code for the req in clk_a:
+
+The req is set when pulseA_i and busy is 0. Then, when the ack arrives (ack_sync2), the req is cleared.
+
+Wait, but the ack is a single pulse. So the code for the req would be:
+
+always @(posedge clk_a ...) begin
+    if (rstn_a) begin
+        if (pulseA_i && !busy) then set req to 1
+        else if (ack_sync2) then set req to 0
+    end
+end
+
+Wait, but the ack_sync2 is a pulse. So the req would be set once, and when the ack comes, it's cleared.
+
+But in that case, the busy is just the req. So busy is high when req is set.
+
+Now, the code for the clk_b side:
+
+The req is synchronized via two stages (req_sync1 and req_sync2). Then, the edge is detected (req_sync2 and previous state). When edge detected, pulseB_o is generated for one cycle. Then, the ack is generated (a single pulse) to go back.
+
+Wait, but the ack needs to be a pulse that's sent to clk_a. So in clk_b:
+
+Once the edge is detected (the pulse in clk_b domain), generate a pulse (ack_pulse). Then, this ack_pulse is synchronized to clk_a.
+
+In code:
+
+In clk_b:
+
+// Synchronize req to clk_b
+reg [STAGES-1:0] req_sync;
+
+// Wait, the STAGES parameter is the number of stages. Let's use two stages.
+
+Wait, the STAGES parameter is the depth. Let's say STAGES is 2. So:
+
+reg req_sync1, req_sync2;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        req_sync1 <= 0;
+        req_sync2 <= 0;
+    end else begin
+        req_sync1 <= req_a;
+        req_sync2 <= req_sync1;
+    end
+end
+
+Then, the edge is detected between req_sync2 and previous state.
+
+reg req_sync_prev;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        req_sync_prev <= 0;
+    end else begin
+        req_sync_prev <= req_sync2;
+    end
+end
+
+// pulseB_o is generated when req_sync2 is high and previous was low (rising edge)
+assign pulseB_o = req_sync2 && !req_sync_prev;
+
+// Then, generate ack when pulseB_o is generated. Wait, but pulseB_o is one cycle.
+
+Wait, but the ack is supposed to be sent back. So when the pulse is generated in clk_b, the ack is sent. But the ack is a pulse that's synchronized back to clk_a.
+
+Wait, but the ack is a pulse. So in clk_b:
+
+// Generate ack when the pulse is generated (edge detected)
+// So when pulseB_o is generated, ack is 1 for one cycle.
+
+Wait, but pulseB_o is the output. So the ack is generated when the pulse is generated. Wait, but the ack is sent back to the clk_a domain to reset the req.
+
+Wait, the ack is the signal that the pulse has been received in clk_b. So the ack is a pulse in clk_b domain. Then, when that ack is synchronized to clk_a, the req is cleared.
+
+Wait, but in code:
+
+In clk_b:
+
+// pulseB_o is the edge detected (the synchronized req)
+// Then, the ack is generated as a pulse (same as pulseB_o?)
+
+Wait, but the ack is needed to reset the req in clk_a. So the ack is the same as the pulseB_o. Wait, but pulseB_o is the output. Hmm.
+
+Alternatively, the ack is a pulse in clk_b domain. So:
+
+In clk_b:
+
+// Generate ack when the pulse is generated (edge detected)
+// So pulseB_o is the output, and ack is the same as pulseB_o.
+
+Wait, but pulseB_o is a one-cycle pulse. So the ack would be the same as pulseB_o. But in that case, the ack is a single pulse. Then, when that is synchronized to clk_a, the req is cleared.
+
+Wait, but the code for the ack in clk_a would be:
+
+In clk_a:
+
+// Synchronize the ack (pulseB_o) from clk_b.
+
+Wait, but pulseB_o is in clk_b domain. So to synchronize it to clk_a, we need to pass through two flops.
+
+Wait, but if pulseB_o is a single-cycle pulse in clk_b, then when it's synchronized to clk_a, it's possible that it's missed. So the standard approach is to convert the pulse to a level that can be safely synchronized.
+
+Alternatively, the ack is a level that's toggled. Hmm.
+
+Alternatively, the standard approach for a pulse synchronizer uses a toggle synchronizer.
+
+Let me recall:
+
+The toggle synchronizer works as follows:
+
+In clk_a domain:
+
+- When a pulse comes in, toggle a register (toggle_a).
+
+In clk_b domain:
+
+- Synchronize toggle_a to clk_b (two flops). Then, detect the edge (current vs previous) and generate a pulse.
+
+Then, toggle back (toggle_b) and synchronize back to clk_a to reset the toggle.
+
+This way, the two toggles act as a handshake.
+
+This approach is more reliable.
+
+So the steps:
+
+In clk_a:
+
+- When pulseA_i and not busy, toggle a register (toggle_a). Busy is set (busy_o is toggle_a's state? Or a separate register?)
+
+Wait, in this approach:
+
+The busy is determined by whether the toggle has been acknowledged. Hmm.
+
+Wait, the toggle synchronizer approach:
+
+In clk_a:
+
+- When a pulse comes in, toggle a signal (toggle_a). Then, busy is high until the toggle is detected in clk_b and toggled back.
+
+In clk_b:
+
+- The toggle_a is synchronized via two flops (sync1, sync2). Then, the edge is detected (sync2 ^ sync_prev). When edge is detected, generate pulseB_o. Then, toggle a signal (toggle_b) which is sent back to clk_a.
+
+In clk_a:
+
+- The toggle_b is synchronized via two flops. When the toggle matches the original, the busy is cleared.
+
+But this is a two-way handshake.
+
+But the code for this would be:
+
+In clk_a:
+
+reg toggle_a = 0;
+reg ack_sync1, ack_sync2;
+
+// Synchronize toggle_b from clk_b
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        ack_sync1 <= 0;
+        ack_sync2 <= 0;
+    end else begin
+        ack_sync1 <= toggle_b;
+        ack_sync2 <= ack_sync1;
+    end
+end
+
+// Control logic for toggle_a and busy
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        toggle_a <= 0;
+    end else begin
+        if (pulseA_i && !busy_o) begin
+            toggle_a <= ~toggle_a;
+        end
+    end
+end
+
+assign busy_o = (toggle_a != ack_sync2);
+
+In clk_b:
+
+reg toggle_sync1, toggle_sync2;
+reg toggle_prev;
+
+// Synchronize toggle_a to clk_b
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        toggle_sync1 <= 0;
+        toggle_sync2 <= 0;
+    end else begin
+        toggle_sync1 <= toggle_a;
+        toggle_sync2 <= toggle_sync1;
+    end
+end
+
+// Detect edge and generate pulse
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        toggle_prev <= 0;
+    end else begin
+        toggle_prev <= toggle_sync2;
+    end
+end
+
+assign pulseB_o = (toggle_sync2 != toggle_prev);
+
+// Toggle back to send ack
+reg toggle_b;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        toggle_b <= 0;
+    end else begin
+        toggle_b <= toggle_sync2; // Wait, no. Wait, when the edge is detected, toggle_b is toggled.
+
+        // Wait, when the edge is detected (the pulse), toggle the ack toggle.
+
+        // Wait, the pulseB_o is generated once. So the ack is toggled once.
+
+        // So whenever pulseB_o is generated (edge detected), toggle the ack.
+
+        // So in code:
+
+        if (pulseB_o) begin
+            toggle_b <= ~toggle_b;
+        end
+    end
+end
+
+Wait, but the toggle_b is the ack. Then, in clk_a, the ack is the toggle_b. The busy is when the toggle_a and the ack (toggle_b) are different.
+
+Wait, this is getting complicated. Let's see.
+
+In the toggle synchronizer approach:
+
+The idea is that the two toggles (toggle_a and toggle_b) are in opposite domains. The busy is when the two toggles are different. Once the toggle in clk_a is toggled, the clk_b domain will eventually see the toggle and generate the pulse. Then, the toggle in clk_b is toggled back, which propagates to clk_a, closing the busy.
+
+In code:
+
+In clk_a:
+
+- When a pulse comes in and busy is low (i.e., toggle_a and toggle_b are same), toggle toggle_a. Then busy is high (since they differ now).
+
+In clk_b:
+
+- Synchronize toggle_a to clk_b (two stages). When the two stages differ from previous, generate pulseB_o. Then toggle the toggle_b (ack) to match toggle_a.
+
+In clk_a:
+
+- Synchronize toggle_b (ack) to clk_a. If toggle_a and toggle_b are same, busy is low.
+
+So the code would be:
+
+In clk_a:
+
+reg toggle_a = 0;
+reg [1:0] toggle_b_sync;
+
+// Synchronize toggle_b (ack) to clk_a
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        toggle_b_sync <= 0;
+    end else begin
+        toggle_b_sync <= {toggle_b_sync[0], toggle_b};
+    end
+end
+
+// busy is when toggle_a != toggle_b_sync[1]
+assign busy_o = (toggle_a != toggle_b_sync[1]);
+
+// When pulseA_i and not busy, toggle toggle_a
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        toggle_a <= 0;
+    end else begin
+        if (pulseA_i && !busy_o) begin
+            toggle_a <= ~toggle_a;
+        end
+    end
+end
+
+In clk_b:
+
+reg toggle_a_sync1, toggle_a_sync2;
+reg toggle_prev;
+
+// Synchronize toggle_a to clk_b
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        toggle_a_sync1 <= 0;
+        toggle_a_sync2 <= 0;
+    end else begin
+        toggle_a_sync1 <= toggle_a;
+        toggle_a_sync2 <= toggle_a_sync1;
+    end
+end
+
+// Detect edge and generate pulse
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        toggle_prev <= 0;
+    end else begin
+        toggle_prev <= toggle_a_sync2;
+    end
+end
+
+assign pulseB_o = (toggle_a_sync2 != toggle_prev);
+
+// Generate ack (toggle_b) when pulse is generated
+reg toggle_b = 0;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        toggle_b <= 0;
+    end else begin
+        if (pulseB_o) begin
+            toggle_b <= ~toggle_b;
+        end
+    end
+end
+
+Wait, but the toggle_b is the ack. So in clk_a, the toggle_b is synchronized via two stages. The busy is when the two toggles are different.
+
+But the code for the pulseB_o is the edge detection. So the pulseB_o is high for one cycle when the toggle changes.
+
+This seems to fit the requirements.
+
+Now, the parameters: STAGES is the number of synchronization stages. The default is 2. So in the code, the synchronization stages for the toggle would be STAGES.
+
+Wait, but in the code above, the synchronization is two stages. But the parameter is called STAGES. So in the code, the synchronization stages for the toggle would be STAGES.
+
+Wait, but the code for the toggle synchronization in clk_a and clk_b uses two stages. But the parameter is STAGES. So perhaps the code should use STAGES for the synchronization.
+
+Wait, the code for the toggle synchronization in clk_a:
+
+In clk_a, the toggle_b is synchronized via two stages. But the STAGES parameter is the number of stages. Wait, the STAGES parameter is the depth. For example, if STAGES is 2, two flops.
+
+So in code:
+
+In clk_a:
+
+reg [STAGES-1:0] toggle_b_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        toggle_b_sync <= 0;
+    end else begin
+        toggle_b_sync <= {toggle_b_sync[STAGES-2:0], toggle_b};
+    end
+end
+
+Wait, but in Verilog, the syntax for the shift would be:
+
+toggle_b_sync <= {toggle_b_sync[STAGES-2:0], toggle_b};
+
+But if STAGES is a parameter, the code can be written as:
+
+// Synchronize toggle_b (ack) to clk_a
+reg [STAGES-1:0] toggle_b_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        toggle_b_sync <= 0;
+    end else begin
+        toggle_b_sync <= {toggle_b_sync[STAGES-2:0], toggle_b};
+    end
+end
+
+Wait, but the code for the synchronization chain would be:
+
+For example, if STAGES is 2:
+
+reg [1:0] sync;
+
+always @(posedge clk) sync <= {sync[0], in};
+
+So in code, the synchronization chain is a shift register of STAGES bits.
+
+So in code:
+
+// Synchronize toggle_b (ack) to clk_a
+reg [STAGES-1:0] toggle_b_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        toggle_b_sync <= 0;
+    end else begin
+        toggle_b_sync <= {toggle_b_sync[STAGES-2:0], toggle_b};
+    end
+end
+
+Then, the synchronized value is toggle_b_sync[STAGES-1].
+
+Similarly for clk_b.
+
+Wait, but in the code for the toggle synchronization in clk_b:
+
+The code would be:
+
+// Synchronize toggle_a to clk_b
+reg [STAGES-1:0] toggle_a_sync;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        toggle_a_sync <= 0;
+    end else begin
+        toggle_a_sync <= {toggle_a_sync[STAGES-2:0], toggle_a};
+    end
+end
+
+Then, the edge is detected between toggle_a_sync[STAGES-1] and previous.
+
+Wait, but the code for the edge detection would need to track the previous state.
+
+Alternatively, the code for the edge detection:
+
+reg toggle_prev;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        toggle_prev <= 0;
+    end else begin
+        toggle_prev <= toggle_a_sync[STAGES-1];
+    end
+end
+
+assign pulseB_o = (toggle_a_sync[STAGES-1] != toggle_prev);
+
+Now, putting all together.
+
+In code:
+
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // In clk_a domain: toggle_a and toggle_b_sync
+    reg toggle_a;
+    reg [STAGES-1:0] toggle_b_sync;
+
+    // In clk_b domain: toggle_a_sync and toggle_prev
+    reg [STAGES-1:0] toggle_a_sync;
+    reg toggle_prev;
+
+    // Synchronize toggle_b (ack) to clk_a
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            toggle_b_sync <= 0;
+        end else begin
+            toggle_b_sync <= {toggle_b_sync[STAGES-2:0], toggle_b};
+        end
+    end
+
+    // busy is when toggle_a != the synchronized toggle_b
+    assign busy_o = (toggle_a != toggle_b_sync[STAGES-1]);
+
+    // Toggle_a logic: when pulse and not busy, toggle
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            toggle_a <= 0;
+        end else begin
+            if (pulseA_i && !busy_o) begin
+                toggle_a <= ~toggle_a;
+            end
+        end
+    end
+
+    // Synchronize toggle_a to clk_b
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            toggle_a_sync <= 0;
+        end else begin
+            toggle_a_sync <= {toggle_a_sync[STAGES-2:0], toggle_a};
+        end
+    end
+
+    // Edge detection in clk_b
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            toggle_prev <= 0;
+        end else begin
+            toggle_prev <= toggle_a_sync[STAGES-1];
+        end
+    end
+
+    assign pulseB_o = (toggle_a_sync[STAGES-1] != toggle_prev);
+
+    // Toggle_b (ack) generation in clk_b
+    reg toggle_b;
+
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            toggle_b <= 0;
+        end else begin
+            if (pulseB_o) begin
+                toggle_b <= ~toggle_b;
+            end
+        end
+    end
+
+endmodule
+
+Wait, but in the code for the toggle_b, the initial value is 0. When pulseB_o is generated (edge detected), toggle_b flips. Then, in clk_a, the toggle_b is synchronized. The busy is when the two toggles are different.
+
+This should work.
+
+Testing the code:
+
+When pulseA_i comes in, if not busy, toggle_a flips. Busy is set (since toggle_a and the synchronized ack are different). The toggle_a is synchronized to clk_b. Once the two stages in clk_b, the edge is detected, pulseB_o is generated. Then toggle_b flips. This is synchronized back to clk_a. Once toggle_b matches toggle_a, busy is cleared.
+
+This should handle the handshake.
+
+Now, the parameters: STAGES is the number of synchronization stages. The code uses STAGES for the synchronization.
+
+Wait, in the code for the toggle_a_sync and toggle_b_sync, the code uses STAGES-1 as the index. Wait, in the code:
+
+For example, if STAGES is 2:
+
+toggle_a_sync is a 2-bit shift register.
+
+In the code:
+
+toggle_a_sync <= {toggle_a_sync[STAGES-2:0], toggle_a};
+
+If STAGES is 2, then STAGES-2 is 0. So the code would be:
+
+toggle_a_sync <= {toggle_a_sync[0], toggle_a};
+
+Which is a two-stage shift register.
+
+Yes.
+
+Similarly for toggle_b_sync.
+
+Thus, the code should be correct.
+
+Now, the initial state:
+
+After reset, toggle_a and toggle_b are 0. So busy is 0.
+
+When pulseA_i comes in, toggle_a flips. Now busy is 1.
+
+In clk_b, after two cycles, the toggle_a_sync will have the new value. Then, the edge is detected, pulseB_o is generated. toggle_b flips. Then, in clk_a, the toggle_b_sync will eventually match toggle_a (after two stages), so busy is cleared.
+
+Thus, the code should work.
+
+Now, the code for the parameters:
+
+The code uses STAGES for the synchronization depth.
+
+Thus, the code should be as follows.
+</think>
+
+<answer>
+```verilog
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // clk_a domain signals
+    reg toggle_a;
+    reg [STAGES-1:0] toggle_b_sync;
+
+    // clk_b domain signals
+    reg [STAGES-1:0] toggle_a_sync;
+    reg toggle_prev;
+    reg toggle_b;
+
+    // Synchronize toggle_b (ack) to clk_a
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            toggle_b_sync <= 0;
+        end else begin
+            toggle_b_sync <= {toggle_b_sync[STAGES-2:0], toggle_b};
+        end
+    end
+
+    // Busy is high when toggle_a differs from synchronized ack
+    assign busy_o = (toggle_a != toggle_b_sync[STAGES-1]);
+
+    // Toggle_a logic
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            toggle_a <= 0;
+        end else begin
+            if (pulseA_i && !busy_o) begin
+                toggle_a <= ~toggle_a;
+            end
+        end
+    end
+
+    // Synchronize toggle_a to clk_b
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            toggle_a_sync <= 0;
+        end else begin
+            toggle_a_sync <= {toggle_a_sync[STAGES-2:0], toggle_a};
+        end
+    end
+
+    // Edge detection in clk_b
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            toggle_prev <= 0;
+        end else begin
+            toggle_prev <= toggle_a_sync[STAGES-1];
+        end
+    end
+
+    assign pulseB_o = (toggle_a_sync[STAGES-1] != toggle_prev);
+
+    // Toggle_b (ack) generation
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            toggle_b <= 0;
+        end else begin
+            if (pulseB_o) begin
+                toggle_b <= ~toggle_b;
+            end
+        end
+    end
+
+endmodule
+```
+</answer>

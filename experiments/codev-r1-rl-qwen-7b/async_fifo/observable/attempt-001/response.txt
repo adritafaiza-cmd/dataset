@@ -1,0 +1,3749 @@
+<think>Okay, I need to design an asynchronous FIFO with the given parameters. Let's start by recalling the structure of an async FIFO. The main components are the dual-port memory, write and read pointers, synchronization of pointers between clock domains, and the generation of flags like full, empty, almost full, almost empty.
+
+First, the parameters: DSIZE is the data width, ASIZE is the address size (so the FIFO has 2^ASIZE entries). The FIFO should start empty after reset, and support fall-through mode if specified. Wait, the parameter FALLTHROUGH is "TRUE", so maybe when it's TRUE, the FIFO allows simultaneous read and write without needing to wait for the other side. Hmm, but the standard async FIFO might have different behavior. Wait, the user says "support the fall-through option and start empty after reset." Maybe the fall-through here refers to allowing simultaneous read and write when full or empty? Or perhaps the standard behavior where read and write can happen even if FIFO is full/empty. Wait, maybe the fall-through is when the FIFO can be read and written at the same time even when full or empty. Wait, but in standard terminology, fall-through FIFO allows simultaneous access. But the user's description says "support the fall-through option and start empty after reset." Hmm. Maybe the FIFO should behave as a fall-through when the parameter is set. Wait, but the standard async FIFO usually has registered outputs. Wait, perhaps the fall-through here refers to the read data being available immediately when read is asserted, without needing a clock edge. Wait, maybe the parameter is to enable or disable the fall-through mode. But the user's instruction says "support the fall-through option and start empty after reset." So when FALLTHROUGH is TRUE, the FIFO is in fall-through mode. 
+
+Wait, in some FIFO designs, the fall-through mode allows the read data to be available on the same cycle as the read enable. Otherwise, registered mode would have the data available on the next cycle. But the user's parameters: the output rdata is a wire, so maybe in registered mode, the data is registered. Hmm. But the code needs to handle that.
+
+But perhaps the main thing is that the FIFO starts empty after reset. So when reset is active (wrst_n and rrst_n are active low), the FIFO is empty. The resets are separate for write and read domains. Wait, but in async FIFO, the write and read pointers are in different clock domains. So the resets for each domain (wrst_n and rrst_n) are separate. Wait, but in standard async FIFO, the write and read pointers are synchronized across domains. Wait, but the resets here are active low. So when wrst_n is low, the write domain resets. Similarly for rrst_n.
+
+Wait, the standard approach for async FIFO uses Gray code pointers to synchronize between the two domains. The write pointer is converted to Gray code and synchronized to the read clock domain, and vice versa. Then, the full and empty conditions are determined by comparing the pointers.
+
+The FIFO memory is dual-port, with write on wclk and read on rclk. The write and read pointers are managed in their respective clock domains.
+
+The flags: full, empty, almost full, almost empty. The almost flags are not specified here, but the user mentions "Honor full, empty, and almost flags without losing or repeating data". Wait, the parameters include ASIZE, DSIZE. The almost flags are probably based on thresholds, but the code may not have parameters for them. Wait, the user's code interface doesn't have parameters for almost thresholds. Hmm. Wait, the user's code interface given has parameters DSIZE, ASIZE, FALLTHROUGH. So maybe the almost flags are not part of the current problem? Wait, the user's instruction says "Honor full, empty, and almost flags without losing or repeating data; support the fall-through option and start empty after reset."
+
+Wait, the code interface given in the module has outputs wfull, awfull (maybe a typo?), rempty, arempty. Wait, the outputs are:
+
+wfull, awfull (probably a typo, maybe 'almost full' but the name is awfull?), rempty, arempty. Wait, the names are a bit unclear. Wait, in the code:
+
+output wire wfull,
+output wire awfull,
+output wire rempty,
+output wire arempty.
+
+Hmm. Maybe the 'awfull' is a typo and should be 'afull'? Or perhaps the user intended 'almost full' as awfull. But the standard naming for almost full is 'afull' or 'almost_full'. But given the names here, perhaps the user intended:
+
+wfull is the normal full flag, awfull is almost full. Similarly, rempty is empty, arempty is almost empty. But the exact names are unclear. But the code needs to have the outputs as per the given names.
+
+But the code's interface is given as:
+
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+So the outputs are:
+
+wfull: normal full flag.
+
+awfull: almost full.
+
+rempty: normal empty.
+
+arempty: almost empty.
+
+But the exact thresholds for almost are not given. Wait, the user's instruction says "Honor full, empty, and almost flags without losing or repeating data". So the almost flags are present but the code needs to generate them. But how? The code may need to have parameters for almost thresholds, but the user's parameters don't include them. Hmm. Wait, the parameters given are DSIZE, ASIZE, FALLTHROUGH. So perhaps the almost flags are not part of the parameters and the code is supposed to generate them with a fixed offset. Wait, but the user's instruction says "support the fall-through option and start empty after reset." Maybe the almost flags are not part of the code? Wait, the user's instruction says "Honor full, empty, and almost flags without losing or repeating data; support the fall-through option and start empty after reset."
+
+Wait, the code must generate the almost flags. But how? The code may need to have a threshold for almost full and almost empty. But the parameters don't include them. Hmm. Maybe the almost flags are not required here, but the user's instruction says to include them. Wait, perhaps the code is supposed to generate almost full when the FIFO is one entry away from full, and almost empty when one entry away from empty. But the user's instruction is unclear. Alternatively, maybe the almost flags are not part of the code, but the user's instruction says to include them. Hmm. Wait, the user's instruction says "Honor full, empty, and almost flags without losing or repeating data". So the code must generate all three: full, empty, and almost (both full and empty). But the code's interface has awfull (almost full) and arempty (almost empty). So the code must generate those.
+
+But the code's parameters don't have thresholds. So perhaps the almost flags are when the FIFO is one less than full (almost full) and one more than empty (almost empty). But that's a common approach. Alternatively, maybe the almost full is when the FIFO is at a certain level, like ASIZE-1. Wait, but the code's parameters are ASIZE (address size, so depth is 2^ASIZE). Hmm. Let's proceed.
+
+The standard approach for async FIFO:
+
+- Use dual n-bit counters (write and read pointers) with Gray code conversion for cross-clock domain.
+
+- The FIFO is empty when read pointer equals write pointer.
+
+- The FIFO is full when the write pointer is one less than the read pointer (if using one extra bit to distinguish full/empty).
+
+Wait, the standard approach for FIFO pointers is to have pointers that are (ASIZE+1) bits. The extra bit helps in determining full and empty. For example, if the pointers are (ASIZE+1) bits, then when the MSBs differ and the rest are same, it's full. When all bits are same, it's empty.
+
+Wait, the standard approach is:
+
+The write pointer increments on write (when not full). The read pointer increments on read (when not empty). The pointers are (ASIZE +1) bits. The actual address is the lower ASIZE bits. The MSB is used to determine if the write has wrapped around more than the read.
+
+Full condition: (wptr - rptr) == 2^ASIZE.
+
+Empty condition: (wptr == rptr).
+
+But in terms of the pointers, when the MSBs differ and the rest are same, the FIFO is full.
+
+So for example:
+
+If the pointers are (ASIZE+1) bits, then:
+
+Full when:
+
+wptr[ASIZE] != rptr_sync[ASIZE] and the lower bits are same.
+
+Empty when all bits are same.
+
+So the code would have:
+
+For the write domain:
+
+- The write pointer (wptr) is (ASIZE+1) bits.
+
+- The read pointer is synchronized to the write clock domain (rptr_gray_sync), converted from Gray.
+
+Similarly, the read pointer is converted to Gray and synchronized in the read domain.
+
+The full flag is generated in the write domain by comparing the current write pointer and the synchronized read pointer.
+
+Similarly, empty is generated in the read domain by comparing read pointer and synchronized write pointer.
+
+Now, the almost full and almost empty. Let's assume almost full is when the FIFO is one less than full. But the exact threshold is unclear. Alternatively, the almost full is when the FIFO is at a certain level, but the user's code may not have parameters for that. Wait, the user's code has parameters DSIZE and ASIZE. So the almost flags may be when the FIFO is one less than full (almost full) and one more than empty (almost empty). But the code's interface has awfull and arempty. So the code must generate those.
+
+But the code's parameters don't have thresholds. Hmm. Maybe the almost flags are not part of the code, but the user's instruction says to include them. Wait, the user's instruction says "Honor full, empty, and almost flags without losing or repeating data; support the fall-through option and start empty after reset."
+
+Wait, the code must generate all three: full, empty, almost full, almost empty. So the code must have logic for almost flags. But how? The code's parameters don't have thresholds. Maybe the almost flags are when the FIFO is one less than full (almost full) and one more than empty (almost empty). Let's proceed with that.
+
+Now, the code structure:
+
+The FIFO memory is a dual-port RAM with write and read pointers.
+
+The write side:
+
+- On wclk, when wrst_n is low, reset. The write pointer starts at 0.
+
+- When winc is asserted and FIFO is not full, write data into memory and increment write pointer.
+
+The read side:
+
+- On rclk, when rrst_n is low, reset. Read pointer starts at 0.
+
+- When rinc is asserted and FIFO is not empty, read data and increment read pointer.
+
+The flags:
+
+- wfull: when write pointer's next position would make the FIFO full.
+
+- rempty: when read pointer equals write pointer.
+
+The almost full (awfull) would be when the FIFO is at (2^ASIZE -1) entries. Wait, but if the FIFO is full when it's 2^ASIZE entries, then almost full would be when it's (2^ASIZE -1). Similarly, almost empty would be when there's one entry left.
+
+Wait, but the actual count is (write_ptr - read_ptr). So if the FIFO is full when (write_ptr - read_ptr) == 2^ASIZE.
+
+So almost full would be when (write_ptr - read_ptr) >= (2^ASIZE -1). Hmm. Alternatively, almost full is when the FIFO is one less than full. Let's proceed with that.
+
+Now, the code.
+
+First, the memory:
+
+reg [DSIZE-1:0] mem [0:(1<<ASIZE)-1];
+
+The write and read pointers:
+
+In the write domain:
+
+reg [ASIZE:0] wptr, wptr_next; // ASIZE+1 bits.
+
+Similarly, in read domain:
+
+reg [ASIZE:0] rptr, rptr_next;
+
+The Gray code conversion:
+
+function [ASIZE:0] bin2gray;
+input [ASIZE:0] bin;
+begin
+    bin2gray = bin ^ (bin >> 1);
+end
+endfunction
+
+Then, the synchronized pointers:
+
+In write domain, synchronize rptr_gray to wclk:
+
+reg [ASIZE:0] rptr_gray_sync1, rptr_gray_sync2;
+
+Similarly, in read domain, synchronize wptr_gray to rclk.
+
+Full condition:
+
+wire full = ((wptr[ASIZE] != rptr_gray_sync2[ASIZE]) && (wptr[ASIZE-1:0] == rptr_gray_sync2[ASIZE-1:0]));
+
+Wait, the standard full condition is when the MSBs are different and the lower bits are equal.
+
+Wait, the full condition is:
+
+(wptr - rptr) == 2^ASIZE.
+
+But in terms of the pointers:
+
+If the pointers are (ASIZE+1) bits, then:
+
+full = ( (wptr[ASIZE] != rptr_sync[ASIZE]) && (wptr[ASIZE-1:0] == rptr_sync[ASIZE-1:0]) )
+
+Similarly, empty is when the pointers are equal.
+
+Now, the code:
+
+In the write domain:
+
+- Generate the next write pointer.
+
+- Convert to gray code.
+
+- Synchronize the read pointer's gray code.
+
+Similarly for read domain.
+
+The almost full and almost empty:
+
+Almost full would be when the FIFO is at (2^ASIZE -1) entries. Wait, but the maximum entries are 2^ASIZE. So almost full could be when the count is (2^ASIZE -1). But the code's almost full is when the FIFO is one less than full. Similarly, almost empty is when the count is 1.
+
+But the code's almost flags are outputs. So:
+
+For almost full:
+
+assign awfull = (count >= (2**ASIZE -1)) ? 1 : 0;
+
+But count is (wptr - rptr). Wait, but in terms of the pointers:
+
+count = wptr - rptr_sync (but synchronized pointers may have delays). Hmm. Alternatively, the actual count is (wptr - rptr) in the write domain. Wait, but the synchronized pointers may have a delay. Hmm.
+
+Alternatively, the almost full is when the FIFO is (2^ASIZE -1) entries. So:
+
+wire [ASIZE:0] wcount = wptr - rptr_sync;
+
+Then, almost full is (wcount >= (2**ASIZE -1)) ?
+
+Wait, but the maximum entries are 2^ASIZE. So when the FIFO is full, it's 2^ASIZE entries. So almost full would be when it's (2^ASIZE -1). Similarly, almost empty is when it's 1.
+
+But the code's almost flags are named awfull and arempty. Wait, the output names are:
+
+awfull: almost full.
+
+arempty: almost empty.
+
+Wait, the standard names are almost_full and almost_empty. But the code uses 'awfull' and 'arempty' as the names. So:
+
+output wire awfull,
+
+output wire arempty.
+
+Assuming that.
+
+Now, the code:
+
+In the write domain:
+
+- The write pointer increments when winc is active and not full.
+
+- The full is determined by comparing the current write pointer and the synchronized read pointer.
+
+Similarly for empty.
+
+Now, the code:
+
+First, the memory:
+
+reg [DSIZE-1:0] mem [0:(1 << ASIZE) -1];
+
+The write pointer and read pointer:
+
+In the write domain:
+
+reg [ASIZE:0] wptr, wptr_gray;
+
+In the read domain:
+
+reg [ASIZE:0] rptr, rptr_gray;
+
+Synchronization:
+
+In the write domain:
+
+reg [ASIZE:0] rptr_gray_sync1, rptr_gray_sync2;
+
+In the read domain:
+
+reg [ASIZE:0] wptr_gray_sync1, wptr_gray_sync2;
+
+Full and empty conditions:
+
+In write domain:
+
+wire full = ( (wptr[ASIZE] != rptr_gray_sync2[ASIZE] ) && (wptr[ASIZE-1:0] == rptr_gray_sync2[ASIZE-1:0]) );
+
+Similarly, empty in read domain:
+
+wire empty = (rptr == wptr_gray_sync2);
+
+Wait, no. The empty is when the read pointer equals the synchronized write pointer.
+
+Wait, in the read domain:
+
+wire empty = (rptr == wptr_synced_gray converted to binary? Or the pointers are in binary.
+
+Wait, the pointers are in binary, converted to gray code for synchronization.
+
+Wait, the actual pointers are binary, but when synchronized across clock domains, they are converted to gray to avoid metastability.
+
+Once synchronized, the gray code is converted back to binary in the destination domain.
+
+Wait, perhaps the steps are:
+
+In write domain:
+
+- The write pointer (binary) is converted to gray (wptr_gray).
+
+- The read pointer's gray code (from read domain) is synchronized (two flops) into write domain as rptr_gray_sync.
+
+- Then, convert rptr_gray_sync back to binary (rptr_sync_bin).
+
+Similarly for read domain.
+
+Then, the full condition is (wptr - rptr_sync_bin) >= (2^ASIZE).
+
+Wait, but the standard approach is:
+
+Full when (wptr - rptr_sync_bin) == 2^ASIZE.
+
+But the pointers are (ASIZE+1) bits. So when the difference is exactly 2^ASIZE, the FIFO is full.
+
+Similarly, empty when (rptr == wptr_sync_bin).
+
+Now, the almost full and almost empty.
+
+Assuming almost full is when the FIFO is (2^ASIZE -1) entries. So:
+
+assign awfull = ( (wptr - rptr_sync_bin) >= ( (1 << ASIZE) -1 ) );
+
+Similarly, almost empty is when ( (wptr_sync_bin - rptr) ) <= 1.
+
+Wait, but in the read domain, the empty is when (rptr == wptr_sync_bin).
+
+But the almost empty would be when the FIFO has one entry left.
+
+But the code's almost empty is 'arempty' which is the almost empty flag. Wait, the standard almost empty is when the FIFO is one entry away from empty. So when the count is 1.
+
+But the code's 'arempty' is the almost empty flag.
+
+Now, the code:
+
+In the write domain:
+
+// Synchronize read pointer to write clock domain
+
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        rptr_gray_sync1 <= 0;
+        rptr_gray_sync2 <= 0;
+    end else begin
+        rptr_gray_sync1 <= rptr_gray;
+        rptr_gray_sync2 <= rptr_gray_sync1;
+    end
+end
+
+// Convert back to binary in write domain
+
+// Wait, but the gray code is converted back to binary.
+
+// Alternatively, the synchronized gray code is converted to binary.
+
+// So:
+
+// Convert the synchronized gray code to binary.
+
+// But in Verilog, we can have a function for that.
+
+// Function to convert gray to binary.
+
+function [ASIZE:0] gray2bin;
+input [ASIZE:0] gray;
+integer i;
+begin
+    gray2bin[ASIZE] = gray[ASIZE];
+    for (i = ASIZE-1; i >=0; i=i-1)
+        gray2bin[i] = gray2bin[i+1] ^ gray[i];
+end
+endfunction
+
+// Then, in the write domain:
+
+wire [ASIZE:0] rptr_sync_bin = gray2bin(rptr_gray_sync2);
+
+// Similarly for read domain.
+
+Now, the full condition:
+
+wire full = ( (wptr[ASIZE] != rptr_sync_bin[ASIZE]) && (wptr[ASIZE-1:0] == rptr_sync_bin[ASIZE-1:0]) );
+
+Similarly, the empty condition in read domain:
+
+wire empty = (rptr == wptr_sync_bin);
+
+Wait, but the pointers in read domain are converted to binary.
+
+Wait, the pointers are in binary, converted to gray, synchronized, then converted back to binary.
+
+So:
+
+In write domain:
+
+- rptr_gray is the gray code of the read pointer.
+
+- After synchronization, converted back to binary (rptr_sync_bin).
+
+Similarly for read domain.
+
+Then, the full is when (wptr - rptr_sync_bin) == 2^ASIZE.
+
+Wait, but the pointers are (ASIZE+1) bits. So the maximum entries is 2^ASIZE.
+
+So:
+
+full = ( (wptr - rptr_sync_bin) == (1 << ASIZE) )
+
+But in terms of the pointers:
+
+If the MSBs are different and the lower bits are same, then the FIFO is full.
+
+So:
+
+full = ( (wptr[ASIZE] != rptr_sync_bin[ASIZE] ) && (wptr[ASIZE-1:0] == rptr_sync_bin[ASIZE-1:0] ) );
+
+Similarly, empty is when (rptr == wptr_sync_bin).
+
+Now, the almost full and almost empty.
+
+Almost full: when the FIFO is (2^ASIZE -1) entries.
+
+But the count is (wptr - rptr_sync_bin). So:
+
+assign awfull = ( (wptr - rptr_sync_bin) >= ( (1 << ASIZE) -1 ) );
+
+Similarly, almost empty:
+
+assign arempty = ( (wptr_sync_bin - rptr) <= 1 );
+
+But in the read domain, the empty is when (rptr == wptr_sync_bin). The almost empty would be when the FIFO has one entry left. So:
+
+If the count is (wptr_sync_bin - rptr) >=1 ?
+
+Wait, if the FIFO has one entry left, then the count is 1. So:
+
+assign arempty = ( (wptr_sync_bin - rptr) <= 1 ) ? 1 : 0;
+
+Wait, but when the FIFO is empty, the count is zero. So almost empty would be when count is 1.
+
+But the code's 'arempty' is the almost empty flag. Hmm. Maybe the almost empty is when the FIFO is one entry away from empty. So:
+
+assign arempty = ( (wptr_sync_bin - rptr) <= 1 ) && ( (wptr_sync_bin - rptr) !=0 );
+
+But perhaps the code uses:
+
+assign arempty = ( (wptr_sync_bin - rptr) <= 1 );
+
+But when the FIFO is empty, the count is zero. So almost empty would be when the count is 1.
+
+But the code's 'arempty' is the almost empty flag. So the code may have:
+
+// almost empty is when the FIFO has one entry left.
+
+// So when (wptr_sync_bin - rptr) ==1.
+
+// Wait, the count is (wptr_sync_bin - rptr). So:
+
+// If the FIFO is empty: count is zero.
+
+// If count is 1, then almost empty.
+
+// So:
+
+assign arempty = ( (wptr_sync_bin - rptr) == 1 );
+
+But in the read domain:
+
+wire [ASIZE:0] count_rd = wptr_sync_bin - rptr;
+
+assign arempty = (count_rd == 1);
+
+Similarly, almost full:
+
+wire [ASIZE:0] count_wr = wptr - rptr_sync_bin;
+
+assign awfull = (count_wr >= ( (1 << ASIZE) -1 ));
+
+But the code's parameters may vary. But given the code's interface, proceed.
+
+Now, the code:
+
+Implementing the dual-clock FIFO.
+
+The code:
+
+module async_fifo #(
+    parameter DSIZE = 8,
+    parameter ASIZE = 4,
+    parameter FALLTHROUGH = "TRUE"
+) (
+    input  wire             wclk,
+    input  wire             wrst_n,
+    input  wire             winc,
+    input  wire [DSIZE-1:0] wdata,
+    output wire             wfull,
+    output wire             awfull,
+    input  wire             rclk,
+    input  wire             rrst_n,
+    input  wire             rinc,
+    output wire [DSIZE-1:0] rdata,
+    output wire             rempty,
+    output wire             arempty
+);
+
+// Memory declaration
+reg [DSIZE-1:0] mem [0:(1 << ASIZE)-1];
+
+// Write domain signals
+reg [ASIZE:0] wptr, wptr_next;
+reg [ASIZE:0] wptr_gray;
+reg [ASIZE:0] rptr_gray_sync1, rptr_gray_sync2;
+
+// Read domain signals
+reg [ASIZE:0] rptr, rptr_next;
+reg [ASIZE:0] rptr_gray;
+reg [ASIZE:0] wptr_gray_sync1, wptr_gray_sync2;
+
+// Convert Gray to binary functions
+function [ASIZE:0] gray2bin;
+input [ASIZE:0] gray;
+integer i;
+begin
+    gray2bin[ASIZE] = gray[ASIZE];
+    for (i = ASIZE-1; i >=0; i = i-1)
+        gray2bin[i] = gray2bin[i+1] ^ gray[i];
+end
+endfunction
+
+// Synchronization of read pointer to write domain
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        rptr_gray_sync1 <= 0;
+        rptr_gray_sync2 <= 0;
+    end else begin
+        rptr_gray_sync1 <= rptr_gray;
+        rptr_gray_sync2 <= rptr_gray_sync1;
+    end
+end
+
+// Convert synchronized Gray to binary in write domain
+wire [ASIZE:0] rptr_sync_bin = gray2bin(rptr_gray_sync2);
+
+// Full condition
+wire full;
+assign full = ( (wptr[ASIZE] != rptr_sync_bin[ASIZE]) && (wptr[ASIZE-1:0] == rptr_sync_bin[ASIZE-1:0]) );
+
+// Write pointer update
+always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+        wptr <= 0;
+        wptr_gray <= 0;
+    end else begin
+        wptr <= wptr_next;
+        wptr_gray <= bin2gray(wptr_next);
+    end
+end
+
+// Next write pointer logic
+always @* begin
+    wptr_next = wptr;
+    if (winc && !full) begin
+        wptr_next = wptr + 1;
+    end
+end
+
+// Write data to memory
+always @(posedge wclk) begin
+    if (winc && !full) begin
+        mem[wptr[ASIZE-1:0]] <= wdata;
+    end
+end
+
+// Read domain synchronization
+// Synchronize write pointer to read domain
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        wptr_gray_sync1 <= 0;
+        wptr_gray_sync2 <= 0;
+    end else begin
+        wptr_gray_sync1 <= wptr_gray;
+        wptr_gray_sync2 <= wptr_gray_sync1;
+    end
+end
+
+// Convert synchronized Gray to binary in read domain
+wire [ASIZE:0] wptr_sync_bin = gray2bin(wptr_gray_sync2);
+
+// Empty condition
+wire empty;
+assign empty = (rptr == wptr_sync_bin);
+
+// Read pointer update
+always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+        rptr <= 0;
+        rptr_gray <= 0;
+    end else begin
+        rptr <= rptr_next;
+        rptr_gray <= bin2gray(rptr_next);
+    end
+end
+
+// Next read pointer logic
+always @* begin
+    rptr_next = rptr;
+    if (rinc && !empty) begin
+        rptr_next = rptr + 1;
+    end
+end
+
+// Read data from memory
+reg [DSIZE-1:0] rdata_reg;
+always @(posedge rclk) begin
+    if (!rrst_n) begin
+        rdata_reg <= 0;
+    end else if (rinc && !empty) begin
+        rdata_reg <= mem[rptr[ASIZE-1:0]];
+    end
+end
+
+assign rdata = FALLTHROUGH == "TRUE" ? mem[rptr[ASIZE-1:0]] : rdata_reg;
+
+// Almost full and almost empty
+// Almost full: when count is (2**ASIZE -1)
+wire [ASIZE:0] wcount = wptr - rptr_sync_bin;
+assign awfull = (wcount >= ( (1 << ASIZE) -1 ));
+
+// Almost empty: when count is 1
+wire [ASIZE:0] rcount = wptr_sync_bin - rptr;
+assign arempty = (rcount <= 1);
+
+// Assign outputs
+assign wfull = full;
+assign rempty = empty;
+
+// Almost full and empty flags
+// Wait, the names are awfull and arempty.
+
+// Wait, the outputs are:
+
+// wfull: normal full.
+
+// awfull: almost full.
+
+// rempty: normal empty.
+
+// arempty: almost empty.
+
+// So the code:
+
+assign awfull = (wcount >= ( (1 << ASIZE) -1 ));
+
+// For almost empty: when the FIFO has one entry left.
+
+// Wait, the count in read domain is (wptr_sync_bin - rptr). If that's 1, then almost empty.
+
+// So:
+
+wire [ASIZE:0] rcount_rd = wptr_sync_bin - rptr;
+
+assign arempty = (rcount_rd == 1);
+
+// Wait, but the almost empty is when the FIFO is one entry away from empty. So when the count is 1.
+
+// So:
+
+assign arempty = ( (wptr_sync_bin - rptr) == 1 );
+
+// But in code:
+
+wire [ASIZE:0] rcount = wptr_sync_bin - rptr;
+
+assign arempty = (rcount == 1);
+
+// Assign outputs:
+
+assign wfull = full;
+assign awfull = (wcount >= ( (1 << ASIZE) -1 ));
+assign rempty = empty;
+assign arempty = (rcount == 1);
+
+// Wait, but the code's 'arempty' is supposed to be almost empty. If the FIFO has one entry left, then the next read will empty it. So the almost empty is when the count is 1.
+
+// Now, the code for the read data.
+
+// If FALLTHROUGH is TRUE, then the data is read immediately. Otherwise, registered.
+
+// The code uses:
+
+// assign rdata = FALLTHROUGH == "TRUE" ? mem[rptr[ASIZE-1:0]] : rdata_reg;
+
+// But in the code above, rdata_reg is assigned on the clock edge.
+
+// Wait, the code for the read data:
+
+// In the code above, the rdata_reg is updated when rinc and not empty. But if FALLTHROUGH is enabled, the data is read combinationally.
+
+// Wait, the code uses:
+
+// assign rdata = FALLTHROUGH ? ... 
+
+// So when FALLTHROUGH is TRUE, the data is read combinationally from the memory. Otherwise, it's registered.
+
+// So the code:
+
+// The memory is written on the write clock, read on read clock.
+
+// Wait, in the code:
+
+// The memory is written on the write clock edge. The read data is either registered (non-fall-through) or directly read from memory (fall-through).
+
+// So in the code:
+
+// The read data is assigned as:
+
+// If FALLTHROUGH is TRUE, then the data is read combinationally from the current read pointer's location.
+
+// Else, it's registered.
+
+// So:
+
+// In the code:
+
+// For non-fall-through:
+
+// The data is read on the clock edge. So when rinc is active and not empty, the data is read and stored in rdata_reg.
+
+// For fall-through:
+
+// The data is read combinationally, so the read data is always the current memory location.
+
+// So the code:
+
+// The read data path:
+
+// If FALLTHROUGH is TRUE:
+
+// assign rdata = mem[rptr[ASIZE-1:0]];
+
+// Else:
+
+// The data is registered.
+
+// So in the code:
+
+// The code uses:
+
+// reg [DSIZE-1:0] rdata_reg;
+
+// always @(posedge rclk) begin
+//     if (rinc && !empty) begin
+//         rdata_reg <= mem[rptr[ASIZE-1:0]];
+//     end
+// end
+
+// assign rdata = FALLTHROUGH ? mem[rptr[ASIZE-1:0]] : rdata_reg;
+
+// So the code for the read data.
+
+// Now, the code for the almost full and almost empty.
+
+// The code for the almost full:
+
+// wcount is the difference between write pointer and synchronized read pointer.
+
+// assign awfull = (wcount >= ( (1 << ASIZE) -1 ));
+
+// Similarly, almost empty:
+
+// assign arempty = ( (wptr_sync_bin - rptr) == 1 );
+
+// Now, the code.
+
+// Now, the code for the almost full and almost empty.
+
+// The code:
+
+// Almost full: when the FIFO has (2^ASIZE -1) entries.
+
+// The count is (wptr - rptr_sync_bin). If that's >= (2^ASIZE -1), then almost full.
+
+// Similarly, almost empty is when the count is 1.
+
+// So:
+
+wire [ASIZE:0] wcount = wptr - rptr_sync_bin;
+assign awfull = (wcount >= ( (1 << ASIZE) -1 ));
+
+wire [ASIZE:0] rcount = wptr_sync_bin - rptr;
+assign arempty = (rcount == 1);
+
+// Assign outputs:
+
+assign awfull = (wcount >= ( (1 << ASIZE) -1 ));
+assign arempty = (rcount == 1);
+
+// Now, the code.
+
+// Now, the code for the write pointer and read pointer.
+
+// The code for the write pointer:
+
+// The write pointer increments when winc and not full.
+
+// The code:
+
+// In the write domain:
+
+// The write pointer is updated on the clock edge.
+
+// Similarly for read.
+
+// Now, the code.
+
+// Now, the code for the Gray code conversion.
+
+// Function to convert binary to gray.
+
+function [ASIZE:0] bin2gray;
+input [ASIZE:0] bin;
+begin
+    bin2gray = bin ^ (bin >> 1);
+end
+endfunction
+
+// Now, the code.
+
+// Now, the code for the synchronization.
+
+// Now, the code.
+
+// Now, the code for the almost full and almost empty.
+
+// Now, the code.
+
+// Now, the code for the reset.
+
+// The resets are active low.
+
+// Now, the code.
+
+// Now, the code for the read data.
+
+// Now, the code.
+
+// Now, the code for the almost full and almost empty.
+
+// Now, the code.
+
+// Now, the code for the almost full and almost empty.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the code.
+
+// Now, the

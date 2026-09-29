@@ -1,0 +1,1331 @@
+<think>Okay, I need to design an AXI4-Lite clock-domain bridge in Verilog. Let me start by understanding the requirements.
+
+The module is called axil_cdc. It has two clock domains: s_clk and m_clk, both asynchronous. Resets are active high for both. The inputs and outputs are split between the slave and master interfaces. The main goal is to forward transactions from the slave side to the master side without loss, duplication, or reordering. Also, one outstanding write and read each.
+
+First, the AXI4-Lite protocol basics. For writes: AW channel (address), W channel (data), B channel (response). For reads: AR channel (address), R channel (data and response). The handshake signals are valid and ready. Each transaction is initiated by the master, but in the bridge, the slave side receives the transactions and forwards them to the master side.
+
+Since the clocks are asynchronous, I need to handle CDC (clock domain crossing) for the control signals. For the write and read channels, I should use synchronizers or FIFOs to pass the transactions between the domains.
+
+The key here is to have separate state machines for the write and read channels. Each can handle one transaction at a time. So, the bridge can handle one write and one read transaction in flight.
+
+For the write path:
+
+On the slave side (s_clk domain), when a write is initiated (AWVALID and WVALID), the bridge needs to capture the address and data. Then, forward them to the master side (m_clk domain). Once the master accepts (AWREADY and WREADY), the bridge can send the B response back.
+
+Similarly for the read path: ARVALID on slave side, capture address, forward to master, wait for RVALID from master, then send back to slave.
+
+But since the clocks are different, need to synchronize the handshakes. Maybe using handshake signals with two-phase synchronization.
+
+Wait, but AXI4-Lite is simpler. The handshake is done via valid/ready signals. So the bridge must handle the handshakes across clock domains.
+
+Possible approach:
+
+For the write channel:
+
+1. When the slave side receives a write (AWVALID and WVALID), the bridge must latch the address and data into a register. Then, in the m_clk domain, it presents these to the master. Wait until the master accepts (AWREADY and WREADY). Once accepted, the bridge can send the B response (OKAY) back to the slave.
+
+But how to safely transfer the data between the two clock domains. Maybe using a handshake mechanism with a toggle signal.
+
+Alternatively, use a FIFO for each channel (write and read) to pass the transactions between the domains.
+
+But given that the bridge is supposed to handle one outstanding transaction each, perhaps a simple handshake with a toggle bit.
+
+Wait, the AXI4-Lite allows for one transaction at a time. So the bridge can have a single register for each channel (write and read) that's being transferred.
+
+Let me outline the steps for write:
+
+Slave side (s_clk):
+
+- When AWVALID and WVALID are high, the bridge latches the AWADDR, WDATA, WSTRB into registers. Then, in the m_clk domain, present these to the master.
+
+But how to trigger the transfer. Maybe use a pulse in the s_clk domain that's synchronized to m_clk.
+
+Wait, but the valid signals are in the same clock domain as the master's. Wait, no: the master's signals are in m_clk domain.
+
+Wait, the master's interface is in m_clk, so the bridge's master outputs (like m_axil_awvalid) are in m_clk.
+
+So the bridge's slave side (s_clk) receives the requests, and the bridge's master side (m_clk) sends the requests to the actual master.
+
+So the bridge's slave interface is on s_clk, and the master interface is on m_clk.
+
+So the bridge acts as a slave on s_clk and as a master on m_clk.
+
+The AXI4-Lite protocol requires that the master (the bridge's master side) initiates transactions. Wait, no. Wait, in AXI, the master initiates transactions. Wait, the bridge is acting as a slave on the s_clk side (so it's a slave there) and as a master on the m_clk side (so it's a master there). So the bridge's master side is initiating transactions to another master (the actual target device).
+
+Wait, the bridge is between two masters and two slaves? Wait, no. Wait, the bridge is a slave on one side (s_clk) and a master on the other (m_clk). So the bridge's slave interface is connected to a master (the initiator), and the bridge's master interface connects to a slave (the target device). So the bridge is converting the slave interface (from the perspective of the initiator) to a master interface (to the target).
+
+Wait, but the AXI4-Lite protocol is for a master to talk to a slave. So the bridge's slave side (s_clk) is connected to a master (the initiator), and the bridge's master side (m_clk) connects to a slave (the target device). So the bridge is acting as a master towards the target.
+
+In that case, the bridge's master side must handle the AXI4-Lite protocol as a master. So the bridge's master side (m_clk) is initiating transactions to the target.
+
+Wait, but the bridge's slave interface (s_clk) is receiving the transactions from the initiator (the master), and the bridge's master interface (m_clk) is sending the transactions to the target (the slave). So the bridge is acting as a slave on the s_clk side and as a master on the m_clk side.
+
+So the bridge's job is to take the transactions from the s_clk (slave) side and forward them to the m_clk (master) side, and vice versa for reads.
+
+Wait, but the original problem says "forward each accepted transaction exactly once to the master ports". So the bridge is acting as a slave on the s_clk side (so it's a slave there) and as a master on the m_clk side (so it's a master there). So the bridge's master interface is connected to the target device (a slave), and the bridge's slave interface is connected to the initiator (a master).
+
+In that case, the bridge's master side (m_clk) must generate the AXI4-Lite transactions to the target.
+
+So the write transaction flow would be:
+
+Initiator (s_clk) sends a write command (AW, W, B). The bridge (as slave) captures the write, then forwards it to the target (as master). The bridge's master side (m_clk) initiates the write to the target, then sends back the B response.
+
+Similarly for read: the initiator (s_clk) sends AR, bridge (as slave) captures it, forwards to target (as master), then gets the data back and sends to the initiator.
+
+But the clocks are asynchronous. So the challenge is to safely transfer the handshake signals across the clock domains.
+
+The standard approach for AXI CDC is to use a FIFO for each channel (AW, W, B, AR, R) to cross the clock domains. However, since the AXI4-Lite allows for one outstanding transaction, the bridge can use a single register per channel and a handshake mechanism.
+
+Alternatively, use a two-stage synchronizer for the control signals.
+
+Let me think about the write channel.
+
+In the s_clk domain (slave side):
+
+When a write is received (AWVALID and WVALID), the bridge latches the address and data into a register. Then, in the m_clk domain, the bridge presents these to the master (AWVALID and WVALID). The master's side (m_clk) then waits until the master accepts (AWREADY and WREADY). Once accepted, the bridge can send the B response (BVALID and BRESP) back to the slave side.
+
+But the B response from the master side (m_clk) needs to be sent back to the slave side (s_clk). So the B channel requires CDC.
+
+Similarly for the read channel.
+
+So the steps for write:
+
+Slave side (s_clk):
+
+1. When AWVALID and WVALID are high, capture the address and data into a register (write_pending). Then assert a flag (write_go) to the m_clk domain.
+
+2. In m_clk domain, when write_go is detected, present the address and data to the master's AW and W channels. Wait until the master accepts (AWREADY and WREADY). Once done, capture the B response (BRESP) and send it back to the slave side via another CDC.
+
+Wait, but the B channel from the master's side (the target's B response) is in m_clk. The bridge's slave side (s_clk) needs to receive the B response. So need to cross that CDC.
+
+Similarly for read: the R channel from the target (m_clk) to the bridge's slave (s_clk).
+
+So each channel (AW, W, B, AR, R) would need CDC handling.
+
+But given that the AXI4-Lite allows for one outstanding transaction, perhaps a single register and handshake for each direction.
+
+Let me outline the structure.
+
+For the write channel:
+
+Slave side (s_clk):
+
+- When AWVALID and WVALID are both high, and the bridge is ready to accept a new write (i.e., not busy with a previous one), latch the address and data into a register. Then, generate a pulse (write_start) in the s_clk domain. This pulse needs to be synchronized to the m_clk domain to trigger the master side.
+
+In the m_clk domain:
+
+- Detect the synchronized pulse (write_start), then assert AWVALID and WVALID. Wait until AWREADY and WREADY are both high. Once done, capture the B response (BRESP) and send it back to the slave side via another synchronization.
+
+Once the B response is received in the s_clk domain, the bridge can deassert BVALID and wait for the next transaction.
+
+Similarly for the read channel.
+
+But how to handle the handshake between the two domains.
+
+Another approach: use a handshake with a request and acknowledge signal.
+
+For the write:
+
+s_clk domain:
+
+- When a write is received, set a request signal (write_req) and pass the data to a register. Then wait for an ack from the m_clk domain.
+
+In m_clk domain:
+
+- When the request is detected (after synchronization), perform the write to the master. Once done, set an ack signal which is synchronized back to s_clk. Then clear the request.
+
+But the exact implementation would require synchronizing the request and ack across the domains.
+
+Alternatively, use a toggle synchronizer for the request.
+
+But this can get complicated.
+
+Alternatively, use a FIFO for each channel. Since each channel can have one transaction, a single-entry FIFO would suffice.
+
+But in Verilog, FIFOs can be implemented with a register and valid bits.
+
+Wait, for the write channel:
+
+In s_clk domain:
+
+- When a write is initiated (AWVALID and WVALID), if the FIFO is empty, push the data into the FIFO (write side). The FIFO has a write enable from s_clk and read enable from m_clk.
+
+In m_clk domain:
+
+- Read from the FIFO, present to master. Once the master accepts (AWREADY and WREADY), pop the FIFO.
+
+Similarly for the read channel.
+
+But the FIFO would need to handle the handshake signals.
+
+But given that the AXI4-Lite allows one transaction, the FIFO can be a single register with a valid bit.
+
+But the valid bit needs to be synchronized.
+
+Alternatively, use a handshake with a req and ack.
+
+But perhaps for simplicity, given the one outstanding transaction, the bridge can have a state machine in each domain.
+
+Let's outline the write process:
+
+Slave side (s_clk):
+
+- State IDLE: Wait for AWVALID and WVALID. When both are high, capture the address and data. Move to SEND state.
+
+- SEND: Assert the AWREADY and WREADY (since the bridge is ready to accept the transaction). Wait until the master side has accepted the transaction (i.e., when the master's AWREADY and WREADY are high). Then, wait for the B response from the master.
+
+Wait, but the master's side (m_clk) is the one initiating the transaction. Hmm, maybe I'm getting confused here.
+
+Wait, the bridge's master side (m_clk) is acting as a master towards the target. So when the bridge receives a write on the slave side (s_clk), it must initiate a write on the master side (m_clk).
+
+Wait, perhaps the bridge's master side is acting as a master, so the bridge's master side (m_clk) must generate the AW and W channels, and wait for the B response.
+
+Wait, the bridge's master side (m_clk) is connected to the target's slave interface.
+
+So the bridge's master side (m_clk) is initiating the transactions. The bridge's slave side (s_clk) is connected to the initiator (the master that starts the transactions).
+
+So the flow would be:
+
+On the s_clk (slave side):
+
+When the initiator (master) sends a write command (AWVALID and WVALID), the bridge (as slave) accepts them (asserts AWREADY and WREADY) and captures the data. Then, the bridge's master side (m_clk) must perform the write to the target.
+
+Wait, but the bridge's master side is in m_clk. So the bridge's master side must generate the AWVALID, WVALID, etc., to the target.
+
+Wait, no. Wait, the bridge's master interface is connected to the target's slave interface. So the bridge's master side (m_clk) is acting as a master towards the target.
+
+Therefore, the bridge's master side (m_clk) must generate the AW, W, B, AR, R channels to the target.
+
+Wait, but the bridge's slave interface (s_clk) is connected to the initiator (the master). The bridge's master interface (m_clk) is connected to the target (the slave).
+
+Therefore, the bridge's job is to take the write commands from the initiator (s_clk) and forward them to the target (m_clk).
+
+So the steps for a write:
+
+1. The initiator (s_clk) sends a write request (AWVALID, WVALID). The bridge (as slave) accepts them (AWREADY and WREADY) and latches the address and data.
+
+2. The bridge's master side (m_clk) then initiates the write to the target. It sets AWVALID, AWADDR, etc., and waits for AWREADY from the target. Once accepted, it sends the data via WVALID, WDATA, etc. Wait for WREADY.
+
+3. Then, the target responds with BVALID and BRESP. The bridge's master side (m_clk) captures BRESP and sends it back to the initiator via the B channel (s_clk domain).
+
+Similarly for read.
+
+But the clocks are asynchronous. So the handshakes between the two domains need to be synchronized.
+
+This is getting complicated. Let's think of the write path.
+
+In the s_clk domain:
+
+When the bridge's slave interface receives a write (AWVALID and WVALID), the bridge (as slave) must assert AWREADY and WREADY. Once the data is accepted, the bridge must then forward the write to the master side (m_clk domain). The master side (m_clk) must then perform the write to the target.
+
+Once the target's B response comes back (BVALID and BRESP), the bridge's master side (m_clk) must send that response back to the slave side (s_clk domain) to complete the transaction.
+
+Similarly for reads.
+
+So the key is to have a way to pass the write data and the read address from s_clk to m_clk, and the B response and R data from m_clk to s_clk.
+
+Possible approach:
+
+For the write:
+
+- Use a register in s_clk to hold the write data/address once accepted.
+
+- Then, synchronize a flag (write_go) to m_clk. Once detected in m_clk, the master side initiates the write.
+
+Once the B response comes back (from target), the bridge's master side (m_clk) must pass the B response to the s_clk domain.
+
+Similarly for read.
+
+So in code:
+
+For the write:
+
+In s_clk:
+
+When AWVALID and WVALID are high and the bridge is idle (no pending transaction), latch the address and data into a register. Then set a flag (write_pending) to 1.
+
+This flag is synchronized to m_clk. Once detected in m_clk, the master side (m_clk) initiates the write.
+
+Once the write is done (BVALID received from target), the B response is stored and a flag (write_done) is set, which is synchronized back to s_clk.
+
+In s_clk, once the done flag is received, the B response is sent to the slave's BVALID and BRESP.
+
+Similarly for read.
+
+Now, the code structure.
+
+First, the write channel:
+
+Slave side (s_clk):
+
+reg [ADDR_WIDTH-1:0] awaddr_reg;
+reg [DATA_WIDTH-1:0] wdata_reg;
+reg [STRB_WIDTH-1:0] wstrb_reg;
+reg awvalid_reg, wvalid_reg;
+reg write_pending;
+
+// Capture the write data when valid and ready
+always @(posedge s_clk) begin
+    if (s_rst) begin
+        write_pending <= 0;
+        // ... reset other registers
+    end else begin
+        if (s_axil_awvalid && s_axil_wvalid && !write_pending && s_axil_awready && s_axil_wready) begin
+            awaddr_reg <= s_axil_awaddr;
+            wdata_reg <= s_axil_wdata;
+            wstrb_reg <= s_axil_wstrb;
+            write_pending <= 1;
+        end else if (write_done_sync) begin
+            write_pending <= 0;
+        end
+    end
+end
+
+// Generate awready and wready when not busy
+assign s_axil_awready = !write_pending && !read_pending;
+assign s_axil_wready = !write_pending && !read_pending;
+
+// Then, in m_clk domain:
+
+// Synchronize write_pending to m_clk
+reg write_pending_sync1, write_pending_sync2;
+always @(posedge m_clk) begin
+    if (m_rst) begin
+        write_pending_sync1 <= 0;
+        write_pending_sync2 <= 0;
+    end else begin
+        write_pending_sync1 <= write_pending;
+        write_pending_sync2 <= write_pending_sync1;
+    end
+end
+
+// Once detected, start the write transaction
+// Then, wait for B response from master side.
+
+// Master side (m_clk) for write:
+
+// Present the address and data to the master's AW and W channels
+assign m_axil_awaddr = awaddr_reg;
+assign m_axil_awprot = s_axil_awprot; // Wait, but the original s_axil_awprot is in s_clk domain. Need to pass to m_clk domain.
+
+Wait, but the registers (awaddr_reg, etc.) are in s_clk domain. Need to synchronize them to m_clk.
+
+This is getting complicated. Alternatively, use a handshake with a req and ack.
+
+Another approach: use a two-register synchronizer for the control signals.
+
+But perhaps the code can be structured as follows:
+
+For the write:
+
+In s_clk:
+
+When a write is accepted (AWVALID and WVALID and awready and wready), latch the data and set a flag (write_go).
+
+In m_clk:
+
+Wait for write_go to be high (after synchronization). Then drive the AW and W channels.
+
+Once the master accepts (AWREADY and WREADY), then wait for the B response.
+
+Once BVALID is received, capture BRESP and set a done flag (write_done).
+
+Then, synchronize write_done back to s_clk.
+
+Once done, clear the write_go and write_pending.
+
+Similarly for read.
+
+But the code would need to handle the CDC for the data and control signals.
+
+Alternatively, use a FIFO for each channel.
+
+But given the time constraints, perhaps the code can be written with the following steps:
+
+For the write channel:
+
+Slave side (s_clk):
+
+- Capture the write data and address when valid and ready.
+
+- Generate a pulse (write_pulse) which is synchronized to m_clk.
+
+Master side (m_clk):
+
+- Detect the synchronized pulse, then drive the AW and W channels.
+
+Once the master accepts, wait for B response.
+
+Once B response is received, send it back to the slave side via another pulse.
+
+Similarly for read.
+
+But in code:
+
+First, the write:
+
+In s_clk:
+
+// Capture the write data when valid and ready
+reg [ADDR_WIDTH-1:0] awaddr_reg;
+reg [DATA_WIDTH-1:0] wdata_reg;
+reg [STRB_WIDTH-1:0] wstrb_reg;
+reg write_pending;
+
+// When the slave side accepts the write
+// s_axil_awready and s_axil_wready are high when write_pending is 0
+// Wait for AWVALID and WVALID to be high and the bridge is ready.
+
+// The code for the slave side:
+
+// Write handshake in s_clk domain
+// When AWVALID and WVALID and awready and wready are high, capture data
+// Then set write_pending to 1.
+
+// Generate awready and wready when not busy
+assign s_axil_awready = !write_pending && !read_pending;
+assign s_axil_wready = !write_pending && !read_pending;
+
+// Capture the data when valid and ready
+always @(posedge s_clk) begin
+    if (s_rst) begin
+        write_pending <= 0;
+        awaddr_reg <= 0;
+        wdata_reg <= 0;
+        wstrb_reg <= 0;
+    end else begin
+        if (s_axil_awvalid && s_axil_wvalid && s_axil_awready && s_axil_wready) begin
+            awaddr_reg <= s_axil_awaddr;
+            wdata_reg <= s_axil_wdata;
+            wstrb_reg <= s_axil_wstrb;
+            write_pending <= 1;
+        end else if (write_done_sync) begin
+            write_pending <= 0;
+        end
+    end
+end
+
+// Now, synchronize the write_pending to m_clk domain
+// Using two flip-flops for synchronization
+reg write_pending_sync1, write_pending_sync2;
+always @(posedge m_clk) begin
+    if (m_rst) begin
+        write_pending_sync1 <= 0;
+        write_pending_sync2 <= 0;
+    end else begin
+        write_pending_sync1 <= write_pending;
+        write_pending_sync2 <= write_pending_sync1;
+    end
+end
+
+// Once write_pending_sync2 is high, start the write transaction on master side
+
+// Master side (m_clk) for write:
+
+// Drive the AW and W channels
+assign m_axil_awvalid = write_pending_sync2;
+assign m_axil_awaddr = awaddr_reg; // Need to synchronize the data from s_clk to m_clk
+// Wait, but the registers (awaddr_reg, etc.) are in s_clk domain. Need to pass to m_clk.
+
+// So need to synchronize the data as well.
+
+// So in m_clk domain, we have to sample the data from the s_clk domain.
+
+// To do that, we can use a two-stage synchronizer for the control signal (write_pending_sync2), and then sample the data when it's stable.
+
+// But data can't be synchronized directly. So the data must be held stable until the m_clk domain has captured it.
+
+// So in the s_clk domain, once write_pending is set, the data is held until the m_clk domain has processed it.
+
+// So in the s_clk domain:
+
+// Once write_pending is set, the data remains until write_done_sync comes back.
+
+// So in code:
+
+// In s_clk domain, after the write is done (B response received), write_pending is cleared.
+
+// Now, in m_clk domain:
+
+// Once write_pending_sync2 is high, the data is valid (since it's held in s_clk domain until done).
+
+// So assign the data to the master's outputs.
+
+// Then, wait for the master's AWREADY and WREADY.
+
+// Once the master accepts, then wait for BVALID.
+
+// Once BVALID is received, capture the BRESP and send back to s_clk.
+
+// Then, set write_done which is synchronized back to s_clk.
+
+// Similarly for read.
+
+This is getting quite involved. Let's try to code this.
+
+First, the write channel:
+
+Slave side (s_clk):
+
+// Capture the write data and address when valid and ready
+reg [ADDR_WIDTH-1:0] awaddr_reg;
+reg [DATA_WIDTH-1:0] wdata_reg;
+reg [STRB_WIDTH-1:0] wstrb_reg;
+reg write_pending;
+
+// Handshake signals
+wire s_awready = !write_pending && !read_pending;
+wire s_wready = !write_pending && !read_pending;
+
+// Capture data when valid and ready
+always @(posedge s_clk) begin
+    if (s_rst) begin
+        write_pending <= 0;
+        awaddr_reg <= 0;
+        wdata_reg <= 0;
+        wstrb_reg <= 0;
+    end else begin
+        if (s_axil_awvalid && s_axil_wvalid && s_awready && s_wready) begin
+            awaddr_reg <= s_axil_awaddr;
+            wdata_reg <= s_axil_wdata;
+            wstrb_reg <= s_axil_wstrb;
+            write_pending <= 1;
+        end else if (write_done_sync) begin
+            write_pending <= 0;
+        end
+    end
+end
+
+// Assign the ready signals
+assign s_axil_awready = s_awready;
+assign s_axil_wready = s_wready;
+
+// Now, synchronize write_pending to m_clk domain
+reg write_pending_sync1, write_pending_sync2;
+always @(posedge m_clk) begin
+    if (m_rst) begin
+        write_pending_sync1 <= 0;
+        write_pending_sync2 <= 0;
+    end else begin
+        write_pending_sync1 <= write_pending;
+        write_pending_sync2 <= write_pending_sync1;
+    end
+end
+
+// Master side (m_clk) for write:
+
+// Drive AW and W channels
+assign m_axil_awvalid = write_pending_sync2;
+assign m_axil_awaddr = awaddr_reg;
+assign m_axil_awprot = s_axil_awprot; // Wait, s_axil_awprot is in s_clk domain. Need to pass to m_clk.
+
+// Similarly for W channel:
+assign m_axil_wvalid = write_pending_sync2;
+assign m_axil_wdata = wdata_reg;
+assign m_axil_wstrb = wstrb_reg;
+
+// Wait for the master to accept (AWREADY and WREADY)
+// Once accepted, wait for B response.
+
+// Capture B response from master
+reg [1:0] bresp_reg;
+reg bvalid_reg;
+
+// Wait for BVALID from master
+always @(posedge m_clk) begin
+    if (m_rst) begin
+        bresp_reg <= 0;
+        bvalid_reg <= 0;
+    end else begin
+        if (m_axil_bvalid && m_axil_bready) begin
+            bresp_reg <= m_axil_bresp;
+            bvalid_reg <= 1;
+        end else begin
+            bvalid_reg <= 0;
+        end
+    end
+end
+
+// Assign the B response to the bridge's master side
+assign m_axil_bready = 1; // Always ready to accept B response
+
+// Now, need to send the B response back to the slave side.
+
+// Generate a done pulse in m_clk domain
+reg done_pulse;
+always @(posedge m_clk) begin
+    if (m_rst) begin
+        done_pulse <= 0;
+    end else begin
+        done_pulse <= bvalid_reg;
+    end
+end
+
+// Synchronize done_pulse back to s_clk domain
+reg done_pulse_sync1, done_pulse_sync2;
+always @(posedge s_clk) begin
+    if (s_rst) begin
+        done_pulse_sync1 <= 0;
+        done_pulse_sync2 <= 0;
+    end else begin
+        done_pulse_sync1 <= done_pulse;
+        done_pulse_sync2 <= done_pulse_sync1;
+    end
+end
+
+// Assign the B response to the slave's B channel
+assign s_axil_bvalid = done_pulse_sync2;
+assign s_axil_bresp = bresp_reg;
+
+// Similarly for read channel.
+
+// Now, the read channel:
+
+// Slave side (s_clk):
+
+// Capture the read address when ARVALID and ARREADY are high
+reg [ADDR_WIDTH-1:0] araddr_reg;
+reg read_pending;
+
+// ARREADY is generated when not busy
+assign s_axil_arready = !write_pending && !read_pending;
+
+// Capture the read address
+always @(posedge s_clk) begin
+    if (s_rst) begin
+        read_pending <= 0;
+        araddr_reg <= 0;
+    end else begin
+        if (s_axil_arvalid && s_axil_arready) begin
+            araddr_reg <= s_axil_araddr;
+            read_pending <= 1;
+        end else if (read_done_sync) begin
+            read_pending <= 0;
+        end
+    end
+end
+
+// Synchronize read_pending to m_clk domain
+reg read_pending_sync1, read_pending_sync2;
+always @(posedge m_clk) begin
+    if (m_rst) begin
+        read_pending_sync1 <= 0;
+        read_pending_sync2 <= 0;
+    end else begin
+        read_pending_sync1 <= read_pending;
+        read_pending_sync2 <= read_pending_sync1;
+    end
+end
+
+// Master side (m_clk) for read:
+
+// Drive AR channel
+assign m_axil_arvalid = read_pending_sync2;
+assign m_axil_araddr = araddr_reg;
+assign m_axil_arprot = s_axil_arprot;
+
+// Wait for the master to accept AR (ARREADY)
+// Once accepted, wait for RVALID from master.
+
+// Capture R data and response
+reg [DATA_WIDTH-1:0] rdata_reg;
+reg [1:0] rresp_reg;
+reg rvalid_reg;
+
+always @(posedge m_clk) begin
+    if (m_rst) begin
+        rvalid_reg <= 0;
+        rdata_reg <= 0;
+        rresp_reg <= 0;
+    end else begin
+        if (m_axil_rvalid && m_axil_rready) begin
+            rdata_reg <= m_axil_rdata;
+            rresp_reg <= m_axil_rresp;
+            rvalid_reg <= 1;
+        end else begin
+            rvalid_reg <= 0;
+        end
+    end
+end
+
+// Assign R channel to slave's interface
+assign m_axil_rready = 1; // Always ready to accept R data
+
+// Generate done pulse for read
+reg read_done_pulse;
+always @(posedge m_clk) begin
+    if (m_rst) begin
+        read_done_pulse <= 0;
+    end else begin
+        read_done_pulse <= rvalid_reg;
+    end
+end
+
+// Synchronize back to s_clk domain
+reg read_done_sync1, read_done_sync2;
+always @(posedge s_clk) begin
+    if (s_rst) begin
+        read_done_sync1 <= 0;
+        read_done_sync2 <= 0;
+    end else begin
+        read_done_sync1 <= read_done_pulse;
+        read_done_sync2 <= read_done_sync1;
+    end
+end
+
+// Assign R data and response to slave
+assign s_axil_rdata = rdata_reg;
+assign s_axil_rresp = rresp_reg;
+assign s_axil_rvalid = read_done_sync2;
+
+// Now, putting all together.
+
+Wait, but in the code above, the data from s_clk to m_clk is directly assigned. This can lead to metastability if the data changes while being read in m_clk. To prevent that, the data must be held stable until the m_clk domain has captured it.
+
+In the current code, once write_pending is set, the data is held in the s_clk domain until the done pulse comes back. So the data is stable during the time when the m_clk domain is processing.
+
+Similarly for read.
+
+But in Verilog, if the data is in a register in s_clk domain and read in m_clk domain, it's possible to have metastability. To avoid that, the data should be synchronized as well. However, for multi-bit signals, using two-stage synchronizers for each bit is not feasible. So the common practice is to hold the data stable until the receiving domain has sampled it.
+
+In the code above, once write_pending is set, the data is held until the done pulse is received. So the data is stable during the m_clk processing.
+
+Thus, the code should be okay.
+
+Now, the code for the entire module.
+
+But need to handle all the signals.
+
+Also, the parameters:
+
+STRB_WIDTH is DATA_WIDTH/8. So in the module declaration, the parameters are set as:
+
+parameter DATA_WIDTH = 32,
+parameter ADDR_WIDTH = 32,
+parameter STRB_WIDTH = (DATA_WIDTH/8)
+
+But in Verilog, parameters can have default values. So the code should have:
+
+module axil_cdc #(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = DATA_WIDTH/8
+) (
+    // ports
+);
+
+Now, the code.
+
+But in the code, the assignments for m_axil_awprot and others would need to be from the s_clk domain's inputs.
+
+Wait, the s_axil_awprot is an input to the module. So in the code, when we assign m_axil_awprot, we need to pass the value from the s_clk domain's input.
+
+But in the code above, the code uses s_axil_awprot directly in the m_clk domain. That's incorrect. Need to latch the s_axil_awprot when the write is accepted.
+
+Ah, right. Because the s_axil_awprot is in the s_clk domain. So when the bridge accepts the write, it should latch the awprot, arprot, etc., into registers in the s_clk domain and then pass them to the m_clk domain.
+
+So in the code:
+
+In the s_clk domain:
+
+When a write is accepted (AWVALID and WVALID and AWREADY and WREADY), latch the awprot into a register.
+
+Similarly for read.
+
+So modifying the code:
+
+For write:
+
+// Latch the awprot when the write is accepted
+reg [2:0] awprot_reg;
+
+always @(posedge s_clk) begin
+    if (s_rst) begin
+        awprot_reg <= 0;
+    end else if (s_axil_awvalid && s_axil_wvalid && s_awready && s_wready) begin
+        awprot_reg <= s_axil_awprot;
+    end
+end
+
+Then assign m_axil_awprot = awprot_reg;
+
+Similarly for read.
+
+This is important to avoid CDC issues.
+
+So the code needs to latch all the control and data signals in the s_clk domain before passing to m_clk.
+
+Thus, the code for the write:
+
+// Latch the awprot when accepted
+reg [2:0] awprot_reg;
+
+// Latch the arprot when accepted
+reg [2:0] arprot_reg;
+
+// For write:
+always @(posedge s_clk) begin
+    if (s_rst) begin
+        awprot_reg <= 0;
+        // ... others
+    end else begin
+        if (s_axil_awvalid && s_axil_wvalid && s_awready && s_wready) begin
+            awprot_reg <= s_axil_awprot;
+            // ... other signals
+        end
+    end
+end
+
+Similarly for read.
+
+This is a crucial point. Otherwise, the signals could change in the s_clk domain while being read in m_clk.
+
+Now, putting all together.
+
+The final code would have:
+
+For the write:
+
+// Slave side (s_clk) registers
+reg [ADDR_WIDTH-1:0] awaddr_reg;
+reg [DATA_WIDTH-1:0] wdata_reg;
+reg [STRB_WIDTH-1:0] wstrb_reg;
+reg [2:0] awprot_reg;
+
+// Read side:
+reg [ADDR_WIDTH-1:0] araddr_reg;
+reg [2:0] arprot_reg;
+
+// Write pending flags
+reg write_pending;
+reg read_pending;
+
+// CDC synchronization registers for write
+reg write_pending_sync1, write_pending_sync2;
+
+// CDC synchronization for done
+reg done_pulse;
+reg done_pulse_sync1, done_pulse_sync2;
+
+// Read CDC
+reg read_done_pulse;
+reg read_done_sync1, read_done_sync2;
+
+// Master side assignments:
+
+// Write:
+assign m_axil_awaddr = awaddr_reg;
+assign m_axil_awprot = awprot_reg;
+assign m_axil_awvalid = write_pending_sync2;
+
+// Similarly for W channel:
+assign m_axil_wdata = wdata_reg;
+assign m_axil_wstrb = wstrb_reg;
+assign m_axil_wvalid = write_pending_sync2;
+
+// Read:
+assign m_axil_araddr = araddr_reg;
+assign m_axil_arprot = arprot_reg;
+assign m_axil_arvalid = read_pending_sync2;
+
+// R channel:
+assign m_axil_rready = 1'b1; // Always ready to accept read data
+
+// B channel:
+assign m_axil_bready = 1'b1; // Always ready to accept B response
+
+// Slave side assignments:
+
+// B channel:
+assign s_axil_bvalid = done_pulse_sync2;
+assign s_axil_bresp = bresp_reg;
+
+// R channel:
+assign s_axil_rdata = rdata_reg;
+assign s_axil_rresp = rresp_reg;
+assign s_axil_rvalid = read_done_sync2;
+
+// Now, the code.
+
+But this is quite lengthy. Let's try to code it.
+
+Final code:
+
+module axil_cdc #(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = DATA_WIDTH/8
+)(
+    // Slave interface (s_clk domain)
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+
+    // Master interface (m_clk domain)
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // Write channel in s_clk domain
+    reg [ADDR_WIDTH-1:0] awaddr_reg;
+    reg [DATA_WIDTH-1:0] wdata_reg;
+    reg [STRB_WIDTH-1:0] wstrb_reg;
+    reg [2:0] awprot_reg;
+    reg write_pending;
+
+    // Read channel in s_clk domain
+    reg [ADDR_WIDTH-1:0] araddr_reg;
+    reg [2:0] arprot_reg;
+    reg read_pending;
+
+    // CDC synchronization registers for write
+    reg write_pending_sync1, write_pending_sync2;
+
+    // CDC synchronization for write done
+    reg done_pulse;
+    reg done_pulse_sync1, done_pulse_sync2;
+
+    // Read CDC
+    reg read_done_pulse;
+    reg read_done_sync1, read_done_sync2;
+
+    // Master side signals
+    reg [1:0] bresp_reg;
+    reg [DATA_WIDTH-1:0] rdata_reg;
+    reg [1:0] rresp_reg;
+
+    // Slave side assignments
+    assign s_axil_awready = !write_pending && !read_pending;
+    assign s_axil_wready = !write_pending && !read_pending;
+
+    // Capture write data when valid and ready
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            write_pending <= 0;
+            awaddr_reg <= 0;
+            wdata_reg <= 0;
+            wstrb_reg <= 0;
+            awprot_reg <= 0;
+        end else begin
+            if (s_axil_awvalid && s_axil_wvalid && s_axil_awready && s_axil_wready) begin
+                awaddr_reg <= s_axil_awaddr;
+                wdata_reg <= s_axil_wdata;
+                wstrb_reg <= s_axil_wstrb;
+                awprot_reg <= s_axil_awprot;
+                write_pending <= 1;
+            end else if (done_pulse_sync2) begin
+                write_pending <= 0;
+            end
+        end
+    end
+
+    // Synchronize write_pending to m_clk domain
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            write_pending_sync1 <= 0;
+            write_pending_sync2 <= 0;
+        end else begin
+            write_pending_sync1 <= write_pending;
+            write_pending_sync2 <= write_pending_sync1;
+        end
+    end
+
+    // Master side write handling
+    assign m_axil_awvalid = write_pending_sync2;
+    assign m_axil_awaddr = awaddr_reg;
+    assign m_axil_awprot = awprot_reg;
+
+    assign m_axil_wvalid = write_pending_sync2;
+    assign m_axil_wdata = wdata_reg;
+    assign m_axil_wstrb = wstrb_reg;
+
+    // Capture B response from master
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            bresp_reg <= 0;
+        end else if (m_axil_bvalid && m_axil_bready) begin
+            bresp_reg <= m_axil_bresp;
+        end
+    end
+
+    assign m_axil_bready = 1'b1; // Always ready to accept B response
+
+    // Generate done pulse in m_clk domain
+    reg done_pulse;
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            done_pulse <= 0;
+        end else begin
+            done_pulse <= m_axil_bvalid && m_axil_bready;
+        end
+    end
+
+    // Synchronize done pulse back to s_clk domain
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            done_pulse_sync1 <= 0;
+            done_pulse_sync2 <= 0;
+        end else begin
+            done_pulse_sync1 <= done_pulse;
+            done_pulse_sync2 <= done_pulse_sync1;
+        end
+    end
+
+    assign s_axil_bvalid = done_pulse_sync2;
+    assign s_axil_bresp = bresp_reg;
+
+    // Read channel in s_clk domain
+    assign s_axil_arready = !write_pending && !read_pending;
+
+    // Capture read address when valid and ready
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            read_pending <= 0;
+            araddr_reg <= 0;
+            arprot_reg <= 0;
+        end else begin
+            if (s_axil_arvalid && s_axil_arready) begin
+                araddr_reg <= s_axil_araddr;
+                arprot_reg <= s_axil_arprot;
+                read_pending <= 1;
+            end else if (read_done_sync2) begin
+                read_pending <= 0;
+            end
+        end
+    end
+
+    // Synchronize read_pending to m_clk domain
+    reg read_pending_sync1, read_pending_sync2;
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            read_pending_sync1 <= 0;
+            read_pending_sync2 <= 0;
+        end else begin
+            read_pending_sync1 <= read_pending;
+            read_pending_sync2 <= read_pending_sync1;
+        end
+    end
+
+    // Master side read handling
+    assign m_axil_arvalid = read_pending_sync2;
+    assign m_axil_araddr = araddr_reg;
+    assign m_axil_arprot = arprot_reg;
+
+    // Capture R data and response from master
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            rdata_reg <= 0;
+            rresp_reg <= 0;
+        end else if (m_axil_rvalid && m_axil_rready) begin
+            rdata_reg <= m_axil_rdata;
+            rresp_reg <= m_axil_rresp;
+        end
+    end
+
+    assign m_axil_rready = 1'b1; // Always ready to accept R data
+
+    // Generate read done pulse
+    reg read_done_pulse;
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            read_done_pulse <= 0;
+        end else begin
+            read_done_pulse <= m_axil_rvalid && m_axil_rready;
+        end
+    end
+
+    // Synchronize read done to s_clk domain
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            read_done_sync1 <= 0;
+            read_done_sync2 <= 0;
+        end else begin
+            read_done_sync1 <= read_done_pulse;
+            read_done_sync2 <= read_done_sync1;
+        end
+    end
+
+    assign s_axil_rdata = rdata_reg;
+    assign s_axil_rresp = rresp_reg;
+    assign s_axil_rvalid = read_done_sync2;
+
+endmodule
+</think>
+
+<answer>
+```verilog
+module axil_cdc #(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = DATA_WIDTH/8
+)(
+    // Slave interface (s_clk domain)
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+
+    // Master interface (m_clk domain)
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // Write channel in s_clk domain
+    reg [ADDR_WIDTH-1:0] awaddr_reg;
+    reg [DATA_WIDTH-1:0] wdata_reg;
+    reg [STRB_WIDTH-1:0] wstrb_reg;
+    reg [2:0] awprot_reg;
+    reg write_pending;
+
+    // Read channel in s_clk domain
+    reg [ADDR_WIDTH-1:0] araddr_reg;
+    reg [2:0] arprot_reg;
+    reg read_pending;
+
+    // CDC synchronization registers for write
+    reg write_pending_sync1, write_pending_sync2;
+
+    // CDC synchronization for write done
+    reg done_pulse;
+    reg done_pulse_sync1, done_pulse_sync2;
+
+    // Read CDC
+    reg read_done_pulse;
+    reg read_done_sync1, read_done_sync2;
+
+    // Master side signals
+    reg [1:0] bresp_reg;
+    reg [DATA_WIDTH-1:0] rdata_reg;
+    reg [1:0] rresp_reg;
+
+    // Slave side assignments
+    assign s_axil_awready = !write_pending && !read_pending;
+    assign s_axil_wready = !write_pending && !read_pending;
+
+    // Capture write data when valid and ready
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            write_pending <= 0;
+            awaddr_reg <= 0;
+            wdata_reg <= 0;
+            wstrb_reg <= 0;
+            awprot_reg <= 0;
+        end else begin
+            if (s_axil_awvalid && s_axil_wvalid && s_axil_awready && s_axil_wready) begin
+                awaddr_reg <= s_axil_awaddr;
+                wdata_reg <= s_axil_wdata;
+                wstrb_reg <= s_axil_wstrb;
+                awprot_reg <= s_axil_awprot;
+                write_pending <= 1;
+            end else if (done_pulse_sync2) begin
+                write_pending <= 0;
+            end
+        end
+    end
+
+    // Synchronize write_pending to m_clk domain
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            write_pending_sync1 <= 0;
+            write_pending_sync2 <= 0;
+        end else begin
+            write_pending_sync1 <= write_pending;
+            write_pending_sync2 <= write_pending_sync1;
+        end
+    end
+
+    // Master side write handling
+    assign m_axil_awvalid = write_pending_sync2;
+    assign m_axil_awaddr = awaddr_reg;
+    assign m_axil_awprot = awprot_reg;
+
+    assign m_axil_wvalid = write_pending_sync2;
+    assign m_axil_wdata = wdata_reg;
+    assign m_axil_wstrb = wstrb_reg;
+
+    // Capture B response from master
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            bresp_reg <= 0;
+        end else if (m_axil_bvalid && m_axil_bready) begin
+            bresp_reg <= m_axil_bresp;
+        end
+    end
+
+    assign m_axil_bready = 1'b1;
+
+    // Generate done pulse in m_clk domain
+    reg done_pulse;
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            done_pulse <= 0;
+        end else begin
+            done_pulse <= m_axil_bvalid && m_axil_bready;
+        end
+    end
+
+    // Synchronize done pulse back to s_clk domain
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            done_pulse_sync1 <= 0;
+            done_pulse_sync2 <= 0;
+        end else begin
+            done_pulse_sync1 <= done_pulse;
+            done_pulse_sync2 <= done_pulse_sync1;
+        end
+    end
+
+    assign s_axil_bvalid = done_pulse_sync2;
+    assign s_axil_bresp = bresp_reg;
+
+    // Read channel in s_clk domain
+    assign s_axil_arready = !write_pending && !read_pending;
+
+    // Capture read address when valid and ready
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            read_pending <= 0;
+            araddr_reg <= 0;
+            arprot_reg <= 0;
+        end else begin
+            if (s_axil_arvalid && s_axil_arready) begin
+                araddr_reg <= s_axil_araddr;
+                arprot_reg <= s_axil_arprot;
+                read_pending <= 1;
+            end else if (read_done_sync2) begin
+                read_pending <= 0;
+            end
+        end
+    end
+
+    // Synchronize read_pending to m_clk domain
+    reg read_pending_sync1, read_pending_sync2;
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            read_pending_sync1 <= 0;
+            read_pending_sync2 <= 0;
+        end else begin
+            read_pending_sync1 <= read_pending;
+            read_pending_sync2 <= read_pending_sync1;
+        end
+    end
+
+    // Master side read handling
+    assign m_axil_arvalid = read_pending_sync2;
+    assign m_axil_araddr = araddr_reg;
+    assign m_axil_arprot = arprot_reg;
+
+    // Capture R data and response from master
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            rdata_reg <= 0;
+            rresp_reg <= 0;
+        end else if (m_axil_rvalid && m_axil_rready) begin
+            rdata_reg <= m_axil_rdata;
+            rresp_reg <= m_axil_rresp;
+        end
+    end
+
+    assign m_axil_rready = 1'b1;
+
+    // Generate read done pulse
+    reg read_done_pulse;
+    always @(posedge m_clk) begin
+        if (m_rst) begin
+            read_done_pulse <= 0;
+        end else begin
+            read_done_pulse <= m_axil_rvalid && m_axil_rready;
+        end
+    end
+
+    // Synchronize read done to s_clk domain
+    always @(posedge s_clk) begin
+        if (s_rst) begin
+            read_done_sync1 <= 0;
+            read_done_sync2 <= 0;
+        end else begin
+            read_done_sync1 <= read_done_pulse;
+            read_done_sync2 <= read_done_sync1;
+        end
+    end
+
+    assign s_axil_rdata = rdata_reg;
+    assign s_axil_rresp = rresp_reg;
+    assign s_axil_rvalid = read_done_sync2;
+
+endmodule
+``` 
+</answer>

@@ -1,0 +1,1250 @@
+<think>Okay, I need to design a Verilog module called pulse_sync that synchronizes a one-cycle pulse from clock domain A to clock domain B. The key points here are handling the asynchronous clocks and ensuring that only one pulse is processed at a time. Let me think through the steps.
+
+First, the module has two clocks, clk_a and clk_b, which are asynchronous to each other. The resets are active-low for each domain. The input pulseA_i is in domain A, and the output pulseB_o is in domain B. The busy_o signal indicates that a pulse is in transit, so new pulses should be ignored.
+
+The behavior requires that a single pulse on pulseA_i results in a single pulse on pulseB_o. Also, busy_o must be high while the pulse is being transferred. So, the main challenge is to safely cross the pulse across the clock domains without missing or duplicating it.
+
+I remember that synchronizing signals across clock domains typically involves a two-flop synchronizer. But since we're dealing with a pulse, which is a single cycle, we need to convert it into a level change that can be safely synchronized. The standard approach is to use a toggle synchronizer. Let me outline the steps.
+
+In domain A:
+1. When pulseA_i is detected and busy is low (not busy), we set a toggle signal (let's say 'toggle_a') to flip its state. This toggle indicates a new pulse.
+2. The toggle_a is then synchronized to domain B using a multi-stage synchronizer (like 2 or more stages to prevent metastability).
+3. In domain B, once the synchronized toggle is detected, we generate pulseB_o and then toggle the synchronized version back to domain A to reset the toggle.
+
+Wait, but the busy signal is needed here. The busy should be active when the toggle is in transit. So, when a pulse is being sent, busy is high, so new pulses are ignored.
+
+Wait, the busy is an output. So the logic would be:
+
+In domain A:
+- When pulseA_i comes and busy is low (not busy), we set a flag (like a register) that starts the transfer. Then, busy goes high. The flag is toggled, and that's synchronized to B.
+
+Wait, perhaps the standard approach is:
+
+In domain A:
+- The pulse is captured into a register (let's call it a2b_toggle). But since the pulse is one cycle, we need to hold it until the other domain acknowledges.
+
+Wait, here's a possible approach:
+
+The pulse in A is converted into a toggle. The toggle is synchronized to B. Once B detects the toggle change, it sends an acknowledge back to A via another toggle. The busy is active when the A's toggle and B's acknowledge are not equal.
+
+Wait, maybe the standard method is:
+
+In domain A:
+
+- When a pulse comes in and busy is low, we set a signal (let's say 'req') to 1. Then busy is set to 1. The 'req' is synchronized to B.
+
+In B:
+
+- Once the synchronized 'req' is detected, generate pulseB_o and send back an 'ack' to A. Then, the ack is synchronized back to A to clear the req and busy.
+
+But the busy would be high until the ack comes back.
+
+Alternatively, the toggle synchronizer approach:
+
+In domain A:
+
+- When a pulse comes in and busy is low, toggle a register (toggle_a). The busy is set to 1 once the toggle is set. The toggle is synchronized to B.
+
+In domain B:
+
+- The synchronized toggle is compared to the previous state. If different, generate pulseB_o and toggle a signal back (toggle_b). Then, the toggle_b is synchronized back to A.
+
+In A, when the toggle_b matches the toggle_a, busy is cleared.
+
+This way, the busy is high until the toggle comes back. So the steps:
+
+Domain A:
+
+- pulseA_i comes when busy is 0. Then, toggle_a flips. Busy is set to 1.
+
+- toggle_a is synchronized to B via two stages (STAGES parameter, default 2). Then, in B, when the synchronized toggle differs from the previous state, pulseB_o is generated, and the toggle is sent back (toggle_b).
+
+- toggle_b is synchronized back to A. Once the toggle in A matches the toggle_b, busy is cleared.
+
+Wait, but the STAGES parameter is given. The user says "choose a safe depth yourself". So maybe the STAGES is the number of synchronization stages. For example, two stages.
+
+But the code should use the parameter STAGES. So the synchronizers would have STAGES number of flip-flops.
+
+So the code outline:
+
+In domain A:
+
+- When pulseA_i is high and busy is low, we generate a pulse (start the process). Then, busy is set to 1.
+
+- The pulse is converted into a toggle (like a flag that flips each time a pulse is sent). So, a register called 'a2b_toggle' that toggles when a pulse is sent.
+
+- The 'a2b_toggle' is synchronized to B via a chain of STAGES flip-flops.
+
+In domain B:
+
+- The synchronized version (after STAGES) is compared to the previous state. If different, generate pulseB_o (one cycle) and toggle the 'b2a_toggle' (to send back to A).
+
+- The 'b2a_toggle' is synchronized back to A.
+
+In domain A:
+
+- When the synchronized 'b2a_toggle' equals the 'a2b_toggle', then busy is cleared (so next pulse can be accepted).
+
+Wait, but the busy is set when the toggle is sent and cleared once the ack comes back.
+
+Wait, the standard approach for a pulse synchronizer is:
+
+1. In the source domain (A), when a pulse comes in, set a flag (req) and wait until it's acknowledged.
+
+2. The req is synchronized to the destination domain (B), which then generates the pulse and sends back an ack.
+
+3. The ack is synchronized back to the source domain (A) to clear the req.
+
+But the busy would be active when the req is set and until ack is received.
+
+But the exact implementation can vary.
+
+Alternatively, the toggle synchronizer:
+
+In domain A:
+
+- The pulse is converted into a toggle (each pulse flips the toggle). The toggle is synchronized to B.
+
+In B:
+
+- The synchronized toggle is compared to the previous state. If different, generate a pulse (one cycle) and toggle a back signal.
+
+In A:
+
+- The back toggle is synchronized. Once the back toggle matches the original toggle, the busy is cleared.
+
+But the busy is active when the toggle is in flight (i.e., when the two toggles are different).
+
+Wait, here's a possible structure:
+
+In domain A:
+
+- When pulseA_i is high and busy is low (not busy), we set a signal (let's say 'a_toggle') to flip. Then busy is set to 1.
+
+- The a_toggle is synchronized to B via STAGES flip-flops.
+
+In domain B:
+
+- The synchronized a_toggle is compared to the previous state (stored in a register). If different, generate pulseB_o (one cycle), then flip the 'b_toggle' (which is sent back to A).
+
+In domain A:
+
+- The b_toggle is synchronized via STAGES. Once the synchronized version equals the a_toggle, busy is cleared.
+
+Wait, but the STAGES parameter here would be the number of stages for the synchronization. For example, two stages.
+
+So the code steps:
+
+In domain A:
+
+- a_toggle is a register that toggles when a pulse is sent (pulseA_i and not busy).
+
+- busy is set when a_toggle changes (i.e., when a pulse is sent) and cleared when the synchronized b_toggle matches a_toggle.
+
+Wait, but the synchronization of the b_toggle back to A would take some time.
+
+Alternatively, the busy is set when the a_toggle is set and cleared once the b_toggle (the ack) comes back.
+
+Wait, here's a possible code outline:
+
+Domain A:
+
+reg a_toggle;
+reg [STAGES-1:0] sync_b_toggle;
+
+// Synchronize b_toggle to A
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        sync_b_toggle <= 0;
+    end else begin
+        sync_b_toggle <= {sync_b_toggle[STAGES-2:0], b_toggle};
+    end
+end
+
+// a_toggle is toggled when pulseA_i is received and busy is low
+// busy is (a_toggle != sync_b_toggle)
+
+Wait, maybe:
+
+The busy is (a_toggle != synchronized_b_toggle). So when they are different, busy is high.
+
+Wait, when the a_toggle is sent, the synchronized version in B would take some time. Once the B has processed it and toggled back, the a_toggle and the synchronized version would be same again.
+
+So the busy is active when a_toggle and the synchronized version are different.
+
+Wait, perhaps:
+
+In domain A:
+
+- a_toggle is the original toggle (starts at 0)
+
+- When a pulse comes, a_toggle flips (so a_pulse is generated). Then, the a_toggle is synchronized to B.
+
+In B:
+
+- The synchronized a_toggle is compared to previous state. If different, generate pulseB_o and flip the b_toggle.
+
+In A:
+
+- The b_toggle is synchronized. If the synchronized version of b_toggle is different from a_toggle, then busy is high.
+
+Wait, but the busy is supposed to be high while the pulse is in flight. So the busy is active when the a_toggle and the synchronized b_toggle (the ack) are different.
+
+Wait, here's a possible code:
+
+In domain A:
+
+reg a_toggle;
+reg [STAGES-1:0] b_toggle_sync;
+
+// Synchronize b_toggle to A
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+// busy is when a_toggle != b_toggle_sync
+assign busy_o = (a_toggle != b_toggle_sync);
+
+// When pulseA_i comes and busy is 0, toggle a_toggle
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        a_toggle <= 0;
+    end else if (pulseA_i && !busy_o) begin
+        a_toggle <= ~a_toggle;
+    end
+end
+
+// Synchronize a_toggle to B
+reg [STAGES-1:0] a_toggle_sync;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        a_toggle_sync <= 0;
+    end else begin
+        a_toggle_sync <= {a_toggle_sync[STAGES-2:0], a_toggle};
+    end
+end
+
+// In B, detect the edge of a_toggle_sync and generate pulse
+reg a_toggle_prev;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        a_toggle_prev <= 0;
+    end else begin
+        a_toggle_prev <= a_toggle_sync[STAGES-1];
+    end
+end
+
+// Generate pulse when a_toggle_sync changes
+assign pulseB_o = (a_toggle_sync[STAGES-1] != a_toggle_prev);
+
+// Now, send back the ack (toggle back)
+reg b_toggle;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        b_toggle <= 0;
+    end else if (pulseB_o) begin
+        b_toggle <= ~b_toggle;
+    end
+end
+
+// Synchronize back to A
+// Wait, but the b_toggle is toggled once per pulse. So the a_toggle_sync in A would eventually match.
+
+Wait, but the code for the B side:
+
+Once the pulse is generated (pulseB_o is high for one cycle), the b_toggle is toggled. Then, the b_toggle is synchronized back to A.
+
+In A, the a_toggle and the synchronized b_toggle (after STAGES) would be compared. If they are same, then busy is low.
+
+Wait, but the STAGES parameter is the number of synchronization stages. For example, if STAGES is 2, then the synchronization chain is two flip-flops.
+
+Wait, but the code for the synchronization chains in both directions.
+
+Wait, the code for the synchronization in A:
+
+The a_toggle is synchronized to B via STAGES flip-flops. Similarly, the b_toggle is synchronized back to A via STAGES.
+
+Wait, but in the code above, the a_toggle is synchronized to B with STAGES stages, and the b_toggle is synchronized back to A with STAGES stages.
+
+But the code for the B side's pulse generation:
+
+The pulseB_o is generated when the synchronized a_toggle (after STAGES) changes. Then, the b_toggle is toggled once. Then, the b_toggle is synchronized back to A.
+
+In A, the a_toggle and the synchronized b_toggle (after STAGES) are compared. If they are the same, then busy is low.
+
+Wait, but in the code:
+
+In domain A:
+
+The a_toggle is toggled when a pulse is sent. The a_toggle is synchronized to B via STAGES stages. Then, in B, when the a_toggle_sync (after STAGES) changes, pulseB is generated, and the b_toggle is toggled once. Then, the b_toggle is synchronized back to A.
+
+In A, the a_toggle and the synchronized b_toggle (after STAGES) are compared. If they are the same, then busy is low. If different, busy is high.
+
+Wait, but the initial state after reset is a_toggle and b_toggle both 0. So after reset, a_toggle is 0, b_toggle is 0. So busy is 0.
+
+When a pulse comes in, a_toggle flips to 1. The a_toggle is synchronized to B. B detects the change (after STAGES) and generates pulseB. Then, b_toggle flips to 1. This is synchronized back to A. Now, a_toggle is 1 and the synchronized b_toggle is 1. So busy is 0.
+
+If another pulse comes in when busy is 0 again.
+
+Wait, but the busy is (a_toggle != synchronized_b_toggle). So when the two are different, busy is high.
+
+Wait, in the code:
+
+assign busy_o = (a_toggle != b_toggle_sync);
+
+Wait, but in the code above, the a_toggle_sync in B is the synchronized version of a_toggle. Then, in B, when the a_toggle_sync changes (after STAGES), pulseB is generated once. Then, the b_toggle is toggled once. Then, the b_toggle is synchronized back to A.
+
+In A, the b_toggle_sync is the synchronized version of the b_toggle. So when the a_toggle and the b_toggle_sync are same, busy is low.
+
+Wait, but the code for the synchronization in A:
+
+The a_toggle is synchronized to B via STAGES stages. Then in B, the pulse is generated once. Then the b_toggle is toggled once. Then, the b_toggle is synchronized back to A via STAGES stages.
+
+In A, the a_toggle and the synchronized b_toggle (after STAGES) are compared. If they are same, busy is low.
+
+Wait, but the initial state after reset: a_toggle is 0, b_toggle is 0. So busy is 0.
+
+When a pulse comes in (pulseA_i when busy is 0), a_toggle flips to 1. Now, the a_toggle is 1. The a_toggle is synchronized to B. B's a_toggle_sync (after STAGES) will eventually become 1. Then, in B, the a_toggle_sync (now 1) is different from previous (0), so pulseB is generated. Then, the b_toggle flips to 1. Then, the b_toggle is synchronized back to A. Now, in A, the b_toggle_sync (after STAGES) becomes 1. So a_toggle (1) and b_toggle_sync (1) → busy is 0.
+
+Thus, the busy is active (high) when the two are different.
+
+Wait, but in the code:
+
+If a_toggle is 1 and the synchronized b_toggle is 0 → busy is 1.
+
+Once the b_toggle is synchronized back (after STAGES), if they are same, busy is 0.
+
+So the busy is (a_toggle != synchronized_b_toggle).
+
+In code:
+
+assign busy_o = (a_toggle != b_toggle_sync);
+
+Now, the code for the synchronization:
+
+In domain A:
+
+// Synchronize b_toggle to A
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+Wait, but the STAGES parameter is the number of stages. So if STAGES is 2, the code would have two flip-flops.
+
+Wait, the code for the synchronization chain in Verilog is typically:
+
+For example, if STAGES is 2:
+
+reg [1:0] sync_reg;
+
+always @(posedge clk) sync_reg <= {sync_reg[0], input};
+
+But for a parameterizable STAGES, the code can use a generate loop.
+
+Wait, but in Verilog, the code can be written as:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync_reg <= 0;
+    end else begin
+        sync_reg <= {sync_reg[STAGES-2:0], input_signal};
+    end
+end
+
+Wait, but the first element is the input, then each stage shifts.
+
+Wait, the code for a two-stage synchronizer would be:
+
+reg stage1, stage2;
+
+always @(posedge clk) begin
+    stage1 <= input;
+    stage2 <= stage1;
+end
+
+So for STAGES=2, the code would have a shift register of length STAGES.
+
+In code, the synchronization chain can be written as:
+
+reg [STAGES-1:0] sync;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync <= 0;
+    end else begin
+        sync <= {sync[STAGES-2:0], input};
+    end
+end
+
+Wait, but the syntax {sync[STAGES-2:0], input} would take the lower STAGES-1 bits and append the input. Wait, if STAGES is 2, then sync is a 2-bit reg. So:
+
+sync[1] is the first stage, sync[0] is the second.
+
+Wait, perhaps the code for a parameterized synchronizer is:
+
+reg [STAGES-1:0] sync;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync <= 0;
+    end else begin
+        sync <= {sync[STAGES-2:0], input_signal};
+    end
+end
+
+Wait, but for STAGES=2:
+
+sync is a 2-bit vector. The code would shift left, with the new input in the LSB.
+
+Wait, but the standard way is to have the first stage as the first element.
+
+Alternatively, the code for a two-stage synchronizer is:
+
+reg stage1, stage2;
+
+always @(posedge clk) begin
+    stage1 <= input;
+    stage2 <= stage1;
+end
+
+So for STAGES=2, the code would have a chain of STAGES flip-flops.
+
+In code, the code for the synchronization in Verilog can be written as:
+
+// For domain A synchronization of b_toggle (from B)
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+Wait, but if STAGES is 2, then the code would be:
+
+b_toggle_sync[1] <= b_toggle_sync[0];
+b_toggle_sync[0] <= b_toggle;
+
+Wait, but the code {b_toggle_sync[STAGES-2:0], b_toggle} would take the lower STAGES-1 bits and append the new input. Wait, if STAGES is 2, then STAGES-2 is 0. So {b_toggle_sync[0], b_toggle} → concatenates the first bit (index 0) and the new input. Wait, but the indices may be off.
+
+Alternatively, the code can be written as:
+
+for (i=0; i < STAGES; i=i+1) begin
+    if (i ==0) begin
+        sync[i] <= input;
+    end else begin
+        sync[i] <= sync[i-1];
+    end
+end
+
+But in Verilog, generate loops can be used.
+
+But perhaps the code can be written as:
+
+reg [STAGES-1:0] sync;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync <= 0;
+    end else begin
+        sync <= {sync[STAGES-2:0], input_signal};
+    end
+end
+
+Wait, for example, if STAGES is 2:
+
+sync is [1:0], and {sync[0], input_signal} → shifts left, with the new input in LSB.
+
+Wait, but in Verilog, the syntax {sync[STAGES-2:0], input} would take the lower STAGES-1 bits and append the input. Wait, if STAGES is 2, then STAGES-2 is 0. So {sync[0], input} → two bits. So the code would shift the existing bits and add the new input.
+
+Wait, but in the two-stage case, the code would be:
+
+sync[1] <= sync[0];
+sync[0] <= input_signal;
+
+Which is correct.
+
+So the code for the synchronization would be:
+
+reg [STAGES-1:0] sync;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync <= 0;
+    end else begin
+        sync <= {sync[STAGES-2:0], input_signal};
+    end
+end
+
+But in Verilog, the syntax for the concatenation would be:
+
+sync <= {sync[STAGES-2:0], input_signal};
+
+Wait, for example, if STAGES is 2:
+
+sync is a 2-bit vector. The code would take the first STAGES-1 bits (sync[0]) and append the input. So the new value is {sync[0], input_signal} → which is two bits. So the first stage is the previous second, and the second is the input.
+
+Wait, perhaps the code is:
+
+sync[0] <= input_signal;
+sync[1] <= sync[0];
+
+Wait, but the code in the always block would be:
+
+sync <= {sync[STAGES-2:0], input_signal};
+
+Wait, if STAGES is 2, then STAGES-2 is 0. So {sync[0], input_signal} → two bits. So the first stage (sync[1]) gets the previous sync[0], and the second (sync[0]) gets the input.
+
+Wait, that's the opposite. Hmm.
+
+Alternatively, the code for a two-stage synchronizer is:
+
+reg stage1, stage2;
+
+always @(posedge clk) begin
+    stage1 <= input;
+    stage2 <= stage1;
+end
+
+In code, the first stage is stage1, then stage2.
+
+So for parameterized code, the code can be written as:
+
+reg [STAGES-1:0] sync;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync <= 0;
+    end else begin
+        sync <= {sync[STAGES-2:0], input};
+    end
+end
+
+Wait, but the indices may be off. Let's think for STAGES=2:
+
+sync is a 2-bit vector. The code {sync[0], input} → the first stage is the previous sync[0], and the second is the input. Wait, but in the two-stage case, the first stage is the first flip-flop, then the second.
+
+Wait, perhaps the code is:
+
+sync[0] is the first stage, sync[1] is the second.
+
+Then, the code would be:
+
+sync[0] <= input;
+sync[1] <= sync[0];
+
+Which can be written as:
+
+sync <= {sync[0], input};
+
+Wait, but in Verilog, the leftmost is the MSB. Wait, if the code is:
+
+reg [1:0] sync;
+
+always @(posedge clk) begin
+    sync <= {sync[0], input};
+end
+
+Then, the first stage is sync[1], which is the previous sync[0], and the second is the input. Wait, no. Wait, the code {sync[0], input} would concatenate the existing sync[0] and input. So the new sync would be:
+
+sync[1] = sync[0], sync[0] = input.
+
+Wait, but that's a shift to the left. Hmm.
+
+Alternatively, the code for a two-stage synchronizer is:
+
+reg stage1, stage2;
+
+always @(posedge clk) begin
+    stage1 <= input;
+    stage2 <= stage1;
+end
+
+In this case, stage1 is first, stage2 is second.
+
+So for parameterized code, the code can be written as:
+
+reg [STAGES-1:0] sync;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync <= 0;
+    end else begin
+        sync <= {sync[STAGES-2:0], input};
+    end
+end
+
+Wait, but if STAGES is 2, then:
+
+sync[1:0] becomes {sync[0], input} → so the first stage is the previous sync[0], the second is the input.
+
+Wait, but in the two-stage case, the first stage is the first flip-flop, the second is the second.
+
+Wait, perhaps the code is:
+
+The first stage is the LSB, and the code shifts left.
+
+But regardless, the code for the synchronization chain can be written as:
+
+For STAGES=2:
+
+reg stage1, stage2;
+
+stage1 <= input;
+stage2 <= stage1;
+
+Which is equivalent to:
+
+sync[0] <= input;
+sync[1] <= sync[0];
+
+Wait, but in Verilog, the code would be:
+
+always @(posedge clk) begin
+    stage1 <= input;
+    stage2 <= stage1;
+end
+
+So the code for parameterized stages would be:
+
+reg [STAGES-1:0] sync;
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        sync <= 0;
+    end else begin
+        sync <= {sync[STAGES-2:0], input};
+    end
+end
+
+Wait, but in Verilog, the syntax {sync[STAGES-2:0], input} would take the lower STAGES-1 bits and append the input. For example, if STAGES is 2, then STAGES-2 is 0. So {sync[0], input} → two bits. So the first stage (sync[1]) gets the previous sync[0], and the second (sync[0]) gets the input.
+
+Hmm, perhaps the code is:
+
+The first stage is the LSB, and the code shifts left. So the code for STAGES=2:
+
+sync[1] is the first stage, sync[0] is the second.
+
+Wait, but this is getting complicated. Maybe the code can be written as:
+
+// Synchronization chain for B's toggle to A
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+Wait, but if STAGES is 2, then STAGES-2 is 0. So {b_toggle_sync[0], b_toggle} → two bits. So the first stage (index 1) is the previous bit 0, and the second (index 0) is the new input. Hmm, but the indices are reversed.
+
+Alternatively, the code can be written as:
+
+// For the synchronization chain in A, the code would be:
+
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-1:0], b_toggle};
+    end
+end
+
+Wait, but that would shift left and append the new input. Hmm.
+
+Alternatively, the code can be written as:
+
+// For the synchronization chain in A:
+
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+Wait, but if STAGES is 2, then STAGES-2 is 0. So the code would take the lower 0 bits (nothing) and append the input. So the code would be:
+
+b_toggle_sync <= { , b_toggle} → which is just b_toggle. That's not correct.
+
+Hmm, perhaps the code for the synchronization chain is better written with a generate loop.
+
+Alternatively, use a loop variable to shift.
+
+But perhaps the code can be written as:
+
+// Synchronization chain for B's toggle to A
+reg [STAGES-1:0] b_toggle_sync;
+
+integer i;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync[0] <= b_toggle;
+        for (i=1; i < STAGES; i = i+1) begin
+            b_toggle_sync[i] <= b_toggle_sync[i-1];
+        end
+    end
+end
+
+But in Verilog, the for loop inside the always block is allowed.
+
+But this may not be the best way. Alternatively, use a generate loop.
+
+But perhaps the code can be written as:
+
+// Synchronization chain for B's toggle to A
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+Assuming that the code for STAGES=2 would have two flip-flops.
+
+But regardless, the code for the synchronization chains can be written as:
+
+In domain A:
+
+// Synchronize b_toggle (from B) to A
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+Similarly for the a_toggle synchronization in B.
+
+Once the code is written, the rest is to generate the pulse.
+
+Now, the code for the entire module.
+
+First, the parameters and module declaration.
+
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+// Domain A signals
+reg a_toggle;
+reg [STAGES-1:0] b_toggle_sync;
+
+// Synchronize b_toggle to A
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+// busy is when a_toggle and synchronized b_toggle are different
+assign busy_o = (a_toggle != b_toggle_sync[STAGES-1]);
+
+// Toggle a when pulseA_i and not busy
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        a_toggle <= 0;
+    end else if (pulseA_i && !busy_o) begin
+        a_toggle <= ~a_toggle;
+    end
+end
+
+// Synchronize a_toggle to B
+reg [STAGES-1:0] a_toggle_sync;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        a_toggle_sync <= 0;
+    end else begin
+        a_toggle_sync <= {a_toggle_sync[STAGES-2:0], a_toggle};
+    end
+end
+
+// Detect edge in a_toggle_sync to generate pulseB
+reg a_toggle_prev;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        a_toggle_prev <= 0;
+    end else begin
+        a_toggle_prev <= a_toggle_sync[STAGES-1];
+    end
+end
+
+assign pulseB_o = (a_toggle_sync[STAGES-1] != a_toggle_prev);
+
+// Generate b_toggle (ack) when pulseB is generated
+reg b_toggle;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        b_toggle <= 0;
+    end else if (pulseB_o) begin
+        b_toggle <= ~b_toggle;
+    end
+end
+
+// Synchronize b_toggle back to A
+// Wait, the code for synchronization of b_toggle back to A is already done in the first part.
+
+Wait, but the code for the synchronization of b_toggle to A is already done in the b_toggle_sync.
+
+Wait, but in the code above, the b_toggle is synchronized to A via the b_toggle_sync.
+
+Wait, but the code for the synchronization of b_toggle (from B) to A is already done in the first part.
+
+Wait, the code for the synchronization of b_toggle (the ack) to A is already handled by the b_toggle_sync.
+
+Wait, but in the code:
+
+In domain B, when pulseB is generated, the b_toggle is toggled once. Then, the b_toggle is synchronized back to A via STAGES.
+
+In domain A, the a_toggle and the synchronized b_toggle (b_toggle_sync) are compared. If they are same, busy is low.
+
+Wait, but the code for the synchronization of b_toggle (the ack) to A is already done in the first part.
+
+Wait, the code for the synchronization of b_toggle to A is:
+
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+Wait, but the code for the synchronization of b_toggle (the ack) is the same as the code for the synchronization of a_toggle in B.
+
+Wait, but the code for the synchronization of b_toggle (the ack) is:
+
+In domain A:
+
+The ack comes from B's b_toggle. So the code for the synchronization of b_toggle (from B) to A is the same as the code for a_toggle_sync in B.
+
+Wait, perhaps the code is correct.
+
+Now, the code for the entire module.
+
+Wait, but in the code for the synchronization of b_toggle (the ack) to A, the code is:
+
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+But the variable names are conflicting. Wait, in the code, the ack is the b_toggle. So the code for synchronization of b_toggle (the ack) is:
+
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+Then, the busy is (a_toggle != b_toggle_sync[STAGES-1]).
+
+Wait, but the code for the synchronization of the ack (b_toggle) is the same as the code for the a_toggle synchronization in B.
+
+But in the code, the code for the synchronization of a_toggle to B is:
+
+reg [STAGES-1:0] a_toggle_sync;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        a_toggle_sync <= 0;
+    end else begin
+        a_toggle_sync <= {a_toggle_sync[STAGES-2:0], a_toggle};
+    end
+end
+
+Then, the pulseB is generated when a_toggle_sync changes.
+
+Now, the code for the entire module.
+
+Wait, but in the code for the synchronization of b_toggle (the ack) to A, the code is:
+
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+But the variable names are conflicting. Wait, in the code, the ack is stored in 'b_toggle', which is in domain B.
+
+Wait, in domain B:
+
+reg b_toggle;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        b_toggle <= 0;
+    end else if (pulseB_o) begin
+        b_toggle <= ~b_toggle;
+    end
+end
+
+Then, the code to synchronize b_toggle to A is:
+
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+Then, the busy is (a_toggle != b_toggle_sync[STAGES-1]).
+
+Wait, but the code for the synchronization of b_toggle (the ack) to A is:
+
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+But in Verilog, the code for the synchronization of the b_toggle (the ack) would be:
+
+Wait, but the code for the synchronization of the ack (b_toggle) is the same as the code for the a_toggle synchronization in B.
+
+But in the code, the a_toggle is synchronized to B via STAGES stages.
+
+In domain B:
+
+reg [STAGES-1:0] a_toggle_sync;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        a_toggle_sync <= 0;
+    end else begin
+        a_toggle_sync <= {a_toggle_sync[STAGES-2:0], a_toggle};
+    end
+end
+
+Then, the pulseB is generated when the a_toggle_sync changes.
+
+Thus, the code for the entire module is:
+
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // Domain A signals
+    reg a_toggle;
+    reg [STAGES-1:0] b_toggle_sync;
+
+    // Synchronize b_toggle (ack) to A
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            b_toggle_sync <= 0;
+        end else begin
+            b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+        end
+    end
+
+    // Busy is when a_toggle and synchronized ack are different
+    assign busy_o = (a_toggle != b_toggle_sync[STAGES-1]);
+
+    // Toggle a when pulseA_i and not busy
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            a_toggle <= 0;
+        end else if (pulseA_i && !busy_o) begin
+            a_toggle <= ~a_toggle;
+        end
+    end
+
+    // Synchronize a_toggle to B
+    reg [STAGES-1:0] a_toggle_sync;
+
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            a_toggle_sync <= 0;
+        end else begin
+            a_toggle_sync <= {a_toggle_sync[STAGES-2:0], a_toggle};
+        end
+    end
+
+    // Detect edge in a_toggle_sync to generate pulseB
+    reg a_toggle_prev;
+
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            a_toggle_prev <= 0;
+        end else begin
+            a_toggle_prev <= a_toggle_sync[STAGES-1];
+        end
+    end
+
+    assign pulseB_o = (a_toggle_sync[STAGES-1] != a_toggle_prev);
+
+    // Generate b_toggle (ack) when pulseB is generated
+    reg b_toggle;
+
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            b_toggle <= 0;
+        end else if (pulseB_o) begin
+            b_toggle <= ~b_toggle;
+        end
+    end
+
+endmodule
+
+Wait, but in the code for the synchronization of b_toggle (the ack) to A, the code uses:
+
+b_toggle_sync[STAGES-1]
+
+But the code for the synchronization of a_toggle to B uses:
+
+a_toggle_sync[STAGES-1]
+
+Which is the same as the code for the edge detection.
+
+In the code, the a_toggle is toggled when a pulse is sent. The a_toggle is synchronized to B via STAGES stages. The edge is detected in B, and pulseB is generated. Then, the b_toggle is toggled once. The b_toggle is synchronized back to A via STAGES stages. The busy is active when a_toggle and the synchronized b_toggle (after STAGES) are different.
+
+This should ensure that once the ack comes back, the busy is cleared.
+
+Testing this code:
+
+After reset, a_toggle and b_toggle are 0. busy is 0.
+
+When pulseA_i comes and busy is 0, a_toggle toggles to 1. The a_toggle is synchronized to B. After STAGES cycles, the a_toggle_sync in B will have the new value. Then, pulseB is generated once, and b_toggle toggles to 1. This is synchronized back to A. Now, a_toggle and the synchronized b_toggle (after STAGES) are same (1 and 1). So busy is 0.
+
+Thus, the code should work.
+
+But wait, the code for the synchronization of b_toggle (the ack) to A is:
+
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+Wait, but the code for the synchronization of b_toggle (the ack) is:
+
+The code for the synchronization of b_toggle (the ack) to A is:
+
+The code for the synchronization chain is:
+
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+But in Verilog, the syntax {b_toggle_sync[STAGES-2:0], b_toggle} would take the lower STAGES-1 bits and append the new input. For example, if STAGES is 2, then STAGES-2 is 0. So {b_toggle_sync[0], b_toggle} → two bits. So the first stage (index 1) is the previous bit 0, and the second (index 0) is the new input.
+
+Wait, but the code for the synchronization of the ack (b_toggle) would have the same structure as the a_toggle synchronization in B.
+
+In code, the code for the synchronization of a_toggle to B is:
+
+reg [STAGES-1:0] a_toggle_sync;
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        a_toggle_sync <= 0;
+    end else begin
+        a_toggle_sync <= {a_toggle_sync[STAGES-2:0], a_toggle};
+    end
+end
+
+Which is the same as the code for the synchronization of b_toggle (the ack) to A.
+
+Thus, the code should be correct.
+
+Now, the code for the busy signal:
+
+assign busy_o = (a_toggle != b_toggle_sync[STAGES-1]);
+
+Wait, but the code for the synchronization of the ack (b_toggle) is:
+
+reg [STAGES-1:0] b_toggle_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        b_toggle_sync <= 0;
+    end else begin
+        b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+    end
+end
+
+Thus, the MSB of the synchronization chain is b_toggle_sync[STAGES-1], which is the synchronized version of b_toggle.
+
+Thus, the code for busy is comparing a_toggle (the original toggle in A) with the synchronized ack (b_toggle_sync[STAGES-1]).
+
+If they are different, busy is high.
+
+Thus, the code should work.
+
+Now, the code for the parameters:
+
+The code uses STAGES parameter, which is the number of synchronization stages. The default is 2.
+
+Thus, the code should be correct.
+
+Now, the code for the pulseB_o:
+
+The code uses a_toggle_sync[STAGES-1] (the synchronized a_toggle in B) and compares it to a_toggle_prev (the previous value). If different, pulseB is generated.
+
+Thus, the code should generate a single pulse in B.
+
+Thus, the code should meet the requirements.
+</think>
+
+<answer>
+```verilog
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // Domain A signals
+    reg a_toggle;
+    reg [STAGES-1:0] b_toggle_sync;
+
+    // Synchronize b_toggle (ack) to A
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            b_toggle_sync <= 0;
+        end else begin
+            b_toggle_sync <= {b_toggle_sync[STAGES-2:0], b_toggle};
+        end
+    end
+
+    // Busy is when a_toggle and synchronized ack are different
+    assign busy_o = (a_toggle != b_toggle_sync[STAGES-1]);
+
+    // Toggle a when pulseA_i and not busy
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            a_toggle <= 0;
+        end else if (pulseA_i && !busy_o) begin
+            a_toggle <= ~a_toggle;
+        end
+    end
+
+    // Synchronize a_toggle to B
+    reg [STAGES-1:0] a_toggle_sync;
+
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            a_toggle_sync <= 0;
+        end else begin
+            a_toggle_sync <= {a_toggle_sync[STAGES-2:0], a_toggle};
+        end
+    end
+
+    // Detect edge in a_toggle_sync to generate pulseB
+    reg a_toggle_prev;
+
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            a_toggle_prev <= 0;
+        end else begin
+            a_toggle_prev <= a_toggle_sync[STAGES-1];
+        end
+    end
+
+    assign pulseB_o = (a_toggle_sync[STAGES-1] != a_toggle_prev);
+
+    // Generate b_toggle (ack) when pulseB is generated
+    reg b_toggle;
+
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            b_toggle <= 0;
+        end else if (pulseB_o) begin
+            b_toggle <= ~b_toggle;
+        end
+    end
+
+endmodule
+```
+</answer>

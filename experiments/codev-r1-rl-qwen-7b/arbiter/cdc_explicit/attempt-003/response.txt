@@ -1,0 +1,1582 @@
+<think>Okay, I need to write a Verilog module for a multi-port request arbiter with specific parameters and behavior. Let me start by understanding the requirements.
+
+First, the module is called 'arbiter' with parameters PORTS, ARB_TYPE_ROUND_ROBIN, etc. The inputs include clk, rst, request, acknowledge. Outputs are grant, grant_valid, grant_encoded. The parameters define the arbitration type, blocking behavior, etc.
+
+The main functionality is to grant one of the PORTS requestors. The priority can be round-robin or fixed. Round-robin rotates priority, fixed uses fixed order. The LSB_HIGH_PRIORITY determines tie-breakers.
+
+ARB_BLOCK and ARB_BLOCK_ACK: When ARB_BLOCK is set, the grant should hold until acknowledge. If ARB_BLOCK_ACK is non-zero, then wait for acknowledge; else wait until request drops. So if ARB_BLOCK is enabled, once a grant is given, it stays until either ack comes (if ARB_BLOCK_ACK is set) or until request drops (if not set). Otherwise, it's non-blocking, so grants can change each cycle.
+
+The grant_valid and grant_encoded must match the grant. So grant_encoded is the encoded version of the grant, like a binary index. For example, if PORTS is 4, grant_encoded would be 2 bits.
+
+CDC requirements: Need to handle clock domain crossings safely. Since the module uses a single clock, maybe CDC isn't an issue here. Wait, the CDC part says the implementation must be safe for CDC and RDC crossings. But since it's a single clock, perhaps the parameters need to be handled in a way that doesn't cause CDC issues. Hmm. Maybe the parameters are static, so no CDC needed. But the code should be written in a way that doesn't have multi-bit signals crossing domains. Since all signals are in the same clock domain, maybe no CDC needed here. But the user mentioned CDC requirement, so perhaps the code should have registered outputs to prevent glitches.
+
+Wait, the parameters are fixed at compile time, so no dynamic CDC. The main thing is that the grant is registered to avoid glitches. So the outputs should be registered.
+
+Now, the structure of the code:
+
+Parameters: PORTS is the number of ports, say 4. The grant is a one-hot vector. The grant_encoded is the binary index of the granted port.
+
+First, the priority logic. For fixed priority, the highest priority is the lowest index (if LSB_HIGH_PRIORITY is 0) or highest index (if 1). Wait, ARB_LSB_HIGH_PRIORITY: if set, LSB (port 0) has highest priority. Otherwise, MSB (port PORTS-1) has highest. Wait, the parameter name is ARB_LSB_HIGH_PRIORITY. If it's 1, then LSB (port 0) is highest priority. If 0, then MSB (port PORTS-1) is highest. Wait, need to clarify.
+
+Wait, the description says: ARB_LSB_HIGH_PRIORITY selects whether the LSB wins ties. So if it's 1, the lower indices have higher priority. For example, in a fixed priority, port 0 is highest if LSB is high. Wait, the exact behavior depends on the parameters. Let's think.
+
+In fixed priority, the highest priority is the lowest index (if LSB is high) or highest index (if LSB is low). Wait, the parameter's name is ARB_LSB_HIGH_PRIORITY. If that's 1, then the LSB (port 0) has higher priority. So in fixed priority, the order is port 0 first, then 1, etc. If it's 0, then the MSB (port PORTS-1) is highest priority.
+
+Wait, perhaps the priority order is determined by the LSB_HIGH_PRIORITY parameter. For example:
+
+If ARB_LSB_HIGH_PRIORITY is 1, then the priority is from LSB (port 0) to MSB (port PORTS-1). So port 0 has highest priority, port 1 next, etc. If it's 0, the reverse: port PORTS-1 is highest, then PORTS-2, etc.
+
+In round-robin, the priority rotates each time. So the next starting point is the last granted port +1.
+
+So the code needs to track the current priority base for round-robin.
+
+Now, the main steps:
+
+1. Determine the current priority order based on the type (round-robin or fixed) and the parameters.
+
+2. Generate the grant based on the current priority and the requests.
+
+3. Handle the blocking behavior: if ARB_BLOCK is set, once a grant is given, it remains until the condition (acknowledge or request drops) is met.
+
+4. The grant_valid is high when a valid grant is present.
+
+5. The grant_encoded is the binary encoding of the granted port.
+
+First, the non-blocking part: when not in blocking mode, the grant can change each cycle. When in blocking mode, once granted, stays until the condition.
+
+So the code needs to have a state where once a grant is given, it's held until the condition.
+
+Let me outline the variables needed.
+
+For the priority logic:
+
+If round-robin:
+
+- Keep track of the last granted port. The next priority starts from last_grant +1.
+
+If fixed:
+
+- The priority is fixed order (either LSB first or MSB first based on parameter)
+
+Once a grant is given, if blocking is enabled, the grant remains until the condition.
+
+So the code would have:
+
+- A registered grant (current_grant)
+
+- A registered last_grant for round-robin.
+
+Now, the steps:
+
+First, compute the next_grant based on current state and requests.
+
+If in blocking mode (ARB_BLOCK is 1), once current_grant is non-zero, it's held until the condition.
+
+Else, each cycle, compute next_grant.
+
+The code structure:
+
+If ARB_BLOCK is 0:
+
+   current_grant is updated every cycle based on the priority.
+
+Else:
+
+   if current_grant is zero (no active grant), compute next_grant.
+
+   else, hold until condition (acknowledge or request drops)
+
+Wait, the exact condition:
+
+ARB_BLOCK_ACK: if non-zero, wait for acknowledge. If zero, wait until request drops.
+
+Wait, the description says:
+
+When ARB_BLOCK is set, hold the grant until acknowledge (ARB_BLOCK_ACK nonzero) or until request drops (ARB_BLOCK_ACK zero).
+
+So:
+
+If ARB_BLOCK is 1:
+
+   if ARB_BLOCK_ACK is non-zero (1?), then wait for acknowledge.
+
+   else (ARB_BLOCK_ACK zero?), wait until request drops.
+
+Wait, the parameter is called ARB_BLOCK_ACK. The description says:
+
+ARB_BLOCK_ACK: when set, wait for acknowledge. If zero, wait until request drops.
+
+Wait, the exact wording:
+
+"When ARB_BLOCK is set, hold the grant until acknowledge (ARB_BLOCK_ACK nonzero) or until request drops (ARB_BLOCK_ACK zero)."
+
+So:
+
+If ARB_BLOCK is 1:
+
+   if ARB_BLOCK_ACK is non-zero (i.e., 1), then wait for acknowledge.
+
+   else (ARB_BLOCK_ACK is 0), wait until request drops.
+
+So the code for blocking would be:
+
+if (ARB_BLOCK) begin
+
+   if (current_grant != 0) begin
+
+      if (ARB_BLOCK_ACK) begin
+
+          // wait for ack
+
+          if (acknowledge & (request & current_grant)) ?
+
+          Wait, the acknowledge is a per-port signal. So when the current grant is active, the corresponding acknowledge bit is checked.
+
+Wait, the acknowledge is a vector where each bit indicates that the requestor has acknowledged.
+
+So when in blocking mode, once a grant is given, the arbiter waits until the acknowledge comes (if ARB_BLOCK_ACK is non-zero) or until the request drops (if ARB_BLOCK_ACK is zero).
+
+Wait, the exact condition:
+
+If ARB_BLOCK is set:
+
+   if ARB_BLOCK_ACK is non-zero (1), then the grant is held until the acknowledge for that grant is received.
+
+   else (ARB_BLOCK_ACK is 0), the grant is held until the request for that grant drops.
+
+So the code would have:
+
+if (ARB_BLOCK) begin
+
+   if (current_grant != 0) begin
+
+      if (ARB_BLOCK_ACK) begin
+
+          // Wait until acknowledge for the current grant is received.
+
+          // So check if the acknowledge bit of the current grant is high.
+
+          // For example, if current_grant is one-hot, then the index is found.
+
+          // Wait until (acknowledge & current_grant) is non-zero.
+
+          // Once that happens, release.
+
+      end else begin
+
+          // Wait until the request for the current grant drops.
+
+          // So if the current_grant's request bit is 0, then release.
+
+      end
+
+   end else begin
+
+      // Compute next grant normally.
+
+   end
+
+end
+
+But how to model this in Verilog.
+
+First, the current_grant is a one-hot vector.
+
+The code would have:
+
+reg [PORTS-1:0] current_grant;
+
+reg [PORTS-1:0] next_grant;
+
+reg [$clog2(PORTS)-1:0] current_encoded;
+
+reg [PORTS-1:0] request_reg;
+
+Wait, but CDC: the request and acknowledge may come from different clock domains. Wait, but the module uses a single clock. The CDC here is perhaps not needed if all signals are in the same domain. But the code needs to be safe for CDC crossings. Wait, the user says "CDC requirement: ... must pass structural CDC/RDC analysis with zero unsafe crossings."
+
+Hmm. So the code must ensure that multi-bit signals crossing clock domains are handled properly. But the module uses a single clock. Wait, maybe the parameters are static, so no CDC. But the code must be written in a way that CDC is not an issue.
+
+Wait, perhaps the code uses registered outputs. For example, the grant is registered, so that even if the combinational logic changes, the outputs are stable.
+
+But the code structure would be:
+
+- The combinational logic computes next_grant based on current state and requests.
+
+- Then, the registered current_grant is updated on each clock edge.
+
+But in the case of blocking, the current_grant is held until the condition.
+
+So the code would have:
+
+always @(posedge clk) begin
+
+   if (rst) begin
+
+      current_grant <= 0;
+
+      last_grant <= 0;
+
+   end else begin
+
+      if (ARB_BLOCK && current_grant != 0) begin
+
+          // handle blocking condition
+
+          if (ARB_BLOCK_ACK) begin
+
+              // wait for ack
+
+              if (acknowledge & current_grant) begin
+
+                  current_grant <= 0;
+
+              end
+
+          end else begin
+
+              // wait until request drops
+
+              if (~request & current_grant) begin
+
+                  current_grant <= 0;
+
+              end
+
+          end
+
+      end else begin
+
+          current_grant <= next_grant;
+
+      end
+
+   end
+
+end
+
+Wait, but the code for next_grant would be computed each cycle, but if in blocking mode, the current_grant is held until the condition.
+
+Wait, the code for next_grant would be:
+
+If not in blocking mode, compute next_grant each cycle.
+
+If in blocking mode and current_grant is zero, compute next_grant.
+
+Else, hold.
+
+So the code would have:
+
+if (ARB_BLOCK) begin
+
+   if (current_grant != 0) begin
+
+      // handle blocking condition
+
+      if (ARB_BLOCK_ACK) begin
+
+          // check if ack is received
+
+          if (acknowledge & current_grant) begin
+
+              next_grant = 0;
+
+          end else begin
+
+              next_grant = current_grant;
+
+          end
+
+      end else begin
+
+          // check if request is dropped
+
+          if (request & current_grant) begin
+
+              next_grant = current_grant;
+
+          end else begin
+
+              next_grant = 0;
+
+          end
+
+      end
+
+   end else begin
+
+      // compute next_grant normally
+
+      next_grant = compute_grant(request, current_grant, ...);
+
+   end
+
+end else begin
+
+   // non-blocking mode: compute next_grant each cycle
+
+   next_grant = compute_grant(request, current_grant, ...);
+
+end
+
+But the compute_grant function depends on the arbitration type.
+
+Now, the compute_grant function.
+
+For fixed priority:
+
+If ARB_LSB_HIGH_PRIORITY is 1, then the priority is from 0 to PORTS-1.
+
+Else, from PORTS-1 to 0.
+
+If round-robin, the next starting point is last_grant +1.
+
+So for fixed priority:
+
+The first request in the priority order is granted.
+
+For example:
+
+If LSB is high (priority 0 first), then check from 0 to PORTS-1.
+
+Else, check from PORTS-1 down to 0.
+
+In round-robin, the next starting point is the last granted port +1.
+
+So code for fixed priority:
+
+function [PORTS-1:0] compute_grant;
+
+input [PORTS-1:0] req;
+
+input [PORTS-1:0] current_grant;
+
+input integer start_idx;
+
+// Wait, need to generate the priority.
+
+Wait, perhaps the code can generate a mask based on priority.
+
+For fixed priority:
+
+If LSB is high:
+
+   priority_order = 0 to PORTS-1.
+
+Else:
+
+   priority_order = PORTS-1 downto 0.
+
+Then, the first request in the priority order is granted.
+
+If multiple requests, the first one in the order.
+
+If none, grant is 0.
+
+Wait, but in non-blocking mode, if no requests, grant is 0.
+
+But in blocking mode, once a grant is given, it's held.
+
+So the compute_grant function would be:
+
+if (ARB_TYPE_ROUND_ROBIN is 0) then fixed priority.
+
+Else round-robin.
+
+So:
+
+if (ARB_TYPE_ROUND_ROBIN) begin
+
+   // round-robin logic
+
+   // starting from last_grant +1
+
+   // find the next request in the circular order.
+
+end else begin
+
+   // fixed priority
+
+   // check from LSB or MSB based on ARB_LSB_HIGH_PRIORITY.
+
+end
+
+Implementing the fixed priority:
+
+For example, if ARB_LSB_HIGH_PRIORITY is 1:
+
+   for (i=0; i < PORTS; i++) check if req[i] is set.
+
+Else:
+
+   for (i=PORTS-1 downto 0) check req[i].
+
+The code can generate a mask and find the first set bit.
+
+In Verilog, can use a loop to find the first request in the priority order.
+
+Alternatively, generate a priority encoder.
+
+But for variable parameters, it's easier to use a generate loop.
+
+Wait, but in Verilog, for a parameterized number of ports, the code can use a generate loop.
+
+But perhaps the code can use a for loop inside an always block.
+
+Wait, here's an approach for fixed priority:
+
+If LSB is high:
+
+   for (i=0; i < PORTS; i++) check if req[i] is set.
+
+Else:
+
+   for (i=PORTS-1 downto 0) check if req[i] is set.
+
+Once the first request in the priority order is found, set the grant.
+
+If none, grant is 0.
+
+Similarly for round-robin.
+
+Now, the code for the fixed priority:
+
+reg [PORTS-1:0] next_grant;
+
+integer i;
+
+always @* begin
+
+   next_grant = 0;
+
+   if (ARB_TYPE_ROUND_ROBIN == 0) begin
+
+      // fixed priority
+
+      if (ARB_LSB_HIGH_PRIORITY) begin
+
+          // priority from 0 to PORTS-1
+
+          for (i=0; i < PORTS; i=i+1) begin
+
+              if (request[i]) begin
+
+                  next_grant = (1 << i);
+
+                  break;
+
+              end
+
+          end
+
+      end else begin
+
+          // priority from PORTS-1 downto 0
+
+          for (i=PORTS-1; i >=0; i=i-1) begin
+
+              if (request[i]) begin
+
+                  next_grant = (1 << i);
+
+                  break;
+
+              end
+
+          end
+
+      end
+
+   end else begin
+
+      // round-robin
+
+      // starting from last_grant +1
+
+      integer start_idx;
+
+      start_idx = (last_grant + 1) % PORTS;
+
+      for (i=start_idx; ; i=(i+1)%PORTS) begin
+
+          if (request[i]) begin
+
+              next_grant = (1 << i);
+
+              break;
+
+          end
+
+          if (i == start_idx) break; // no requests
+
+      end
+
+   end
+
+end
+
+Wait, but in Verilog, for loops in always blocks can be used if they are static (i.e., the loop is unrolled). So for parameterized PORTS, this should be okay.
+
+But variables in Verilog can't be declared inside the always block. Wait, in Verilog, variables declared in the always block are not allowed. So variables like 'i' need to be declared as integers outside.
+
+Wait, in Verilog, you can declare integer variables in the module.
+
+Wait, but in Verilog-2001, variables can be declared in the procedural block.
+
+Wait, no. In Verilog, variables must be declared in the module.
+
+So, perhaps:
+
+integer i;
+
+reg [PORTS-1:0] next_grant;
+
+always @* begin
+
+   next_grant = 0;
+
+   if (ARB_TYPE_ROUND_ROBIN == 0) begin
+
+      // fixed priority
+
+      if (ARB_LSB_HIGH_PRIORITY) begin
+
+          // priority from 0 to PORTS-1
+
+          for (i=0; i < PORTS; i=i+1) begin
+
+              if (request[i]) begin
+
+                  next_grant = (1 << i);
+
+                  // break the loop once found
+
+                  i = PORTS; // exit loop
+
+              end
+
+          end
+
+      end else begin
+
+          // priority from PORTS-1 downto 0
+
+          for (i=PORTS-1; i >=0; i=i-1) begin
+
+              if (request[i]) begin
+
+                  next_grant = (1 << i);
+
+                  i = -1; // exit loop
+
+              end
+
+          end
+
+      end
+
+   end else begin
+
+      // round-robin
+
+      integer start_idx;
+
+      start_idx = (last_grant + 1) % PORTS;
+
+      for (i=start_idx; ; i=(i+1)%PORTS) begin
+
+          if (request[i]) begin
+
+              next_grant = (1 << i);
+
+              i = PORTS; // exit loop
+
+          end
+
+          if (i == start_idx) break; // no requests
+
+      end
+
+   end
+
+end
+
+Wait, but in Verilog, variables declared in the always block can't be declared as integers. So variables like 'i' must be declared as integers in the module.
+
+Alternatively, use generate loops, but that's more complex.
+
+Alternatively, use a generate loop for the fixed priority.
+
+But perhaps the code can use a loop variable declared as integer.
+
+But in Verilog, variables in procedural blocks can't be declared inside the block. So the integer i must be declared outside.
+
+So in the module:
+
+integer i;
+
+reg [PORTS-1:0] next_grant;
+
+Then, in the always block:
+
+always @* begin
+
+   next_grant = 0;
+
+   if (ARB_TYPE_ROUND_ROBIN == 0) begin
+
+      // fixed priority
+
+      if (ARB_LSB_HIGH_PRIORITY) begin
+
+          // priority from 0 to PORTS-1
+
+          for (i=0; i < PORTS; i=i+1) begin
+
+              if (request[i]) begin
+
+                  next_grant = (1 << i);
+
+                  // break loop
+
+                  i = PORTS;
+
+              end
+
+          end
+
+      end else begin
+
+          // priority from PORTS-1 downto 0
+
+          for (i=PORTS-1; i >=0; i=i-1) begin
+
+              if (request[i]) begin
+
+                  next_grant = (1 << i);
+
+                  i = -1; // exit loop
+
+              end
+
+          end
+
+      end
+
+   end else begin
+
+      // round-robin
+
+      integer start_idx;
+
+      start_idx = (last_grant + 1) % PORTS;
+
+      for (i=start_idx; ; i=(i+1)%PORTS) begin
+
+          if (request[i]) begin
+
+              next_grant = (1 << i);
+
+              i = PORTS; // exit loop
+
+          end
+
+          if (i == start_idx) break; // no requests
+
+      end
+
+   end
+
+end
+
+Wait, but in Verilog, variables declared in the always block can't be declared as integers. So the integer i must be declared in the module.
+
+But in Verilog, variables in procedural blocks are allowed to be declared as integers.
+
+Wait, in Verilog, you can declare variables in the procedural blocks.
+
+Wait, in Verilog-2001, you can declare variables inside the procedural blocks.
+
+Wait, no. In Verilog, variables must be declared in the module or in the block's scope.
+
+Wait, in Verilog, you can declare variables in the procedural block's scope.
+
+Wait, in Verilog, you can have:
+
+always @* begin
+
+   integer i;
+
+   // code
+
+end
+
+Yes, in Verilog, variables can be declared inside the procedural blocks.
+
+Wait, but in Verilog-2001, variables can be declared inside the procedural blocks.
+
+So, inside the always block, we can declare the loop variable.
+
+But in the code above, the for loop uses 'i' as the loop variable.
+
+So, in the code:
+
+always @* begin
+
+   integer i;
+
+   reg [PORTS-1:0] next_grant;
+
+   // rest of code
+
+But in Verilog, variables declared inside the always block are allowed.
+
+Wait, but in Verilog, variables declared inside the procedural block are allowed.
+
+Wait, perhaps the code can be written as:
+
+always @* begin
+
+   integer i;
+
+   reg [PORTS-1:0] next_grant;
+
+   next_grant = 0;
+
+   // ... code
+
+But in Verilog, the variables declared inside the always block are allowed.
+
+Wait, but in Verilog, variables declared inside the procedural block are allowed.
+
+Wait, but in Verilog, variables declared in the module are allowed.
+
+But in this case, the code would need to have variables declared in the module.
+
+Alternatively, perhaps the code can use generate loops for fixed priority.
+
+But that's more complex.
+
+Alternatively, use a priority encoder.
+
+But for variable PORTS, it's easier to use a loop.
+
+Assuming that the code can use for loops inside the always block.
+
+Once the next_grant is determined, then the code for the blocking/non-blocking.
+
+Now, the code for the blocking.
+
+If ARB_BLOCK is enabled, once a grant is given, it's held until the condition.
+
+So:
+
+reg [PORTS-1:0] current_grant;
+
+reg [PORTS-1:0] last_grant; // for round-robin tracking
+
+// compute next_grant based on current state.
+
+// if in blocking mode:
+
+if (ARB_BLOCK) begin
+
+   if (current_grant != 0) begin
+
+      // check if we need to hold
+
+      if (ARB_BLOCK_ACK) begin
+
+          // wait for ack
+
+          // find which bit is set in current_grant.
+
+          // check if the corresponding ack is received.
+
+          // if yes, release.
+
+          // else, hold.
+
+          // code to find the index of current_grant.
+
+          // then check if acknowledge's bit is set.
+
+          // if so, next_grant is 0.
+
+          // else, same as current.
+
+      end else begin
+
+          // wait until request drops.
+
+          // if the current_grant's request is 0, release.
+
+          // else hold.
+
+      end
+
+   end else begin
+
+      // compute next_grant normally.
+
+   end
+
+end else begin
+
+   // non-blocking: next_grant is computed each cycle.
+
+end
+
+But the code for finding the index of current_grant can be done via a loop.
+
+But in Verilog, you can use a for loop to find the index.
+
+Once the current_grant is non-zero, find the index of the granted port.
+
+Then check if the ack is received (if ARB_BLOCK_ACK is non-zero) or if the request is dropped.
+
+Once the condition is met, release the grant.
+
+So, code steps:
+
+In the always @* block:
+
+if (ARB_BLOCK) begin
+
+   if (current_grant != 0) begin
+
+      // find the index of the current_grant.
+
+      // then check ack or request.
+
+      integer idx;
+
+      idx = 0;
+
+      for (i=0; i < PORTS; i=i+1) begin
+
+          if (current_grant[i]) begin
+
+              idx = i;
+
+          end
+
+      end
+
+      if (ARB_BLOCK_ACK) begin
+
+          // check if the ack for idx is set.
+
+          if (acknowledge[idx]) begin
+
+              next_grant = 0;
+
+          end else begin
+
+              next_grant = current_grant;
+
+          end
+
+      end else begin
+
+          // check if request[idx] is still active.
+
+          if (request[idx]) begin
+
+              next_grant = current_grant;
+
+          end else begin
+
+              next_grant = 0;
+
+          end
+
+      end
+
+   end else begin
+
+      // compute next_grant normally.
+
+      next_grant = compute_grant(request, ...);
+
+   end
+
+end else begin
+
+   // non-blocking mode.
+
+   next_grant = compute_grant(request, ...);
+
+end
+
+But in Verilog, the code would need to loop through the current_grant to find the index.
+
+But in Verilog, you can use a for loop to find the index.
+
+Once the index is found, then check the conditions.
+
+Now, the code for the entire module.
+
+Putting all together:
+
+Declare the parameters and ports.
+
+Then, registers for current_grant, last_grant.
+
+The code:
+
+module arbiter #(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+) (
+    input wire clk,
+    input wire rst,
+    input wire [PORTS-1:0] request,
+    input wire [PORTS-1:0] acknowledge,
+    output wire [PORTS-1:0] grant,
+    output wire grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+// Internal registers
+reg [PORTS-1:0] current_grant;
+reg [PORTS-1:0] last_grant;
+
+// Combinational next_grant
+reg [PORTS-1:0] next_grant;
+
+// Encoded grant
+reg [$clog2(PORTS)-1:0] grant_encoded_reg;
+
+// Grant valid is when current_grant is non-zero
+assign grant_valid = |current_grant;
+
+// Convert current_grant to encoded form
+// Need to find the index of the set bit in current_grant
+// If multiple bits set, undefined (but in practice, current_grant is one-hot)
+// So use a priority encoder.
+
+// Function to convert one-hot to binary
+function [$clog2(PORTS)-1:0] onehot_to_bin;
+    input [PORTS-1:0] onehot;
+    integer i;
+    begin
+        onehot_to_bin = 0;
+        for (i = 0; i < PORTS; i = i + 1) begin
+            if (onehot[i]) begin
+                onehot_to_bin = i;
+            end
+        end
+    end
+endfunction
+
+// Assign grant_encoded
+assign grant_encoded = grant_encoded_reg;
+
+// Assign grant
+assign grant = current_grant;
+
+// Update current_grant on clock edge
+always @(posedge clk) begin
+    if (rst) begin
+        current_grant <= 0;
+        last_grant <= 0;
+    end else begin
+        current_grant <= next_grant;
+        // Update last_grant for round-robin
+        if (ARB_TYPE_ROUND_ROBIN && (next_grant != 0)) begin
+            // Find the index of the granted port
+            last_grant <= next_grant;
+        end
+    end
+end
+
+// Compute next_grant
+always @* begin
+    integer i;
+    integer idx;
+    reg [PORTS-1:0] req;
+    reg [PORTS-1:0] current_grant_reg;
+
+    current_grant_reg = current_grant;
+    req = request;
+
+    if (ARB_BLOCK && (current_grant != 0)) begin
+        // Handle blocking mode
+        if (ARB_BLOCK_ACK) begin
+            // Wait for acknowledge
+            // Find the index of current_grant
+            idx = 0;
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (current_grant[i]) begin
+                    idx = i;
+                end
+            end
+            if (acknowledge[idx]) begin
+                next_grant = 0;
+            end else begin
+                next_grant = current_grant;
+            end
+        end else begin
+            // Wait until request drops
+            idx = 0;
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (current_grant[i]) begin
+                    idx = i;
+                end
+            end
+            if (req[idx]) begin
+                next_grant = current_grant;
+            end else begin
+                next_grant = 0;
+            end
+        end
+    end else begin
+        // Non-blocking mode or no current grant
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            // Round-robin arbitration
+            integer start_idx;
+            start_idx = (last_grant == 0) ? 0 : onehot_to_bin(last_grant) + 1;
+            start_idx = start_idx % PORTS;
+
+            req = request & ~current_grant_reg; // Mask out already granted requests
+
+            next_grant = 0;
+            for (i = start_idx; ; i = (i + 1) % PORTS) begin
+                if (req[i]) begin
+                    next_grant = (1 << i);
+                    break;
+                end
+                if (i == start_idx) break;
+            end
+        end else begin
+            // Fixed priority
+            if (ARB_LSB_HIGH_PRIORITY) begin
+                // Priority from LSB to MSB
+                for (i = 0; i < PORTS; i = i + 1) begin
+                    if (req[i]) begin
+                        next_grant = (1 << i);
+                        break;
+                    end
+                end
+            end else begin
+                // Priority from MSB to LSB
+                for (i = PORTS - 1; i >= 0; i = i - 1) begin
+                    if (req[i]) begin
+                        next_grant = (1 << i);
+                        break;
+                    end
+                end
+            end
+        end
+    end
+end
+
+// Update grant_encoded_reg
+always @* begin
+    grant_encoded_reg = onehot_to_bin(current_grant);
+end
+
+endmodule
+
+Wait, but in the code above, the function onehot_to_bin is used to convert current_grant to the encoded value.
+
+But in Verilog, functions can't have loops. Wait, no. Functions can have for loops if they are static.
+
+Wait, the function in Verilog can have for loops as long as they are static (i.e., the number of iterations is known at compile time). Since PORTS is a parameter, the loop can be unrolled.
+
+But in the code above, the function uses a for loop to find the index of the set bit.
+
+Yes, that's allowed.
+
+But in Verilog, functions can have for loops.
+
+Wait, in Verilog, functions can contain procedural statements, including for loops.
+
+Yes.
+
+So the code should be okay.
+
+Now, the code for the next_grant:
+
+In the always @* block:
+
+If in blocking mode and current_grant is non-zero:
+
+   find the index of current_grant.
+
+   if ARB_BLOCK_ACK is non-zero:
+
+      check if the acknowledge for that index is set.
+
+      if yes, release (next_grant = 0)
+
+      else, hold (next_grant = current_grant)
+
+   else:
+
+      check if the request for that index is still set.
+
+      if yes, hold.
+
+      else, release.
+
+Else:
+
+   compute next_grant based on arbitration type.
+
+Now, the code for the round-robin:
+
+start_idx is the last granted index +1.
+
+But when starting, if last_grant is zero, start from 0.
+
+Wait, in the code:
+
+start_idx = (last_grant == 0) ? 0 : onehot_to_bin(last_grant) + 1;
+
+Wait, last_grant is a one-hot vector. So onehot_to_bin(last_grant) gives the index.
+
+But if last_grant is zero (no previous grant), then start from 0.
+
+Wait, but in the code, when the current_grant is zero (no active grant), the next_grant is computed normally.
+
+But in the code, the last_grant is updated when next_grant is non-zero.
+
+Hmm, perhaps the code for the round-robin needs to track the last granted port.
+
+Wait, the code uses last_grant to track the last granted port. So when a new grant is made, last_grant is updated.
+
+Thus, in the code:
+
+if (ARB_TYPE_ROUND_ROBIN && (next_grant !=0 )) then last_grant <= next_grant.
+
+Wait, but in the code above, the last_grant is updated in the clocked block.
+
+But the code for the next_grant in the combinational block uses last_grant to compute the start_idx.
+
+But in the code:
+
+start_idx = (last_grant == 0) ? 0 : onehot_to_bin(last_grant) +1;
+
+Wait, if last_grant is zero (no previous grant), then start from 0.
+
+Else, take the index of last_grant and add 1.
+
+But if last_grant is a one-hot vector, then onehot_to_bin(last_grant) gives the index.
+
+So for example, if last_grant is 4 (binary 100), the index is 2 (assuming 3 bits). Wait, depends on PORTS.
+
+Wait, the function onehot_to_bin returns the index of the set bit.
+
+So in round-robin:
+
+start from last_grant's index +1.
+
+If no previous grant, start from 0.
+
+Thus, the code for start_idx:
+
+if (last_grant is zero) then start from 0.
+
+else:
+
+   last_idx = onehot_to_bin(last_grant)
+
+   start_idx = (last_idx +1) % PORTS.
+
+Thus, the code:
+
+start_idx = (last_grant == 0) ? 0 : (onehot_to_bin(last_grant) +1) % PORTS;
+
+But in Verilog, the modulo operator is %.
+
+But in code:
+
+start_idx = (last_grant == 0) ? 0 : (onehot_to_bin(last_grant) +1) % PORTS;
+
+But in the code above, the code uses:
+
+start_idx = (last_grant == 0) ? 0 : onehot_to_bin(last_grant) +1;
+
+But that would be (last_idx +1), which is modulo PORTS.
+
+But in code, the code uses:
+
+start_idx = (last_grant == 0) ? 0 : onehot_to_bin(last_grant) +1;
+
+But if last_grant is non-zero, then onehot_to_bin(last_grant) gives the index.
+
+Thus, start_idx is (index +1) mod PORTS.
+
+Then, the code loops from start_idx in a circular way.
+
+Once the next_grant is computed, the code updates last_grant in the clocked block.
+
+Now, the code for the combinational next_grant.
+
+But in the code above, the code for the round-robin is:
+
+// Round-robin arbitration
+start_idx = (last_grant == 0) ? 0 : onehot_to_bin(last_grant) +1;
+start_idx = start_idx % PORTS;
+
+req = request & ~current_grant_reg; // Mask out already granted requests
+
+next_grant = 0;
+for (i = start_idx; ; i = (i + 1) % PORTS) begin
+    if (req[i]) begin
+        next_grant = (1 << i);
+        break;
+    end
+    if (i == start_idx) break;
+end
+
+This code loops through the start_idx and finds the first request in the round-robin order.
+
+Now, the code for the fixed priority.
+
+If ARB_LSB_HIGH_PRIORITY is 1, then check from 0 to PORTS-1.
+
+Else, check from PORTS-1 downto 0.
+
+The code:
+
+if (ARB_LSB_HIGH_PRIORITY) begin
+    // Priority from LSB to MSB
+    for (i = 0; i < PORTS; i = i + 1) begin
+        if (req[i]) begin
+            next_grant = (1 << i);
+            break;
+        end
+    end
+end else begin
+    // Priority from MSB to LSB
+    for (i = PORTS - 1; i >= 0; i = i - 1) begin
+        if (req[i]) begin
+            next_grant = (1 << i);
+            break;
+        end
+    end
+end
+
+But req here is the original request, not masked.
+
+Wait, in the non-blocking mode, the code should consider all requests.
+
+In the code, the req is the original request.
+
+But in the code for the round-robin, the req is masked with ~current_grant_reg to avoid granting the same as before.
+
+Wait, in the code:
+
+req = request & ~current_grant_reg; // Mask out already granted requests
+
+So in round-robin mode, the code only considers requests that are not already granted.
+
+Thus, the code for round-robin is to find the next request after the last granted.
+
+Now, the code for the non-blocking mode.
+
+Once the next_grant is computed, the code is registered.
+
+Now, the code for the blocking mode.
+
+In the code:
+
+if (ARB_BLOCK && current_grant !=0) begin
+
+   // handle blocking
+
+   // find the index of current_grant.
+
+   // check ack or request.
+
+end else begin
+
+   // compute next_grant normally.
+
+end
+
+Now, the code for the function onehot_to_bin.
+
+Yes.
+
+Now, the code for the grant_encoded.
+
+The code uses:
+
+assign grant_encoded = grant_encoded_reg;
+
+Which is assigned via:
+
+always @* begin
+
+   grant_encoded_reg = onehot_to_bin(current_grant);
+
+end
+
+Thus, whenever current_grant changes, the encoded value is updated.
+
+Now, the code for the CDC.
+
+The code uses a single clock, so all signals are in the same domain. Thus, CDC is not an issue.
+
+But the code must ensure that the parameters are static.
+
+But the code uses parameters, which are fixed.
+
+Thus, the code should be safe.
+
+Now, the code for the parameters.
+
+The parameters PORTS, ARB_TYPE_ROUND_ROBIN, etc., are all static.
+
+Thus, the code should be safe.
+
+Now, the code for the function onehot_to_bin.
+
+In Verilog, functions can have for loops.
+
+Thus, the code should be okay.
+
+Now, the code for the variables.
+
+The code uses current_grant_reg, which is current_grant.
+
+Thus, the code should be okay.
+
+Now, the code for the next_grant.
+
+In the code:
+
+if (ARB_BLOCK && (current_grant !=0)) begin
+
+   // handle blocking.
+
+end else begin
+
+   // compute next_grant.
+
+end
+
+Thus, the code should handle the blocking.
+
+Now, the code for the blocking.
+
+In the code:
+
+if (ARB_BLOCK_ACK) begin
+
+   // wait for ack.
+
+   // find the index of current_grant.
+
+   // check if ack is received.
+
+end else begin
+
+   // wait until request drops.
+
+end
+
+Thus, the code should handle the conditions.
+
+Now, the code for the last_grant.
+
+In the clocked block:
+
+if (ARB_TYPE_ROUND_ROBIN && (next_grant !=0 )) begin
+
+   last_grant <= next_grant;
+
+end
+
+Thus, whenever a new grant is given in round-robin mode, the last_grant is updated.
+
+Thus, the code should track the last granted port.
+
+Now, the code for the initial state.
+
+On reset, current_grant is zero, last_grant is zero.
+
+Thus, the code should start correctly.
+
+Now, the code for the grant_valid.
+
+assign grant_valid = |current_grant;
+
+Thus, when current_grant is non-zero, grant_valid is high.
+
+Thus, the code should be okay.
+
+Now, the code for the parameters.
+
+The parameters are all set as per the user's description.
+
+Thus, the code should meet the requirements.
+
+Now, the code for the parameters.
+
+The code uses:
+
+parameter PORTS =4,
+
+etc.
+
+Thus, the code should be okay.
+
+Now, the code for the output ports.
+
+The code assigns:
+
+output wire [PORTS-1:0] grant,
+
+assign grant = current_grant;
+
+Thus, the grant is the current_grant.
+
+The grant_valid is |current_grant.
+
+The grant_encoded is the encoded version.
+
+Thus, the code should be okay.
+
+Now, the code for the function onehot_to_bin.
+
+Yes.
+
+Thus, the code should be correct.
+</think>
+
+<answer>
+```verilog
+module arbiter #(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+) (
+    input wire clk,
+    input wire rst,
+    input wire [PORTS-1:0] request,
+    input wire [PORTS-1:0] acknowledge,
+    output wire [PORTS-1:0] grant,
+    output wire grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    reg [PORTS-1:0] current_grant;
+    reg [PORTS-1:0] last_grant;
+    reg [PORTS-1:0] next_grant;
+    reg [$clog2(PORTS)-1:0] grant_encoded_reg;
+
+    // Convert current_grant to encoded form
+    function [$clog2(PORTS)-1:0] onehot_to_bin;
+        input [PORTS-1:0] onehot;
+        integer i;
+        begin
+            onehot_to_bin = 0;
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (onehot[i]) begin
+                    onehot_to_bin = i;
+                end
+            end
+        end
+    endfunction
+
+    assign grant = current_grant;
+    assign grant_valid = |current_grant;
+    assign grant_encoded = grant_encoded_reg;
+
+    // Update current_grant and last_grant on clock edge
+    always @(posedge clk) begin
+        if (rst) begin
+            current_grant <= 0;
+            last_grant <= 0;
+        end else begin
+            current_grant <= next_grant;
+            if (ARB_TYPE_ROUND_ROBIN && (next_grant != 0)) begin
+                last_grant <= next_grant;
+            end
+        end
+    end
+
+    // Combinational next_grant logic
+    always @* begin
+        integer i, idx;
+        reg [PORTS-1:0] req;
+        reg [PORTS-1:0] current_grant_reg;
+
+        current_grant_reg = current_grant;
+        req = request;
+
+        if (ARB_BLOCK && (current_grant != 0)) begin
+            // Handle blocking mode
+            idx = onehot_to_bin(current_grant);
+            if (ARB_BLOCK_ACK) begin
+                // Wait for acknowledge
+                if (acknowledge[idx]) begin
+                    next_grant = 0;
+                end else begin
+                    next_grant = current_grant;
+                end
+            end else begin
+                // Wait until request drops
+                if (req[idx]) begin
+                    next_grant = current_grant;
+                end else begin
+                    next_grant = 0;
+                end
+            end
+        end else begin
+            // Non-blocking mode or no current grant
+            if (ARB_TYPE_ROUND_ROBIN) begin
+                // Round-robin arbitration
+                integer start_idx;
+                start_idx = (last_grant == 0) ? 0 : onehot_to_bin(last_grant) + 1;
+                start_idx = start_idx % PORTS;
+                req = request & ~current_grant_reg;
+
+                next_grant = 0;
+                for (i = start_idx; ; i = (i + 1) % PORTS) begin
+                    if (req[i]) begin
+                        next_grant = (1 << i);
+                        break;
+                    end
+                    if (i == start_idx) break;
+                end
+            end else begin
+                // Fixed priority
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    // Priority from LSB to MSB
+                    for (i = 0; i < PORTS; i = i + 1) begin
+                        if (req[i]) begin
+                            next_grant = (1 << i);
+                            break;
+                        end
+                    end
+                end else begin
+                    // Priority from MSB to LSB
+                    for (i = PORTS - 1; i >= 0; i = i - 1) begin
+                        if (req[i]) begin
+                            next_grant = (1 << i);
+                            break;
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    // Update grant_encoded_reg
+    always @* begin
+        grant_encoded_reg = onehot_to_bin(current_grant);
+    end
+
+endmodule
+```
+</answer>

@@ -1,0 +1,629 @@
+<think>Okay, I need to write a Verilog module for a single-bit destination-clock synchronizer. Let's start by understanding the requirements.
+
+The module is called sync, with parameters STAGES and ResetValue. The inputs are clk_i, rst_ni (active-low reset), and serial_i. The output is serial_o. The purpose is to synchronize the asynchronous serial_i into the clk_i domain, using a multi-stage synchronizer with the specified depth.
+
+Wait, the STAGES parameter is the number of flip-flops used for synchronization. Typically, two stages are used, but the parameter allows for more. The ResetValue is the value the flip-flops take when reset.
+
+So the standard approach is to have a chain of flip-flops. Each stage's output is fed into the next. The first stage samples the async input, then subsequent stages reduce metastability.
+
+But wait, the input is a single bit. The synchronizer is for a single bit signal crossing clock domains. The reset is active low, so when rst_ni is 0, the flops reset to ResetValue.
+
+The code structure would be:
+
+- Declare a register array (stages) with STAGES elements.
+- The first stage takes serial_i as input, others take the previous stage's output.
+- Assign the output of the last stage to serial_o.
+
+Wait, but the first stage's input is the async serial_i. The first flop is in the destination clock domain. So the code would have:
+
+reg [STAGES-1:0] sync_chain;
+
+But in Verilog, maybe better to use a generate loop for multiple stages.
+
+Wait, in Verilog, for a multi-stage synchronizer, you can create a shift register where each stage is a flip-flop.
+
+Wait, the code would be something like:
+
+reg [STAGES-1:0] sync_stages;
+
+always_ff @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_stages <= '0; // Or ResetValue? Wait, the parameter is ResetValue.
+  end else begin
+    sync_stages <= {sync_stages[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, but the standard approach is to have each stage in sequence. For example, if STAGES is 2:
+
+stage1 <= serial_i;
+stage2 <= stage1;
+
+So for STAGES parameter, the code would need to generate a chain of STAGES flip-flops.
+
+Wait, the code can be written with a generate loop. Let's think.
+
+If STAGES is 2, then two flip-flops. The first samples the input, the second samples the first's output.
+
+In code:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, but the concatenation would shift left. Wait, the first element is the first stage. Wait, maybe the code is:
+
+The first stage is the first bit. So:
+
+sync_reg[0] is the first stage, then each next stage is the next bit.
+
+Wait, perhaps better to index from 0 to STAGES-1. For example:
+
+genvar i;
+generate
+  for (i=0; i < STAGES; i=i+1) begin : gen_sync
+    if (i == 0) begin
+      // first stage: input is serial_i
+      always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          sync_reg[i] <= ResetValue;
+        end else begin
+          sync_reg[i] <= serial_i;
+        end
+      end
+    end else begin
+      // subsequent stages: input is previous stage's output
+      always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          sync_reg[i] <= ResetValue;
+        end else begin
+          sync_reg[i] <= sync_reg[i-1];
+        end
+      end
+    end
+  end
+endgenerate
+
+Wait, but in Verilog, you can't have a generate loop with variables in the sensitivity list. Hmm. Alternatively, create a shift register.
+
+Wait, perhaps the code can be written as:
+
+reg [STAGES-1:0] sync_reg;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_reg <= {STAGES{ResetValue}};
+  end else begin
+    sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+  end
+end
+
+Then assign serial_o = sync_reg[STAGES-1];
+
+Wait, but the first stage is the first flip-flop. Wait, if STAGES is 2, then the first stage is the first bit, and the second is the second. Wait, the code would have:
+
+sync_reg[0] is first stage, sync_reg[1] is second.
+
+Wait, but in the code above, when you shift, the new value is added to the left. Wait, the code {sync_reg[STAGES-2:0], serial_i} would take the lower bits and append the new input. Wait, if STAGES is 2, then:
+
+sync_reg is [1:0], and after shift, the new value is {sync_reg[0], serial_i} ?
+
+Wait, maybe the code is:
+
+For STAGES >=1.
+
+Wait, the standard synchronizer code for two stages is:
+
+reg stage1, stage2;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    stage1 <= ResetValue;
+    stage2 <= ResetValue;
+  end else begin
+    stage1 <= serial_i;
+    stage2 <= stage1;
+  end
+end
+
+Then output is stage2.
+
+In this case, the code can be generalized with a loop.
+
+But in Verilog, for a variable number of stages, perhaps using a generate loop.
+
+Alternatively, using a vector and shifting.
+
+Wait, the code can be written as:
+
+reg [STAGES-1:0] sync_stages;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_stages <= {STAGES{ResetValue}};
+  end else begin
+    sync_stages <= {sync_stages[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, if STAGES is 2, then the code would have:
+
+sync_stages is [1:0], and each cycle, the new value is {sync_stages[0], serial_i} ?
+
+Wait, no. Wait, the concatenation would be {current lower bits, new input}.
+
+Wait, if the stages are stored as [0] is first, [1] is second.
+
+Wait, if STAGES is 2, then:
+
+sync_stages[0] is first stage, sync_stages[1] is second.
+
+In each clock cycle, the first stage takes the input, and the second takes the first's previous value.
+
+Wait, but in the code above, the code would shift left, with the new input being added to the right.
+
+Wait, perhaps the code is:
+
+sync_stages <= {sync_stages[STAGES-2 : 0], serial_i};
+
+Wait, if STAGES is 2, then:
+
+sync_stages is [1:0], and the code would take bits [0] (the first stage) and append the new input. Wait, but that would be shifting left, but the first stage is the oldest.
+
+Wait, maybe the code is:
+
+The first stage is the first flip-flop, then each next stage is the next.
+
+Wait, perhaps the code is:
+
+The first flip-flop (stage 1) samples the input, then each subsequent stage samples the prior one.
+
+In code:
+
+reg [STAGES-1:0] sync_chain;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_chain <= {STAGES{ResetValue}};
+  end else begin
+    sync_chain <= {sync_chain[STAGES-2:0], serial_i};
+  end
+end
+
+Then the output is the last element of the array.
+
+Wait, if STAGES is 2, then the array is [1:0], and the output would be sync_chain[1].
+
+Wait, but in the code above, the first element is the first stage. Wait, the code {sync_chain[STAGES-2:0], serial_i} would take the lower bits (from 0 to STAGES-2) and append the new input. So for STAGES=2, the code would be:
+
+sync_chain <= {sync_chain[0], serial_i} ?
+
+Wait, but that would be a shift left. Wait, if the array is [1:0], then the code {sync_chain[0], serial_i} would be a two-bit vector where the first bit is the previous first stage, and the second is the new input. Wait, but that's not correct.
+
+Wait, maybe the code is:
+
+The first stage is the first element, and each next stage is the next.
+
+Wait, perhaps the code should be:
+
+sync_chain[0] <= serial_i;
+
+for (i=1; i < STAGES; i++) sync_chain[i] <= sync_chain[i-1];
+
+But in Verilog, you can't have a loop in the always block unless using generate.
+
+Alternatively, using a generate loop.
+
+Wait, here's a possible approach:
+
+If STAGES is 2:
+
+reg stage1, stage2;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    stage1 <= ResetValue;
+    stage2 <= ResetValue;
+  end else begin
+    stage1 <= serial_i;
+    stage2 <= stage1;
+  end
+end
+
+Then output is stage2.
+
+So for a general STAGES, the code can be written with a generate loop.
+
+But in Verilog, you can use a generate loop to create the stages.
+
+Alternatively, use a vector and shift.
+
+Wait, here's a code example:
+
+reg [STAGES-1:0] sync_stages;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_stages <= {STAGES{ResetValue}};
+  end else begin
+    sync_stages <= {sync_stages[STAGES-2:0], serial_i};
+  end
+end
+
+assign serial_o = sync_stages[STAGES-1];
+
+Wait, let's test for STAGES=2.
+
+sync_stages is [1:0], after reset, both bits are ResetValue.
+
+In the next cycle, the code would take bits [0] (the first stage) and append serial_i. Wait, but if STAGES is 2, then the code would be:
+
+sync_stages <= {sync_stages[0], serial_i} ?
+
+Wait, if STAGES is 2, then the code is:
+
+sync_stages <= {sync_stages[0], serial_i} ?
+
+Wait, but in that case, the first stage (index 0) is the first flip-flop, and the second (index 1) is the second. Wait, but the code would have:
+
+Wait, the code {sync_stages[STAGES-2:0], serial_i} would take the lower STAGES-1 bits and append the new input. Wait, if STAGES is 2, then STAGES-2 is 0, so [0:0], which is the first bit. So the code would be:
+
+sync_stages <= {sync_stages[0], serial_i};
+
+Which would be a two-bit vector where the first bit is the previous first stage, and the second is the new input.
+
+Wait, but in a two-stage synchronizer, the first stage is the first flip-flop, then the second is the second. So the first stage is the first to sample the input, then the second samples the first.
+
+Wait, perhaps the code is:
+
+The first stage is the first element in the array, then each next stage is the next.
+
+Wait, in the code:
+
+sync_stages[0] is the first stage, sync_stages[1] is the second.
+
+In the code, the code would shift left, with the new input being added to the end.
+
+Wait, but the code {sync_stages[STAGES-2:0], serial_i} would take the lower STAGES-1 bits and append the new input. Wait, if STAGES is 2, then STAGES-2 is 0, so [0:0], so the code would be:
+
+sync_stages <= {sync_stages[0], serial_i} ?
+
+Wait, but that would be a two-bit vector where the first bit is the previous first stage (sync_stages[0]) and the second is the new input. Wait, but that's not correct. Because the first stage should sample the input, then the second stage samples the first.
+
+Wait, perhaps the code is wrong here.
+
+Alternative approach: The first flip-flop samples the input, the next samples the first, etc.
+
+In code:
+
+reg [STAGES-1:0] sync_stages;
+
+always @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    sync_stages <= {STAGES{ResetValue}};
+  end else begin
+    sync_stages <= {sync_stages[STAGES-2:0], serial_i};
+  end
+end
+
+Wait, if STAGES is 2:
+
+sync_stages is [1:0]. The code would take bits [0] (the first stage) and append the new input. So the new array would be [0] (old first stage) and new input. Wait, but that's not correct. Because the first stage should be the first to get the input, then the second stage gets the first.
+
+Wait, perhaps the code should be:
+
+sync_stages[0] <= serial_i;
+
+for (i=1; i < STAGES; i++) sync_stages[i] <= sync_stages[i-1];
+
+But in Verilog, you can't have a loop in the always block unless using generate.
+
+Alternatively, using a generate loop for each stage.
+
+Let's try:
+
+genvar i;
+generate
+  for (i=0; i < STAGES; i=i+1) begin : gen_sync
+    if (i == 0) begin
+      // first stage: input is serial_i
+      always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          sync_stages[i] <= ResetValue;
+        end else begin
+          sync_stages[i] <= serial_i;
+        end
+      end
+    end else begin
+      // subsequent stages: input is previous stage
+      always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          sync_stages[i] <= ResetValue;
+        end else begin
+          sync_stages[i] <= sync_stages[i-1];
+        end
+      end
+    end
+  end
+endgenerate
+
+But in Verilog, you can't declare a reg array and then have generate blocks assign to it. Wait, but if the array is declared as reg [STAGES-1:0] sync_stages; then each index can be handled.
+
+Wait, but in Verilog, the generate loop can index into the array.
+
+Wait, perhaps:
+
+reg [STAGES-1:0] sync_stages;
+
+generate
+  genvar i;
+  for (i=0; i < STAGES; i=i+1) begin : gen_sync
+    if (i == 0) begin
+      // first stage
+      always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          sync_stages[i] <= ResetValue;
+        end else begin
+          sync_stages[i] <= serial_i;
+        end
+      end
+    end else begin
+      // other stages
+      always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          sync_stages[i] <= ResetValue;
+        end else begin
+          sync_stages[i] <= sync_stages[i-1];
+        end
+      end
+    end
+  end
+endgenerate
+
+Then assign serial_o = sync_stages[STAGES-1];
+
+This would create a chain of flip-flops. The first one takes the input, each next one takes the previous.
+
+This seems correct.
+
+But in Verilog, the generate loop can create multiple always blocks.
+
+Yes, that's allowed.
+
+So the code would be:
+
+module sync #(
+    parameter int unsigned STAGES = 2,
+    parameter bit ResetValue = 1'b0
+) (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic serial_i,
+    output logic serial_o
+);
+
+    reg [STAGES-1:0] sync_stages;
+
+    generate
+        genvar i;
+        for (i=0; i < STAGES; i=i+1) begin : gen_sync
+            if (i == 0) begin
+                // First stage: input is serial_i
+                always @(posedge clk_i or negedge rst_ni) begin
+                    if (!rst_ni) begin
+                        sync_stages[i] <= ResetValue;
+                    end else begin
+                        sync_stages[i] <= serial_i;
+                    end
+                end
+            end else begin
+                // Subsequent stages: input from previous stage
+                always @(posedge clk_i or negedge rst_ni) begin
+                    if (!rst_ni) begin
+                        sync_stages[i] <= ResetValue;
+                    end else begin
+                        sync_stages[i] <= sync_stages[i-1];
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    assign serial_o = sync_stages[STAGES-1];
+
+endmodule
+
+Wait, but in Verilog, the generate loop variables can't be used in the array indices unless they are genvars. Wait, in the code above, the generate loop uses genvar i, and in the for loop, the code uses i as the index.
+
+Wait, in Verilog, the generate loop is allowed to create the code with the genvar i, and the code inside the generate block can use i as an index.
+
+But in the code above, the reg is declared as [STAGES-1:0], which is a packed array. Then each index is assigned in the generate loop.
+
+Yes, this should work.
+
+Wait, but in Verilog, the generate loop can generate the code for each stage.
+
+Another alternative is to use a shift register approach.
+
+But the generate loop approach is more explicit and perhaps clearer.
+
+Wait, but in Verilog, the code for the first stage and the rest can be written with a generate loop.
+
+Another thing to check: when STAGES is 1. But the parameter is unsigned, so STAGES >=1.
+
+Wait, the code would have to handle STAGES=1. But in that case, the output is the first stage, which is the same as the input. But that's not a synchronizer. So the code should have STAGES >=2? Or the code allows any STAGES >=1.
+
+The problem statement says "respecting the configured depth", so the parameter is the number of stages. So the code should handle any STAGES >=1.
+
+But in the code above, if STAGES is 1, then the output is the first stage, which is the input registered once. But in practice, synchronizers are typically two stages. But the code allows any depth.
+
+But the code as written would handle any STAGES >=1.
+
+But in the code, the generate loop runs for i from 0 to STAGES-1.
+
+Wait, in the code above, the generate loop runs for i from 0 to STAGES-1 (since i < STAGES). For each i, create the flip-flop.
+
+Wait, in the code, the generate loop is:
+
+for (i=0; i < STAGES; i=i+1) begin : gen_sync
+
+So for STAGES=2, i runs 0 and 1.
+
+In the code, the first stage (i=0) takes the input, and the second (i=1) takes the first.
+
+Then the output is the last stage.
+
+Yes.
+
+So the code would work.
+
+But in Verilog, the generate loop variables are genvars, and the code inside the generate block can use the genvar as an index.
+
+Yes.
+
+But in the code, the reg is declared as [STAGES-1:0], which is a packed array. So each index is a separate bit.
+
+Yes.
+
+Another possible way is to use a vector and shift.
+
+But the generate loop approach is more explicit.
+
+Now, the code for the reset: when reset is active (rst_ni is low), all stages are set to ResetValue.
+
+Yes.
+
+The output is the last stage.
+
+Yes.
+
+So the code should be:
+
+module sync #(
+    parameter int unsigned STAGES = 2,
+    parameter bit ResetValue = 1'b0
+) (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic serial_i,
+    output logic serial_o
+);
+
+    reg [STAGES-1:0] sync_stages;
+
+    generate
+        genvar i;
+        for (i=0; i < STAGES; i=i+1) begin : gen_sync
+            if (i == 0) begin
+                // First stage
+                always @(posedge clk_i or negedge rst_ni) begin
+                    if (!rst_ni) begin
+                        sync_stages[i] <= ResetValue;
+                    end else begin
+                        sync_stages[i] <= serial_i;
+                    end
+                end
+            end else begin
+                // Subsequent stages
+                always @(posedge clk_i or negedge rst_ni) begin
+                    if (!rst_ni) begin
+                        sync_stages[i] <= ResetValue;
+                    end else begin
+                        sync_stages[i] <= sync_stages[i-1];
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    assign serial_o = sync_stages[STAGES-1];
+
+endmodule
+
+Wait, but in Verilog, the generate loop can't have the same name for each block. Wait, in the generate loop, each iteration creates a block named gen_sync[i], which is okay.
+
+Yes.
+
+But in Verilog, the generate loop variable must be a genvar.
+
+Yes.
+
+Another possible error: in the code, the reg is declared as [STAGES-1:0], but if STAGES is 0, but the parameter is unsigned, so STAGES >=0. But the code would have STAGES >=1, as per the parameters.
+
+Wait, the code's parameters have STAGES as unsigned, but the default is 2. So the code should handle STAGES >=1.
+
+But the code would have to handle STAGES=1.
+
+In that case, the generate loop runs once (i=0), and the output is the first stage.
+
+Yes.
+
+Thus, the code should be correct.
+
+Testing for STAGES=2:
+
+sync_stages[0] is first stage, sync_stages[1] is second.
+
+Yes.
+
+Thus, the code should be correct.
+
+Another possible way: using a shift register.
+
+But the generate loop approach is more explicit.
+
+Yes.
+
+Thus, the code should be as written.
+</think>
+
+<answer>
+```verilog
+module sync #(
+    parameter int unsigned STAGES = 2,
+    parameter bit ResetValue = 1'b0
+) (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic serial_i,
+    output logic serial_o
+);
+
+    reg [STAGES-1:0] sync_stages;
+
+    generate
+        genvar i;
+        for (i = 0; i < STAGES; i = i + 1) begin : gen_sync
+            if (i == 0) begin
+                // First stage samples the input directly
+                always @(posedge clk_i or negedge rst_ni) begin
+                    if (!rst_ni) begin
+                        sync_stages[i] <= ResetValue;
+                    end else begin
+                        sync_stages[i] <= serial_i;
+                    end
+                end
+            end else begin
+                // Subsequent stages sample the previous stage
+                always @(posedge clk_i or negedge rst_ni) begin
+                    if (!rst_ni) begin
+                        sync_stages[i] <= ResetValue;
+                    end else begin
+                        sync_stages[i] <= sync_stages[i-1];
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    assign serial_o = sync_stages[STAGES-1];
+
+endmodule
+```
+</answer>
