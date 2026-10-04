@@ -9,6 +9,8 @@ their own trees.
 
 Daily progress:
 
+- [progress-track/TORCH_HPC.md](progress-track/TORCH_HPC.md):
+  Torch SSH + **https://login.microsoft.com/device** (enter the HPC MFA code).
 - [progress-track/2026-10-03_DAILY_FORMAL_AND_ENHANCED_TB.md](progress-track/2026-10-03_DAILY_FORMAL_AND_ENHANCED_TB.md):
   formal contract repair, newly eligible SymbiYosys scores, and enhanced CDC
   TB results on compile+functional-pass generated RTL.

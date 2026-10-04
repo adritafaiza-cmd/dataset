@@ -99,7 +99,10 @@ Golden enhanced TBs remain 42/43 PASS. `spi_master_slave` golden still fails tha
 
 ### 5. RTLCoder on Torch
 
-Job **19128466** (`rtlcoder-3prompt`, 44 × 3 × 10 = 1,320) was submitted on Torch HPC. Last confirmed state: `R` on `gh112`, writing `experiments/rtlcoder-deepseek-3prompt-10attempt-v1`. SSH logout does not stop Slurm. Status was not re-queried after disconnect (MFA).
+Job **19128466** (`rtlcoder-3prompt`, 44 × 3 × 10 = 1,320) was submitted on Torch HPC. Last confirmed state: `R` on `gh112`, writing `experiments/rtlcoder-deepseek-3prompt-10attempt-v1`. SSH logout does not stop Slurm.
+
+**Enter the HPC MFA code:** [https://login.microsoft.com/device](https://login.microsoft.com/device)  
+Login steps and `squeue` commands: [TORCH_HPC.md](TORCH_HPC.md).
 
 ## What these data can and cannot claim
 

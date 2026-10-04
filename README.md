@@ -7,6 +7,13 @@ reset domain crossings.
 **Full write-up (scores, GIR, Jasper checks, TB assertions):**
 [`reports/CDC_LLM_BENCHMARK_REPORT.md`](reports/CDC_LLM_BENCHMARK_REPORT.md)
 
+**3–4 October notes:**
+[`reports/progress-track/2026-10-03_DAILY_FORMAL_AND_ENHANCED_TB.md`](reports/progress-track/2026-10-03_DAILY_FORMAL_AND_ENHANCED_TB.md)
+
+**Enter the Torch HPC device code here:**
+[https://login.microsoft.com/device](https://login.microsoft.com/device) —
+see [`reports/progress-track/TORCH_HPC.md`](reports/progress-track/TORCH_HPC.md).
+
 ## Repository layout
 
 | Path | What it is |
@@ -20,6 +27,9 @@ reset domain crossings.
 | `complexvcoder/` | ComplexVCoder 27/264 dump + ecs05 scores |
 | `experiments/human_repaired/` | Human anti-patterns: sim pass, Jasper fail |
 | `reports/` | Project reports for collaborators |
+| `formal/` | SymbiYosys contracts (`formal.sv`, `golden.sby`); not a CDC-clean proof |
+| `enhanced_cdc_tb/` | Procedural CDC/reset stress TBs + functional-pass scores |
+| `cdc_tb_checks/` | Lint + SVA so functional sim flags CDC (no Jasper) |
 | `scripts/` | Generate and evaluate (`eval_all_generated.py`) |
 
 Do **not** treat a Torch HPC tarball extract as “LLM circuits.” Scoring
