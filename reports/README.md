@@ -9,6 +9,9 @@ their own trees.
 
 Daily progress:
 
+- [progress-track/2026-10-03_DAILY_FORMAL_AND_ENHANCED_TB.md](progress-track/2026-10-03_DAILY_FORMAL_AND_ENHANCED_TB.md):
+  formal contract repair, newly eligible SymbiYosys scores, and enhanced CDC
+  TB results on compile+functional-pass generated RTL.
 - [progress-track/2026-09-20_DAILY_CDC_BENCHMARK_PROGRESS.md](progress-track/2026-09-20_DAILY_CDC_BENCHMARK_PROGRESS.md):
   typed-TB work, JG-derived and added checks, no-Sol model comparison,
   interpretation limits, and publication requirements.
