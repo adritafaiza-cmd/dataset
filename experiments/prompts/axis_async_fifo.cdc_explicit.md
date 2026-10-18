@@ -83,6 +83,7 @@ Behavior:
     - Deliver beats in order with tlast and the enabled sidebands.
     - s_axis_tready must go low when the FIFO cannot accept another beat, unless a drop/mark-when-full parameter is set.
     - After reset the FIFO is empty.
+    - Full, empty, and depth use acknowledged binary pointer snapshots, so backpressure can lag. Hold tdata and tlast while tready is low. Frame commit behavior is unchanged.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings

@@ -4,7 +4,7 @@ Implement an asynchronous FIFO with 2**ASIZE entries of DSIZE bits.
 
 wclk and rclk are independent clocks. Please take care of any clock-domain crossings between them. The resets are active-low.
 
-Store words written on one side and return them in order on the other. Honor full, empty, and almost flags without losing or repeating data; support the fall-through option and start empty after reset.
+Store words written on one side and return them in order on the other. Honor full, empty, and almost flags without losing or repeating data. Pointers cross as acknowledged binary snapshots, so full and empty can lag. rdata is one read-clock sample, and rempty may be high for one read clock between stored words. Start empty after reset.
 
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.

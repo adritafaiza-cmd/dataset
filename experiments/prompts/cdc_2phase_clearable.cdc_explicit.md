@@ -45,6 +45,7 @@ Behavior:
     - src_clear_i and dst_clear_i request a coordinated flush: isolate the channel, drop in-flight data, then return both sides to idle.
     - src_clear_pending_o / dst_clear_pending_o stay high until that side has finished the clear.
     - Reset and clear must not create a destination beat.
+    - Isolate gates both ends before clear. Clear drops the one outstanding beat by returning the two-phase request and acknowledge to zero. The destination payload is still captured on the request edge, with no extra valid gap between beats. Each clear step reaches the other clock one handshake later.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings

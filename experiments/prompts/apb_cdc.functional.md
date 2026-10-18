@@ -57,6 +57,7 @@ Behavior:
     - Assert src_pready_o only after the destination transfer completes.
     - Do not lose, duplicate, or reorder requests. One outstanding transaction is enough.
     - Reset must idle both interfaces and must not create a transaction.
+    - Each FIFO beat is one registered sample. Valid can fall for one read clock before the next beat. The destination still waits for dst_pready_i before completing the access.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

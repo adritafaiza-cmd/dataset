@@ -4,7 +4,7 @@ Implement a clearable two-phase valid/ready channel between asynchronous clocks.
 
 src_clk_i and dst_clk_i are independent clocks. Please take care of any clock-domain crossings between them. The resets are active-low.
 
-Move source data to the destination in order, holding it while the receiver waits. A clear request should flush the channel and let both sides return to idle without a stray transfer.
+Move source data to the destination in order, holding it while the receiver waits. A clear request isolates both ends, then drops the one outstanding beat by returning request and acknowledge to zero, and both sides return to idle without a stray transfer. There is no extra valid gap between beats. Each clear step reaches the other clock one handshake later.
 
 Give me the complete SystemVerilog code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.

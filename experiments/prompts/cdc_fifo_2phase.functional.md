@@ -39,6 +39,7 @@ Behavior:
     - Deliver destination beats in order when dst_valid_o and dst_ready_i are high.
     - src_ready_o must be low when the FIFO cannot accept another item.
     - After reset the FIFO is empty and dest is idle.
+    - The destination word is a registered sample. dst_valid_o may fall for one destination clock after an accepted beat even when another word is already stored.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

@@ -41,6 +41,7 @@ Behavior:
     - Pointers and data that leave their clock domain must remain coherent.
     - SYNC_STAGES is an implementation parameter; choose a safe crossing yourself.
     - After reset the FIFO is empty.
+    - Pointers cross as acknowledged binary snapshots, so ready and valid can lag. dst_data_o is one destination-clock sample. dst_valid_o may fall for one destination clock after an accepted beat even when another word is stored.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings

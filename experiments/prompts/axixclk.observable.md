@@ -4,7 +4,7 @@ Implement an AXI4 clock-domain bridge.
 
 S_AXI_ACLK and M_AXI_ACLK are independent clocks. Please take care of any clock-domain crossings between them. The reset is active-low.
 
-Bridge AXI bursts between the slave and master sides. Preserve the association between requests, data, IDs, and responses through stalls, and honor the read/write and buffering options.
+Bridge AXI bursts between the slave and master sides. Preserve the association between requests, data, IDs, and responses through stalls, and honor the read/write and buffering options. Each channel keeps its own order. Each beat is one registered sample, valid rises on a later read clock after that sample, and valid can fall for one read clock before the next beat. Master write data is held one extra M_AXI clock before M_AXI_WVALID.
 
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.

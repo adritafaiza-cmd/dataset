@@ -4,7 +4,7 @@ Implement a valid/ready asynchronous FIFO with 2**LOG_DEPTH entries of WIDTH bit
 
 src_clk_i and dst_clk_i are independent clocks. Please take care of any clock-domain crossings between them. The resets are active-low.
 
-Queue data between the source and destination sides, returning it once in order. Keep flow control sensible and start empty after reset.
+Queue data between the source and destination sides, returning it once in order. Pointers cross as acknowledged binary snapshots, so ready and valid can lag. The destination word is one sample, and dst_valid_o may fall for one destination clock between stored words. Start empty after reset.
 
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.

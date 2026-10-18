@@ -38,19 +38,22 @@ Parameters:
     OPT_REGISTER_READS: See Behavior.
 
 Behavior:
-    - A write is accepted when i_wr is high and o_wr_full is low.
+    - Storage accepts 2**LGFIFO writes before any read. o_wr_full is high only when that storage is occupied.
+    - A write is accepted when i_wr is high and o_wr_full is low, on the edge selected by WRITE_ON_POSEDGE.
     - A read is accepted when i_rd is high and o_rd_empty is low.
-    - Accepted data must return exactly once in write order.
-    - Writes while full and reads while empty must not change stored data.
-    - After reset, o_wr_full is low and o_rd_empty is high.
-    - WRITE_ON_POSEDGE selects the write edge. OPT_REGISTER_READS selects whether reads are registered.
+    - A write while full does not change stored data. A read while empty does not change o_rd_data and does not drop a later word.
+    - Accepted data returns exactly once, in write order.
+    - While write reset is asserted, o_wr_full is low. While read reset is asserted, o_rd_empty is high.
+    - o_rd_empty can be high while words remain stored. The read side presents one stored word at a time. After a read, empty may return high until the next stored word becomes visible.
+    - OPT_REGISTER_READS selects whether the read data and empty flag are registered.
+    - NFF is the synchronizer depth. Use at least 2 stages.
     - Do not emit FORMAL-only ports.
 
 CDC requirement:
-    The implementation must be safe for clock-domain and reset-domain crossings
-    and must pass structural CDC/RDC analysis with zero unsafe crossings. Reset
-    release must be safe in each clock domain, and transferred multi-bit data must
-    remain coherent. Select the architecture yourself.
+    Cross only single-bit control between i_wclk and i_rclk, using NFF synchronizer stages.
+    Hold each memory word stable from the time it is offered until the read side takes it.
+    Do not form full or empty by comparing a multi-bit pointer that was synchronized bit by bit.
+    Reset release must be safe in each clock domain.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

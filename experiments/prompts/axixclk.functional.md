@@ -112,6 +112,7 @@ Behavior:
     - Reset must not create a burst.
     - OPT_WRITE_ONLY / OPT_READ_ONLY may omit the unused direction.
     - LGFIFO sizes internal buffering. XCLOCK_FFS is an implementation parameter; choose a safe crossing yourself.
+    - Each channel keeps its own order. Each beat is one registered sample, valid rises on a later read clock after that sample, and valid can fall for one read clock before the next beat. Master write data is held one extra M_AXI clock before M_AXI_WVALID.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

@@ -52,7 +52,7 @@ Behavior:
     - Accepted writes must appear in order on the opposite side when that side reads.
     - Full/empty and almost-full/almost-empty flags are local to each side.
     - After reset the FIFO is empty.
-    - FALLTHROUGH selects first-word fall-through.
+    - FALLTHROUGH does not select a combinational read. Each side's read data is one local sample taken while that side is the reader. Empty may be high for one local clock after an accepted read even when another word is stored. Pointers in both directions cross as acknowledged binary snapshots, so full and empty can lag.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings

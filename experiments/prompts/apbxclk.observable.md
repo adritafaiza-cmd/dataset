@@ -4,7 +4,7 @@ Implement an APB clock-domain bridge.
 
 S_APB_PCLK and M_APB_PCLK are independent clocks. Please take care of any clock-domain crossings between them. The reset is active-low.
 
-Bridge APB transactions from the slave side to the master side. Preserve the request while the master waits, and return the matching response only after that transfer finishes. Keep both sides idle in reset; the registered option should not change bus behavior.
+Bridge APB transactions from the slave side to the master side. Capture the request fields once in the master clock when the synchronized request arrives, and hold them while the master waits. Return the matching response, captured once in the slave clock, only after that transfer finishes. Keep both sides idle in reset. The registered option does not select a combinational bypass.
 
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.

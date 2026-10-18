@@ -57,7 +57,7 @@ Behavior:
     - Do not lose, duplicate, or reorder requests.
     - Supporting one outstanding transaction is sufficient.
     - Both interfaces must remain inactive during reset, and reset must not create a transaction.
-    - OPT_REGISTERED selects whether crossing payload and response fields are explicitly registered. Both parameter settings must preserve APB behavior.
+    - Crossing payload and response fields are captured once in the receiving clock and then held. OPT_REGISTERED does not select a combinational bypass. Both parameter settings use that capture and must preserve APB behavior.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

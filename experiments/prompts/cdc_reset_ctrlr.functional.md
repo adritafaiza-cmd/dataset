@@ -41,6 +41,7 @@ Behavior:
     - When either side requests clear (*_clear_i), first raise both isolate outputs, wait for both isolate acks, then raise both clear outputs, wait for both clear acks, then release isolate and clear.
     - Do not leave one domain cleared while the other is still live.
     - After reset, isolate and clear outputs are inactive.
+    - Peer progress is delivered in order: idle, then active, then done, then idle. Each step waits until the previous transfer is acknowledged, so the other side observes it one handshake later than the local transition. Do not release isolate or clear before the peer completion has been observed.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,
