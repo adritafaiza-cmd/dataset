@@ -53,6 +53,7 @@ Behavior:
     - Full/empty and almost-full/almost-empty flags are local to each side.
     - After reset the FIFO is empty.
     - FALLTHROUGH selects first-word fall-through.
+    - Pointers in both directions cross as acknowledged binary snapshots, so full and empty can lag. Each reading side samples the word once. Empty may be high for one local clock after an accepted read even when another word is stored. `FALLTHROUGH` does not select a combinational read.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings

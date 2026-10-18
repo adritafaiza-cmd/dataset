@@ -47,6 +47,7 @@ Behavior:
     - awfull indicates that the FIFO is approaching full, and arempty indicates that it is approaching empty.
     - After reset, wfull must be low and rempty must be high.
     - When FALLTHROUGH equals "TRUE", rdata presents the current oldest unread word without requiring an additional registered-read cycle. Otherwise, rdata may be updated by an accepted read.
+    - `rdata` is one read-clock sample. `rempty` may be high for one read clock after an accepted read even when another word is stored. Pointers cross as acknowledged binary snapshots, so full and empty can lag. `FALLTHROUGH` does not select a combinational memory read.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings

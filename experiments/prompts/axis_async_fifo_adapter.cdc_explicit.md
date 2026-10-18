@@ -84,6 +84,7 @@ Behavior:
     - Combine an asynchronous AXI-Stream FIFO with a width adapter from S_DATA_WIDTH to M_DATA_WIDTH.
     - Preserve order, tlast, and enabled sidebands.
     - After reset both interfaces are idle and the FIFO is empty.
+    - The FIFO uses acknowledged binary pointer snapshots, so ready can lag. Width conversion stays in one clock. Hold `tdata` and `tlast` while `tready` is low.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings

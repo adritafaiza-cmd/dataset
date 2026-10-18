@@ -4,7 +4,7 @@ Implement a bidirectional asynchronous FIFO with an external dual-port RAM inter
 
 a_clk and b_clk are independent clocks. Please take care of any clock-domain crossings between them. The resets are active-low.
 
-Move words in either direction using the external RAM ports for storage. Preserve order, observe full/empty status and the fall-through option, and start empty after reset.
+Move words in either direction using the external RAM ports for storage. Preserve order, observe full/empty status and the fall-through option, and start empty after reset. Do not infer an internal payload memory. RAM address, write data, and enables stay local to each side's clock, and read data remains the RAM input. Pointers in both directions cross as acknowledged binary snapshots, so full and empty can lag.
 
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.

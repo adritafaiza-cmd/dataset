@@ -4,7 +4,7 @@ Implement a pipelined Wishbone clock-domain bridge.
 
 i_wb_clk and i_xclk_clk are independent clocks. Please take care of any clock-domain crossings between them. The reset is active-high.
 
-Bridge pipelined Wishbone requests between the two sides and return the matching response. Handle stalls without losing requests, and leave both sides idle on reset.
+Bridge pipelined Wishbone requests between the two sides and return the matching response. Handle stalls without losing requests, and leave both sides idle on reset. Each FIFO keeps its own order. A beat is one registered sample and empty falls on a later read clock. `o_wb_stall` remains the outstanding-request count.
 
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.

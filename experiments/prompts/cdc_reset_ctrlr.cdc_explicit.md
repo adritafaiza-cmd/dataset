@@ -41,6 +41,7 @@ Behavior:
     - When either side requests clear (*_clear_i), first raise both isolate outputs, wait for both isolate acks, then raise both clear outputs, wait for both clear acks, then release isolate and clear.
     - Do not leave one domain cleared while the other is still live.
     - After reset, isolate and clear outputs are inactive.
+    - Peer progress arrives in order: idle, then active, then done, then idle. Each step is observed one handshake after the local transition. Do not release isolate or clear before the peer completion has been observed.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings

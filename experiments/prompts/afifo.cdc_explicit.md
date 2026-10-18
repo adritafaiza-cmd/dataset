@@ -45,6 +45,7 @@ Behavior:
     - After reset, o_wr_full is low and o_rd_empty is high.
     - WRITE_ON_POSEDGE selects the write edge. OPT_REGISTER_READS selects whether reads are registered.
     - Do not emit FORMAL-only ports.
+    - `o_rd_empty` can be high while words remain stored. Present one stored word at a time. After a read, empty may return high until the next stored word becomes visible. While write reset is asserted, `o_wr_full` is low. While read reset is asserted, `o_rd_empty` is high.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings

@@ -43,6 +43,7 @@ Behavior:
     - Data must return exactly once in write order.
     - After reset, wfull is low and rempty is high.
     - waddr and raddr are debug pointer outputs.
+    - `rdata` is a read-clock sample of the word being offered. `rempty` may be high for one read clock after an accepted read even when another word is already stored.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings

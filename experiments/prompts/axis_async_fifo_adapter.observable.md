@@ -4,7 +4,7 @@ Implement an asynchronous AXI-Stream FIFO with a width adapter.
 
 s_clk and m_clk are independent clocks. Please take care of any clock-domain crossings between them. The resets are active-high.
 
-Buffer and adapt the stream between the two sides, preserving order and packet boundaries through width conversion. Honor the enabled sidebands and any selected pause or drop behavior.
+Buffer and adapt the stream between the two sides, preserving order and packet boundaries through width conversion. Honor the enabled sidebands and any selected pause or drop behavior. The FIFO uses acknowledged binary pointer snapshots, so ready can lag. Width conversion stays in one clock. Hold `tdata` and `tlast` while `tready` is low.
 
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.

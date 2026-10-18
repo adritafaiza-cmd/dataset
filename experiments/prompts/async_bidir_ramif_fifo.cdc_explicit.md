@@ -64,6 +64,7 @@ Behavior:
     - Drive o_ram_* clocks, addresses, write data, and enables. Read data returns on i_ram_*_rdata.
     - Do not infer an internal payload memory.
     - After reset the FIFO is empty.
+    - Do not infer an internal payload memory. RAM address, write data, and enables stay local to each side's clock, and read data remains the RAM input. Pointers in both directions cross as acknowledged binary snapshots, so full and empty can lag.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings

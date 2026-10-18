@@ -4,7 +4,7 @@ Implement an asynchronous FIFO with 2**LGFIFO entries of WIDTH bits.
 
 i_wclk and i_rclk are independent clocks. Please take care of any clock-domain crossings between them. The resets are active-low.
 
-Queue words across the write and read sides, in order. Honor the full/empty flags, reset behavior, and the selected write-edge and read-timing options.
+Queue words across the write and read sides, in order. Honor the full/empty flags, reset behavior, and the selected write-edge and read-timing options. `o_rd_empty` can be high while words remain stored. Present one stored word at a time. After a read, empty may return high until the next stored word becomes visible. While write reset is asserted, `o_wr_full` is low. While read reset is asserted, `o_rd_empty` is high.
 
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.

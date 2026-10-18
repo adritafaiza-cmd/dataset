@@ -4,7 +4,7 @@ Implement an asynchronous AXI-Stream FIFO.
 
 s_clk and m_clk are independent clocks. Please take care of any clock-domain crossings between them. The resets are active-high.
 
-Buffer stream beats between the two sides without disturbing their order, packet endings, or enabled sidebands. Honor the selected full, pause, and drop/mark options.
+Buffer stream beats between the two sides without disturbing their order, packet endings, or enabled sidebands. Honor the selected full, pause, and drop/mark options. Full, empty, and depth use acknowledged binary pointer snapshots, so backpressure can lag. Hold `tdata` and `tlast` while `tready` is low. Frame commit behavior is unchanged.
 
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.

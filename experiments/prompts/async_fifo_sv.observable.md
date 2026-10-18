@@ -4,7 +4,7 @@ Implement an asynchronous FIFO with 2**ADDR_WIDTH entries of DATA_WIDTH bits.
 
 wclk and rclk are independent clocks. Please take care of any clock-domain crossings between them. The resets are active-low.
 
-Queue words between the write and read sides. Preserve order, keep the flags and pointer outputs meaningful in their respective domains, and start empty after reset.
+Queue words between the write and read sides. Preserve order, keep the flags and pointer outputs meaningful in their respective domains, and start empty after reset. `rdata` is a read-clock sample of the word being offered. `rempty` may be high for one read clock after an accepted read even when another word is already stored.
 
 Give me the complete SystemVerilog code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.
