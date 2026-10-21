@@ -1,0 +1,59 @@
+```verilog
+module rstgen (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic test_mode_i,
+    output logic rst_no,
+    output logic init_no
+);
+
+    // Synchronization chain for the asynchronous reset signal
+    // Using a 2-stage synchronizer to ensure metastability is resolved
+    // before the reset is released. This satisfies CDC requirements for
+    // reset domain crossings.
+    logic rst_n_sync_1;
+    logic rst_n_sync_2;
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            rst_n_sync_1 <= 1'b1;
+        end else begin
+            rst_n_sync_1 <= rst_n_sync_1;
+        end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_n_sync_1) begin
+        if (!rst_n_sync_1) begin
+            rst_n_sync_2 <= 1'b1;
+        end else begin
+            rst_n_sync_2 <= rst_n_sync_2;
+        end
+    end
+
+    // Generate synchronized active-low reset
+    // If test_mode_i is high, the reset is bypassed (directly passed through)
+    // to allow scan/test operations without synchronization delay.
+    assign rst_no = test_mode_i ? rst_ni : rst_n_sync_2;
+
+    // Generate initialization qualifier
+    // init_no is asserted (active low) for a short duration after the
+    // synchronized reset is released. This allows logic to initialize
+    // internal state before normal operation begins.
+    // We use a 2-cycle pulse after reset release.
+    logic rst_n_sync_3;
+
+    always_ff @(posedge clk_i or negedge rst_n_sync_2) begin
+        if (!rst_n_sync_2) begin
+            rst_n_sync_3 <= 1'b1;
+        end else begin
+            rst_n_sync_3 <= rst_n_sync_3;
+        end
+    end
+
+    // Pulse generation logic
+    // When rst_n_sync_2 goes high (reset released), rst_n_sync_3 stays high for 2 cycles
+    // before going low.
+    assign init_no = (rst_n_sync_2 && rst_n_sync_3) ? 1'b0 : 1'b1;
+
+endmodule
+```<|im_end|>

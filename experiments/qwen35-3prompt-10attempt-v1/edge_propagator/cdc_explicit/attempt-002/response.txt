@@ -1,0 +1,140 @@
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  // CDC Strategy:
+  // 1. Capture the input edge in the TX domain using a flip-flop to synchronize it to clk_tx_i.
+  // 2. Detect the rising edge of this synchronized signal within the TX domain to identify a pulse/transition.
+  // 3. Use a 2-FIFO (or 2-stage synchronizer + edge detector) approach to transfer the "edge detected" event to the RX domain.
+    //    Since we only need to propagate a single event (the edge), a 2-stage synchronizer on the "edge detected" signal is sufficient.
+    //    However, to ensure we don't double-count or lose edges due to metastability or glitches, we will:
+    //    a) Detect the edge in TX.
+    //    b) Synchronize the "edge detected" flag to RX using a 2-stage synchronizer.
+    //    c) Use a simple edge detector in RX to generate the output pulse.
+    //    This ensures the event is safely transferred across the clock domain boundary.
+
+  // Stage 1: Synchronize input edge to TX domain (though it's already in TX, we capture it to avoid metastability if edge_i is from another async source, 
+  // but per spec edge_i is in TX domain. We need to detect the transition in TX).
+  
+  // Let's refine: 
+  // edge_i is in TX domain. We need to detect if it changed (rising or falling? Spec says "pulse or edge"). 
+  // Usually "edge propagator" implies detecting a rising edge or a transition. 
+  // "A pulse or edge on edge_i ... produce one pulse". 
+  // If edge_i goes high then low (pulse), we want one pulse out.
+  // If edge_i goes low then high (edge), we want one pulse out.
+  // So we detect any transition.
+  
+  // Approach:
+  // 1. In TX domain: Detect if edge_i changed from previous cycle. Store this "change" signal.
+  // 2. Transfer the "change" signal to RX domain using a 2-stage synchronizer (safe for CDC).
+  // 3. In RX domain: Detect the rising edge of the synchronized "change" signal to generate the output pulse.
+  //    This ensures exactly one pulse is generated per transition in TX.
+
+  logic edge_synced_tx;
+  logic edge_change_tx;
+  logic edge_synced_rx_1;
+  logic edge_synced_rx_2;
+  logic edge_change_rx;
+
+  // --- TX Domain Logic ---
+  
+  // Capture edge_i to detect transitions. 
+  // We use a register to store the previous value of edge_i.
+  // Note: rstn_tx_i is active low.
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      edge_synced_tx <= 1'b0;
+    end else begin
+      edge_synced_tx <= edge_i;
+    end
+  end
+
+  // Detect transition in TX domain
+  // We compare current edge_synced_tx with previous value.
+  // We need to store the previous value of edge_synced_tx.
+  logic edge_synced_tx_prev;
+  
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      edge_synced_tx_prev <= 1'b0;
+    end else begin
+      edge_synced_tx_prev <= edge_synced_tx;
+    end
+  end
+
+  // Generate the "change" signal in TX domain
+  // A change occurs if the current value is different from the previous value.
+  // We use a latch or register to hold the change signal until it is synchronized out.
+  // To prevent double counting, we only assert change when a transition is detected.
+  // We will use a register to hold the change signal, resetting it after one cycle in TX? 
+  // Actually, the standard way is to detect the edge, then synchronize that single-bit event to RX.
+  // Since the event is a single bit (did a change happen?), we can just synchronize the 'change' signal.
+  // But we must ensure the 'change' signal is stable for at least one clock cycle in TX before being sampled by RX synchronizer.
+  // So we register the change signal in TX.
+  
+  logic edge_change_tx_reg;
+  
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      edge_change_tx_reg <= 1'b0;
+    end else begin
+      edge_change_tx_reg <= (edge_synced_tx != edge_synced_tx_prev);
+    end
+  end
+
+  // --- CDC Synchronization (TX to RX) ---
+  // 2-Stage Synchronizer for the edge_change_tx_reg signal.
+  // This is safe for asynchronous clock domains.
+  
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      edge_synced_rx_1 <= 1'b0;
+    end else begin
+      edge_synced_rx_1 <= edge_change_tx_reg;
+    end
+  end
+
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      edge_synced_rx_2 <= 1'b0;
+    end else begin
+      edge_synced_rx_2 <= edge_synced_rx_1;
+    end
+  end
+
+  // --- RX Domain Logic ---
+  // Now we have the synchronized "change" signal in the RX domain (edge_synced_rx_2).
+  // We need to detect the rising edge of this signal to generate the output pulse.
+  // This ensures that even if the TX domain had multiple cycles of change (glitches), 
+  // the RX domain sees a clean single transition because the synchronizer filters them.
+  // However, we must ensure we don't double count if the TX domain signal stays high for multiple cycles.
+  // The logic above: edge_change_tx_reg is asserted for exactly one cycle in TX when a transition happens.
+  // The synchronizer transfers this single-cycle pulse to RX.
+  // Then we detect the rising edge of the synchronized signal in RX.
+  
+  logic edge_synced_rx_2_prev;
+  
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      edge_synced_rx_2_prev <= 1'b0;
+    end else begin
+      edge_synced_rx_2_prev <= edge_synced_rx_2;
+    end
+  end
+
+  // Generate output pulse on rising edge of the synchronized change signal
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      edge_o <= 1'b0;
+    end else begin
+      edge_o <= (edge_synced_rx_2 && !edge_synced_rx_2_prev);
+    end
+  end
+
+endmodule<|im_end|>
+<|endoftext|>

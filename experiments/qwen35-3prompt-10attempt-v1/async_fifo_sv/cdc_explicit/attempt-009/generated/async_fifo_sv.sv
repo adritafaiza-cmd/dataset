@@ -1,0 +1,217 @@
+```systemverilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam ADDR_MASK = (1 << ADDR_WIDTH) - 1;
+    localparam FIFO_DEPTH = 1 << ADDR_WIDTH;
+
+    // Internal pointers: [ADDR_WIDTH-1:0] for address, [ADDR_WIDTH:0] for full/empty flags
+    // We use one extra bit for the full/empty flag to avoid metastability on the flag itself
+    // Write Pointer: [ADDR_WIDTH-1:0] address, [ADDR_WIDTH] flag
+    // Read Pointer:  [ADDR_WIDTH-1:0] address, [ADDR_WIDTH] flag
+    
+    // Write Domain Signals
+    logic [ADDR_WIDTH:0] w_ptr;
+    logic [ADDR_WIDTH:0] w_ptr_sync;
+    logic w_ptr_sync_valid;
+    
+    // Read Domain Signals
+    logic [ADDR_WIDTH:0] r_ptr;
+    logic [ADDR_WIDTH:0] r_ptr_sync;
+    logic r_ptr_sync_valid;
+    
+    // Cross-domain flags
+    logic w_full;
+    logic w_empty;
+    logic r_full;
+    logic r_empty;
+    
+    // Synced flags for control
+    logic w_full_sync;
+    logic w_empty_sync;
+    logic r_full_sync;
+    logic r_empty_sync;
+    
+    // Data Storage
+    logic [DATA_WIDTH-1:0] mem [FIFO_DEPTH-1:0];
+    
+    // Write Enable (internal)
+    logic w_en;
+    
+    // Read Enable (internal)
+    logic r_en;
+
+    // --- Write Domain Logic ---
+    always_ff @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            w_ptr <= {1'b0, 1'b0}; // Reset to 0
+        end else begin
+            if (winc) begin
+                if (w_ptr[ADDR_WIDTH] == 1'b0) begin
+                    w_ptr <= w_ptr + 1;
+                end
+            end
+        end
+    end
+
+    // Generate w_en based on winc and wfull
+    // wfull is determined by the pointer difference
+    assign w_en = winc && (w_ptr[ADDR_WIDTH] == 1'b0);
+
+    // --- Read Domain Logic ---
+    always_ff @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            r_ptr <= {1'b0, 1'b0}; // Reset to 0
+        end else begin
+            if (rinc) begin
+                if (r_ptr[ADDR_WIDTH] == 1'b0) begin
+                    r_ptr <= r_ptr + 1;
+                end
+            end
+        end
+    end
+
+    // Generate r_en based on rinc and rempty
+    // rempty is determined by the pointer difference
+    assign r_en = rinc && (r_ptr[ADDR_WIDTH] == 1'b0);
+
+    // --- Cross Domain Synchronization ---
+    // We need to sync w_ptr[ADDR_WIDTH] (full flag) to read domain
+    // We need to sync r_ptr[ADDR_WIDTH] (empty flag) to write domain
+    
+    // Sync w_ptr[ADDR_WIDTH] to Read Domain
+    genvar i;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : w_ptr_sync_stage
+            logic [ADDR_WIDTH:0] w_ptr_sync_reg;
+            assign w_ptr_sync_reg = w_ptr;
+            always_ff @(posedge rclk or negedge rrst_n) begin
+                if (!rrst_n)
+                    w_ptr_sync_reg <= {1'b0, 1'b0};
+                else
+                    w_ptr_sync_reg <= w_ptr_sync_reg;
+            end
+            assign w_ptr_sync = w_ptr_sync_reg;
+        end
+    endgenerate
+
+    // Sync r_ptr[ADDR_WIDTH] to Write Domain
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : r_ptr_sync_stage
+        logic [ADDR_WIDTH:0] r_ptr_sync_reg;
+        assign r_ptr_sync_reg = r_ptr;
+        always_ff @(posedge wclk or negedge wrst_n) begin
+            if (!wrst_n)
+                r_ptr_sync_reg <= {1'b0, 1'b0};
+            else
+                r_ptr_sync_reg <= r_ptr_sync_reg;
+        end
+        assign r_ptr_sync = r_ptr_sync_reg;
+    endgenerate
+
+    // --- Full/Empty Logic ---
+    // Full: Write pointer == Read pointer + 1 (in terms of the extra bit)
+    // Empty: Write pointer == Read pointer
+    
+    // Calculate full flag in write domain
+    // w_ptr[ADDR_WIDTH] is 1 if we have written one more than the base address
+    // r_ptr[ADDR_WIDTH] is 1 if we have read one more than the base address
+    // Full condition: w_ptr == r_ptr + 1 (considering the extra bit)
+    // Since we use the extra bit as a flag, we can compare directly if we align them.
+    // However, a simpler approach for the extra bit architecture:
+    // Full = (w_ptr == r_ptr + 1) ? 1 : 0
+    // But since w_ptr and r_ptr have the extra bit, we need to be careful.
+    // Let's use the standard approach:
+    // Full = (w_ptr == r_ptr + 1)
+    // Empty = (w_ptr == r_ptr)
+    
+    // To avoid ambiguity with the extra bit, we can compute the flags explicitly.
+    // w_ptr[ADDR_WIDTH] indicates if the write pointer has overflowed the address space relative to reset.
+    // Actually, the standard way with extra bit:
+    // Full = (w_ptr == r_ptr + 1)
+    // Empty = (w_ptr == r_ptr)
+    
+    // Let's implement the comparison logic carefully.
+    // w_ptr and r_ptr are [ADDR_WIDTH:0].
+    // If w_ptr == r_ptr, then empty.
+    // If w_ptr == r_ptr + 1, then full.
+    
+    // Note: r_ptr + 1 might overflow if r_ptr is max, but since we have the extra bit, 
+    // the max value is 2^ADDR_WIDTH. So r_ptr + 1 is safe within [ADDR_WIDTH:0].
+    
+    assign w_empty = (w_ptr == r_ptr_sync);
+    assign w_full = (w_ptr == r_ptr_sync + 1);
+    
+    // Sync r_ptr[ADDR_WIDTH] to Write Domain for rempty calculation
+    // rempty is valid in read domain, but we need to sync r_ptr to write domain to calculate it?
+    // No, rempty is an output in read domain. We need to sync w_ptr to read domain to calculate rempty.
+    // Wait, rempty is calculated in read domain using r_ptr and w_ptr_sync.
+    // w_full is calculated in write domain using w_ptr and r_ptr_sync.
+    
+    // Let's re-verify the outputs:
+    // wfull: Output in write domain. Needs w_ptr and r_ptr_sync.
+    // rempty: Output in read domain. Needs r_ptr and w_ptr_sync.
+    
+    // So:
+    // w_full = (w_ptr == r_ptr_sync + 1)
+    // w_empty = (w_ptr == r_ptr_sync)
+    // r_full = (r_ptr == w_ptr_sync + 1)
+    // r_empty = (r_ptr == w_ptr_sync)
+    
+    // Assignments for outputs
+    assign wfull = w_full;
+    assign rempty = r_empty;
+    
+    // --- Data Storage and Readout ---
+    // Write data to memory
+    always_ff @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            // Reset memory to 0
+            genvar j;
+            generate
+                for (j = 0; j < FIFO_DEPTH; j = j + 1) begin : mem_reset
+                    assign mem[j] = 0;
+                end
+            endgenerate
+        end else if (w_en) begin
+            mem[w_ptr[ADDR_WIDTH-1:0]] <= wdata;
+        end
+    end
+
+    // Read data from memory
+    // rdata is sampled in read domain
+    always_ff @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rdata <= 0;
+        end else if (r_en) begin
+            rdata <= mem[r_ptr[ADDR_WIDTH-1:0]];
+        end else begin
+            // Keep previous value or drive high-Z? Usually keep previous or 0.
+            // For safety, let's keep previous value.
+            // But in Verilog, if no assignment, it holds.
+            // However, to be explicit and avoid glitches if r_en is not asserted:
+            // We can just let it hold.
+        end
+    end
+
+    // --- Address Outputs ---
+    assign waddr = w_ptr[ADDR_WIDTH-1:0];
+    assign raddr = r_ptr[ADDR_WIDTH-1:0];
+
+endmodule
+```<|im_end|>

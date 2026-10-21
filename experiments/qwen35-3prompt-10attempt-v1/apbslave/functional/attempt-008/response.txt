@@ -1,0 +1,88 @@
+module apbslave #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH,
+	localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+) (
+	input	wire			PCLK, PRESETn,
+	input	wire			PSEL,
+	input	wire			PENABLE,
+	output	reg			PREADY,
+	input	wire	[AW-1:0]	PADDR,
+	input	wire			PWRITE,
+	input	wire	[DW-1:0]	PWDATA,
+	input	wire	[DW/8-1:0]	PWSTRB,
+	input	wire	[2:0]		PPROT,
+	output	reg	[DW-1:0]	PRDATA,
+	output	wire			PSLVERR
+);
+
+	reg	[AW-1:0]	ADDR;
+	reg	[DW/8-1:0]	WSTRB;
+	reg	[DW-1:0]	DATA;
+	reg	STATE;
+	reg	[DW-1:0]	OLD_DATA;
+
+	initial begin
+		STATE = 2'b00;
+		PREADY = 1'b0;
+		PSLVERR = 1'b0;
+		PRDATA = 0;
+	end
+
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			STATE <= 2'b00;
+			PREADY <= 1'b0;
+			PSLVERR <= 1'b0;
+			PRDATA <= 0;
+			ADDR <= 0;
+			WSTRB <= 0;
+			DATA <= 0;
+		end else begin
+			case (STATE)
+				2'b00: begin // IDLE
+					if (PSEL && PENABLE) begin
+						ADDR <= PADDR;
+						WSTRB <= PWSTRB;
+						DATA <= PWDATA;
+						STATE <= 2'b01;
+					end
+					PREADY <= 1'b1;
+				end
+
+				2'b01: begin // ACTIVE
+					if (PSEL && PENABLE) begin
+						// Read or Write
+						if (!PWRITE) begin
+							// Read: Data is already in DATA from previous cycle
+							PRDATA <= DATA;
+						end else begin
+							// Write: Update internal data
+							DATA <= PWDATA;
+						end
+						// For standard APB, we assert ready immediately on the second cycle
+						// unless there is a specific latency requirement not mentioned.
+						// The prompt says "complete each access by asserting PREADY".
+						// In a 1-cycle latency slave, we assert ready in the next cycle after setup.
+						// Since we are in the ACTIVE state (cycle 2 of access), we assert ready now.
+						PREADY <= 1'b1;
+						PSLVERR <= 1'b0; // PSLVERR stays low for in-range accesses as per prompt
+					end else begin
+						// If PSEL or PENABLE goes low while in ACTIVE, we must de-assert ready
+						// and wait for the next setup.
+						PREADY <= 1'b0;
+						STATE <= 2'b00;
+					end
+				end
+
+				default: begin
+					PREADY <= 1'b1;
+				end
+			endcase
+		end
+	end
+
+endmodule<|im_end|>
+<|endoftext|>

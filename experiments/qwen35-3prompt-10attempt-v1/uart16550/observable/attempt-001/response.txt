@@ -1,0 +1,551 @@
+```verilog
+`timescale 1ns / 1ps
+
+module uart_top (
+    wb_clk_i,
+    wb_rst_i, wb_adr_i, wb_dat_i, wb_dat_o, wb_we_i, wb_stb_i, wb_cyc_i, wb_ack_o, wb_sel_i,
+    int_o,
+    stx_pad_o, srx_pad_i,
+    rts_pad_o, cts_pad_i, dtr_pad_o, dsr_pad_i, ri_pad_i, dcd_pad_i
+);
+
+    // ---------------------------------------------------------------------------
+    // Parameters
+    // ---------------------------------------------------------------------------
+    parameter WB_ADDR_WIDTH = 16;
+    parameter WB_DATA_WIDTH = 32;
+    parameter UART_BAUD_RATE = 9600;
+    parameter UART_BIT_LENGTH = 8;
+    parameter UART_STOP_BITS = 1;
+    parameter UART_PARITY = 0; // 0: None, 1: Even, 2: Odd
+    parameter UART_SAMPLE_COUNT = 16; // Samples per bit
+
+    // ---------------------------------------------------------------------------
+    // Internal Wires
+    // ---------------------------------------------------------------------------
+    wire clk_sys;
+    wire rst_n;
+    wire rst_n_int;
+    wire rst_n_uart;
+    
+    wire tx_idle;
+    wire tx_busy;
+    wire tx_data_valid;
+    wire tx_data;
+    wire tx_shift_reg;
+    wire tx_shift_out;
+    
+    wire rx_idle;
+    wire rx_busy;
+    wire rx_data_valid;
+    wire rx_data;
+    wire rx_shift_reg;
+    wire rx_shift_out;
+    
+    wire tx_enable;
+    wire rx_enable;
+    wire rts_enable;
+    wire cts_enable;
+    wire dtr_enable;
+    wire dsr_enable;
+    wire ri_enable;
+    wire dcd_enable;
+    
+    wire [7:0] baud_div;
+    wire [7:0] baud_div_cnt;
+    wire baud_tick;
+    
+    // Wishbone Signals
+    reg [WB_DATA_WIDTH-1:0] wb_dat_o_reg;
+    reg wb_ack_o_reg;
+    reg wb_ack_o;
+    
+    // ---------------------------------------------------------------------------
+    // Clock and Reset Generation
+    // ---------------------------------------------------------------------------
+    assign clk_sys = wb_clk_i;
+    assign rst_n = ~wb_rst_i;
+    
+    // Generate active-high reset for internal logic
+    assign rst_n_int = wb_rst_i;
+    assign rst_n_uart = wb_rst_i;
+
+    // ---------------------------------------------------------------------------
+    // Baud Rate Generator
+    // ---------------------------------------------------------------------------
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            baud_div_cnt <= 0;
+        end else begin
+            if (baud_tick) begin
+                baud_div_cnt <= baud_div_cnt + 1;
+                if (baud_div_cnt >= baud_div) begin
+                    baud_div_cnt <= 0;
+                    baud_tick <= 1;
+                end
+            end
+        end
+    end
+
+    // ---------------------------------------------------------------------------
+    // UART State Machine
+    // ---------------------------------------------------------------------------
+    typedef enum logic [2:0] {
+        IDLE,
+        TX_START,
+        TX_DATA,
+        TX_STOP,
+        RX_IDLE,
+        RX_START,
+        RX_DATA,
+        RX_STOP
+    } uart_state_t;
+
+    uart_state_t state_tx, state_rx;
+    logic [UART_BIT_LENGTH-1:0] tx_data_reg;
+    logic [UART_BIT_LENGTH-1:0] rx_data_reg;
+    logic tx_shift_cnt, rx_shift_cnt;
+    logic [UART_BIT_LENGTH-1:0] tx_shift_cnt_reg, rx_shift_cnt_reg;
+    logic tx_shift_out_reg, rx_shift_out_reg;
+    logic tx_done, rx_done;
+    logic tx_enable_reg, rx_enable_reg;
+    logic rts_enable_reg, cts_enable_reg, dtr_enable_reg;
+    logic dsr_enable_reg, ri_enable_reg, dcd_enable_reg;
+    logic int_flag;
+    logic int_pending;
+
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            state_tx <= IDLE;
+            state_rx <= IDLE;
+            tx_data_reg <= 0;
+            rx_data_reg <= 0;
+            tx_shift_cnt <= 0;
+            rx_shift_cnt <= 0;
+            tx_shift_out_reg <= 0;
+            rx_shift_out_reg <= 0;
+            tx_done <= 0;
+            rx_done <= 0;
+            tx_enable_reg <= 0;
+            rx_enable_reg <= 0;
+            rts_enable_reg <= 0;
+            cts_enable_reg <= 0;
+            dtr_enable_reg <= 0;
+            dsr_enable_reg <= 0;
+            ri_enable_reg <= 0;
+            dcd_enable_reg <= 0;
+            int_flag <= 0;
+            int_pending <= 0;
+        end else begin
+            // TX State Machine
+            case (state_tx)
+                IDLE: begin
+                    if (tx_enable_reg) begin
+                        state_tx <= TX_START;
+                        tx_shift_cnt <= 0;
+                        tx_shift_out_reg <= 1; // Start bit
+                        tx_done <= 0;
+                    end
+                end
+                TX_START: begin
+                    if (tx_shift_cnt == 0) begin
+                        tx_shift_cnt <= 1;
+                        state_tx <= TX_DATA;
+                    end
+                end
+                TX_DATA: begin
+                    if (tx_shift_cnt == UART_BIT_LENGTH) begin
+                        state_tx <= TX_STOP;
+                        tx_shift_cnt <= 0;
+                        tx_shift_out_reg <= 1; // Stop bit
+                    end else begin
+                        tx_shift_cnt <= tx_shift_cnt + 1;
+                        tx_shift_out_reg <= tx_data_reg[UART_BIT_LENGTH-1-tx_shift_cnt];
+                    end
+                end
+                TX_STOP: begin
+                    if (tx_shift_cnt == 1) begin
+                        state_tx <= IDLE;
+                        tx_shift_cnt <= 0;
+                        tx_shift_out_reg <= 0;
+                    end else begin
+                        tx_shift_cnt <= tx_shift_cnt + 1;
+                    end
+                end
+                default: state_tx <= IDLE;
+            endcase
+
+            // RX State Machine
+            case (state_rx)
+                IDLE: begin
+                    if (rx_enable_reg) begin
+                        state_rx <= RX_START;
+                        rx_shift_cnt <= 0;
+                        rx_shift_out_reg <= 1; // Start bit
+                        rx_done <= 0;
+                    end
+                end
+                RX_START: begin
+                    if (rx_shift_cnt == 0) begin
+                        rx_shift_cnt <= 1;
+                        state_rx <= RX_DATA;
+                    end
+                end
+                RX_DATA: begin
+                    if (rx_shift_cnt == UART_BIT_LENGTH) begin
+                        state_rx <= RX_STOP;
+                        rx_shift_cnt <= 0;
+                        rx_shift_out_reg <= 1; // Stop bit
+                    end else begin
+                        rx_shift_cnt <= rx_shift_cnt + 1;
+                        rx_shift_out_reg <= srx_pad_i;
+                    end
+                end
+                RX_STOP: begin
+                    if (rx_shift_cnt == 1) begin
+                        state_rx <= IDLE;
+                        rx_shift_cnt <= 0;
+                        rx_shift_out_reg <= 0;
+                        // Check for errors
+                        if (rx_shift_out_reg != 1) begin
+                            int_flag <= 1;
+                        end
+                        rx_done <= 1;
+                    end else begin
+                        rx_shift_cnt <= rx_shift_cnt + 1;
+                    end
+                end
+                default: state_rx <= IDLE;
+            endcase
+
+            // Shift Out Registers
+            if (tx_shift_cnt > 0) begin
+                tx_shift_out <= tx_shift_out_reg;
+            end else begin
+                tx_shift_out <= 0;
+            end
+
+            if (rx_shift_cnt > 0) begin
+                rx_shift_out <= rx_shift_out_reg;
+            end else begin
+                rx_shift_out <= 0;
+            end
+
+            // Enable Signals
+            tx_enable_reg <= tx_enable;
+            rx_enable_reg <= rx_enable;
+            rts_enable_reg <= rts_enable;
+            cts_enable_reg <= cts_enable;
+            dtr_enable_reg <= dtr_enable;
+            dsr_enable_reg <= dsr_enable;
+            ri_enable_reg <= ri_enable;
+            dcd_enable_reg <= dcd_enable;
+
+            // Interrupt Logic
+            if (rx_done) begin
+                int_flag <= 1;
+            end
+            if (int_flag && !int_pending) begin
+                int_pending <= 1;
+                int_o <= 1;
+            end else begin
+                int_pending <= 0;
+                int_o <= 0;
+            end
+        end
+    end
+
+    // ---------------------------------------------------------------------------
+    // Wishbone Interface
+    // ---------------------------------------------------------------------------
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            wb_dat_o_reg <= 0;
+            wb_ack_o_reg <= 0;
+        end else begin
+            wb_ack_o_reg <= wb_ack_o;
+        end
+    end
+
+    assign wb_dat_o = wb_dat_o_reg;
+    assign wb_ack_o = wb_ack_o_reg;
+
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            wb_dat_o_reg <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[0]) begin
+                wb_dat_o_reg <= wb_dat_i;
+            end
+        end
+    end
+
+    // ---------------------------------------------------------------------------
+    // Register Map
+    // ---------------------------------------------------------------------------
+    // 0x00: Control Register (Write)
+    // 0x01: Interrupt Status Register (Read)
+    // 0x02: Line Status Register (Read)
+    // 0x03: Modem Control Register (Write)
+    // 0x04: Modem Status Register (Read)
+    // 0x05: IER (Interrupt Enable Register) - Write
+    // 0x06: ISR (Interrupt Status Register) - Read
+    // 0x07: FIFO Control Register - Write
+    // 0x08: FIFO Status Register - Read
+    // 0x09: Baud Rate Generator Divisor - Write
+    // 0x0A: Baud Rate Generator Status - Read
+    // 0x0B: FIFO Threshold - Write
+    // 0x0C: FIFO Status - Read
+    // 0x0D: Line Control Register - Write
+    // 0x0E: Modem Control Register - Write
+    // 0x0F: Modem Status Register - Read
+
+    // Control Register
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            tx_enable <= 0;
+            rx_enable <= 0;
+            rts_enable <= 0;
+            cts_enable <= 0;
+            dtr_enable <= 0;
+            dsr_enable <= 0;
+            ri_enable <= 0;
+            dcd_enable <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[0]) begin
+                tx_enable <= wb_dat_i[0];
+                rx_enable <= wb_dat_i[1];
+                rts_enable <= wb_dat_i[2];
+                cts_enable <= wb_dat_i[3];
+                dtr_enable <= wb_dat_i[4];
+                dsr_enable <= wb_dat_i[5];
+                ri_enable <= wb_dat_i[6];
+                dcd_enable <= wb_dat_i[7];
+            end
+        end
+    end
+
+    // Interrupt Status Register
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            int_o <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[1]) begin
+                int_o <= 0;
+            end else begin
+                int_o <= int_flag;
+            end
+        end
+    end
+
+    // Line Status Register
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            wb_dat_o_reg <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[2]) begin
+                wb_dat_o_reg <= 0;
+            end else begin
+                wb_dat_o_reg <= 0;
+            end
+        end
+    end
+
+    // Modem Control Register
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            rts_enable <= 0;
+            cts_enable <= 0;
+            dtr_enable <= 0;
+            dsr_enable <= 0;
+            ri_enable <= 0;
+            dcd_enable <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[3]) begin
+                rts_enable <= wb_dat_i[0];
+                cts_enable <= wb_dat_i[1];
+                dtr_enable <= wb_dat_i[2];
+                dsr_enable <= wb_dat_i[3];
+                ri_enable <= wb_dat_i[4];
+                dcd_enable <= wb_dat_i[5];
+            end
+        end
+    end
+
+    // Modem Status Register
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            wb_dat_o_reg <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[4]) begin
+                wb_dat_o_reg <= 0;
+            end else begin
+                wb_dat_o_reg <= 0;
+            end
+        end
+    end
+
+    // IER (Interrupt Enable Register)
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            int_flag <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[5]) begin
+                int_flag <= 0;
+            end else begin
+                int_flag <= int_flag;
+            end
+        end
+    end
+
+    // ISR (Interrupt Status Register)
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            wb_dat_o_reg <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[6]) begin
+                wb_dat_o_reg <= 0;
+            end else begin
+                wb_dat_o_reg <= 0;
+            end
+        end
+    end
+
+    // FIFO Control Register
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            tx_enable <= 0;
+            rx_enable <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[7]) begin
+                tx_enable <= wb_dat_i[0];
+                rx_enable <= wb_dat_i[1];
+            end
+        end
+    end
+
+    // FIFO Status Register
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            wb_dat_o_reg <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[8]) begin
+                wb_dat_o_reg <= 0;
+            end else begin
+                wb_dat_o_reg <= 0;
+            end
+        end
+    end
+
+    // Baud Rate Generator Divisor
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            baud_div <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[9]) begin
+                baud_div <= wb_dat_i[7:0];
+            end
+        end
+    end
+
+    // Baud Rate Generator Status
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            wb_dat_o_reg <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[10]) begin
+                wb_dat_o_reg <= 0;
+            end else begin
+                wb_dat_o_reg <= 0;
+            end
+        end
+    end
+
+    // FIFO Threshold
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            tx_enable <= 0;
+            rx_enable <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[11]) begin
+                tx_enable <= wb_dat_i[0];
+                rx_enable <= wb_dat_i[1];
+            end
+        end
+    end
+
+    // FIFO Status
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            wb_dat_o_reg <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[12]) begin
+                wb_dat_o_reg <= 0;
+            end else begin
+                wb_dat_o_reg <= 0;
+            end
+        end
+    end
+
+    // Line Control Register
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            tx_enable <= 0;
+            rx_enable <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[13]) begin
+                tx_enable <= wb_dat_i[0];
+                rx_enable <= wb_dat_i[1];
+            end
+        end
+    end
+
+    // Modem Control Register
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            rts_enable <= 0;
+            cts_enable <= 0;
+            dtr_enable <= 0;
+            dsr_enable <= 0;
+            ri_enable <= 0;
+            dcd_enable <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[14]) begin
+                rts_enable <= wb_dat_i[0];
+                cts_enable <= wb_dat_i[1];
+                dtr_enable <= wb_dat_i[2];
+                dsr_enable <= wb_dat_i[3];
+                ri_enable <= wb_dat_i[4];
+                dcd_enable <= wb_dat_i[5];
+            end
+        end
+    end
+
+    // Modem Status Register
+    always @(posedge clk_sys or posedge rst_n) begin
+        if (rst_n) begin
+            wb_dat_o_reg <= 0;
+        end else begin
+            if (wb_we_i && wb_stb_i && wb_cyc_i && wb_sel_i[15]) begin
+                wb_dat_o_reg <= 0;
+            end else begin
+                wb_dat_o_reg <= 0;
+            end
+        end
+    end
+
+    // ---------------------------------------------------------------------------
+    // Output Assignments
+    // ---------------------------------------------------------------------------
+    assign stx_pad_o = tx_shift_out;
+    assign srx_pad_i = srx_pad_i;
+    assign rts_pad_o = rts_enable_reg;
+    assign cts_pad_i = cts_enable_reg;
+    assign dtr_pad_o = dtr_enable_reg;
+    assign dsr_pad_i = dsr_enable_reg;
+    assign ri_pad_i = ri_enable_reg;
+    assign dcd_pad_i = dcd_enable_reg;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

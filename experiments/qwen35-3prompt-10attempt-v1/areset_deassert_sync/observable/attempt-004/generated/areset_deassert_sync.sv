@@ -1,0 +1,144 @@
+```verilog
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  wire clk,
+    input  wire async_rst_i,
+    output wire sync_rst_o
+);
+
+    localparam DEASSERT_CHAINS = CHAINS;
+    localparam POLARITY = RST_POL;
+
+    // Internal state to track the deassertion process
+    reg [DEASSERT_CHAINS - 1:0] deassert_chain;
+
+    // Synchronize the async reset signal to detect the rising edge of deassertion
+    // We need to detect when async_rst_i goes from asserted to deasserted.
+    // Since async_rst_i is active-high (based on RST_POL=1 default), 
+    // we look for the transition 1 -> 0.
+    
+    // If RST_POL is 0 (active low), the reset is asserted when async_rst_i is 0.
+    // Deassertion happens when async_rst_i goes 0 -> 1.
+    
+    wire rst_asserted;
+    assign rst_asserted = (POLARITY == 1'b1) ? async_rst_i : ~async_rst_i;
+
+    // Detect the edge of deassertion
+    // We want to start the chain when the reset is released.
+    // Edge detection: current state is deasserted, previous state was asserted.
+    reg rst_prev;
+    reg rst_edge_detected;
+    
+    always @(posedge clk or posedge rst_asserted) begin
+        if (posedge rst_asserted) begin
+            rst_prev <= 1'b1;
+        end else begin
+            rst_prev <= 1'b0;
+        end
+    end
+
+    // Detect transition from asserted to deasserted
+    // Note: The above block updates rst_prev on the clock edge. 
+    // To detect the edge accurately relative to the async signal change, 
+    // we sample the current async state against the previous clock cycle's sampled state.
+    
+    reg async_rst_d1;
+    always @(posedge clk) begin
+        async_rst_d1 <= async_rst_i;
+    end
+
+    wire rst_deassert_edge = (rst_asserted && ~async_rst_d1);
+
+    // Initialize the chain
+    // If POLARITY is 1 (Active High): Reset is asserted when input is 1.
+    // Deassertion starts when we see the edge 1->0.
+    // If POLARITY is 0 (Active Low): Reset is asserted when input is 0.
+    // Deassertion starts when we see the edge 0->1.
+    
+    // We use a counter-like approach where we shift a '1' through the chain upon deassertion edge.
+    // However, a simpler and more robust method for "reset release synchronizer" is to 
+    // count the number of clocks since deassertion and only release the output after CHAINS clocks.
+    
+    reg [DEASSERT_CHAINS - 1:0] counter;
+    reg reset_chain_valid;
+
+    // Logic to start the chain
+    // We need to ensure we don't restart the chain if the reset re-asserts before the chain completes.
+    // The chain should only start on the first deassertion edge.
+    
+    always @(posedge clk or posedge rst_asserted) begin
+        if (posedge rst_asserted) begin
+            // Reset the counter and chain logic when reset is asserted
+            counter <= 0;
+            reset_chain_valid <= 1'b0;
+        end else begin
+            // Check for deassertion edge
+            if (rst_deassert_edge) begin
+                counter <= 0;
+                reset_chain_valid <= 1'b1;
+            end else begin
+                // If reset re-asserts (rst_asserted becomes 1), we must stop the chain immediately.
+                // This is handled by the 'posedge rst_asserted' block above which resets everything.
+                // But we need to make sure we don't accidentally count clocks while reset is asserted.
+                // The condition 'posedge rst_asserted' covers the assertion.
+                // We need to ensure that if reset is asserted, we don't increment.
+                // Actually, the logic below handles the counting.
+                
+                // If reset is currently asserted, we do nothing (counter stays 0, valid stays 0)
+                // unless we are in a weird state, but the posedge block handles the reset condition.
+                
+                // Increment the chain counter if reset is deasserted
+                if (~rst_asserted) begin
+                    counter <= counter + 1'b1;
+                end
+            end
+        end
+    end
+
+    // Generate the output based on the chain depth
+    // The output should be asserted (or deasserted depending on polarity) only after CHAINS clocks
+    // have passed since the deassertion edge.
+    
+    // If POLARITY is 1 (Active High Reset):
+    //   sync_rst_o should be 1 while reset is active.
+    //   It should stay 1 for CHAINS cycles after deassertion, then go 0.
+    //   So, sync_rst_o = rst_asserted OR (counter < CHAINS).
+    //   Wait, if counter reaches CHAINS, we release.
+    //   So if counter < CHAINS, we are still holding the reset.
+    //   Therefore: sync_rst_o = rst_asserted | (counter < CHAINS).
+    
+    // If POLARITY is 0 (Active Low Reset):
+    //   sync_rst_o should be 0 while reset is active.
+    //   It should stay 0 for CHAINS cycles after deassertion, then go 1.
+    //   So, sync_rst_o = ~rst_asserted & (counter >= CHAINS).
+    //   Alternatively: sync_rst_o = (counter >= CHAINS) & ~rst_asserted.
+    
+    // Let's refine the logic to be cleaner:
+    // We want sync_rst_o to behave exactly like async_rst_i but with a delay on the deassertion edge.
+    // If POLARITY == 1:
+    //   sync_rst_o = rst_asserted | (counter < CHAINS)
+    // If POLARITY == 0:
+    //   sync_rst_o = ~rst_asserted & (counter >= CHAINS)
+    
+    // However, there is a subtle issue. If the reset is asserted, counter is 0.
+    // If reset is deasserted, counter starts incrementing.
+    // When counter == CHAINS, we release.
+    
+    // Let's re-verify the counter logic.
+    // On deassertion edge: counter = 0, valid = 1.
+    // Next cycle: counter = 1.
+    // ...
+    // Cycle CHAINS-1: counter = CHAINS-1.
+    // Cycle CHAINS: counter = CHAINS.
+    // At counter = CHAINS, we release.
+    
+    // So the condition to hold reset is (counter < CHAINS).
+    
+    assign sync_rst_o = (POLARITY == 1'b1) 
+        ? (rst_asserted | (counter < DEASSERT_CHAINS))
+        : (~rst_asserted & (counter >= DEASSERT_CHAINS));
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,52 @@
+module sync_wedge #(
+    parameter STAGES = 2
+)(
+    input  wire clk_i,
+    input  wire rst_ni,
+    input  wire en_i,
+    input  wire serial_i,
+    output wire r_edge_o,
+    output wire f_edge_o,
+    output wire serial_o
+);
+
+    // Synchronize the asynchronous serial input to the clock domain
+    wire [STAGES-1:0] sync_serial;
+    genvar i;
+    generate
+        for (i = 0; i < STAGES; i = i + 1) begin : sync_stage
+            wire sync_tmp;
+            always @(posedge clk_i or negedge rst_ni) begin
+                if (!rst_ni)
+                    sync_tmp <= 1'b0;
+                else
+                    sync_tmp <= sync_serial[i];
+            end
+            assign sync_serial[i] = sync_tmp;
+        end
+    endgenerate
+
+    // Detect edges on the synchronized signal
+    wire sync_rising;
+    wire sync_falling;
+    wire prev_sync;
+
+    // Store previous value for edge detection
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+            prev_sync <= 1'b0;
+        else
+            prev_sync <= sync_serial[STAGES-1];
+    end
+
+    assign sync_rising = sync_serial[STAGES-1] && !prev_sync;
+    assign sync_falling = !sync_serial[STAGES-1] && prev_sync;
+
+    // Generate single-cycle pulses for edges
+    assign r_edge_o = sync_rising;
+    assign f_edge_o = sync_falling;
+
+    // Output the synchronized bit
+    assign serial_o = sync_serial[STAGES-1];
+
+endmodule<|im_end|>

@@ -1,0 +1,271 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // Internal state registers for parallel interface
+    reg [N-1:0] tx_data;
+    reg [N-1:0] rx_data;
+    reg tx_ready;
+    reg rx_ready;
+    reg tx_busy;
+    reg rx_busy;
+    reg tx_start;
+    reg rx_start;
+    reg tx_done;
+    reg rx_done;
+
+    // Internal counters and shift registers for SPI
+    reg [N-1:0] shift_reg;
+    reg [N-1:0] shift_reg_rx;
+    reg [3:0]   bit_count;
+    reg         sck_edge;
+    reg         sck_edge_neg;
+    reg         sck_edge_pos;
+
+    // State machine for SPI timing
+    localparam IDLE = 0;
+    localparam TX_SHIFT = 1;
+    localparam RX_SHIFT = 2;
+    localparam TX_DONE = 3;
+    localparam RX_DONE = 4;
+
+    reg [1:0] spi_state;
+
+    // Generate SPI clock based on divider
+    reg [SPI_2X_CLK_DIV-1:0] sck_div_cnt;
+    reg sck_out;
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sck_div_cnt <= 0;
+            sck_out <= 1'b0;
+        end else begin
+            sck_div_cnt <= sck_div_cnt + 1'b1;
+            if (sck_div_cnt == SPI_2X_CLK_DIV - 1'b1) begin
+                sck_div_cnt <= 0;
+                sck_out <= ~sck_out;
+            end
+        end
+    end
+
+    // Detect SPI clock edges
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sck_edge <= 1'b0;
+        end else begin
+            sck_edge <= sck_out;
+        end
+    end
+
+    // State machine logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_state <= IDLE;
+            tx_data <= 0;
+            rx_data <= 0;
+            tx_ready <= 0;
+            rx_ready <= 0;
+            tx_busy <= 0;
+            rx_busy <= 0;
+            tx_start <= 0;
+            rx_start <= 0;
+            tx_done <= 0;
+            rx_done <= 0;
+            bit_count <= 0;
+            shift_reg <= 0;
+            shift_reg_rx <= 0;
+            di_req_o <= 0;
+            wr_ack_o <= 0;
+            do_valid_o <= 0;
+            spi_ssel_o <= 1'b1;
+            spi_sck_o <= 1'b0;
+            spi_mosi_o <= 1'b0;
+        end else begin
+            // State transitions
+            case (spi_state)
+                IDLE: begin
+                    if (wren_i && di_req_o) begin
+                        tx_data <= di_i;
+                        tx_start <= 1'b1;
+                        tx_busy <= 1'b1;
+                        rx_start <= 1'b0;
+                        rx_busy <= 1'b0;
+                        spi_state <= TX_SHIFT;
+                    end else if (rx_ready && do_valid_o) begin
+                        rx_start <= 1'b1;
+                        rx_busy <= 1'b1;
+                        tx_start <= 1'b0;
+                        tx_busy <= 1'b0;
+                        spi_state <= RX_SHIFT;
+                    end else begin
+                        spi_state <= IDLE;
+                    end
+                end
+
+                TX_SHIFT: begin
+                    if (bit_count == N) begin
+                        tx_done <= 1'b1;
+                        tx_busy <= 1'b0;
+                        tx_start <= 1'b0;
+                        spi_state <= TX_DONE;
+                    end else begin
+                        spi_state <= TX_SHIFT;
+                    end
+                end
+
+                TX_DONE: begin
+                    if (tx_done) begin
+                        tx_done <= 1'b0;
+                        tx_ready <= 1'b1;
+                        spi_state <= IDLE;
+                    end else begin
+                        spi_state <= TX_DONE;
+                    end
+                end
+
+                RX_SHIFT: begin
+                    if (bit_count == N) begin
+                        rx_done <= 1'b1;
+                        rx_busy <= 1'b0;
+                        rx_start <= 1'b0;
+                        spi_state <= RX_DONE;
+                    end else begin
+                        spi_state <= RX_SHIFT;
+                    end
+                end
+
+                RX_DONE: begin
+                    if (rx_done) begin
+                        rx_done <= 1'b0;
+                        rx_ready <= 1'b1;
+                        spi_state <= IDLE;
+                    end else begin
+                        spi_state <= RX_DONE;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // SPI Output Logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_ssel_o <= 1'b1;
+            spi_sck_o <= 1'b0;
+            spi_mosi_o <= 1'b0;
+        end else begin
+            // Chip Select: Active low during transfer
+            if (spi_state == IDLE) begin
+                spi_ssel_o <= 1'b1;
+                spi_sck_o <= 1'b0;
+                spi_mosi_o <= 1'b0;
+            end else if (spi_state == TX_SHIFT) begin
+                spi_ssel_o <= 1'b0;
+                spi_sck_o <= 1'b0;
+                spi_mosi_o <= shift_reg[N-1];
+            end else if (spi_state == RX_SHIFT) begin
+                spi_ssel_o <= 1'b0;
+                spi_sck_o <= 1'b0;
+                spi_mosi_o <= 1'b0; // MOSI idle during RX
+            end else begin
+                spi_ssel_o <= 1'b1;
+                spi_sck_o <= 1'b0;
+                spi_mosi_o <= 1'b0;
+            end
+        end
+    end
+
+    // SPI Clock Output
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_sck_o <= 1'b0;
+        end else begin
+            if (spi_state == IDLE) begin
+                spi_sck_o <= 1'b0;
+            end else if (spi_state == TX_SHIFT || spi_state == RX_SHIFT) begin
+                spi_sck_o <= 1'b1;
+            end else begin
+                spi_sck_o <= 1'b0;
+            end
+        end
+    end
+
+    // Shift Register Logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            shift_reg <= 0;
+            shift_reg_rx <= 0;
+            bit_count <= 0;
+        end else begin
+            if (spi_state == TX_SHIFT) begin
+                shift_reg <= {shift_reg[N-2:0], 1'b0}; // Shift in 0 for TX
+                bit_count <= bit_count + 1'b1;
+            end else if (spi_state == RX_SHIFT) begin
+                shift_reg_rx <= {shift_reg_rx[N-2:0], spi_miso_i};
+                bit_count <= bit_count + 1'b1;
+            end else begin
+                shift_reg <= 0;
+                shift_reg_rx <= 0;
+                bit_count <= 0;
+            end
+        end
+    end
+
+    // Data Output Logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            do_valid_o <= 1'b0;
+            do_o <= 0;
+        end else begin
+            if (spi_state == RX_SHIFT) begin
+                do_valid_o <= 1'b0;
+                do_o <= shift_reg_rx;
+            end else if (spi_state == RX_DONE) begin
+                do_valid_o <= 1'b1;
+                do_o <= shift_reg_rx;
+            end else begin
+                do_valid_o <= 1'b0;
+                do_o <= 0;
+            end
+        end
+    end
+
+    // Handshake Signals
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_o <= 1'b0;
+            wr_ack_o <= 1'b0;
+        end else begin
+            if (spi_state == IDLE) begin
+                di_req_o <= 1'b1;
+            end else begin
+                di_req_o <= 1'b0;
+            end
+
+            if (spi_state == TX_DONE) begin
+                wr_ack_o <= 1'b1;
+            end else begin
+                wr_ack_o <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

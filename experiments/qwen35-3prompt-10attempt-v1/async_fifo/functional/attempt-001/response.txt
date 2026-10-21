@@ -1,0 +1,184 @@
+```verilog
+`timescale 1ns/1ps
+
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam INT_ASIZE = ASIZE;
+    localparam INT_DEPTH = 1 << ASIZE;
+    localparam INT_MASK  = (1 << ASIZE) - 1;
+
+    // Write domain pointers
+    reg [INT_ASIZE-1:0] w_ptr;
+    reg [INT_ASIZE-1:0] w_full_ptr;
+
+    // Read domain pointers
+    reg [INT_ASIZE-1:0] r_ptr;
+    reg [INT_ASIZE-1:0] r_empty_ptr;
+
+    // FIFO Memory
+    reg [DSIZE-1:0] mem [INT_DEPTH-1:0];
+
+    // Cross-domain signals
+    wire [INT_ASIZE-1:0] w_ptr_gray;
+    wire [INT_ASIZE-1:0] r_ptr_gray;
+    wire [INT_ASIZE-1:0] w_full_ptr_gray;
+    wire [INT_ASIZE-1:0] r_empty_ptr_gray;
+
+    // --- Write Domain Logic ---
+
+    // Generate Gray code for write pointer
+    assign w_ptr_gray = w_ptr ^ (w_ptr >> 1);
+    assign w_full_ptr_gray = w_full_ptr ^ (w_full_ptr >> 1);
+
+    // Full detection: w_ptr == w_full_ptr
+    assign wfull = (w_ptr == w_full_ptr);
+
+    // Almost full detection: w_ptr + 1 == w_full_ptr (modulo depth)
+    // This is true if w_full_ptr is the next position after w_ptr
+    assign awfull = (w_full_ptr == (w_ptr + 1) - INT_DEPTH);
+
+    // Write process
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            w_ptr      <= 0;
+            w_full_ptr <= 0;
+        end else begin
+            if (winc && !wfull) begin
+                w_ptr <= w_ptr + 1;
+                mem[w_ptr] <= wdata;
+            end
+            // w_full_ptr only updates when we are NOT full
+            // If we are full, w_full_ptr stays where it is, effectively blocking writes
+            if (!wfull) begin
+                w_full_ptr <= w_full_ptr + 1;
+            end
+        end
+    end
+
+    // --- Read Domain Logic ---
+
+    // Generate Gray code for read pointers
+    assign r_ptr_gray = r_ptr ^ (r_ptr >> 1);
+    assign r_empty_ptr_gray = r_empty_ptr ^ (r_empty_ptr >> 1);
+
+    // Empty detection: r_ptr == r_empty_ptr
+    assign rempty = (r_ptr == r_empty_ptr);
+
+    // Almost empty detection: r_ptr + 1 == r_empty_ptr (modulo depth)
+    assign arempty = (r_empty_ptr == (r_ptr + 1) - INT_DEPTH);
+
+    // Read process
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            r_ptr      <= 0;
+            r_empty_ptr <= 0;
+        end else begin
+            if (rinc && !rempty) begin
+                r_ptr <= r_ptr + 1;
+            end
+            // r_empty_ptr only updates when we are NOT empty
+            if (!rempty) begin
+                r_empty_ptr <= r_empty_ptr + 1;
+            end
+        end
+    end
+
+    // Data Output Logic
+    // We need to read from memory using the read pointer.
+    // Since the read pointer is in the read domain and memory is in the write domain,
+    // we must use the Gray-coded version of the read pointer to index the memory.
+    // The memory is stable in the write domain, so reading it with a Gray code
+    // from the read domain works correctly for asynchronous FIFOs.
+
+    // Determine the address to read based on FALLTHROUGH
+    // If FALLTHROUGH is TRUE, we want the current oldest word (r_ptr).
+    // If FALLTHROUGH is FALSE, we want the word that will be read on the NEXT cycle
+    // (which is r_ptr + 1). However, the prompt says:
+    // "When FALLTHROUGH equals "TRUE", rdata presents the current oldest unread word...
+    // Otherwise, rdata may be updated by an accepted read."
+    //
+    // Standard interpretation:
+    // FALLTHROUGH = TRUE: rdata = mem[r_ptr_gray] (Available immediately)
+    // FALLTHROUGH = FALSE: rdata = mem[(r_ptr + 1) gray] (Requires a read cycle to advance)
+    //
+    // Note: The prompt states "rdata is one read-clock sample".
+    // If FALLTHROUGH is FALSE, typically the data is valid only after a read occurs.
+    // But to satisfy "presents the current oldest unread word" for TRUE, and the alternative for FALSE:
+    //
+    // Case TRUE: Address = r_ptr
+    // Case FALSE: Address = r_ptr + 1 (This is the standard behavior where data is valid
+    //              only after the pointer has advanced, effectively requiring a read cycle).
+    //              However, some implementations hold the old data until the pointer moves.
+    //              Given the description "rdata may be updated by an accepted read" for FALSE,
+    //              it implies that without a read, rdata might be stale or undefined, OR
+    //              it implies the data available is the one *after* the current pointer.
+    //
+    // Let's implement the standard logic:
+    // If FALLTHROUGH: Read at r_ptr.
+    // If !FALLTHROUGH: Read at r_ptr + 1.
+    //
+    // We must handle the modulo arithmetic for the address calculation.
+
+    wire [INT_ASIZE-1:0] read_addr;
+
+    always @(*) begin
+        if (FALLTHROUGH) begin
+            read_addr = r_ptr;
+        end else begin
+            read_addr = (r_ptr + 1) - INT_DEPTH;
+        end
+    end
+
+    // Assign rdata from memory using the calculated address.
+    // We use the Gray code of the read pointer to index the memory array directly.
+    // The memory array is indexed by the write pointer (which is stable in write domain).
+    // The read pointer (r_ptr) is in the read domain.
+    // To access memory safely across domains, we use the Gray code of the read pointer.
+    // However, since we are calculating 'read_addr' based on r_ptr, we need to be careful.
+    // The standard technique is to index the memory with the Gray code of the read pointer.
+    // But here we have a specific address calculation.
+    //
+    // Correction on standard async FIFO implementation:
+    // The memory is indexed by the Gray code of the pointer.
+    // If we want to read at 'r_ptr', we use mem[r_ptr_gray].
+    // If we want to read at 'r_ptr + 1', we need the Gray code of (r_ptr + 1).
+    //
+    // Let's re-evaluate the address generation.
+    // We cannot simply do mem[read_addr_gray] if read_addr is a calculated value like r_ptr+1,
+    // because the Gray code of (A+1) is not (A_gray + 1).
+    //
+    // Approach:
+    // 1. Calculate the logical address (r_ptr or r_ptr+1).
+    // 2. Convert that logical address to Gray code to index the memory.
+    //
+    // Let's define the logical address first.
+    wire [INT_ASIZE-1:0] logical_addr;
+    assign logical_addr = (FALLTHROUGH) ? r_ptr : (r_ptr + 1 - INT_DEPTH);
+
+    // Now convert logical_addr to Gray code to index the memory.
+    wire [INT_ASIZE-1:0] addr_gray = logical_addr ^ (logical_addr >> 1);
+
+    assign rdata = mem[addr_gray];
+
+    // End of module
+endmodule
+```<|im_end|>
+<|endoftext|>

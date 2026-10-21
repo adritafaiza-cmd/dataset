@@ -1,0 +1,686 @@
+```verilog
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // ========================================================================
+    // CDC Strategy:
+    // 1. Single Clock Domain: All logic runs on 'clk'.
+    // 2. Reset Synchronization: Use a 2-stage synchronizer for 'rst' to ensure
+    //    safe release in the logic, although 'rst' is already in the same domain.
+    //    This is a best practice for structural safety.
+    // 3. Output Registers: All outputs (scl_o, sda_o, m_axis_*) are registered
+    //    on 'clk' to prevent glitches and ensure CDC compliance.
+    // 4. Input Sampling: Inputs are sampled directly as they are in the same domain.
+    // ========================================================================
+
+    // Synchronizer for Reset (RDC Safety)
+    wire rst_sync;
+    reg rst_sync_reg1;
+    reg rst_sync_reg2;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rst_sync_reg1 <= 1'b1;
+            rst_sync_reg2 <= 1'b1;
+        end else begin
+            rst_sync_reg1 <= rst;
+            rst_sync_reg2 <= rst_sync_reg1;
+        end
+    end
+    assign rst_sync = rst_sync_reg2;
+
+    // ========================================================================
+    // Internal State Machine
+    // ========================================================================
+    typedef enum logic [2:0] {
+        IDLE,
+        START,
+        ADDR_WRITE,
+        ADDR_WRITE_ACK,
+        DATA_WRITE,
+        DATA_WRITE_ACK,
+        DATA_WRITE_NACK,
+        STOP,
+        STOP_IDLE,
+        RESTART,
+        ADDR_READ,
+        DATA_READ,
+        DATA_READ_ACK,
+        DATA_READ_NACK,
+        STOP_AFTER_READ
+    } state_t;
+
+    state_t current_state, next_state;
+
+    // Control Signals
+    logic [7:0] tx_data;
+    logic tx_valid;
+    logic tx_last;
+    logic tx_done; // Internal flag indicating a byte transfer is complete
+    logic ack_received;
+    logic nack_received;
+    logic bus_arbiter; // Internal bus control logic
+    logic byte_sent;
+    logic byte_received;
+    logic stop_sent;
+
+    // Timing Control
+    logic scl_high;
+    logic sda_high;
+    logic scl_edge;
+    logic sda_edge;
+    logic scl_period_count;
+    logic sda_period_count;
+    logic scl_low_time;
+    logic sda_low_time;
+    logic scl_high_time;
+    logic sda_high_time;
+    logic [15:0] prescale_val;
+    logic [15:0] scl_counter;
+    logic [15:0] sda_counter;
+    logic scl_phase; // 0: Low, 1: High
+    logic sda_phase; // 0: Low, 1: High
+
+    // Output Registers (CDC Safety)
+    reg scl_o_reg;
+    reg sda_o_reg;
+    reg m_axis_data_tdata_reg;
+    reg m_axis_data_tvalid_reg;
+    reg m_axis_data_tlast_reg;
+    reg busy_reg;
+    reg bus_control_reg;
+    reg bus_active_reg;
+    reg missed_ack_reg;
+
+    // ========================================================================
+    // Combinational Logic for State Machine and Control
+    // ========================================================================
+    always @(*) begin
+        next_state = current_state;
+        tx_data = 8'b0;
+        tx_valid = 1'b0;
+        tx_last = 1'b0;
+        tx_done = 1'b0;
+        ack_received = 1'b0;
+        nack_received = 1'b0;
+        bus_arbiter = 1'b0;
+        byte_sent = 1'b0;
+        byte_received = 1'b0;
+        stop_sent = 1'b0;
+        missed_ack = 1'b0;
+
+        // Host Interface Handshakes
+        s_axis_cmd_ready = (current_state == IDLE) && s_axis_cmd_valid;
+        s_axis_data_tready = (current_state == DATA_WRITE) && tx_valid;
+
+        // Output Data Assignment
+        m_axis_data_tdata = tx_data;
+        m_axis_data_tvalid = tx_valid;
+        m_axis_data_tlast = tx_last;
+
+        // Status Outputs
+        busy = (current_state != IDLE);
+        bus_control = bus_arbiter;
+        bus_active = (current_state != IDLE);
+        missed_ack = nack_received;
+
+        // State Transition Logic
+        case (current_state)
+            IDLE: begin
+                if (s_axis_cmd_valid) begin
+                    // Determine operation type
+                    if (s_axis_cmd_start) next_state = START;
+                    else if (s_axis_cmd_write) next_state = ADDR_WRITE;
+                    else if (s_axis_cmd_read) next_state = ADDR_READ;
+                    else if (s_axis_cmd_write_multiple) next_state = DATA_WRITE; // Simplified: treat as write stream
+                    else if (s_axis_cmd_stop) next_state = STOP;
+                    else next_state = IDLE; // Ignore invalid commands
+                end
+            end
+
+            START: begin
+                // Generate Start Condition
+                next_state = ADDR_WRITE;
+                bus_arbiter = 1'b1;
+                byte_sent = 1'b1;
+                tx_last = 1'b0;
+            end
+
+            ADDR_WRITE: begin
+                // Send Address (7 bits) + Write Bit (1)
+                tx_data = {s_axis_cmd_address[6:0], 1'b0};
+                tx_valid = 1'b1;
+                tx_last = 1'b0;
+                next_state = ADDR_WRITE_ACK;
+            end
+
+            ADDR_WRITE_ACK: begin
+                if (ack_received) begin
+                    // Check if we need to send more data or stop
+                    if (s_axis_cmd_write_multiple) begin
+                        // Loop back to send data
+                        next_state = DATA_WRITE;
+                        bus_arbiter = 1'b1;
+                        byte_sent = 1'b1;
+                        tx_last = 1'b0;
+                    end else if (s_axis_cmd_stop) begin
+                        next_state = STOP;
+                        bus_arbiter = 1'b1;
+                        stop_sent = 1'b1;
+                    end else begin
+                        // Default to stop if no more commands
+                        next_state = STOP;
+                        bus_arbiter = 1'b1;
+                        stop_sent = 1'b1;
+                    end
+                end else begin
+                    // NACK received
+                    next_state = IDLE;
+                    bus_arbiter = 1'b0;
+                end
+            end
+
+            DATA_WRITE: begin
+                // Data is provided via s_axis_data
+                tx_data = s_axis_data_tdata;
+                tx_valid = s_axis_data_tvalid;
+                tx_last = s_axis_data_tlast;
+                
+                // If this is the last byte of a transaction (indicated by tlast or internal logic)
+                // For simplicity, we assume tlast indicates the end of the payload stream
+                // However, in a stream, we might not know the end until a STOP command.
+                // Here, we treat tlast as the end of the current burst.
+                if (s_axis_data_tlast) begin
+                    tx_last = 1'b1;
+                end
+
+                next_state = DATA_WRITE_ACK;
+            end
+
+            DATA_WRITE_ACK: begin
+                if (ack_received) begin
+                    if (tx_last) begin
+                        // End of data burst
+                        if (s_axis_cmd_stop) begin
+                            next_state = STOP;
+                            bus_arbiter = 1'b1;
+                            stop_sent = 1'b1;
+                        end else begin
+                            // Stay in IDLE or wait for next command
+                            next_state = IDLE;
+                            bus_arbiter = 1'b0;
+                        end
+                    end else begin
+                        // Send next byte
+                        next_state = DATA_WRITE;
+                        bus_arbiter = 1'b1;
+                        byte_sent = 1'b1;
+                        tx_last = 1'b0;
+                    end
+                end else begin
+                    // NACK
+                    next_state = IDLE;
+                    bus_arbiter = 1'b0;
+                end
+            end
+
+            STOP: begin
+                // Generate Stop Condition
+                next_state = STOP_IDLE;
+                bus_arbiter = 1'b1;
+                stop_sent = 1'b1;
+            end
+
+            STOP_IDLE: begin
+                // Wait for bus to be free or return to IDLE
+                if (scl_i == 1'b0 && sda_i == 1'b0) begin
+                    next_state = IDLE;
+                    bus_arbiter = 1'b0;
+                end
+            end
+
+            RESTART: begin
+                // Generate Restart Condition
+                next_state = ADDR_READ;
+                bus_arbiter = 1'b1;
+                byte_sent = 1'b1;
+                tx_last = 1'b0;
+            end
+
+            ADDR_READ: begin
+                // Send Address (7 bits) + Read Bit (1)
+                tx_data = {s_axis_cmd_address[6:0], 1'b1};
+                tx_valid = 1'b1;
+                tx_last = 1'b0;
+                next_state = DATA_READ;
+            end
+
+            DATA_READ: begin
+                // Wait for data from slave
+                // Data is captured in the ACK/NACK phase
+                next_state = DATA_READ_ACK;
+            end
+
+            DATA_READ_ACK: begin
+                if (ack_received) begin
+                    // Data was received in the previous cycle (during the ACK/NACK phase)
+                    // We need to output it now
+                    m_axis_data_tdata = tx_data; // tx_data holds the received data
+                    m_axis_data_tvalid = 1'b1;
+                    m_axis_data_tlast = 1'b0;
+                    
+                    if (s_axis_cmd_stop) begin
+                        next_state = STOP_AFTER_READ;
+                        bus_arbiter = 1'b1;
+                        stop_sent = 1'b1;
+                    end else begin
+                        next_state = DATA_READ; // Continue reading
+                        bus_arbiter = 1'b1;
+                        byte_received = 1'b1;
+                    end
+                end else begin
+                    // NACK
+                    next_state = STOP_AFTER_READ;
+                    bus_arbiter = 1'b1;
+                    stop_sent = 1'b1;
+                    missed_ack = 1'b1;
+                end
+            end
+
+            DATA_READ_NACK: begin
+                // Handled in DATA_READ_ACK based on ack_received signal
+                next_state = STOP_AFTER_READ;
+                bus_arbiter = 1'b1;
+                stop_sent = 1'b1;
+                missed_ack = 1'b1;
+            end
+
+            STOP_AFTER_READ: begin
+                // Generate Stop Condition
+                next_state = STOP_IDLE;
+                bus_arbiter = 1'b1;
+                stop_sent = 1'b1;
+            end
+
+            default: begin
+                next_state = IDLE;
+            end
+        endcase
+    end
+
+    // ========================================================================
+    // I2C Timing Control Logic
+    // ========================================================================
+    always @(posedge clk or posedge rst_sync) begin
+        if (rst_sync) begin
+            scl_counter <= 0;
+            sda_counter <= 0;
+            scl_phase <= 0;
+            sda_phase <= 0;
+            scl_high_time <= 0;
+            sda_high_time <= 0;
+            scl_low_time <= 0;
+            sda_low_time <= 0;
+            scl_o_reg <= 1'b1; // Release
+            sda_o_reg <= 1'b1; // Release
+            m_axis_data_tvalid_reg <= 1'b0;
+            m_axis_data_tlast_reg <= 1'b0;
+            missed_ack_reg <= 1'b0;
+            busy_reg <= 1'b0;
+            bus_control_reg <= 1'b0;
+            bus_active_reg <= 1'b0;
+        end else begin
+            // Update counters based on prescale
+            // prescale[15:0] defines the number of clock cycles for a low/high period
+            // We use prescale[15:0] as the period count.
+            // To ensure proper timing, we alternate between low and high phases.
+            
+            // SCL Timing
+            if (scl_phase) begin
+                // High phase
+                if (scl_counter >= prescale_val) begin
+                    scl_phase <= 0;
+                    scl_counter <= 0;
+                    scl_high_time <= 1'b1;
+                end else begin
+                    scl_counter <= scl_counter + 1;
+                    scl_high_time <= 1'b0;
+                end
+            end else begin
+                // Low phase
+                if (scl_counter >= prescale_val) begin
+                    scl_phase <= 1;
+                    scl_counter <= 0;
+                    scl_low_time <= 1'b1;
+                end else begin
+                    scl_counter <= scl_counter + 1;
+                    scl_low_time <= 1'b0;
+                end
+            end
+
+            // SDA Timing (usually same as SCL for simplicity in this implementation)
+            if (sda_phase) begin
+                if (sda_counter >= prescale_val) begin
+                    sda_phase <= 0;
+                    sda_counter <= 0;
+                    sda_high_time <= 1'b1;
+                end else begin
+                    sda_counter <= sda_counter + 1;
+                    sda_high_time <= 1'b0;
+                end
+            end else begin
+                if (sda_counter >= prescale_val) begin
+                    sda_phase <= 1;
+                    sda_counter <= 0;
+                    sda_low_time <= 1'b1;
+                end else begin
+                    sda_counter <= sda_counter + 1;
+                    sda_low_time <= 1'b0;
+                end
+            end
+
+            // Edge Detection
+            scl_edge = (scl_phase && !scl_o_reg) || (!scl_phase && scl_o_reg);
+            sda_edge = (sda_phase && !sda_o_reg) || (!sda_phase && sda_o_reg);
+
+            // Output Registers (CDC Safety)
+            scl_o_reg <= scl_phase;
+            sda_o_reg <= sda_phase;
+            m_axis_data_tvalid_reg <= m_axis_data_tvalid;
+            m_axis_data_tlast_reg <= m_axis_data_tlast;
+            missed_ack_reg <= missed_ack;
+            busy_reg <= busy;
+            bus_control_reg <= bus_control;
+            bus_active_reg <= bus_active;
+        end
+    end
+
+    // ========================================================================
+    // I2C Protocol State Machine (Timing & Signal Control)
+    // ========================================================================
+    always @(posedge clk or posedge rst_sync) begin
+        if (rst_sync) begin
+            scl_o <= 1'b1;
+            sda_o <= 1'b1;
+            ack_received <= 1'b0;
+            nack_received <= 1'b0;
+            byte_sent <= 1'b0;
+            byte_received <= 1'b0;
+            stop_sent <= 1'b0;
+        end else begin
+            // Default: Release bus
+            scl_o <= 1'b1;
+            sda_o <= 1'b1;
+
+            // Only drive bus if we have arbitration control
+            if (bus_arbiter) begin
+                case (current_state)
+                    IDLE: begin
+                        // Release bus
+                        scl_o <= 1'b1;
+                        sda_o <= 1'b1;
+                    end
+
+                    START: begin
+                        // Start Condition: SDA low while SCL high
+                        // We need to wait for SCL high edge to pull SDA low
+                        if (scl_high_time) begin
+                            sda_o <= 1'b0;
+                        end
+                    end
+
+                    ADDR_WRITE, DATA_WRITE: begin
+                        // Data Setup: SDA stable before SCL rising edge
+                        // Data Hold: SDA stable during SCL low
+                        // We drive SDA based on the current phase
+                        if (scl_high_time) begin
+                            // SCL is high, SDA must be stable. 
+                            // We set SDA to the data value now.
+                            sda_o <= tx_data[0]; // LSB first
+                        end else begin
+                            // SCL is low, SDA can change
+                            sda_o <= tx_data[0];
+                        end
+                    end
+
+                    DATA_READ: begin
+                        // Sampling: Sample SDA on SCL falling edge
+                        // We hold the value in tx_data for the next state
+                        if (scl_low_time) begin
+                            // SCL is low, sample SDA
+                            tx_data <= sda_i;
+                        end
+                    end
+
+                    STOP: begin
+                        // Stop Condition: SDA high while SCL high
+                        if (scl_high_time) begin
+                            sda_o <= 1'b1;
+                        end
+                    end
+
+                    STOP_IDLE, RESTART, ADDR_READ, DATA_READ_ACK, DATA_READ_NACK, STOP_AFTER_READ: begin
+                        // Idle or waiting states
+                        scl_o <= 1'b1;
+                        sda_o <= 1'b1;
+                    end
+
+                    default: begin
+                        scl_o <= 1'b1;
+                        sda_o <= 1'b1;
+                    end
+                endcase
+            end else begin
+                // Release bus
+                scl_o <= 1'b1;
+                sda_o <= 1'b1;
+            end
+        end
+    end
+
+    // ========================================================================
+    // ACK/NACK Detection Logic
+    // ========================================================================
+    // ACK/NACK is sampled on the falling edge of SCL after the 9th bit (8 data + 1 ACK)
+    // In our simplified timing model, we assume the timing is correct and sample
+    // when SCL transitions from high to low after a data byte.
+    
+    // We need to track the bit count within a byte transfer.
+    // Since the state machine is high-level, we infer the ACK/NACK timing
+    // by detecting the SCL falling edge after a byte transfer is initiated.
+    
+    logic scl_falling_edge;
+    logic byte_transfer_complete;
+    logic [3:0] bit_counter;
+
+    always @(posedge clk or posedge rst_sync) begin
+        if (rst_sync) begin
+            scl_falling_edge <= 1'b0;
+            byte_transfer_complete <= 1'b0;
+            bit_counter <= 0;
+        end else begin
+            scl_falling_edge = (scl_phase && !scl_o_reg); // Falling edge detection
+            bit_counter <= bit_counter + 1;
+            
+            // Detect falling edge of SCL
+            if (scl_falling_edge) begin
+                // Check if we are in a state where we expect an ACK/NACK
+                // This is tricky without a detailed bit counter in the FSM.
+                // We will use a simplified approach:
+                // If we just sent a byte (byte_sent) and SCL just fell, check SDA.
+                // However, the FSM state transitions happen on clock edges.
+                // We need to align the ACK detection with the SCL falling edge.
+                
+                // Let's refine: We will detect ACK/NACK in the state machine
+                // by checking the SDA level at the moment SCL falls, 
+                // but since we are in a synchronous FSM, we need to capture this.
+                
+                // Alternative: Use a separate counter for bit position within a byte.
+                // For this implementation, we assume the timing is such that
+                // the ACK/NACK is available when the state machine transitions
+                // from the data sending state to the ACK state.
+                
+                // To make this robust, we will use a dedicated counter for bit position.
+                // But given the constraints, we will rely on the state machine
+                // to trigger the check at the right time.
+                
+                // Revised approach: 
+                // We will check SDA level when SCL falls.
+                // We need to know if we are in the ACK/NACK phase.
+                // The ACK/NACK phase is the 9th bit.
+                
+                // Let's add a bit counter to the state machine logic.
+                // We will reset the bit counter when a new byte starts.
+            end
+        end
+    end
+
+    // Re-implementing ACK/NACK detection with a bit counter
+    // This counter tracks the bit position within the current byte transfer.
+    logic [3:0] bit_pos;
+    logic scl_falling_edge_det;
+
+    always @(posedge clk or posedge rst_sync) begin
+        if (rst_sync) begin
+            bit_pos <= 0;
+            scl_falling_edge_det <= 0;
+        end else begin
+            // Detect SCL falling edge
+            if (scl_phase && !scl_o_reg) begin
+                scl_falling_edge_det <= 1'b1;
+            end else begin
+                scl_falling_edge_det <= 1'b0;
+            end
+            
+            // Increment bit counter on SCL rising edge (start of bit)
+            if (scl_phase && !scl_o_reg) begin
+                // This is a rising edge, start of a new bit
+                // But we need to detect the falling edge to sample ACK/NACK
+                // Let's sample SDA on the falling edge of SCL
+                if (scl_falling_edge_det) begin
+                    // Sample SDA
+                    if (current_state == DATA_WRITE_ACK || 
+                        current_state == ADDR_WRITE_ACK ||
+                        current_state == DATA_READ_ACK ||
+                        current_state == DATA_READ_NACK) begin
+                        // We are in an ACK/NACK state
+                        // Check SDA level at this moment
+                        // Note: sda_o_reg is the output, sda_i is the input.
+                        // We need to check sda_i.
+                        if (sda_i == 1'b0) begin
+                            ack_received <= 1'b1;
+                            nack_received <= 1'b0;
+                        end else begin
+                            ack_received <= 1'b0;
+                            nack_received <= 1'b1;
+                        end
+                    end
+                end
+            end
+            
+            // Increment bit counter on SCL rising edge
+            if (scl_phase && !scl_o_reg) begin
+                bit_pos <= bit_pos + 1;
+            end
+            
+            // Reset bit counter when a new byte starts (indicated by state transition to ADDR_WRITE, DATA_WRITE, etc.)
+            // We can infer this by checking if we are in a data sending state and bit_pos is 0
+            // Or simply reset it when we enter a new byte transfer state.
+            // A simpler way: Reset bit_pos when we enter a state that sends a byte.
+            // However, the state machine is already defined.
+            // Let's reset bit_pos when we are in a state that expects to send a byte and bit_pos is 0.
+            // Actually, we can reset it when we transition to a state that sends a byte.
+            // But since we are in combinational logic for state, we can't easily reset here.
+            // Instead, we reset bit_pos when we detect a Start or Restart condition.
+            if (current_state == START || current_state == RESTART) begin
+                bit_pos <= 0;
+            end
+        end
+    end
+
+    // Reset bit counter when a new byte transfer starts (ADDR_WRITE, DATA_WRITE, ADDR_READ)
+    // We can do this in the sequential logic block for bit_pos
+    // But we need to know when a new byte starts.
+    // We can reset bit_pos when we are in a state that sends a byte and bit_pos is 0.
+    // Or better, reset it when we enter a state that sends a byte.
+    // Let's modify the bit_pos logic to reset when we are in a data sending state and bit_pos is 0.
+    // Actually, the simplest way is to reset bit_pos when we are in a state that sends a byte
+    // and the previous state was not a data sending state.
+    // Given the complexity, let's assume the bit counter is reset when we enter a state that sends a byte.
+    // We can do this by checking the current state in the sequential block.
+    
+    // Re-define bit_pos logic with reset on state entry for data sending states
+    always @(posedge clk or posedge rst_sync) begin
+        if (rst_sync) begin
+            bit_pos <= 0;
+        end else begin
+            // Reset bit counter when entering a state that sends a byte
+            if (current_state == ADDR_WRITE || current_state == DATA_WRITE || 
+                current_state == ADDR_READ || current_state == START || current_state == RESTART) begin
+                bit_pos <= 0;
+            end else begin
+                // Increment on SCL rising edge
+                if (scl_phase && !scl_o_reg) begin
+                    bit_pos <= bit_pos + 1;
+                end else begin
+                    bit_pos <= bit_pos;
+                end
+            end
+        end
+    end
+
+    // Final Output Assignments
+    assign scl_o = scl_o_reg;
+    assign sda_o = sda_o_reg;
+    assign m_axis_data_tdata = m_axis_data_tdata_reg;
+    assign m_axis_data_tvalid = m_axis_data_tvalid_reg;
+    assign m_axis_data_tlast = m_axis_data_tlast_reg;
+    assign busy = busy_reg;
+    assign bus_control = bus_control_reg;
+    assign bus_active = bus_active_reg;
+    assign missed_ack = missed_ack_reg;
+
+endmodule
+```<|im_end|>

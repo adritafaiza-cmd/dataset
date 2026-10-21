@@ -1,0 +1,157 @@
+```systemverilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam ADDR_WIDTH_LOG = ADDR_WIDTH;
+    localparam FIFO_DEPTH = 1 << ADDR_WIDTH;
+    localparam FULL_THRESHOLD = FIFO_DEPTH - 1;
+    localparam EMPTY_THRESHOLD = 0;
+
+    // Internal pointers (write and read)
+    reg [ADDR_WIDTH-1:0] wptr;
+    reg [ADDR_WIDTH-1:0] rptr;
+
+    // Counters for full/empty detection
+    reg [ADDR_WIDTH-1:0] wcount;
+    reg [ADDR_WIDTH-1:0] rcount;
+
+    // Write side registers
+    reg [DATA_WIDTH-1:0] wdata_reg;
+    reg [ADDR_WIDTH-1:0] waddr_reg;
+
+    // Read side registers
+    reg [DATA_WIDTH-1:0] rdata_reg;
+    reg [ADDR_WIDTH-1:0] raddr_reg;
+
+    // Synchronizers for control signals
+    wire winc_synced;
+    wire rinc_synced;
+    wire wrst_n_synced;
+    wire rrst_n_synced;
+
+    // Generate synchronizer chains
+    genvar i;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : sync_stage
+            wire winc_synced_0, winc_synced_1;
+            wire rinc_synced_0, rinc_synced_1;
+            wire wrst_n_synced_0, wrst_n_synced_1;
+            wire rrst_n_synced_0, rrst_n_synced_1;
+
+            assign winc_synced_0 = winc_synced_1 ? winc_synced_1 : winc;
+            assign rinc_synced_0 = rinc_synced_1 ? rinc_synced_1 : rinc;
+            assign wrst_n_synced_0 = wrst_n_synced_1 ? wrst_n_synced_1 : wrst_n;
+            assign rrst_n_synced_0 = rrst_n_synced_1 ? rrst_n_synced_1 : rrst_n;
+
+            always @(posedge wclk or negedge wrst_n) begin
+                if (!wrst_n)
+                    winc_synced_1 <= 1'b0;
+                else
+                    winc_synced_1 <= winc_synced_0;
+            end
+
+            always @(posedge rclk or negedge rrst_n) begin
+                if (!rrst_n)
+                    rinc_synced_1 <= 1'b0;
+                else
+                    rinc_synced_1 <= rinc_synced_0;
+            end
+
+            always @(posedge wclk or negedge wrst_n) begin
+                if (!wrst_n)
+                    wrst_n_synced_1 <= 1'b1;
+                else
+                    wrst_n_synced_1 <= wrst_n_synced_0;
+            end
+
+            always @(posedge rclk or negedge rrst_n) begin
+                if (!rrst_n)
+                    rrst_n_synced_1 <= 1'b1;
+                else
+                    rrst_n_synced_1 <= rrst_n_synced_0;
+            end
+        end
+    endgenerate
+
+    assign winc_synced = winc_synced[SYNC_STAGES-1];
+    assign rinc_synced = rinc_synced[SYNC_STAGES-1];
+    assign wrst_n_synced = wrst_n_synced[SYNC_STAGES-1];
+    assign rrst_n_synced = rrst_n_synced[SYNC_STAGES-1];
+
+    // Write logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= '0;
+            wcount <= '0;
+            wdata_reg <= '0;
+            waddr_reg <= '0;
+            wfull <= 1'b0;
+        end else begin
+            if (winc_synced) begin
+                if (wcount == FULL_THRESHOLD) begin
+                    wfull <= 1'b1;
+                end else begin
+                    wfull <= 1'b0;
+                    wptr <= wptr + 1'b1;
+                    wcount <= wcount + 1'b1;
+                    wdata_reg <= wdata;
+                    waddr_reg <= wptr;
+                end
+            end else begin
+                wfull <= 1'b0;
+            end
+        end
+    end
+
+    // Read logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= '0;
+            rcount <= '0;
+            rdata_reg <= '0;
+            raddr_reg <= '0;
+            rempty <= 1'b1;
+        end else begin
+            if (rinc_synced) begin
+                if (rcount == EMPTY_THRESHOLD) begin
+                    rempty <= 1'b1;
+                end else begin
+                    rempty <= 1'b0;
+                    rptr <= rptr + 1'b1;
+                    rcount <= rcount - 1'b1;
+                    rdata_reg <= wdata_reg;
+                    raddr_reg <= rptr;
+                end
+            end else begin
+                rempty <= 1'b0;
+            end
+        end
+    end
+
+    // Output assignments
+    assign waddr = waddr_reg;
+    assign rdata = rdata_reg;
+    assign raddr = raddr_reg;
+
+    // Full/Empty flags
+    assign wfull = (wcount == FULL_THRESHOLD);
+    assign rempty = (rcount == EMPTY_THRESHOLD);
+
+endmodule
+```<|im_end|>

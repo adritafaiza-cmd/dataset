@@ -1,0 +1,182 @@
+```verilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // CDC Compliance: Use a dedicated register for the reset signal to ensure
+  // synchronous release across the clock domain. This prevents metastability
+  // issues when the reset is de-asserted asynchronously relative to pclk_i.
+  logic reset_reg;
+
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni)
+      reset_reg <= 1'b1;
+    else
+      reset_reg <= 1'b0;
+  end
+
+  // CDC Compliance: Use a dedicated register for the address input to ensure
+  // synchronous sampling of the address before it is used for register indexing.
+  logic [ApbAddrWidth-1:0] addr_reg;
+
+  always_ff @(posedge pclk_i) begin
+    if (!reset_reg)
+      addr_reg <= '0;
+    else
+      addr_reg <= base_addr_i;
+  end
+
+  // CDC Compliance: Use a dedicated register for the request signal to ensure
+  // synchronous sampling of the request before it is used for control logic.
+  logic req_reg;
+
+  always_ff @(posedge pclk_i) begin
+    if (!reset_reg)
+      req_reg <= 1'b0;
+    else
+      req_reg <= req_i;
+  end
+
+  // Internal logic to determine which register is being accessed
+  // and whether it is a read or write operation.
+  logic [NoApbRegs-1:0] active_reg_idx;
+  logic is_read;
+  logic is_write;
+  logic valid_req;
+
+  always_comb begin
+    valid_req = 1'b0;
+    is_read = 1'b0;
+    is_write = 1'b0;
+    active_reg_idx = '0;
+
+    if (reset_reg) begin
+      // Check if the address falls within the range of our registers
+      // Address must be >= base_addr and (Address - base_addr) % AddrOffset == 0
+      // Since base_addr_i is an input, we assume it is valid and aligned.
+      // We calculate the offset from base_addr_i.
+      logic [ApbAddrWidth-1:0] addr_offset;
+      addr_offset = addr_reg - base_addr_i;
+      
+      // Check if offset is non-negative and divisible by AddrOffset
+      // Note: This assumes AddrOffset > 0. If AddrOffset is 0, no registers are mapped.
+      if (NoApbRegs > 0 && AddrOffset > 0) begin
+        if (addr_offset >= 0 && (addr_offset % AddrOffset) == 0) begin
+          logic [ApbAddrWidth-1:0] reg_idx_offset = addr_offset / AddrOffset;
+          
+          if (reg_idx_offset < NoApbRegs) begin
+            active_reg_idx = reg_idx_offset;
+            valid_req = 1'b1;
+            
+            // Determine if the request is a read or write based on req_i
+            // Assuming req_i has a .read or .write property or similar structure.
+            // Since req_t is a parameter type, we assume it has a .read member for reads
+            // and a .write member for writes, or similar standard APB-like structure.
+            // If req_i is a simple logic, this would need specific bit checking.
+            // Given the generic nature, we assume req_i is a struct or union with .read/.write.
+            // If req_i is just logic, we cannot distinguish read/write without more info.
+            // However, standard APB uses PSEL and PENABLE. 
+            // Let's assume req_i is a struct with .read and .write members for clarity,
+            // or if it's a single bit, we assume 1=read, 0=write (or vice versa).
+            // To be safe and generic for "req_t", we will assume it has a .read member.
+            // If req_t is logic, this code will fail to compile unless logic has .read.
+            // Given the prompt says "req_i / resp_o use the APB request and response types",
+            // we assume standard APB-like structure where req_i indicates the operation.
+            // Let's assume req_i is a struct with .read and .write.
+            // If req_i is a single bit, we can't know. 
+            // Let's assume the most common case: req_i is a struct with .read and .write.
+            // If the user passes a single bit, they should define it as such.
+            // For this implementation, we assume req_i has a .read member.
+            
+            if (req_i.read)
+              is_read = 1'b1;
+            else if (req_i.write)
+              is_write = 1'b1;
+          end
+        end
+      end
+    end
+  end
+
+  // Register array storage
+  reg_data_t [NoApbRegs-1:0] reg_storage;
+
+  // Initialize registers on reset
+  always_ff @(posedge pclk_i) begin
+    if (!reset_reg) begin
+      reg_storage <= reg_init_i;
+    end
+  end
+
+  // Output register data
+  always_comb begin
+    if (NoApbRegs > 0) begin
+      reg_q_o <= reg_storage;
+    end else begin
+      reg_q_o <= '0;
+    end
+  end
+
+  // Write logic: Only update if it's a write request and the register is not read-only
+  always_ff @(posedge pclk_i) begin
+    if (!reset_reg) begin
+      // On reset, restore initial values
+      reg_storage <= reg_init_i;
+    end else if (valid_req && is_write && (ReadOnly[active_reg_idx] == 1'b0)) begin
+      // Update the specific register
+      reg_storage[active_reg_idx] <= req_i.write_data;
+    end
+  end
+
+  // Response logic
+  always_comb begin
+    resp_o = 1'b0; // Default: OKAY (assuming 0 is okay, 1 is fault, or vice versa)
+                   // Standard APB: PRESP[1:0] = 2'b00 (OKAY), 2'b01 (DECERR), 2'b10 (SLVERR), 2'b11 (RESERVED)
+                   // Assuming resp_t is a single bit or small vector. 
+                   // If resp_t is logic, let's assume 0=OKAY, 1=ERROR.
+                   // If resp_t is a struct, we need to set the appropriate field.
+                   // Given the generic type, we assume resp_t is a bit or small vector.
+                   // Let's assume 0 is OKAY.
+    resp_o = 1'b0;
+
+    if (valid_req) begin
+      if (is_read) begin
+        // Read response is always OKAY unless address is invalid (handled by valid_req check)
+        resp_o = 1'b0; 
+      end else if (is_write) begin
+        if (ReadOnly[active_reg_idx]) begin
+          // Write to read-only register -> SLVERR (or similar error)
+          // Assuming 1 indicates an error for simplicity if resp_t is bit
+          // Or if resp_t is a struct, set .resp to error.
+          // Since we don't know the exact structure of resp_t, we assume a single bit for error indication
+          // or a standard APB response encoding if resp_t is a vector.
+          // Let's assume resp_t is a bit where 0=OKAY, 1=ERROR.
+          resp_o = 1'b1;
+        end else begin
+          // Write to writable register -> OKAY
+          resp_o = 1'b0;
+        end
+      end
+    end
+  end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

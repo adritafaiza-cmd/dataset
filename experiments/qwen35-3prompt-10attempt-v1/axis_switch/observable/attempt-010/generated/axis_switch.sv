@@ -1,0 +1,225 @@
+```verilog
+`timescale 1ns/1ps
+
+module axis_switch #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter S_ID_WIDTH = 8,
+    parameter M_ID_WIDTH = S_ID_WIDTH+$clog2(S_COUNT),
+    parameter M_DEST_WIDTH = 1,
+    parameter S_DEST_WIDTH = M_DEST_WIDTH+$clog2(M_COUNT),
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter M_BASE = 0,
+    parameter M_TOP = 0,
+    parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
+    parameter UPDATE_TID = 0,
+    parameter S_REG_TYPE = 0,
+    parameter M_REG_TYPE = 2,
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 1
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    input  wire [S_COUNT*DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [S_COUNT*KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire [S_COUNT-1:0]               s_axis_tvalid,
+    output wire [S_COUNT-1:0]               s_axis_tready,
+    input  wire [S_COUNT-1:0]               s_axis_tlast,
+    input  wire [S_COUNT*S_ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [S_COUNT*USER_WIDTH-1:0]    s_axis_tuser,
+    output wire [M_COUNT*DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [M_COUNT*KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire [M_COUNT-1:0]               m_axis_tvalid,
+    input  wire [M_COUNT-1:0]               m_axis_tready,
+    output wire [M_COUNT-1:0]               m_axis_tlast,
+    output wire [M_COUNT*M_ID_WIDTH-1:0]    m_axis_tid,
+    output wire [M_COUNT*M_DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [M_COUNT*USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    // Internal parameters for arbitration
+    localparam ARB_WIDTH = $clog2(S_COUNT);
+    localparam ARB_STATE_WIDTH = $clog2(S_COUNT + 1);
+    localparam ARB_STATE_IDLE = 0;
+    localparam ARB_STATE_BUSY = 1;
+
+    // State registers for Round Robin
+    reg [ARB_STATE_WIDTH-1:0] arb_state;
+    reg [ARB_WIDTH-1:0] arb_next_idx;
+    reg [ARB_WIDTH-1:0] arb_current_idx;
+    reg [ARB_WIDTH-1:0] arb_last_idx;
+
+    // Input buffers to handle backpressure and packet boundaries
+    reg [S_COUNT-1:0] s_axis_tvalid_reg;
+    reg [S_COUNT-1:0] s_axis_tdata_reg;
+    reg [S_COUNT-1:0] s_axis_tkeep_reg;
+    reg [S_COUNT-1:0] s_axis_tlast_reg;
+    reg [S_COUNT-1:0] s_axis_tid_reg;
+    reg [S_COUNT-1:0] s_axis_tdest_reg;
+    reg [S_COUNT-1:0] s_axis_tuser_reg;
+    reg [S_COUNT-1:0] s_axis_tready_reg;
+
+    // Output buffers
+    reg [M_COUNT-1:0] m_axis_tvalid_reg;
+    reg [M_COUNT-1:0] m_axis_tdata_reg;
+    reg [M_COUNT-1:0] m_axis_tkeep_reg;
+    reg [M_COUNT-1:0] m_axis_tlast_reg;
+    reg [M_COUNT-1:0] m_axis_tid_reg;
+    reg [M_COUNT-1:0] m_axis_tdest_reg;
+    reg [M_COUNT-1:0] m_axis_tuser_reg;
+    reg [M_COUNT-1:0] m_axis_tready_reg;
+
+    // Arbitration logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            arb_state <= ARB_STATE_IDLE;
+            arb_next_idx <= 0;
+            arb_current_idx <= 0;
+            arb_last_idx <= 0;
+        end else begin
+            if (arb_state == ARB_STATE_IDLE) begin
+                // Find first valid input
+                arb_next_idx <= 0;
+                for (integer i = 0; i < S_COUNT; i = i + 1) begin
+                    if (s_axis_tvalid[i]) begin
+                        arb_next_idx <= i;
+                        break;
+                    end
+                end
+                if (arb_next_idx == 0) begin
+                    arb_state <= ARB_STATE_IDLE;
+                end else begin
+                    arb_state <= ARB_STATE_BUSY;
+                    arb_current_idx <= arb_next_idx;
+                    arb_last_idx <= arb_next_idx;
+                end
+            end else begin
+                // Round Robin
+                arb_current_idx <= arb_next_idx;
+                arb_last_idx <= arb_current_idx;
+                // Update next index for next cycle
+                arb_next_idx <= arb_last_idx + 1;
+                if (arb_next_idx >= S_COUNT) begin
+                    arb_next_idx <= 0;
+                end
+            end
+        end
+    end
+
+    // Input buffering logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            s_axis_tvalid_reg <= 0;
+            s_axis_tdata_reg <= 0;
+            s_axis_tkeep_reg <= 0;
+            s_axis_tlast_reg <= 0;
+            s_axis_tid_reg <= 0;
+            s_axis_tdest_reg <= 0;
+            s_axis_tuser_reg <= 0;
+            s_axis_tready_reg <= 0;
+        end else begin
+            for (integer i = 0; i < S_COUNT; i = i + 1) begin
+                s_axis_tvalid_reg[i] <= s_axis_tvalid[i];
+                s_axis_tdata_reg[i] <= s_axis_tdata[i];
+                s_axis_tkeep_reg[i] <= s_axis_tkeep[i];
+                s_axis_tlast_reg[i] <= s_axis_tlast[i];
+                s_axis_tid_reg[i] <= s_axis_tid[i];
+                s_axis_tdest_reg[i] <= s_axis_tdest[i];
+                s_axis_tuser_reg[i] <= s_axis_tuser[i];
+                s_axis_tready_reg[i] <= 1'b1; // Default ready
+            end
+        end
+    end
+
+    // Output buffering logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            m_axis_tvalid_reg <= 0;
+            m_axis_tdata_reg <= 0;
+            m_axis_tkeep_reg <= 0;
+            m_axis_tlast_reg <= 0;
+            m_axis_tid_reg <= 0;
+            m_axis_tdest_reg <= 0;
+            m_axis_tuser_reg <= 0;
+            m_axis_tready_reg <= 0;
+        end else begin
+            for (integer i = 0; i < M_COUNT; i = i + 1) begin
+                m_axis_tvalid_reg[i] <= m_axis_tvalid[i];
+                m_axis_tdata_reg[i] <= m_axis_tdata[i];
+                m_axis_tkeep_reg[i] <= m_axis_tkeep[i];
+                m_axis_tlast_reg[i] <= m_axis_tlast[i];
+                m_axis_tid_reg[i] <= m_axis_tid[i];
+                m_axis_tdest_reg[i] <= m_axis_tdest[i];
+                m_axis_tuser_reg[i] <= m_axis_tuser[i];
+                m_axis_tready_reg[i] <= 1'b1; // Default ready
+            end
+        end
+    end
+
+    // Main logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            m_axis_tvalid <= 0;
+            m_axis_tdata <= 0;
+            m_axis_tkeep <= 0;
+            m_axis_tlast <= 0;
+            m_axis_tid <= 0;
+            m_axis_tdest <= 0;
+            m_axis_tuser <= 0;
+            s_axis_tready <= 0;
+        end else begin
+            // Determine which input to forward
+            wire [S_COUNT-1:0] selected_input = {S_COUNT{1'b0}};
+            if (arb_state == ARB_STATE_BUSY) begin
+                selected_input[arb_current_idx] = 1'b1;
+            end
+
+            // Update input ready signals
+            for (integer i = 0; i < S_COUNT; i = i + 1) begin
+                if (selected_input[i] == 1'b1) begin
+                    s_axis_tready[i] <= m_axis_tready[i];
+                end else begin
+                    s_axis_tready[i] <= 1'b1;
+                end
+            end
+
+            // Update output valid signals
+            for (integer i = 0; i < M_COUNT; i = i + 1) begin
+                if (selected_input[i] == 1'b1) begin
+                    m_axis_tvalid[i] <= s_axis_tvalid[i];
+                end else begin
+                    m_axis_tvalid[i] <= 1'b0;
+                end
+            end
+
+            // Update output data signals
+            for (integer i = 0; i < M_COUNT; i = i + 1) begin
+                if (selected_input[i] == 1'b1) begin
+                    m_axis_tdata[i] <= s_axis_tdata[i];
+                    m_axis_tkeep[i] <= s_axis_tkeep[i];
+                    m_axis_tlast[i] <= s_axis_tlast[i];
+                    m_axis_tid[i] <= s_axis_tid[i];
+                    m_axis_tdest[i] <= s_axis_tdest[i];
+                    m_axis_tuser[i] <= s_axis_tuser[i];
+                end else begin
+                    m_axis_tdata[i] <= 0;
+                    m_axis_tkeep[i] <= 0;
+                    m_axis_tlast[i] <= 0;
+                    m_axis_tid[i] <= 0;
+                    m_axis_tdest[i] <= 0;
+                    m_axis_tuser[i] <= 0;
+                end
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

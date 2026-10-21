@@ -1,0 +1,392 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ------------------------------------------------------------------
+    // Internal Signals
+    // ------------------------------------------------------------------
+    wire s_aw_valid, s_w_valid, s_ar_valid, s_r_valid;
+    wire s_aw_ready, s_w_ready, s_ar_ready, s_r_ready;
+    wire m_aw_valid, m_w_valid, m_ar_valid, m_r_valid;
+    wire m_aw_ready, m_w_ready, m_ar_ready, m_r_ready;
+    
+    reg [ADDR_WIDTH-1:0] s_aw_addr, s_ar_addr;
+    reg [2:0] s_aw_prot, s_ar_prot;
+    reg [DATA_WIDTH-1:0] s_w_data, s_w_strb;
+    reg [DATA_WIDTH-1:0] s_r_data;
+    reg [1:0] s_b_resp, s_r_resp;
+    
+    reg m_aw_addr, m_ar_addr;
+    reg [2:0] m_aw_prot, m_ar_prot;
+    reg [DATA_WIDTH-1:0] m_w_data, m_w_strb;
+    reg [DATA_WIDTH-1:0] m_r_data;
+    reg [1:0] m_b_resp, m_r_resp;
+
+    // CDC Registers for Write Channel (Slave -> Master)
+    reg s_w_state; // 0: Idle, 1: Data Captured, 2: Forwarding
+    reg s_w_valid_reg;
+    reg [DATA_WIDTH-1:0] s_w_data_reg;
+    reg [STRB_WIDTH-1:0] s_w_strb_reg;
+    reg s_w_ready_reg;
+    
+    // CDC Registers for Read Channel (Slave -> Master)
+    reg s_r_state; // 0: Idle, 1: Addr Captured, 2: Data Captured, 3: Forwarding
+    reg s_r_valid_reg;
+    reg [ADDR_WIDTH-1:0] s_r_addr_reg;
+    reg [DATA_WIDTH-1:0] s_r_data_reg;
+    reg [1:0] s_r_resp_reg;
+    reg s_r_ready_reg;
+    
+    // CDC Registers for Write Response (Master -> Slave)
+    reg m_b_state; // 0: Idle, 1: Resp Captured, 2: Forwarding
+    reg m_b_valid_reg;
+    reg [1:0] m_b_resp_reg;
+    reg m_b_ready_reg;
+    
+    // CDC Registers for Read Response (Master -> Slave)
+    reg m_r_state; // 0: Idle, 1: Data Captured, 2: Forwarding
+    reg m_r_valid_reg;
+    reg [DATA_WIDTH-1:0] m_r_data_reg;
+    reg [1:0] m_r_resp_reg;
+    reg m_r_ready_reg;
+
+    // ------------------------------------------------------------------
+    // Write Channel: Slave (s) -> Master (m)
+    // ------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_w_state <= 0;
+            s_w_valid_reg <= 0;
+            s_w_ready_reg <= 0;
+            s_w_data_reg <= 0;
+            s_w_strb_reg <= 0;
+        end else begin
+            case (s_w_state)
+                0: begin // Idle
+                    if (s_axil_wvalid && s_axil_wready) begin
+                        s_w_state <= 1;
+                        s_w_valid_reg <= 1;
+                        s_w_data_reg <= s_axil_wdata;
+                        s_w_strb_reg <= s_axil_wstrb;
+                        s_w_ready_reg <= 0;
+                    end else begin
+                        s_w_ready_reg <= s_axil_wready;
+                    end
+                end
+                1: begin // Data Captured
+                    if (s_w_ready_reg) begin
+                        s_w_state <= 2;
+                        s_w_valid_reg <= 1;
+                        s_w_ready_reg <= 0;
+                    end else begin
+                        s_w_ready_reg <= s_axil_wready;
+                    end
+                end
+                2: begin // Forwarding
+                    s_w_valid_reg <= 1;
+                    s_w_ready_reg <= s_axil_wready;
+                    if (m_axil_wready) begin
+                        s_w_state <= 0;
+                        s_w_valid_reg <= 0;
+                        s_w_ready_reg <= 0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    assign s_axil_wready = s_w_ready_reg;
+    assign s_axil_wdata = s_w_data_reg;
+    assign s_axil_wstrb = s_w_strb_reg;
+    assign s_axil_wvalid = s_w_valid_reg;
+    
+    assign m_axil_wdata = s_w_data_reg;
+    assign m_axil_wstrb = s_w_strb_reg;
+    assign m_axil_wvalid = s_w_valid_reg;
+    assign m_axil_wready = m_axil_wready;
+
+    // ------------------------------------------------------------------
+    // Write Response: Master (m) -> Slave (s)
+    // ------------------------------------------------------------------
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_b_state <= 0;
+            m_b_valid_reg <= 0;
+            m_b_ready_reg <= 0;
+            m_b_resp_reg <= 0;
+        end else begin
+            case (m_b_state)
+                0: begin // Idle
+                    if (m_axil_bvalid && m_axil_bready) begin
+                        m_b_state <= 1;
+                        m_b_valid_reg <= 1;
+                        m_b_resp_reg <= m_axil_bresp;
+                        m_b_ready_reg <= 0;
+                    end else begin
+                        m_b_ready_reg <= m_axil_bready;
+                    end
+                end
+                1: begin // Resp Captured
+                    if (m_b_ready_reg) begin
+                        m_b_state <= 2;
+                        m_b_valid_reg <= 1;
+                        m_b_ready_reg <= 0;
+                    end else begin
+                        m_b_ready_reg <= m_axil_bready;
+                    end
+                end
+                2: begin // Forwarding
+                    m_b_valid_reg <= 1;
+                    m_b_ready_reg <= m_axil_bready;
+                    if (s_axil_bready) begin
+                        m_b_state <= 0;
+                        m_b_valid_reg <= 0;
+                        m_b_ready_reg <= 0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    assign s_axil_bresp = m_b_resp_reg;
+    assign s_axil_bvalid = m_b_valid_reg;
+    assign s_axil_bready = m_b_ready_reg;
+    
+    assign m_axil_bready = s_axil_bready;
+    assign m_axil_bresp = m_axil_bresp;
+
+    // ------------------------------------------------------------------
+    // Read Channel: Slave (s) -> Master (m)
+    // ------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_r_state <= 0;
+            s_r_valid_reg <= 0;
+            s_r_addr_reg <= 0;
+            s_r_data_reg <= 0;
+            s_r_resp_reg <= 0;
+            s_r_ready_reg <= 0;
+        end else begin
+            case (s_r_state)
+                0: begin // Idle
+                    if (s_axil_arvalid && s_axil_arready) begin
+                        s_r_state <= 1;
+                        s_r_valid_reg <= 1;
+                        s_r_addr_reg <= s_axil_araddr;
+                        s_r_data_reg <= 0;
+                        s_r_resp_reg <= 0;
+                        s_r_ready_reg <= 0;
+                    end else begin
+                        s_r_ready_reg <= s_axil_arready;
+                    end
+                end
+                1: begin // Addr Captured
+                    if (s_r_ready_reg) begin
+                        s_r_state <= 2;
+                        s_r_valid_reg <= 1;
+                        s_r_ready_reg <= 0;
+                    end else begin
+                        s_r_ready_reg <= s_axil_arready;
+                    end
+                end
+                2: begin // Data Captured
+                    if (s_axil_rvalid && s_axil_rready) begin
+                        s_r_state <= 3;
+                        s_r_valid_reg <= 1;
+                        s_r_data_reg <= s_axil_rdata;
+                        s_r_resp_reg <= s_axil_rresp;
+                        s_r_ready_reg <= 0;
+                    end else begin
+                        s_r_ready_reg <= s_axil_rready;
+                    end
+                end
+                3: begin // Forwarding
+                    s_r_valid_reg <= 1;
+                    s_r_ready_reg <= s_axil_rready;
+                    if (m_axil_rready) begin
+                        s_r_state <= 0;
+                        s_r_valid_reg <= 0;
+                        s_r_ready_reg <= 0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    assign s_axil_arready = s_r_ready_reg;
+    assign s_axil_araddr = s_r_addr_reg;
+    assign s_axil_arprot = s_axil_arprot; // Pass through
+    assign s_axil_arvalid = s_r_valid_reg;
+    
+    assign m_axil_araddr = s_r_addr_reg;
+    assign m_axil_arprot = s_axil_arprot;
+    assign m_axil_arvalid = s_r_valid_reg;
+    assign m_axil_arready = m_axil_arready;
+
+    // ------------------------------------------------------------------
+    // Read Response: Master (m) -> Slave (s)
+    // ------------------------------------------------------------------
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_r_state <= 0;
+            m_r_valid_reg <= 0;
+            m_r_data_reg <= 0;
+            m_r_resp_reg <= 0;
+            m_r_ready_reg <= 0;
+        end else begin
+            case (m_r_state)
+                0: begin // Idle
+                    if (m_axil_rvalid && m_axil_rready) begin
+                        m_r_state <= 1;
+                        m_r_valid_reg <= 1;
+                        m_r_data_reg <= m_axil_rdata;
+                        m_r_resp_reg <= m_axil_rresp;
+                        m_r_ready_reg <= 0;
+                    end else begin
+                        m_r_ready_reg <= m_axil_rready;
+                    end
+                end
+                1: begin // Data Captured
+                    if (m_r_ready_reg) begin
+                        m_r_state <= 2;
+                        m_r_valid_reg <= 1;
+                        m_r_ready_reg <= 0;
+                    end else begin
+                        m_r_ready_reg <= m_axil_rready;
+                    end
+                end
+                2: begin // Forwarding
+                    m_r_valid_reg <= 1;
+                    m_r_ready_reg <= m_axil_rready;
+                    if (s_axil_rready) begin
+                        m_r_state <= 0;
+                        m_r_valid_reg <= 0;
+                        m_r_ready_reg <= 0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    assign s_axil_rdata = m_r_data_reg;
+    assign s_axil_rresp = m_r_resp_reg;
+    assign s_axil_rvalid = m_r_valid_reg;
+    assign s_axil_rready = m_r_ready_reg;
+    
+    assign m_axil_rdata = s_axil_rdata;
+    assign m_axil_rresp = s_axil_rresp;
+    assign m_axil_rvalid = s_axil_rvalid;
+    assign m_axil_rready = s_axil_rready;
+
+    // ------------------------------------------------------------------
+    // Address Channel: Slave (s) -> Master (m)
+    // ------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_aw_addr <= 0;
+            s_aw_prot <= 0;
+            s_ar_addr <= 0;
+            s_ar_prot <= 0;
+            s_aw_valid_reg <= 0;
+            s_ar_valid_reg <= 0;
+            s_aw_ready_reg <= 0;
+            s_ar_ready_reg <= 0;
+        end else begin
+            // Write Address
+            if (s_axil_awvalid && s_axil_awready) begin
+                s_aw_addr <= s_axil_awaddr;
+                s_aw_prot <= s_axil_awprot;
+                s_aw_valid_reg <= 1;
+                s_aw_ready_reg <= 0;
+            end else begin
+                s_aw_ready_reg <= s_axil_awready;
+            end
+            
+            // Read Address
+            if (s_axil_arvalid && s_axil_arready) begin
+                s_ar_addr <= s_axil_araddr;
+                s_ar_prot <= s_axil_arprot;
+                s_ar_valid_reg <= 1;
+                s_ar_ready_reg <= 0;
+            end else begin
+                s_ar_ready_reg <= s_axil_arready;
+            end
+        end
+    end
+
+    assign s_axil_awready = s_aw_ready_reg;
+    assign s_axil_awaddr = s_aw_addr;
+    assign s_axil_awprot = s_aw_prot;
+    assign s_axil_awvalid = s_aw_valid_reg;
+    
+    assign m_axil_awaddr = s_aw_addr;
+    assign m_axil_awprot = s_aw_prot;
+    assign m_axil_awvalid = s_aw_valid_reg;
+    assign m_axil_awready = m_axil_awready;
+
+    assign s_axil_arready = s_ar_ready_reg;
+    assign s_axil_araddr = s_ar_addr;
+    assign s_axil_arprot = s_ar_prot;
+    assign s_axil_arvalid = s_ar_valid_reg;
+    
+    assign m_axil_araddr = s_ar_addr;
+    assign m_axil_arprot = s_ar_prot;
+    assign m_axil_arvalid = s_ar_valid_reg;
+    assign m_axil_arready = m_axil_arready;
+
+endmodule
+```<|im_end|>

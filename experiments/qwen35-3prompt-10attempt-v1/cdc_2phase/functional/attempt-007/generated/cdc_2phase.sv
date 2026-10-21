@@ -1,0 +1,90 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain state machine
+  // State: IDLE or BUSY
+  localparam IDLE = 1'b0;
+  localparam BUSY = 1'b1;
+
+  reg src_state;
+  reg [WIDTH-1:0] src_data_reg;
+
+  // Destination domain state machine
+  // State: IDLE or BUSY
+  localparam DST_IDLE = 1'b0;
+  localparam DST_BUSY = 1'b1;
+
+  reg dst_state;
+  reg [WIDTH-1:0] dst_data_reg;
+
+  // ---------------------------------------------------------
+  // Source Domain Logic
+  // ---------------------------------------------------------
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_state      <= IDLE;
+      src_data_reg   <= 0;
+      src_ready_o    <= 1'b1; // Ready by default when idle
+    end else begin
+      case (src_state)
+        IDLE: begin
+          if (src_valid_i) begin
+            src_state      <= BUSY;
+            src_data_reg   <= src_data_i;
+            src_ready_o    <= 1'b0; // Not ready until transfer completes
+          end else begin
+            src_ready_o    <= 1'b1; // Ready if valid is low
+          end
+        end
+        BUSY: begin
+          src_ready_o    <= 1'b1; // Ready to accept next item
+          // State remains BUSY until destination acknowledges
+        end
+      endcase
+    end
+  end
+
+  // ---------------------------------------------------------
+  // Destination Domain Logic
+  // ---------------------------------------------------------
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_state       <= DST_IDLE;
+      dst_data_reg    <= 0;
+      dst_valid_o     <= 1'b0;
+    end else begin
+      case (dst_state)
+        DST_IDLE: begin
+          if (src_valid_i && src_ready_o) begin
+            dst_state       <= DST_BUSY;
+            dst_data_reg    <= src_data_reg;
+            dst_valid_o     <= 1'b1;
+          end else begin
+            dst_valid_o     <= 1'b0;
+          end
+        end
+        DST_BUSY: begin
+          if (dst_ready_i) begin
+            dst_state       <= DST_IDLE;
+            dst_valid_o     <= 1'b0;
+          end else begin
+            // Hold data and valid stable
+          end
+        end
+      endcase
+    end
+  end
+
+endmodule<|im_end|>

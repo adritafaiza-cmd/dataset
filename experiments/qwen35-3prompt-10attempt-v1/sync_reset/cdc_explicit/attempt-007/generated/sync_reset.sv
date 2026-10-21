@@ -1,0 +1,22 @@
+module sync_reset #
+(
+    parameter N = 2
+)
+(
+    input  wire clk,
+    input  wire rst,
+    output wire out
+);
+
+    reg [N-1:0] sync_cnt;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst)
+            sync_cnt <= 0;
+        else
+            sync_cnt <= sync_cnt + 1;
+    end
+
+    assign out = (sync_cnt >= N);
+
+endmodule<|im_end|>

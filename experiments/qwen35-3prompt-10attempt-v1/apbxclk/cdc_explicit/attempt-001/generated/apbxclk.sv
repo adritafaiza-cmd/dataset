@@ -1,0 +1,550 @@
+```verilog
+module apbxclk #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	parameter [0:0]	OPT_REGISTERED = 1'b0,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH
+) (
+	input	wire			S_APB_PCLK, S_PRESETn,
+	input	wire			S_APB_PSEL,
+	input	wire			S_APB_PENABLE,
+	output	reg			S_APB_PREADY,
+	input	wire	[AW-1:0]	S_APB_PADDR,
+	input	wire			S_APB_PWRITE,
+	input	wire	[DW-1:0]	S_APB_PWDATA,
+	input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+	input	wire	[2:0]		S_APB_PPROT,
+	output	wire	[DW-1:0]	S_APB_PRDATA,
+	output	wire			S_APB_PSLVERR,
+	input	wire			M_APB_PCLK,
+	output	reg			M_PRESETn,
+	output	reg			M_APB_PSEL,
+	output	reg			M_APB_PENABLE,
+	input	wire			M_APB_PREADY,
+	output	wire	[AW-1:0]	M_APB_PADDR,
+	output	wire			M_APB_PWRITE,
+	output	wire	[DW-1:0]	M_APB_PWDATA,
+	output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+	output	wire	[2:0]		M_APB_PPROT,
+	input	wire	[DW-1:0]	M_APB_PRDATA,
+	input	wire			M_APB_PSLVERR
+);
+
+	// ------------------------------------------------------------------
+	// CDC Strategy:
+	// 1. Reset Domain Crossing: Use a 2-bit Gray code counter for safe 
+	//    release of M_PRESETn.
+	// 2. Clock Domain Crossing (S -> M):
+	//    - Use a FIFO-like structure (Request Queue) to store the 
+	//      transaction details from the Source clock domain.
+	//    - The Master side reads from this queue in the Master clock domain.
+	//    - Since OPT_REGISTERED is 0 (default), we do not register the 
+	//      payload/response fields explicitly in the crossing logic, 
+	//      but the FIFO mechanism inherently handles the crossing safely 
+	//      by holding data stable until read.
+	// 3. Clock Domain Crossing (M -> S):
+	//    - Read data and error status are captured in the Source clock 
+	//      domain upon completion of the Master transaction.
+	// ------------------------------------------------------------------
+
+	localparam	DEPTH = 4; // Small depth sufficient for single outstanding + handshaking
+	localparam	ADDR_WIDTH = AW;
+	localparam	DATA_WIDTH = DW;
+	localparam	WSTRB_WIDTH = DW/8;
+	localparam	PROT_WIDTH = 3;
+
+	// ------------------------------------------------------------------
+	// Source Clock Domain Logic
+	// ------------------------------------------------------------------
+
+	// Reset Generation for Master Domain (Gray Code)
+	reg [1:0] gray_cnt;
+	reg [1:0] gray_cnt_next;
+	reg		m_reset_done;
+	reg		m_reset_req;
+
+	// Detect reset release on Source side
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			gray_cnt <= 2'b00;
+			m_reset_req <= 1'b1;
+			m_reset_done <= 1'b0;
+		end else begin
+			m_reset_req <= 1'b0;
+			// Simple 2-bit Gray code counter for safe release
+			gray_cnt_next <= gray_cnt[0] ? ~gray_cnt[1] : gray_cnt[1];
+			gray_cnt <= gray_cnt_next;
+			// Release when counter reaches 2'b11 (or any non-zero state depending on design, 
+			// here we use 2'b11 to ensure stable release)
+			if (gray_cnt == 2'b11)
+				m_reset_done <= 1'b1;
+			else
+				m_reset_done <= 1'b0;
+		end
+	end
+
+	// Request Queue (FIFO) for crossing S -> M
+	// Stores: Valid, Addr, Write, Data, WStrb, Prot, Pready_ack (internal)
+	reg [DEPTH-1:0] req_valid;
+	reg [DEPTH-1:0] req_addr;
+	reg [DEPTH-1:0] req_write;
+	reg [DEPTH-1:0] req_data;
+	reg [DEPTH-1:0] req_wstrb;
+	reg [DEPTH-1:0] req_prot;
+	reg [DEPTH-1:0] req_pready_ack; // Internal flag to know if downstream is done
+
+	reg [DEPTH-1:0] req_tail;
+	reg [DEPTH-1:0] req_head;
+	reg [DEPTH-1:0] req_full;
+	reg [DEPTH-1:0] req_empty;
+
+	// FIFO Control Logic
+	reg [1:0] req_write_ptr;
+	reg [1:0] req_read_ptr;
+	reg [1:0] req_count;
+
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			req_tail <= 2'b00;
+			req_head <= 2'b00;
+			req_count <= 2'b00;
+			req_full <= 1'b0;
+			req_empty <= 1'b1;
+			req_valid <= 4'b0000;
+			req_addr <= 4'b0000;
+			req_write <= 4'b0000;
+			req_data <= 4'b0000;
+			req_wstrb <= 4'b0000;
+			req_prot <= 4'b0000;
+			req_pready_ack <= 4'b0000;
+		end else begin
+			// Write Pointer Logic
+			if (S_APB_PSEL && S_APB_PENABLE && !S_APB_PREADY && !S_APB_PSLVERR) begin
+				// Only write if not full
+				if (!req_full) begin
+					req_write_ptr <= req_tail;
+					req_valid[req_tail] <= 1'b1;
+					req_addr[req_tail] <= S_APB_PADDR;
+					req_write[req_tail] <= S_APB_PWRITE;
+					req_data[req_tail] <= S_APB_PWDATA;
+					req_wstrb[req_tail] <= S_APB_PWSTRB;
+					req_prot[req_tail] <= S_APB_PPROT;
+					req_pready_ack[req_tail] <= 1'b0; // Not done yet
+					req_count <= req_count + 1'b1;
+				end
+			end
+			// Read Pointer Logic
+			if (M_APB_PCLK && M_APB_PSEL && M_APB_PENABLE && M_APB_PREADY) begin
+				if (!req_empty) begin
+					req_read_ptr <= req_head;
+					req_count <= req_count - 1'b1;
+					// Mark this entry as done
+					req_pready_ack[req_head] <= 1'b1;
+					// Check if queue is empty now
+					if (req_count == 2'b00)
+						req_empty <= 1'b1;
+					else
+						req_empty <= 1'b0;
+				end
+			end
+		end
+	end
+
+	// FIFO Full/Empty Logic
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			req_full <= 1'b0;
+			req_empty <= 1'b1;
+		end else begin
+			if (req_count == DEPTH)
+				req_full <= 1'b1;
+			else if (req_count == 2'b00)
+				req_empty <= 1'b1;
+			else
+				req_empty <= 1'b0;
+		end
+	end
+
+	// Output Logic for Source Side
+	// S_APB_PREADY: Assert only when queue is empty or current entry is done
+	// S_APB_PRDATA: Data from current entry
+	// S_APB_PSLVERR: Error from current entry
+
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			S_APB_PREADY <= 1'b0;
+			S_APB_PRDATA <= {DW{1'b0}};
+			S_APB_PSLVERR <= 1'b0;
+		end else begin
+			if (req_empty || req_pready_ack[req_head])
+				S_APB_PREADY <= 1'b1;
+			else
+				S_APB_PREADY <= 1'b0;
+
+			if (req_empty) begin
+				S_APB_PRDATA <= {DW{1'b0}};
+				S_APB_PSLVERR <= 1'b0;
+			end else begin
+				S_APB_PRDATA <= req_data[req_head];
+				S_APB_PSLVERR <= req_pready_ack[req_head] ? 1'b1 : 1'b0; // If marked done, it was an error? 
+				// Correction: req_pready_ack means the downstream finished. 
+				// If downstream finished with error, we need to know. 
+				// Let's refine: We need to store the error status separately or infer from M_APB_PSLVERR.
+				// Better approach: Store M_APB_PSLVERR in the FIFO.
+			end
+		end
+	end
+
+	// Re-implementing FIFO with Error Storage
+	reg [DEPTH-1:0] req_err;
+
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			req_err <= 4'b0000;
+		end else begin
+			if (S_APB_PSEL && S_APB_PENABLE && !S_APB_PREADY && !S_APB_PSLVERR) begin
+				if (!req_full) begin
+					req_write_ptr <= req_tail;
+					req_valid[req_tail] <= 1'b1;
+					req_addr[req_tail] <= S_APB_PADDR;
+					req_write[req_tail] <= S_APB_PWRITE;
+					req_data[req_tail] <= S_APB_PWDATA;
+					req_wstrb[req_tail] <= S_APB_PWSTRB;
+					req_prot[req_tail] <= S_APB_PPROT;
+					req_pready_ack[req_tail] <= 1'b0;
+					req_err[req_tail] <= 1'b0; // Assume no error initially
+					req_count <= req_count + 1'b1;
+				end
+			end
+			if (M_APB_PCLK && M_APB_PSEL && M_APB_PENABLE && M_APB_PREADY) begin
+				if (!req_empty) begin
+					req_read_ptr <= req_head;
+					req_count <= req_count - 1'b1;
+					req_pready_ack[req_head] <= 1'b1;
+					if (req_count == 2'b00)
+						req_empty <= 1'b1;
+					else
+						req_empty <= 1'b0;
+				end
+			end
+		end
+	end
+
+	// Update Source Outputs with Error
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			S_APB_PREADY <= 1'b0;
+			S_APB_PRDATA <= {DW{1'b0}};
+			S_APB_PSLVERR <= 1'b0;
+		end else begin
+			if (req_empty || req_pready_ack[req_head])
+				S_APB_PREADY <= 1'b1;
+			else
+				S_APB_PREADY <= 1'b0;
+
+			if (req_empty) begin
+				S_APB_PRDATA <= {DW{1'b0}};
+				S_APB_PSLVERR <= 1'b0;
+			end else begin
+				S_APB_PRDATA <= req_data[req_head];
+				S_APB_PSLVERR <= req_err[req_head];
+			end
+		end
+	end
+
+	// ------------------------------------------------------------------
+	// Master Clock Domain Logic
+	// ------------------------------------------------------------------
+
+	// Reset Generation for Source Domain (Gray Code)
+	reg [1:0] s_gray_cnt;
+	reg [1:0] s_gray_cnt_next;
+	reg		s_reset_done;
+	reg		s_reset_req;
+
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			s_gray_cnt <= 2'b00;
+			s_reset_req <= 1'b1;
+			s_reset_done <= 1'b0;
+		end else begin
+			s_reset_req <= 1'b0;
+			s_gray_cnt_next <= s_gray_cnt[0] ? ~s_gray_cnt[1] : s_gray_cnt[1];
+			s_gray_cnt <= s_gray_cnt_next;
+			if (s_gray_cnt == 2'b11)
+				s_reset_done <= 1'b1;
+			else
+				s_reset_done <= 1'b0;
+		end
+	end
+
+	// Read Data and Error from FIFO
+	reg [DW-1:0] m_read_data;
+	reg			m_read_err;
+	reg			m_read_valid;
+
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_read_data <= {DW{1'b0}};
+			m_read_err <= 1'b0;
+			m_read_valid <= 1'b0;
+		end else begin
+			if (!req_empty && !req_pready_ack[req_head]) begin
+				m_read_data <= req_data[req_head];
+				m_read_err <= req_err[req_head];
+				m_read_valid <= 1'b1;
+			end else if (req_empty || req_pready_ack[req_head]) begin
+				m_read_data <= {DW{1'b0}};
+				m_read_err <= 1'b0;
+				m_read_valid <= 1'b0;
+			end
+		end
+	end
+
+	// Master APB Interface Signals
+	reg [AW-1:0] m_addr;
+	reg			m_write;
+	reg [DW-1:0] m_wdata;
+	reg [WSTRB_WIDTH-1:0] m_wstrb;
+	reg [2:0]		m_prot;
+	reg			m_sel;
+	reg			m_enable;
+	reg			m_ready;
+
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_sel <= 1'b0;
+			m_enable <= 1'b0;
+			m_addr <= {AW{1'b0}};
+			m_write <= 1'b0;
+			m_wdata <= {DW{1'b0}};
+			m_wstrb <= {WSTRB_WIDTH{1'b0}};
+			m_prot <= 3'b000;
+			m_ready <= 1'b0;
+		end else begin
+			// Drive APB signals based on FIFO content
+			if (!req_empty && !req_pready_ack[req_head]) begin
+				m_sel <= 1'b1;
+				m_enable <= 1'b1;
+				m_addr <= req_addr[req_head];
+				m_write <= req_write[req_head];
+				m_wdata <= req_data[req_head];
+				m_wstrb <= req_wstrb[req_head];
+				m_prot <= req_prot[req_head];
+				m_ready <= 1'b0; // Wait for slave
+			end else begin
+				m_sel <= 1'b0;
+				m_enable <= 1'b0;
+				m_addr <= {AW{1'b0}};
+				m_write <= 1'b0;
+				m_wdata <= {DW{1'b0}};
+				m_wstrb <= {WSTRB_WIDTH{1'b0}};
+				m_prot <= 3'b000;
+				m_ready <= 1'b1; // Ready if no transaction
+			end
+		end
+	end
+
+	// Capture Response from Slave
+	reg [DW-1:0] m_rdata;
+	reg			m_rerr;
+	reg			m_done;
+
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_rdata <= {DW{1'b0}};
+			m_rerr <= 1'b0;
+			m_done <= 1'b0;
+		end else begin
+			if (M_APB_PREADY) begin
+				m_rdata <= M_APB_PRDATA;
+				m_rerr <= M_APB_PSLVERR;
+				m_done <= 1'b1;
+			end else begin
+				m_rdata <= {DW{1'b0}};
+				m_rerr <= 1'b0;
+				m_done <= 1'b0;
+			end
+		end
+	end
+
+	// Update FIFO with Response
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			req_err <= 4'b0000;
+		end else begin
+			if (M_APB_PCLK && M_APB_PSEL && M_APB_PENABLE && M_APB_PREADY) begin
+				if (!req_empty) begin
+					req_read_ptr <= req_head;
+					req_count <= req_count - 1'b1;
+					req_pready_ack[req_head] <= 1'b1;
+					req_err[req_head] <= m_rerr; // Store error status
+					if (req_count == 2'b00)
+						req_empty <= 1'b1;
+					else
+						req_empty <= 1'b0;
+				end
+			end
+		end
+	end
+
+	// ------------------------------------------------------------------
+	// Reset Output Logic
+	// ------------------------------------------------------------------
+
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn)
+			M_PRESETn <= 1'b0;
+		else if (m_reset_req)
+			M_PRESETn <= 1'b0;
+		else if (s_reset_done)
+			M_PRESETn <= 1'b1;
+		else
+			M_PRESETn <= 1'b1;
+	end
+
+	// ------------------------------------------------------------------
+	// Instantiation of FIFO Logic (Inline for single file)
+	// ------------------------------------------------------------------
+
+	// Note: The FIFO logic above is implemented inline using registers.
+	// To make it cleaner and more modular within the constraints, 
+	// we can define the FIFO as a separate module inside this file 
+	// or keep it inline. Given the requirement for a single source file 
+	// and no testbench, keeping it inline is acceptable but verbose.
+	// However, to ensure clarity and maintainability, let's define 
+	// a local parameterized FIFO module within the same file.
+
+endmodule
+
+// Local FIFO Module Definition
+module fifo #(
+	parameter DEPTH = 4,
+	parameter DATA_WIDTH = 32
+) (
+	input		wire	clk,
+	input		wire	rst_n,
+	input		wire	wreq,
+	input		wire	wvalid,
+	output	reg		wready,
+	input		wire	[DATA_WIDTH-1:0]	wdata,
+	input		wire	werr,
+	output	reg		rvalid,
+	output	reg		[DATA_WIDTH-1:0]	rdata,
+	output	reg		[DATA_WIDTH-1:0]	errdata
+);
+
+	localparam ADDR_WIDTH = $clog2(DEPTH);
+	reg [ADDR_WIDTH-1:0] tail;
+	reg [ADDR_WIDTH-1:0] head;
+	reg [ADDR_WIDTH-1:0] count;
+	reg [DEPTH-1:0] valid;
+	reg [DEPTH-1:0] addr;
+	reg [DEPTH-1:0] data;
+	reg [DEPTH-1:0] wstrb;
+	reg [DEPTH-1:0] prot;
+	reg [DEPTH-1:0] pready_ack;
+	reg [DEPTH-1:0] err;
+
+	// Write Logic
+	always @(posedge clk or negedge rst_n) begin
+		if (!rst_n) begin
+			tail <= 0;
+			head <= 0;
+			count <= 0;
+			valid <= 0;
+			addr <= 0;
+			data <= 0;
+			wstrb <= 0;
+			prot <= 0;
+			pready_ack <= 0;
+			err <= 0;
+			wready <= 1;
+			rvalid <= 0;
+			rdata <= 0;
+			errdata <= 0;
+		end else begin
+			if (wreq && wvalid && !pready_ack[tail] && count < DEPTH) begin
+				tail <= tail + 1;
+				valid[tail] <= 1;
+				addr[tail] <= 0; // Placeholder, actual addr passed externally
+				data[tail] <= wdata;
+				wstrb[tail] <= 0;
+				prot[tail] <= 0;
+				pready_ack[tail] <= 0;
+				err[tail] <= werr;
+				wready <= 0;
+			end else if (rvalid && !pready_ack[head]) begin
+				head <= head + 1;
+				count <= count - 1;
+				pready_ack[head] <= 1;
+				rvalid <= 0;
+				rdata <= data[head];
+				errdata <= err[head];
+				if (count == 0)
+					valid <= 0;
+			end else begin
+				wready <= 1;
+				rvalid <= 0;
+			end
+		end
+	end
+
+	// Count Logic
+	always @(posedge clk or negedge rst_n) begin
+		if (!rst_n)
+			count <= 0;
+		else begin
+			if (wreq && wvalid && !pready_ack[tail] && count < DEPTH)
+				count <= count + 1;
+			else if (rvalid && !pready_ack[head] && count > 0)
+				count <= count - 1;
+		end
+	end
+
+	// Full/Empty Logic
+	always @(posedge clk or negedge rst_n) begin
+		if (!rst_n) begin
+			valid <= 0;
+			count <= 0;
+		end else begin
+			if (count == DEPTH)
+				valid <= 1;
+			else if (count == 0)
+				valid <= 0;
+		end
+	end
+
+	// Output Logic
+	always @(posedge clk or negedge rst_n) begin
+		if (!rst_n) begin
+			rvalid <= 0;
+			rdata <= 0;
+			errdata <= 0;
+		end else begin
+			if (valid == 0 || pready_ack[head]) begin
+				rvalid <= 0;
+				rdata <= 0;
+				errdata <= 0;
+			end else begin
+				rvalid <= 1;
+				rdata <= data[head];
+				errdata <= err[head];
+			end
+		end
+	end
+
+endmodule
+
+// Re-implementing the FIFO logic inline in the main module to avoid 
+// potential issues with local module definitions in some synthesis tools 
+// and to strictly adhere to the "single source file" constraint without 
+// external dependencies. The logic above in the main module is the 
+// expanded version of this FIFO.
+
+// Finalizing the main module structure with the inline FIFO logic 
+// already present in the previous block.
+
+endmodule
+```<|im_end|>

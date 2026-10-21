@@ -1,0 +1,302 @@
+```verilog
+`timescale 1ns/1ps
+
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam INT_ASIZE = ASIZE;
+  localparam INT_DEPTH = 1 << ASIZE;
+  localparam INT_MASK  = (1 << ASIZE) - 1;
+
+  // Internal pointers and counters
+  reg [INT_ASIZE-1:0] a_write_ptr;
+  reg [INT_ASIZE-1:0] a_read_ptr;
+  reg [INT_ASIZE-1:0] b_write_ptr;
+  reg [INT_ASIZE-1:0] b_read_ptr;
+
+  // Gray encoded pointers for CDC
+  reg [INT_ASIZE-1:0] a_write_gray;
+  reg [INT_ASIZE-1:0] a_read_gray;
+  reg [INT_ASIZE-1:0] b_write_gray;
+  reg [INT_ASIZE-1:0] b_read_gray;
+
+  // Data storage
+  reg [DSIZE-1:0] mem [0:INT_DEPTH-1];
+
+  // Write pointers (local)
+  wire a_write_ptr_next;
+  wire b_write_ptr_next;
+
+  // Read pointers (local)
+  wire a_read_ptr_next;
+  wire b_read_ptr_next;
+
+  // Full/Empty logic (local)
+  wire a_full_local;
+  wire a_empty_local;
+  wire b_full_local;
+  wire b_empty_local;
+
+  // Almost Full/Empty logic (local)
+  wire a_afull_local;
+  wire a_aempty_local;
+  wire b_afull_local;
+  wire b_aempty_local;
+
+  // Cross-domain pointers (Gray encoded)
+  wire [INT_ASIZE-1:0] a_write_gray_out;
+  wire [INT_ASIZE-1:0] a_read_gray_out;
+  wire [INT_ASIZE-1:0] b_write_gray_out;
+  wire [INT_ASIZE-1:0] b_read_gray_out;
+
+  // Cross-domain data
+  wire [DSIZE-1:0] a_write_data_out;
+  wire [DSIZE-1:0] a_read_data_out;
+  wire [DSIZE-1:0] b_write_data_out;
+  wire [DSIZE-1:0] b_read_data_out;
+
+  // Write Enable signals (cross-domain)
+  wire a_write_en;
+  wire b_write_en;
+
+  // Read Enable signals (cross-domain)
+  wire a_read_en;
+  wire b_read_en;
+
+  // Full/Empty flags (cross-domain)
+  wire a_full_flag_out;
+  wire a_empty_flag_out;
+  wire b_full_flag_out;
+  wire b_empty_flag_out;
+
+  // Almost Full/Empty flags (cross-domain)
+  wire a_afull_flag_out;
+  wire a_aempty_flag_out;
+  wire b_afull_flag_out;
+  wire b_aempty_flag_out;
+
+  // ------------------------------------------------------------------
+  // A-Side Logic (Clock: a_clk)
+  // ------------------------------------------------------------------
+
+  // Write Pointer Logic
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_write_ptr <= 0;
+    else if (a_winc)
+      a_write_ptr <= a_write_ptr + 1'b1;
+  end
+
+  // Read Pointer Logic
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_read_ptr <= 0;
+    else if (a_rinc && a_dir)
+      a_read_ptr <= a_read_ptr + 1'b1;
+  end
+
+  // Local Full/Empty
+  assign a_full_local = (a_write_ptr == a_read_ptr) && (a_dir == 1'b1);
+  assign a_empty_local = (a_write_ptr == a_read_ptr) && (a_dir == 0'b0);
+
+  // Local Almost Full/Empty
+  assign a_afull_local = (a_write_ptr == a_read_ptr) && (a_dir == 1'b1) && (a_write_ptr == (INT_MASK));
+  assign a_aempty_local = (a_write_ptr == a_read_ptr) && (a_dir == 0'b0) && (a_read_ptr == 0);
+
+  // Write Enable (local)
+  assign a_write_en = (a_dir == 1'b1) && (a_winc) && (!a_full_local);
+
+  // Read Enable (local)
+  assign a_read_en = (a_dir == 0'b0) && (a_rinc) && (!a_empty_local);
+
+  // ------------------------------------------------------------------
+  // B-Side Logic (Clock: b_clk)
+  // ------------------------------------------------------------------
+
+  // Write Pointer Logic
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_write_ptr <= 0;
+    else if (b_winc)
+      b_write_ptr <= b_write_ptr + 1'b1;
+  end
+
+  // Read Pointer Logic
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_read_ptr <= 0;
+    else if (b_rinc && b_dir)
+      b_read_ptr <= b_read_ptr + 1'b1;
+  end
+
+  // Local Full/Empty
+  assign b_full_local = (b_write_ptr == b_read_ptr) && (b_dir == 1'b1);
+  assign b_empty_local = (b_write_ptr == b_read_ptr) && (b_dir == 0'b0);
+
+  // Local Almost Full/Empty
+  assign b_afull_local = (b_write_ptr == b_read_ptr) && (b_dir == 1'b1) && (b_write_ptr == (INT_MASK));
+  assign b_aempty_local = (b_write_ptr == b_read_ptr) && (b_dir == 0'b0) && (b_read_ptr == 0);
+
+  // Write Enable (local)
+  assign b_write_en = (b_dir == 1'b1) && (b_winc) && (!b_full_local);
+
+  // Read Enable (local)
+  assign b_read_en = (b_dir == 0'b0) && (b_rinc) && (!b_empty_local);
+
+  // ------------------------------------------------------------------
+  // Gray Encoder / Decoder
+  // ------------------------------------------------------------------
+
+  // A-Side Gray Encoder
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_write_gray <= 0;
+    else if (a_winc)
+      a_write_gray <= a_write_gray ^ (1 << (INT_ASIZE - 1));
+    else
+      a_write_gray <= a_write_gray;
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_read_gray <= 0;
+    else if (a_rinc && a_dir)
+      a_read_gray <= a_read_gray ^ (1 << (INT_ASIZE - 1));
+    else
+      a_read_gray <= a_read_gray;
+  end
+
+  // B-Side Gray Encoder
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_write_gray <= 0;
+    else if (b_winc)
+      b_write_gray <= b_write_gray ^ (1 << (INT_ASIZE - 1));
+    else
+      b_write_gray <= b_write_gray;
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_read_gray <= 0;
+    else if (b_rinc && b_dir)
+      b_read_gray <= b_read_gray ^ (1 << (INT_ASIZE - 1));
+    else
+      b_read_gray <= b_read_gray;
+  end
+
+  // A-Side Gray Decoder (for reading data from B-side)
+  always @(*) begin
+    a_write_gray_out = a_write_gray;
+    a_read_gray_out = a_read_gray;
+    b_write_gray_out = b_write_gray;
+    b_read_gray_out = b_read_gray;
+  end
+
+  // ------------------------------------------------------------------
+  // Cross-Domain Data Transfer
+  // ------------------------------------------------------------------
+
+  // A-Side Write Data (to B-side)
+  assign a_write_data_out = a_wdata;
+
+  // B-Side Write Data (to A-side)
+  assign b_write_data_out = b_wdata;
+
+  // A-Side Read Data (from B-side)
+  assign a_read_data_out = b_write_data_out;
+
+  // B-Side Read Data (from A-side)
+  assign b_read_data_out = a_write_data_out;
+
+  // ------------------------------------------------------------------
+  // Cross-Domain Control Signals
+  // ------------------------------------------------------------------
+
+  // A-Side Write Enable (to B-side)
+  assign a_write_en = (a_dir == 1'b1) && (a_winc) && (!a_full_local);
+
+  // B-Side Write Enable (to A-side)
+  assign b_write_en = (b_dir == 1'b1) && (b_winc) && (!b_full_local);
+
+  // A-Side Read Enable (to B-side)
+  assign a_read_en = (a_dir == 0'b0) && (a_rinc) && (!a_empty_local);
+
+  // B-Side Read Enable (to A-side)
+  assign b_read_en = (b_dir == 0'b0) && (b_rinc) && (!b_empty_local);
+
+  // ------------------------------------------------------------------
+  // Cross-Domain Full/Empty Flags
+  // ------------------------------------------------------------------
+
+  // A-Side Full Flag (from B-side)
+  assign a_full_flag_out = (b_write_ptr == b_read_ptr) && (b_dir == 1'b1);
+
+  // A-Side Empty Flag (from B-side)
+  assign a_empty_flag_out = (b_write_ptr == b_read_ptr) && (b_dir == 0'b0);
+
+  // B-Side Full Flag (from A-side)
+  assign b_full_flag_out = (a_write_ptr == a_read_ptr) && (a_dir == 1'b1);
+
+  // B-Side Empty Flag (from A-side)
+  assign b_empty_flag_out = (a_write_ptr == a_read_ptr) && (a_dir == 0'b0);
+
+  // A-Side Almost Full Flag (from B-side)
+  assign a_afull_flag_out = (b_write_ptr == b_read_ptr) && (b_dir == 1'b1) && (b_write_ptr == (INT_MASK));
+
+  // A-Side Almost Empty Flag (from B-side)
+  assign a_aempty_flag_out = (b_write_ptr == b_read_ptr) && (b_dir == 0'b0) && (b_read_ptr == 0);
+
+  // B-Side Almost Full Flag (from A-side)
+  assign b_afull_flag_out = (a_write_ptr == a_read_ptr) && (a_dir == 1'b1) && (a_write_ptr == (INT_MASK));
+
+  // B-Side Almost Empty Flag (from A-side)
+  assign b_aempty_flag_out = (a_write_ptr == a_read_ptr) && (a_dir == 0'b0) && (a_read_ptr == 0);
+
+  // ------------------------------------------------------------------
+  // Output Assignments
+  // ------------------------------------------------------------------
+
+  // A-Side Outputs
+  assign a_rdata = a_read_data_out;
+  assign a_full = a_full_local;
+  assign a_afull = a_afull_local;
+  assign a_empty = a_empty_local;
+  assign a_aempty = a_aempty_local;
+
+  // B-Side Outputs
+  assign b_rdata = b_read_data_out;
+  assign b_full = b_full_local;
+  assign b_afull = b_afull_local;
+  assign b_empty = b_empty_local;
+  assign b_aempty = b_aempty_local;
+
+endmodule
+```<|im_end|>

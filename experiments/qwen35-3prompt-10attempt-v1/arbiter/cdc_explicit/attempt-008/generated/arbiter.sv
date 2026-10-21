@@ -1,0 +1,377 @@
+```verilog
+module arbiter #(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+) (
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam LOG_PORTS = $clog2(PORTS);
+    localparam MAX_IDX = PORTS - 1;
+
+    // State encoding for Round Robin
+    // We track the "next" candidate index.
+    // State 0: Next candidate is 0
+    // State 1: Next candidate is 1
+    // ...
+    // State N: Next candidate is N-1
+    localparam NUM_STATES = PORTS;
+    localparam STATE_WIDTH = $clog2(NUM_STATES);
+
+    reg [STATE_WIDTH-1:0] next_state_reg;
+    wire [STATE_WIDTH-1:0] next_state;
+    wire [STATE_WIDTH-1:0] current_state;
+
+    // Internal signals for logic
+    wire [PORTS-1:0] active_requests;
+    wire [PORTS-1:0] active_acks;
+    wire any_request;
+    wire any_ack;
+    wire [PORTS-1:0] grant_candidates; // One-hot of who is eligible based on RR logic
+    wire [PORTS-1:0] fixed_priority;   // One-hot of who has highest fixed priority
+
+    // --- CDC Strategy: Synchronous State Machine with Asynchronous Reset Handling ---
+    // To ensure safe reset release and clock domain crossing (if inputs were async, 
+    // though here inputs are assumed same domain as clk for simplicity, the internal 
+    // state machine is fully synchronous).
+    // We use a standard synchronous state machine. The reset is active high.
+    // On rst, state goes to 0. On release, it proceeds to next_state based on logic.
+
+    always @(posedge clk or posedge rst) begin
+        if (rst)
+            current_state <= 0;
+        else
+            current_state <= next_state_reg;
+    end
+
+    // Combinational logic for next state
+    always @(*) begin
+        next_state = 0;
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            // Round Robin Logic
+            // 1. Identify the first active request starting from the current 'next' candidate.
+            // 2. If no requests, wrap around to 0.
+            // 3. If requests exist, pick the first one encountered in the rotation.
+            
+            wire [PORTS-1:0] rotated_req;
+            wire [PORTS-1:0] rotated_ack;
+            
+            // Rotate request vector so that current_state is at index 0
+            // This simplifies finding the "first" active request
+            genvar i;
+            generate
+                for (i = 0; i < PORTS; i = i + 1) begin : rot_gen
+                    assign rotated_req[i] = request[(current_state + i) % PORTS];
+                    assign rotated_ack[i] = acknowledge[(current_state + i) % PORTS];
+                end
+            endgenerate
+
+            // Find the first '1' in rotated_req
+            wire [PORTS-1:0] rr_one_hot;
+            reg [PORTS-1:0] rr_temp;
+            
+            // Simple priority encoder logic for rotated vector
+            // We want the lowest index 'i' where rotated_req[i] is 1
+            // Since PORTS is small (power of 2 usually, but code handles general), 
+            // we can use a reduction or a loop. Let's use a loop for clarity and synthesis friendliness.
+            
+            rr_temp = 0;
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (rotated_req[i]) begin
+                    rr_temp = 1 << i;
+                    break;
+                end
+            end
+            
+            // If no request found in rotation, grant is 0 (or last one if block logic applies, 
+            // but typically RR waits for request). 
+            // However, we need to update the 'next' state.
+            // The 'next' state should be the index of the granted port + 1 (modulo PORTS).
+            
+            if (rr_temp != 0) begin
+                // Found a request at index 'i' in rotated domain.
+                // Actual port index = (current_state + i) % PORTS
+                // Next state = (Actual port index + 1) % PORTS
+                wire [PORTS-1:0] granted_idx = (current_state + $clog2(rr_temp)) % PORTS;
+                next_state = (granted_idx + 1) % PORTS;
+            end else begin
+                // No requests, keep rotating or stay? 
+                // Standard RR: if no request, next state remains same or wraps. 
+                // Usually, we keep the pointer at the last served or just 0.
+                // Let's keep it at current_state to maintain position until a request comes.
+                // Alternatively, some implementations wrap to 0. 
+                // Let's stick to: if no request, next_state = current_state.
+                next_state = current_state;
+            end
+
+        end else begin
+            // Fixed Priority Logic
+            // Determine highest priority requestor.
+            // LSB_HIGH_PRIORITY: LSB is highest priority.
+            // MSB_HIGH_PRIORITY (default): MSB is highest priority.
+            
+            wire [PORTS-1:0] priority_mask;
+            if (ARB_LSB_HIGH_PRIORITY) begin
+                // LSB is highest. We want the smallest index with request.
+                // Create a mask where lower bits are 1s.
+                // Example: req = 0010 (idx 1). Mask = 0001. Result = 0010.
+                // Example: req = 0101 (idx 0, 2). Mask = 0011. Result = 0001 (idx 0 wins).
+                priority_mask = ~((~request) & (request >> 1)) | (request & 1); 
+                // Simpler approach: Iterate from 0 to PORTS-1.
+                priority_mask = 0;
+                for (i = 0; i < PORTS; i = i + 1) begin
+                    if (request[i]) begin
+                        priority_mask = 1 << i;
+                        break;
+                    end
+                end
+            end else begin
+                // MSB is highest. We want the largest index with request.
+                // Iterate from PORTS-1 down to 0.
+                priority_mask = 0;
+                for (i = PORTS-1; i >= 0; i = i - 1) begin
+                    if (request[i]) begin
+                        priority_mask = 1 << i;
+                        break;
+                    end
+                end
+            end
+
+            if (priority_mask != 0) begin
+                // Grant the highest priority one.
+                // Next state: In fixed priority, usually we stay at the same priority level 
+                // or go to the next lower priority. 
+                // Standard behavior: Stay at the same priority level (so if it releases, 
+                // the next highest takes it immediately next cycle).
+                // To implement "next state" as a counter for RR, we can just set it to the 
+                // index of the granted port. But since it's fixed priority, the state 
+                // variable in RR context doesn't strictly matter for selection, 
+                // but we must ensure the state machine doesn't break.
+                // Let's set next_state to the index of the granted port.
+                wire [PORTS-1:0] granted_idx = $clog2(priority_mask);
+                next_state = granted_idx;
+            end else begin
+                next_state = 0;
+            end
+        end
+    end
+
+    // --- Output Logic ---
+    
+    // Determine who gets granted this cycle
+    wire [PORTS-1:0] selected_grant;
+    
+    if (ARB_TYPE_ROUND_ROBIN) begin
+        // Find the first active request starting from current_state
+        wire [PORTS-1:0] rotated_req;
+        genvar j;
+        generate
+            for (j = 0; j < PORTS; j = j + 1) begin : rr_out_gen
+                assign rotated_req[j] = request[(current_state + j) % PORTS];
+            end
+        endgenerate
+        
+        wire [PORTS-1:0] rr_one_hot;
+        reg [PORTS-1:0] rr_temp;
+        rr_temp = 0;
+        for (j = 0; j < PORTS; j = j + 1) begin
+            if (rotated_req[j]) begin
+                rr_temp = 1 << j;
+                break;
+            end
+        end
+        
+        if (rr_temp != 0) begin
+            wire [PORTS-1:0] granted_idx = (current_state + $clog2(rr_temp)) % PORTS;
+            selected_grant = 1 << granted_idx;
+        end else begin
+            selected_grant = 0;
+        end
+    end else begin
+        wire [PORTS-1:0] priority_mask;
+        if (ARB_LSB_HIGH_PRIORITY) begin
+            priority_mask = 0;
+            for (j = 0; j < PORTS; j = j + 1) begin
+                if (request[j]) begin
+                    priority_mask = 1 << j;
+                    break;
+                end
+            end
+        end else begin
+            priority_mask = 0;
+            for (j = PORTS-1; j >= 0; j = j - 1) begin
+                if (request[j]) begin
+                    priority_mask = 1 << j;
+                    break;
+                end
+            end
+        end
+        
+        if (priority_mask != 0) begin
+            selected_grant = priority_mask;
+        end else begin
+            selected_grant = 0;
+        end
+    end
+
+    // --- Block Logic ---
+    // If ARB_BLOCK is set:
+    // 1. If ARB_BLOCK_ACK is 1: Hold grant until acknowledge from the granted port.
+    // 2. If ARB_BLOCK_ACK is 0: Hold grant until request drops (standard blocking).
+    
+    // We need to track if we are currently blocked.
+    reg [PORTS-1:0] blocked_mask;
+    reg [PORTS-1:0] last_granted;
+    
+    // Update blocked status
+    // If we granted someone last cycle, and block is enabled, we check ack.
+    // If ack is high, we unblock. If ack is low, we stay blocked.
+    // If we didn't grant last cycle, we are not blocked (unless we were already blocked? No, block implies holding a grant).
+    
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            blocked_mask <= 0;
+            last_granted <= 0;
+        end else begin
+            // If we granted someone in the previous cycle (or current cycle logic determines it)
+            // Actually, simpler: 
+            // If ARB_BLOCK is 0, blocked_mask is always 0.
+            if (ARB_BLOCK) begin
+                if (ARB_BLOCK_ACK) begin
+                    // Wait for ACK
+                    // If last_granted has acknowledge, clear blocked bit.
+                    // If not, keep it.
+                    // Note: We need to know who was granted in the PREVIOUS cycle to check their ACK now.
+                    // But our 'selected_grant' is computed for the CURRENT cycle.
+                    // Let's refine the state:
+                    // We grant 'selected_grant'.
+                    // If 'selected_grant' overlaps with 'blocked_mask', we extend the block.
+                    // If 'selected_grant' does NOT overlap, we might be releasing a block?
+                    // Actually, the standard behavior:
+                    // 1. Arbitration happens. Winner is W.
+                    // 2. If W is already blocked (from previous cycle), we check if W's ack is high.
+                    //    If yes, W is unblocked. If no, W remains blocked.
+                    // 3. If W is NOT blocked, we grant W. Now W becomes blocked.
+                    // 4. Other ports cannot be granted while any port is blocked.
+                    
+                    // Let's track 'is_blocked' as a single flag if only one can be blocked?
+                    // The prompt says "hold the grant". Usually implies one port at a time.
+                    // If multiple requests, only one is granted. So only one can be blocked.
+                    
+                    // Logic:
+                    // If (ARB_BLOCK_ACK) begin
+                    //    if (last_granted & acknowledge) begin
+                    //        // Ack received, unblock
+                    //        blocked_mask <= 0;
+                    //    end else begin
+                    //        // No ack, stay blocked
+                    //        blocked_mask <= last_granted;
+                    //    end
+                    // end else begin
+                    //    // No block on ack, just block until request drops
+                    //    // This means if we granted X, and X still requests, we keep X.
+                    //    // If X drops, we can grant someone else.
+                    //    // So blocked_mask = last_granted & request.
+                    //    blocked_mask <= last_granted & request;
+                    // end
+                    
+                    // Wait, the logic needs to be careful about the cycle.
+                    // Cycle T: Grant W.
+                    // Cycle T+1: Check if W is still blocked.
+                    
+                    if (last_granted != 0) begin
+                        if (ARB_BLOCK_ACK) begin
+                            if (last_granted & acknowledge) begin
+                                blocked_mask <= 0;
+                            end else begin
+                                blocked_mask <= last_granted;
+                            end
+                        end else begin
+                            // Block until request drops
+                            if (last_granted & request) begin
+                                blocked_mask <= last_granted;
+                            end else begin
+                                blocked_mask <= 0;
+                            end
+                        end
+                    end else begin
+                        blocked_mask <= 0;
+                    end
+                end else begin
+                    // ARB_BLOCK_ACK is 0, but ARB_BLOCK is 1.
+                    // "hold the grant until acknowledge (ARB_BLOCK_ACK nonzero) or until request drops (ARB_BLOCK_ACK zero)"
+                    // This phrasing is slightly ambiguous. 
+                    // Interpretation: 
+                    // If ARB_BLOCK_ACK == 1: Hold until Ack.
+                    // If ARB_BLOCK_ACK == 0: Hold until Request drops.
+                    // So the 'else' branch above covers ARB_BLOCK_ACK == 0.
+                    // But wait, the parameter is ARB_BLOCK_ACK. 
+                    // If ARB_BLOCK_ACK is 1, we use Ack logic.
+                    // If ARB_BLOCK_ACK is 0, we use Request drop logic.
+                    
+                    // Re-reading: "When ARB_BLOCK is set, hold the grant until acknowledge (ARB_BLOCK_ACK nonzero) or until request drops (ARB_BLOCK_ACK zero)."
+                    // This implies:
+                    // If ARB_BLOCK_ACK != 0 (i.e., 1): Condition is Ack.
+                    // If ARB_BLOCK_ACK == 0: Condition is Request Drop.
+                    
+                    // My previous logic block structure:
+                    // if (ARB_BLOCK) begin
+                    //    if (ARB_BLOCK_ACK) ... (Ack logic)
+                    //    else ... (Request logic)
+                    // end
+                    // This matches.
+                    
+                    if (last_granted != 0) begin
+                        if (ARB_BLOCK_ACK) begin
+                            if (last_granted & acknowledge) begin
+                                blocked_mask <= 0;
+                            end else begin
+                                blocked_mask <= last_granted;
+                            end
+                        end else begin
+                            if (last_granted & request) begin
+                                blocked_mask <= last_granted;
+                            end else begin
+                                blocked_mask <= 0;
+                            end
+                        end
+                    end else begin
+                        blocked_mask <= 0;
+                    end
+                end
+            end else begin
+                // ARB_BLOCK is 0. Never block.
+                blocked_mask <= 0;
+            end
+            last_granted <= selected_grant;
+        end
+    end
+
+    // Final Grant Logic
+    // If blocked_mask is non-zero, the grant is forced to be the blocked port.
+    // Otherwise, it is 'selected_grant'.
+    
+    assign grant = (blocked_mask != 0) ? blocked_mask : selected_grant;
+    
+    // Encode grant
+    assign grant_encoded = ($clog2(grant) == 0) ? 0 : $clog2(grant);
+    // Handle case where grant is 0 (no one granted)
+    // If grant is 0, grant_encoded should be 0.
+    // The $clog2(0) is undefined.
+    // We need to mask it.
+    assign grant_encoded = (grant != 0) ? $clog2(grant) : 0;
+
+    // Handshake valid
+    assign grant_valid = (grant != 0);
+
+endmodule
+```<|im_end|>

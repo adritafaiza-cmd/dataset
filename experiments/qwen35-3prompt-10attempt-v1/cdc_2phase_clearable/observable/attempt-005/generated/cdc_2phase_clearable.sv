@@ -1,0 +1,244 @@
+```verilog
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // ------------------------------------------------------------------
+  // Source Side (src_clk_i domain)
+  // ------------------------------------------------------------------
+  
+  // Synchronize src_clear_i to src_clk_i
+  logic [SYNC_STAGES-1:0] src_clear_sync;
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      src_clear_sync <= '{default: 0};
+    else
+      src_clear_sync <= {src_clear_sync[SYNC_STAGES-2:0], src_clear_i};
+  end
+
+  // Synchronize dst_clear_i to src_clk_i (for clear propagation)
+  logic [SYNC_STAGES-1:0] dst_clear_sync;
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_clear_sync <= '{default: 0};
+    else
+      dst_clear_sync <= {dst_clear_sync[SYNC_STAGES-2:0], dst_clear_i};
+  end
+
+  // State Machine for Source
+  typedef enum logic [1:0] {
+    SRC_IDLE,
+    SRC_SENDING,
+    SRC_WAITING_CLEAR
+  } src_state_t;
+
+  src_state_t src_state, src_state_next;
+  logic src_data_reg;
+  logic src_valid_reg;
+  logic src_clear_pending_reg;
+
+  // State Logic
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_state <= SRC_IDLE;
+      src_data_reg <= '0;
+      src_valid_reg <= 1'b0;
+      src_clear_pending_reg <= 1'b0;
+    end else begin
+      src_state <= src_state_next;
+      src_data_reg <= src_data_i;
+      src_valid_reg <= src_valid_i;
+      src_clear_pending_reg <= src_clear_sync[SYNC_STAGES-1];
+    end
+  end
+
+  // Next State Logic
+  always_comb begin
+    src_state_next = src_state;
+    src_valid_reg = src_valid_i; // Forward valid immediately on clock edge
+    src_clear_pending_reg = src_clear_sync[SYNC_STAGES-1];
+
+    case (src_state)
+      SRC_IDLE: begin
+        if (src_valid_i && dst_ready_i_synced) begin
+          src_state_next = SRC_SENDING;
+          src_valid_reg = 1'b1;
+        end else if (src_clear_sync[SYNC_STAGES-1]) begin
+          src_state_next = SRC_WAITING_CLEAR;
+          src_valid_reg = 1'b0;
+        end
+      end
+
+      SRC_SENDING: begin
+        if (dst_ready_i_synced) begin
+          src_state_next = SRC_IDLE;
+          src_valid_reg = 1'b0;
+        end else if (src_clear_sync[SYNC_STAGES-1]) begin
+          src_state_next = SRC_WAITING_CLEAR;
+          src_valid_reg = 1'b0;
+        end
+      end
+
+      SRC_WAITING_CLEAR: begin
+        if (dst_ready_i_synced) begin
+          src_state_next = SRC_IDLE;
+          src_valid_reg = 1'b0;
+        end
+      end
+    endcase
+  end
+
+  // Output assignments
+  assign src_ready_o = (src_state == SRC_IDLE) || (src_state == SRC_SENDING && dst_ready_i_synced);
+  assign src_clear_pending_o = src_clear_pending_reg;
+
+  // ------------------------------------------------------------------
+  // Destination Side (dst_clk_i domain)
+  // ------------------------------------------------------------------
+
+  // Synchronize src_clear_i to dst_clk_i
+  logic [SYNC_STAGES-1:0] src_clear_dst_sync;
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_clear_dst_sync <= '{default: 0};
+    else
+      src_clear_dst_sync <= {src_clear_dst_sync[SYNC_STAGES-2:0], src_clear_i};
+  end
+
+  // Synchronize src_valid_i to dst_clk_i
+  logic [SYNC_STAGES-1:0] src_valid_dst_sync;
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_valid_dst_sync <= '{default: 0};
+    else
+      src_valid_dst_sync <= {src_valid_dst_sync[SYNC_STAGES-2:0], src_valid_i};
+  end
+
+  // Synchronize src_data_i to dst_clk_i
+  logic [WIDTH-1:0] src_data_dst_sync;
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_data_dst_sync <= '0;
+    else
+      src_data_dst_sync <= {src_data_dst_sync[WIDTH-2:0], src_data_i[WIDTH-1]}; // Simplified for WIDTH=1, generalized below
+  end
+
+  // Proper data synchronization for arbitrary WIDTH
+  logic [WIDTH-1:0] src_data_dst_sync_full;
+  genvar i;
+  generate
+    for (i = 0; i < WIDTH; i = i + 1) begin : data_sync_gen
+      always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+          src_data_dst_sync_full[i] <= 1'b0;
+        else
+          src_data_dst_sync_full[i] <= src_data_i[i];
+      end
+    end
+  endgenerate
+
+  // State Machine for Destination
+  typedef enum logic [1:0] {
+    DST_IDLE,
+    DST_RECEIVING,
+    DST_WAITING_CLEAR
+  } dst_state_t;
+
+  dst_state_t dst_state, dst_state_next;
+  logic dst_valid_reg;
+  logic dst_clear_pending_reg;
+
+  // State Logic
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_state <= DST_IDLE;
+      dst_valid_reg <= 1'b0;
+      dst_clear_pending_reg <= 1'b0;
+    end else begin
+      dst_state <= dst_state_next;
+      dst_valid_reg <= src_valid_dst_sync[SYNC_STAGES-1];
+      dst_clear_pending_reg <= src_clear_dst_sync[SYNC_STAGES-1];
+    end
+  end
+
+  // Next State Logic
+  always_comb begin
+    dst_state_next = dst_state;
+    dst_valid_reg = src_valid_dst_sync[SYNC_STAGES-1];
+    dst_clear_pending_reg = src_clear_dst_sync[SYNC_STAGES-1];
+
+    case (dst_state)
+      DST_IDLE: begin
+        if (src_valid_dst_sync[SYNC_STAGES-1] && dst_ready_i) begin
+          dst_state_next = DST_RECEIVING;
+          dst_valid_reg = 1'b1;
+        end else if (src_clear_dst_sync[SYNC_STAGES-1]) begin
+          dst_state_next = DST_WAITING_CLEAR;
+          dst_valid_reg = 1'b0;
+        end
+      end
+
+      DST_RECEIVING: begin
+        if (dst_ready_i) begin
+          dst_state_next = DST_IDLE;
+          dst_valid_reg = 1'b0;
+        end else if (src_clear_dst_sync[SYNC_STAGES-1]) begin
+          dst_state_next = DST_WAITING_CLEAR;
+          dst_valid_reg = 1'b0;
+        end
+      end
+
+      DST_WAITING_CLEAR: begin
+        if (dst_ready_i) begin
+          dst_state_next = DST_IDLE;
+          dst_valid_reg = 1'b0;
+        end
+      end
+    endcase
+  end
+
+  // Output assignments
+  assign dst_data_o = src_data_dst_sync_full;
+  assign dst_valid_o = dst_valid_reg;
+  assign dst_clear_pending_o = dst_clear_pending_reg;
+
+  // ------------------------------------------------------------------
+  // Cross-Domain Synchronization Signals
+  // ------------------------------------------------------------------
+
+  // Sync dst_ready_i to src_clk_i domain
+  logic [SYNC_STAGES-1:0] dst_ready_sync;
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_ready_sync <= '{default: 0};
+    else
+      dst_ready_sync <= {dst_ready_sync[SYNC_STAGES-2:0], dst_ready_i};
+  end
+
+  // Sync src_valid_i to dst_clk_i domain (already done above as src_valid_dst_sync)
+  // Sync src_data_i to dst_clk_i domain (already done above as src_data_dst_sync_full)
+  // Sync dst_clear_i to src_clk_i domain (already done above as dst_clear_sync)
+  // Sync src_clear_i to dst_clk_i domain (already done above as src_clear_dst_sync)
+
+  // Assign the synchronized ready signal to the source state logic
+  assign dst_ready_i_synced = dst_ready_sync[SYNC_STAGES-1];
+
+endmodule
+```<|im_end|>

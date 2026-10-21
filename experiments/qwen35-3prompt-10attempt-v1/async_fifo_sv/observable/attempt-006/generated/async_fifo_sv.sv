@@ -1,0 +1,198 @@
+```systemverilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam ADDR_WIDTH_LOG = ADDR_WIDTH + 1;
+    localparam FIFO_DEPTH = 2**ADDR_WIDTH;
+
+    // Write side registers
+    reg [ADDR_WIDTH-1:0] wptr;
+    reg [ADDR_WIDTH-1:0] wptr_next;
+    reg [ADDR_WIDTH-1:0] wfull_ptr;
+    reg wfull_reg;
+
+    // Read side registers
+    reg [ADDR_WIDTH-1:0] rptr;
+    reg [ADDR_WIDTH-1:0] rptr_next;
+    reg [ADDR_WIDTH-1:0] rempty_ptr;
+    reg rempty_reg;
+
+    // FIFO Memory
+    reg [DATA_WIDTH-1:0] mem [FIFO_DEPTH-1:0];
+
+    // Write Address Generation
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= '0;
+            wfull_ptr <= '0;
+            wfull_reg <= 1'b0;
+        end else begin
+            wptr <= wptr_next;
+            wfull_ptr <= wfull_ptr + 1'b1;
+            if (wptr_next == '0)
+                wfull_reg <= 1'b1;
+            else if (wptr_next == wfull_ptr)
+                wfull_reg <= 1'b0;
+            else
+                wfull_reg <= wfull_reg;
+        end
+    end
+
+    // Read Address Generation
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= '0;
+            rempty_ptr <= '0;
+            rempty_reg <= 1'b1;
+        end else begin
+            rptr <= rptr_next;
+            rempty_ptr <= rempty_ptr + 1'b1;
+            if (rptr_next == '0)
+                rempty_reg <= 1'b1;
+            else if (rptr_next == rempty_ptr)
+                rempty_reg <= 1'b0;
+            else
+                rempty_reg <= rempty_reg;
+        end
+    end
+
+    // Write Pointer Next Logic
+    always @* begin
+        wptr_next = wptr + 1'b1;
+        if (wptr == FIFO_DEPTH - 1'b1)
+            wptr_next = '0;
+    end
+
+    // Read Pointer Next Logic
+    always @* begin
+        rptr_next = rptr + 1'b1;
+        if (rptr == FIFO_DEPTH - 1'b1)
+            rptr_next = '0;
+    end
+
+    // Write Enable Logic (Increment pointer only if not full)
+    always @* begin
+        wptr_next = wptr;
+        if (winc && !wfull_reg)
+            wptr_next = wptr + 1'b1;
+            if (wptr == FIFO_DEPTH - 1'b1)
+                wptr_next = '0;
+    end
+
+    // Read Enable Logic (Increment pointer only if not empty)
+    always @* begin
+        rptr_next = rptr;
+        if (rinc && !rempty_reg)
+            rptr_next = rptr + 1'b1;
+            if (rptr == FIFO_DEPTH - 1'b1)
+                rptr_next = '0;
+    end
+
+    // Memory Write Logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            mem <= '0;
+        end else if (winc && !wfull_reg) begin
+            mem[wptr] <= wdata;
+        end
+    end
+
+    // Memory Read Logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rdata <= '0;
+        end else begin
+            rdata <= mem[rptr];
+        end
+    end
+
+    // Clock Domain Crossing: Write Address to Read Domain
+    wire [ADDR_WIDTH-1:0] wptr_synced;
+    wire [ADDR_WIDTH-1:0] wptr_synced_1;
+    wire [ADDR_WIDTH-1:0] wptr_synced_2;
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            wptr_synced <= '0;
+        else
+            wptr_synced <= wptr;
+    end
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            wptr_synced_1 <= '0;
+        else
+            wptr_synced_1 <= wptr_synced;
+    end
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            wptr_synced_2 <= '0;
+        else
+            wptr_synced_2 <= wptr_synced_1;
+    end
+
+    // Clock Domain Crossing: Read Address to Write Domain
+    wire [ADDR_WIDTH-1:0] rptr_synced;
+    wire [ADDR_WIDTH-1:0] rptr_synced_1;
+    wire [ADDR_WIDTH-1:0] rptr_synced_2;
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rptr_synced <= '0;
+        else
+            rptr_synced <= rptr;
+    end
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rptr_synced_1 <= '0;
+        else
+            rptr_synced_1 <= rptr_synced;
+    end
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rptr_synced_2 <= '0;
+        else
+            rptr_synced_2 <= rptr_synced_1;
+    end
+
+    // Full Flag Logic (Write Domain)
+    // Full when write pointer equals read pointer (after sync)
+    always @* begin
+        wfull = 1'b0;
+        if (wptr == rptr_synced_2)
+            wfull = 1'b1;
+    end
+
+    // Empty Flag Logic (Read Domain)
+    // Empty when read pointer equals write pointer (after sync)
+    always @* begin
+        rempty = 1'b0;
+        if (rptr == wptr_synced_2)
+            rempty = 1'b1;
+    end
+
+    // Output Ports
+    assign waddr = wptr;
+    assign raddr = rptr;
+
+endmodule
+```<|im_end|>

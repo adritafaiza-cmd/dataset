@@ -1,0 +1,194 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain signals
+  logic src_valid_reg;
+  logic src_ready_reg;
+  logic [WIDTH-1:0] src_data_reg;
+  logic src_valid_next;
+  logic src_ready_next;
+
+  // Destination domain signals
+  logic dst_valid_reg;
+  logic dst_ready_reg;
+  logic [WIDTH-1:0] dst_data_reg;
+  logic dst_valid_next;
+  logic dst_ready_next;
+
+  // State machine for destination side (4-phase)
+  // States: IDLE, DATA, ACK, WAIT
+  enum logic [1:0] {
+    DST_IDLE,
+    DST_DATA,
+    DST_ACK,
+    DST_WAIT
+  } dst_state, dst_state_next;
+
+  // Source side state (simplified handshake logic)
+  // We need to track if we are waiting for the previous beat to complete
+  // before accepting a new one, unless DECOUPLED is set.
+  logic src_waiting_for_ack;
+
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_ready_reg <= 1'b1;
+      src_data_reg <= '0;
+      src_waiting_for_ack <= 1'b0;
+    end else begin
+      src_valid_reg <= src_valid_next;
+      src_ready_reg <= src_ready_next;
+      src_data_reg <= src_data_next;
+      src_waiting_for_ack <= src_waiting_for_ack_next;
+    end
+  end
+
+  always_comb begin
+    src_valid_next = src_valid_reg;
+    src_ready_next = src_ready_reg;
+    src_data_next = src_data_reg;
+    src_waiting_for_ack_next = src_waiting_for_ack;
+
+    // Default values
+    src_ready_next = 1'b1;
+    src_valid_next = 1'b0;
+    src_data_next = '0;
+    src_waiting_for_ack_next = 1'b0;
+
+    // Handshake logic
+    if (!src_rst_ni) begin
+      src_ready_next = 1'b1;
+      src_valid_next = 1'b0;
+      src_waiting_for_ack_next = 1'b0;
+    end else begin
+      // If we are waiting for the previous beat to complete (non-decoupled mode)
+      if (!DECOUPLED && src_waiting_for_ack) begin
+        src_ready_next = 1'b0;
+      end else begin
+        src_ready_next = 1'b1;
+      end
+
+      // If valid and ready, accept data and set waiting flag if not decoupled
+      if (src_valid_i && src_ready_next) begin
+        src_valid_next = 1'b0; // Deassert valid immediately after acceptance
+        src_data_next = src_data_i;
+        if (!DECOUPLED) begin
+          src_waiting_for_ack_next = 1'b1;
+        end else begin
+          src_waiting_for_ack_next = 1'b0;
+        end
+      end
+    end
+  end
+
+  // Destination side logic
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_ready_reg <= 1'b1;
+      dst_data_reg <= '0;
+      dst_state <= DST_IDLE;
+    end else begin
+      dst_valid_reg <= dst_valid_next;
+      dst_ready_reg <= dst_ready_next;
+      dst_data_reg <= dst_data_next;
+      dst_state <= dst_state_next;
+    end
+  end
+
+  always_comb begin
+    dst_valid_next = dst_valid_reg;
+    dst_ready_next = dst_ready_reg;
+    dst_data_next = dst_data_reg;
+    dst_state_next = dst_state;
+
+    // Default values
+    dst_ready_next = 1'b1;
+    dst_valid_next = 1'b0;
+    dst_data_next = '0;
+    dst_state_next = DST_IDLE;
+
+    if (!dst_rst_ni) begin
+      dst_ready_next = 1'b1;
+      dst_valid_next = 1'b0;
+      dst_data_next = '0;
+      dst_state_next = DST_IDLE;
+    end else begin
+      case (dst_state)
+        DST_IDLE: begin
+          if (src_valid_reg && src_ready_reg) begin
+            dst_valid_next = 1'b1;
+            dst_data_next = src_data_reg;
+            dst_state_next = DST_DATA;
+          end else begin
+            dst_state_next = DST_IDLE;
+          end
+        end
+
+        DST_DATA: begin
+          // Hold data stable while waiting for ready
+          dst_data_next = src_data_reg;
+          if (dst_ready_i) begin
+            dst_valid_next = 1'b0;
+            dst_state_next = DST_ACK;
+          end else begin
+            // Stay in DATA state, hold data
+            dst_state_next = DST_DATA;
+          end
+        end
+
+        DST_ACK: begin
+          // Wait for source to acknowledge (src_ready goes high)
+          // In 4-phase, we wait for src_ready to go high to indicate the previous beat is done
+          if (src_ready_reg) begin
+            dst_valid_next = 1'b0;
+            dst_state_next = DST_WAIT;
+          end else begin
+            dst_state_next = DST_ACK;
+          end
+        end
+
+        DST_WAIT: begin
+          // Wait for source to indicate it's ready for the next beat
+          // This is the "wait for src_valid to go low" phase effectively
+          if (!src_valid_reg) begin
+            dst_state_next = DST_IDLE;
+          end else begin
+            dst_state_next = DST_WAIT;
+          end
+        end
+
+        default: begin
+          dst_state_next = DST_IDLE;
+        end
+      endcase
+    end
+  end
+
+  // Handle Reset Message
+  if (SEND_RESET_MSG && !dst_rst_ni) begin
+    // During reset, force the reset message
+    dst_valid_next = 1'b1;
+    dst_data_next = RESET_MSG;
+    dst_state_next = DST_DATA;
+  end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

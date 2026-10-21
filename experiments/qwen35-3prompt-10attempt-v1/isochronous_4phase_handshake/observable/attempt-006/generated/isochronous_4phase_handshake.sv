@@ -1,0 +1,147 @@
+```verilog
+module isochronous_4phase_handshake (
+    input  src_clk_i,
+    input  src_rst_ni,
+    input  src_valid_i,
+    output src_ready_o,
+    input  dst_clk_i,
+    input  dst_rst_ni,
+    output dst_valid_o,
+    input  dst_ready_i
+);
+
+    // Synchronizer for src_valid_i to dst domain
+    reg src_valid_synced;
+    reg src_valid_synced_2;
+
+    // Synchronizer for dst_ready_i to src domain
+    reg dst_ready_synced;
+    reg dst_ready_synced_2;
+
+    // State machine state encoding
+    // 0: IDLE
+    // 1: WAIT_SRC (Waiting for src_valid)
+    // 2: GRANT_SRC (Asserting dst_valid, waiting for dst_ready)
+    // 3: WAIT_DST (Waiting for dst_ready)
+    // 4: ACK_SRC (Asserting src_ready, waiting for next src_valid)
+    localparam IDLE = 2'b00;
+    localparam WAIT_SRC = 2'b01;
+    localparam GRANT_SRC = 2'b10;
+    localparam WAIT_DST = 2'b11;
+    localparam ACK_SRC = 2'b00; // Reuse IDLE logic or distinct if needed, but 4-phase usually loops back to wait for next valid
+    // Actually, standard 4-phase:
+    // 0: Idle
+    // 1: Request (src_valid asserted)
+    // 2: Grant (dst_valid asserted)
+    // 3: Ack (src_ready asserted)
+    // Then back to Idle.
+    localparam STATE_IDLE = 2'b00;
+    localparam STATE_REQ = 2'b01;
+    localparam STATE_GRANT = 2'b10;
+    localparam STATE_ACK = 2'b11;
+
+    reg [1:0] state, next_state;
+
+    // State Register
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            state <= STATE_IDLE;
+        else
+            state <= next_state;
+    end
+
+    // Next State Logic
+    always @(*) begin
+        next_state = state;
+        case (state)
+            STATE_IDLE: begin
+                if (src_valid_i)
+                    next_state = STATE_REQ;
+                else
+                    next_state = STATE_IDLE;
+            end
+            STATE_REQ: begin
+                // Wait for grant from dst domain
+                if (dst_ready_synced)
+                    next_state = STATE_GRANT;
+                else
+                    next_state = STATE_REQ;
+            end
+            STATE_GRANT: begin
+                // Wait for ack from dst domain
+                if (dst_ready_synced)
+                    next_state = STATE_ACK;
+                else
+                    next_state = STATE_GRANT;
+            end
+            STATE_ACK: begin
+                // Wait for next request
+                if (src_valid_i)
+                    next_state = STATE_REQ;
+                else
+                    next_state = STATE_IDLE;
+            end
+            default: next_state = STATE_IDLE;
+        endcase
+    end
+
+    // Output Logic
+    always @(*) begin
+        src_ready_o = 1'b0;
+        dst_valid_o = 1'b0;
+        case (state)
+            STATE_IDLE: begin
+                src_ready_o = 1'b0;
+                dst_valid_o = 1'b0;
+            end
+            STATE_REQ: begin
+                src_ready_o = 1'b0;
+                dst_valid_o = 1'b0;
+            end
+            STATE_GRANT: begin
+                src_ready_o = 1'b0;
+                dst_valid_o = 1'b1;
+            end
+            STATE_ACK: begin
+                src_ready_o = 1'b1;
+                dst_valid_o = 1'b1;
+            end
+            default: begin
+                src_ready_o = 1'b0;
+                dst_valid_o = 1'b0;
+            end
+        endcase
+    end
+
+    // Synchronizer: src_valid_i -> dst domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_valid_synced <= 1'b0;
+        else
+            src_valid_synced <= src_valid_i;
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_valid_synced_2 <= 1'b0;
+        else
+            src_valid_synced_2 <= src_valid_synced;
+    end
+
+    // Synchronizer: dst_ready_i -> src domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ready_synced <= 1'b0;
+        else
+            dst_ready_synced <= dst_ready_i;
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ready_synced_2 <= 1'b0;
+        else
+            dst_ready_synced_2 <= dst_ready_synced;
+    end
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,358 @@
+```verilog
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam INT_DEPTH = 1 << LOG_DEPTH;
+    localparam INT_ADDR_WIDTH = ADDR_WIDTH;
+    localparam INT_DATA_WIDTH = DATA_WIDTH;
+    localparam INT_STRB_WIDTH = DATA_WIDTH / 8;
+
+    // Synchronizer for asynchronous reset signals
+    reg src_reset_sync;
+    reg dst_reset_sync;
+
+    // Synchronizer for handshake signals
+    reg src_psel_sync;
+    reg src_penable_sync;
+    reg src_pwrite_sync;
+    reg src_pready_sync;
+    reg dst_pready_sync;
+    reg dst_pslverr_sync;
+
+    // Synchronizer for data and control signals
+    reg [INT_ADDR_WIDTH-1:0] src_paddr_sync;
+    reg [INT_DATA_WIDTH-1:0] src_pwdata_sync;
+    reg [INT_STRB_WIDTH-1:0] src_pstrb_sync;
+    reg [2:0] src_pprot_sync;
+    reg [INT_DATA_WIDTH-1:0] dst_prdata_sync;
+
+    // FIFO Control Signals
+    reg [LOG_DEPTH-1:0] wr_ptr;
+    reg [LOG_DEPTH-1:0] rd_ptr;
+    reg [LOG_DEPTH-1:0] full_cnt;
+    reg [LOG_DEPTH-1:0] empty_cnt;
+    reg [LOG_DEPTH-1:0] next_wr_ptr;
+    reg [LOG_DEPTH-1:0] next_rd_ptr;
+    reg [LOG_DEPTH-1:0] next_full_cnt;
+    reg [LOG_DEPTH-1:0] next_empty_cnt;
+    reg [LOG_DEPTH-1:0] next_next_wr_ptr;
+    reg [LOG_DEPTH-1:0] next_next_rd_ptr;
+    reg [LOG_DEPTH-1:0] next_next_full_cnt;
+    reg [LOG_DEPTH-1:0] next_next_empty_cnt;
+
+    // FIFO Data Storage
+    reg [INT_ADDR_WIDTH-1:0] fifo_addr [INT_DEPTH-1:0];
+    reg [INT_DATA_WIDTH-1:0] fifo_pwdata [INT_DEPTH-1:0];
+    reg [INT_STRB_WIDTH-1:0] fifo_pstrb [INT_DEPTH-0];
+    reg [2:0] fifo_pprot [INT_DEPTH-1:0];
+    reg [INT_DATA_WIDTH-1:0] fifo_prdata [INT_DEPTH-1:0];
+    reg fifo_pslverr [INT_DEPTH-1:0];
+
+    // State Machine for Source Side
+    typedef enum logic [1:0] {
+        SRC_IDLE,
+        SRC_WAIT_DST_READY,
+        SRC_READ_DATA
+    } src_state_t;
+
+    src_state_t src_state;
+    reg src_state_next;
+
+    // State Machine for Destination Side
+    typedef enum logic [1:0] {
+        DST_IDLE,
+        DST_WAIT_SRC_READY,
+        DST_READ_DATA
+    } dst_state_t;
+
+    dst_state_t dst_state;
+    reg dst_state_next;
+
+    // Synchronizer Logic
+    always_ff @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            src_reset_sync <= 1'b1;
+        else
+            src_reset_sync <= src_reset_sync | src_preset_ni;
+    end
+
+    always_ff @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni)
+            dst_reset_sync <= 1'b1;
+        else
+            dst_reset_sync <= dst_reset_sync | dst_preset_ni;
+    end
+
+    always_ff @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            src_psel_sync <= 1'b0;
+        else
+            src_psel_sync <= src_psel_sync | src_psel_i;
+    end
+
+    always_ff @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            src_penable_sync <= 1'b0;
+        else
+            src_penable_sync <= src_penable_sync | src_penable_i;
+    end
+
+    always_ff @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            src_pwrite_sync <= 1'b0;
+        else
+            src_pwrite_sync <= src_pwrite_sync | src_pwrite_i;
+    end
+
+    always_ff @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            src_pready_sync <= 1'b0;
+        else
+            src_pready_sync <= src_pready_sync | src_pready_i;
+    end
+
+    always_ff @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni)
+            dst_pready_sync <= 1'b0;
+        else
+            dst_pready_sync <= dst_pready_sync | dst_pready_i;
+    end
+
+    always_ff @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni)
+            dst_pslverr_sync <= 1'b0;
+        else
+            dst_pslverr_sync <= dst_pslverr_sync | dst_pslverr_i;
+    end
+
+    always_ff @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            src_paddr_sync <= {INT_ADDR_WIDTH{1'b0}};
+        else
+            src_paddr_sync <= src_paddr_i;
+    end
+
+    always_ff @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            src_pwdata_sync <= {INT_DATA_WIDTH{1'b0}};
+        else
+            src_pwdata_sync <= src_pwdata_i;
+    end
+
+    always_ff @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            src_pstrb_sync <= {INT_STRB_WIDTH{1'b0}};
+        else
+            src_pstrb_sync <= src_pstrb_i;
+    end
+
+    always_ff @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            src_pprot_sync <= 3'b000;
+        else
+            src_pprot_sync <= src_pprot_i;
+    end
+
+    always_ff @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni)
+            dst_prdata_sync <= {INT_DATA_WIDTH{1'b0}};
+        else
+            dst_prdata_sync <= dst_prdata_i;
+    end
+
+    // FIFO Logic
+    always_ff @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            wr_ptr <= 0;
+            rd_ptr <= 0;
+            full_cnt <= 0;
+            empty_cnt <= 0;
+            next_wr_ptr <= 0;
+            next_rd_ptr <= 0;
+            next_full_cnt <= 0;
+            next_empty_cnt <= 0;
+            next_next_wr_ptr <= 0;
+            next_next_rd_ptr <= 0;
+            next_next_full_cnt <= 0;
+            next_next_empty_cnt <= 0;
+        end else begin
+            wr_ptr <= next_wr_ptr;
+            rd_ptr <= next_rd_ptr;
+            full_cnt <= next_full_cnt;
+            empty_cnt <= next_empty_cnt;
+            next_wr_ptr <= next_next_wr_ptr;
+            next_rd_ptr <= next_next_rd_ptr;
+            next_full_cnt <= next_next_full_cnt;
+            next_empty_cnt <= next_next_empty_cnt;
+        end
+    end
+
+    always_comb begin
+        next_wr_ptr = wr_ptr;
+        next_rd_ptr = rd_ptr;
+        next_full_cnt = full_cnt;
+        next_empty_cnt = empty_cnt;
+
+        if (src_psel_sync && src_penable_sync && !src_pready_sync && !src_reset_sync) begin
+            if (full_cnt == 0) begin
+                next_wr_ptr = wr_ptr;
+                next_full_cnt = 1;
+            end else if (full_cnt == INT_DEPTH - 1) begin
+                next_wr_ptr = wr_ptr;
+                next_full_cnt = INT_DEPTH;
+            end else begin
+                next_wr_ptr = wr_ptr + 1;
+                next_full_cnt = full_cnt + 1;
+            end
+        end
+
+        if (dst_pready_sync && !dst_reset_sync) begin
+            if (empty_cnt == 0) begin
+                next_rd_ptr = rd_ptr;
+                next_empty_cnt = 1;
+            end else if (empty_cnt == INT_DEPTH - 1) begin
+                next_rd_ptr = rd_ptr;
+                next_empty_cnt = INT_DEPTH;
+            end else begin
+                next_rd_ptr = rd_ptr + 1;
+                next_empty_cnt = empty_cnt + 1;
+            end
+        end
+    end
+
+    always_comb begin
+        if (src_psel_sync && src_penable_sync && !src_pready_sync && !src_reset_sync) begin
+            fifo_addr[wr_ptr] = src_paddr_sync;
+            fifo_pwdata[wr_ptr] = src_pwdata_sync;
+            fifo_pstrb[wr_ptr] = src_pstrb_sync;
+            fifo_pprot[wr_ptr] = src_pprot_sync;
+        end
+
+        if (dst_pready_sync && !dst_reset_sync) begin
+            fifo_prdata[rd_ptr] = dst_prdata_sync;
+            fifo_pslverr[rd_ptr] = dst_pslverr_sync;
+        end
+    end
+
+    // Source State Machine
+    always_ff @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            src_state <= SRC_IDLE;
+        else
+            src_state <= src_state_next;
+    end
+
+    always_comb begin
+        src_state_next = SRC_IDLE;
+        src_pready_o = 1'b0;
+        src_prdata_o = {INT_DATA_WIDTH{1'b0}};
+        src_pslverr_o = 1'b0;
+
+        case (src_state)
+            SRC_IDLE: begin
+                if (src_psel_sync && src_penable_sync && !src_pready_sync && !src_reset_sync) begin
+                    src_state_next = SRC_WAIT_DST_READY;
+                end
+            end
+
+            SRC_WAIT_DST_READY: begin
+                if (dst_pready_sync && !dst_reset_sync) begin
+                    src_state_next = SRC_READ_DATA;
+                end
+            end
+
+            SRC_READ_DATA: begin
+                if (dst_pready_sync && !dst_reset_sync) begin
+                    src_state_next = SRC_IDLE;
+                    src_pready_o = 1'b1;
+                    src_prdata_o = fifo_prdata[rd_ptr];
+                    src_pslverr_o = fifo_pslverr[rd_ptr];
+                end
+            end
+        endcase
+    end
+
+    // Destination State Machine
+    always_ff @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni)
+            dst_state <= DST_IDLE;
+        else
+            dst_state <= dst_state_next;
+    end
+
+    always_comb begin
+        dst_state_next = DST_IDLE;
+        dst_psel_o = 1'b0;
+        dst_penable_o = 1'b0;
+        dst_pwrite_o = 1'b0;
+        dst_paddr_o = {INT_ADDR_WIDTH{1'b0}};
+        dst_pwdata_o = {INT_DATA_WIDTH{1'b0}};
+        dst_pstrb_o = {INT_STRB_WIDTH{1'b0}};
+        dst_pprot_o = 3'b000;
+
+        case (dst_state)
+            DST_IDLE: begin
+                if (src_psel_sync && src_penable_sync && !src_pready_sync && !dst_reset_sync) begin
+                    dst_state_next = DST_WAIT_SRC_READY;
+                    dst_psel_o = 1'b1;
+                    dst_penable_o = 1'b1;
+                    dst_pwrite_o = src_pwrite_sync;
+                    dst_paddr_o = fifo_addr[wr_ptr];
+                    dst_pwdata_o = fifo_pwdata[wr_ptr];
+                    dst_pstrb_o = fifo_pstrb[wr_ptr];
+                    dst_pprot_o = fifo_pprot[wr_ptr];
+                end
+            end
+
+            DST_WAIT_SRC_READY: begin
+                if (src_pready_sync && !dst_reset_sync) begin
+                    dst_state_next = DST_READ_DATA;
+                end
+            end
+
+            DST_READ_DATA: begin
+                if (src_pready_sync && !dst_reset_sync) begin
+                    dst_state_next = DST_IDLE;
+                    dst_psel_o = 1'b0;
+                    dst_penable_o = 1'b0;
+                    dst_pwrite_o = 1'b0;
+                    dst_paddr_o = {INT_ADDR_WIDTH{1'b0}};
+                    dst_pwdata_o = {INT_DATA_WIDTH{1'b0}};
+                    dst_pstrb_o = {INT_STRB_WIDTH{1'b0}};
+                    dst_pprot_o = 3'b000;
+                end
+            end
+        endcase
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,221 @@
+```systemverilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam INT_WIDTH = ADDR_WIDTH + 1;
+    localparam INT_MAX   = 1 << INT_WIDTH;
+    localparam INT_HALF  = INT_MAX / 2;
+
+    // Calculate total depth and required sync stages
+    localparam INT_DEPTH = 1 << ADDR_WIDTH;
+    localparam INT_SYNC  = SYNC_STAGES;
+
+    // Write Domain Signals
+    reg [INT_WIDTH-1:0] w_ptr;
+    reg [INT_WIDTH-1:0] w_cnt;
+    reg [DATA_WIDTH-1:0] w_data_reg;
+
+    // Read Domain Signals
+    reg [INT_WIDTH-1:0] r_ptr;
+    reg [INT_WIDTH-1:0] r_cnt;
+    wire [DATA_WIDTH-1:0] r_data_reg;
+
+    // Cross-domain synchronization
+    // We use a shift register chain to synchronize pointers and counts
+    // from one domain to the other.
+    
+    // Write Domain -> Read Domain (for r_ptr, r_cnt)
+    reg [INT_WIDTH-1:0] w2r_ptr [0:INT_SYNC-1];
+    reg [INT_WIDTH-1:0] w2r_cnt [0:INT_SYNC-1];
+    
+    // Read Domain -> Write Domain (for w_ptr, w_cnt)
+    reg [INT_WIDTH-1:0] r2w_ptr [0:INT_SYNC-1];
+    reg [INT_WIDTH-1:0] r2w_cnt [0:INT_SYNC-1];
+
+    // Synchronize winc and rinc
+    reg winc_synced;
+    reg rinc_synced;
+
+    // ---------------------------------------------------------
+    // Write Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            w_ptr      <= 1'b0;
+            w_cnt      <= 1'b0;
+            w_data_reg <= 1'b0;
+            winc_synced<= 1'b0;
+        end else begin
+            winc_synced <= winc;
+            
+            if (winc_synced && !wfull) begin
+                w_ptr <= w_ptr + 1'b1;
+                w_cnt <= w_cnt + 1'b1;
+                w_data_reg <= wdata;
+            end
+        end
+    end
+
+    // Generate wfull based on count
+    assign wfull = (w_cnt >= INT_HALF);
+
+    // ---------------------------------------------------------
+    // Read Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            r_ptr      <= 1'b0;
+            r_cnt      <= 1'b0;
+            rinc_synced<= 1'b0;
+        end else begin
+            rinc_synced <= rinc;
+            
+            if (rinc_synced && !rempty) begin
+                r_ptr <= r_ptr + 1'b1;
+                r_cnt <= r_cnt + 1'b1;
+            end
+        end
+    end
+
+    // Generate rempty based on count
+    assign rempty = (r_cnt == 1'b0);
+
+    // ---------------------------------------------------------
+    // Synchronization Logic: Write -> Read
+    // ---------------------------------------------------------
+    // Chain the pointers and counts from Write domain to Read domain
+    genvar i;
+    generate
+        for (i = 0; i < INT_SYNC; i = i + 1) begin : sync_chain_wr2rd
+            if (i == 0) begin
+                always @(posedge rclk or negedge rrst_n) begin
+                    if (!rrst_n) begin
+                        w2r_ptr[i] <= 1'b0;
+                        w2r_cnt[i] <= 1'b0;
+                    end else begin
+                        w2r_ptr[i] <= w_ptr;
+                        w2r_cnt[i] <= w_cnt;
+                    end
+                end
+            end else begin
+                always @(posedge rclk or negedge rrst_n) begin
+                    if (!rrst_n) begin
+                        w2r_ptr[i] <= 1'b0;
+                        w2r_cnt[i] <= 1'b0;
+                    end else begin
+                        w2r_ptr[i] <= w2r_ptr[i-1];
+                        w2r_cnt[i] <= w2r_cnt[i-1];
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // Use the last stage of the chain for actual comparison
+    wire [INT_WIDTH-1:0] sync_w_ptr = w2r_ptr[INT_SYNC-1];
+    wire [INT_WIDTH-1:0] sync_w_cnt = w2r_cnt[INT_SYNC-1];
+
+    // ---------------------------------------------------------
+    // Synchronization Logic: Read -> Write
+    // ---------------------------------------------------------
+    // Chain the pointers and counts from Read domain to Write domain
+    generate
+        for (i = 0; i < INT_SYNC; i = i + 1) begin : sync_chain_rd2wr
+            if (i == 0) begin
+                always @(posedge wclk or negedge wrst_n) begin
+                    if (!wrst_n) begin
+                        r2w_ptr[i] <= 1'b0;
+                        r2w_cnt[i] <= 1'b0;
+                    end else begin
+                        r2w_ptr[i] <= r_ptr;
+                        r2w_cnt[i] <= r_cnt;
+                    end
+                end
+            end else begin
+                always @(posedge wclk or negedge wrst_n) begin
+                    if (!wrst_n) begin
+                        r2w_ptr[i] <= 1'b0;
+                        r2w_cnt[i] <= 1'b0;
+                    end else begin
+                        r2w_ptr[i] <= r2w_ptr[i-1];
+                        r2w_cnt[i] <= r2w_cnt[i-1];
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // Use the last stage of the chain for actual comparison
+    wire [INT_WIDTH-1:0] sync_r_ptr = r2w_ptr[INT_SYNC-1];
+    wire [INT_WIDTH-1:0] sync_r_cnt = r2w_cnt[INT_SYNC-1];
+
+    // ---------------------------------------------------------
+    // Output Generation
+    // ---------------------------------------------------------
+    // waddr is the current write pointer
+    assign waddr = w_ptr;
+
+    // rdata is the data at the current read pointer
+    assign rdata = w_data_reg[sync_r_ptr[ADDR_WIDTH:0]];
+
+    // raddr is the current read pointer
+    assign raddr = r_ptr;
+
+    // Full signal: Write count >= Half depth (synchronized)
+    // We compare the synchronized write count against the synchronized read count
+    // If (sync_w_cnt - sync_r_cnt) >= HALF, then full.
+    // To avoid subtraction overflow issues with unsigned types, we check:
+    // sync_w_cnt >= (sync_r_cnt + HALF)
+    // However, since sync_r_cnt is synchronized, we must be careful.
+    // Standard approach: Full if (sync_w_cnt >= sync_r_cnt + HALF)
+    // But sync_r_cnt is from read domain. Let's re-evaluate.
+    
+    // Correct logic for Full:
+    // The FIFO is full when the number of items written (sync_w_cnt) 
+    // minus the number of items read (sync_r_cnt) equals HALF.
+    // Since sync_w_cnt and sync_r_cnt are both in the Read domain now (after sync),
+    // we can safely subtract.
+    
+    // Note: sync_r_cnt is the count of reads that have happened in the read domain,
+    // synchronized to the read clock. sync_w_cnt is the count of writes,
+    // synchronized to the read clock.
+    // So (sync_w_cnt - sync_r_cnt) represents the current fill level seen by the read domain.
+    
+    // Full condition: fill_level >= HALF
+    // fill_level = sync_w_cnt - sync_r_cnt
+    // We need to handle the case where sync_w_cnt < sync_r_cnt (underflow in logic, shouldn't happen if logic is correct)
+    // But to be safe with unsigned arithmetic:
+    // if (sync_w_cnt >= sync_r_cnt) then fill = sync_w_cnt - sync_r_cnt
+    // else fill = 0 (should not happen in normal operation)
+    
+    // Simpler robust check:
+    // Full if (sync_w_cnt >= sync_r_cnt + HALF)
+    // This works because if sync_w_cnt < sync_r_cnt, the condition is false (correct, not full).
+    // If sync_w_cnt >= sync_r_cnt, we check if the difference is >= HALF.
+    
+    assign wfull = (sync_w_cnt >= (sync_r_cnt + INT_HALF));
+
+    // Empty signal: Read count == 0 (synchronized)
+    // The read domain sees the write count synchronized.
+    // Empty if (sync_w_cnt - sync_r_cnt) == 0
+    // i.e., sync_w_cnt == sync_r_cnt
+    assign rempty = (sync_w_cnt == sync_r_cnt);
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,272 @@
+```verilog
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam INT_DEPTH = 1 << LOG_DEPTH;
+
+    // Source Side Signals (Request FIFO)
+    reg [ADDR_WIDTH-1:0]    src_fifo_addr;
+    reg [DATA_WIDTH-1:0]    src_fifo_wdata;
+    reg [DATA_WIDTH/8-1:0]  src_fifo_wstrb;
+    reg                     src_fifo_wen;
+    reg                     src_fifo_valid;
+    reg                     src_fifo_ready;
+    reg                     src_fifo_full;
+    reg                     src_fifo_empty;
+
+    // Destination Side Signals (Response FIFO)
+    reg [ADDR_WIDTH-1:0]    dst_fifo_addr;
+    reg [DATA_WIDTH-1:0]    dst_fifo_rdata;
+    reg [DATA_WIDTH/8-1:0]  dst_fifo_rstrb;
+    reg                     dst_fifo_rvalid;
+    reg                     dst_fifo_ready;
+    reg                     dst_fifo_full;
+    reg                     dst_fifo_empty;
+
+    // Control Signals
+    reg                     src_req_valid;
+    reg                     src_req_ready;
+    reg                     dst_resp_valid;
+    reg                     dst_resp_ready;
+    reg                     src_resp_valid;
+    reg                     src_resp_ready;
+    reg                     dst_req_valid;
+    reg                     dst_req_ready;
+    reg                     dst_resp_ready_int;
+
+    // Source Side Logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_fifo_addr <= '0;
+            src_fifo_wdata <= '0;
+            src_fifo_wstrb <= '0;
+            src_fifo_valid <= 1'b0;
+            src_fifo_ready <= 1'b1;
+            src_fifo_full <= 1'b0;
+            src_fifo_empty <= 1'b1;
+            src_req_valid <= 1'b0;
+            src_req_ready <= 1'b1;
+            src_pready_o <= 1'b1;
+            src_prdata_o <= '0;
+            src_pslverr_o <= 1'b0;
+            dst_psel_o <= 1'b0;
+            dst_penable_o <= 1'b0;
+            dst_pwrite_o <= 1'b0;
+            dst_paddr_o <= '0;
+            dst_pwdata_o <= '0;
+            dst_pstrb_o <= '0;
+            dst_pprot_o <= '0;
+        end else begin
+            // Request Generation
+            src_req_valid <= src_psel_i & src_penable_i;
+            src_req_ready <= ~src_fifo_full;
+            
+            if (src_req_valid & src_req_ready) begin
+                src_fifo_addr <= src_paddr_i;
+                src_fifo_wdata <= src_pwdata_i;
+                src_fifo_wstrb <= src_pstrb_i;
+                src_fifo_wen <= 1'b1;
+                src_fifo_valid <= 1'b1;
+                src_pready_o <= 1'b0;
+            end else if (src_fifo_valid & src_fifo_ready) begin
+                src_fifo_wen <= 1'b0;
+                src_fifo_valid <= 1'b0;
+                src_pready_o <= 1'b1;
+            end
+
+            // Response Generation
+            src_resp_valid <= dst_resp_valid;
+            src_resp_ready <= ~src_fifo_empty;
+            
+            if (src_resp_valid & src_resp_ready) begin
+                src_prdata_o <= dst_prdata_i;
+                src_pslverr_o <= dst_pslverr_i;
+            end else if (src_resp_valid & src_resp_ready) begin
+                // Handshake completed, reset response
+                src_prdata_o <= '0;
+                src_pslverr_o <= 1'b0;
+            end
+
+            // Destination Request Generation
+            dst_req_valid <= src_fifo_valid;
+            dst_req_ready <= ~dst_fifo_full;
+            
+            if (dst_req_valid & dst_req_ready) begin
+                dst_psel_o <= 1'b1;
+                dst_penable_o <= 1'b1;
+                dst_pwrite_o <= src_pwrite_i;
+                dst_paddr_o <= src_fifo_addr;
+                dst_pwdata_o <= src_fifo_wdata;
+                dst_pstrb_o <= src_fifo_wstrb;
+                dst_pprot_o <= src_pprot_i;
+            end else if (dst_req_valid & dst_req_ready) begin
+                // Wait for ready, do nothing else
+            end
+
+            // Destination Response Handling
+            dst_resp_ready_int <= ~dst_fifo_empty;
+            if (dst_pready_i & dst_req_valid) begin
+                dst_resp_valid <= 1'b1;
+                dst_prdata_i <= dst_prdata_i; // Capture data
+                dst_pslverr_i <= dst_pslverr_i; // Capture error
+            end else if (dst_pready_i & dst_req_valid) begin
+                // Handshake completed
+                dst_resp_valid <= 1'b0;
+            end
+        end
+    end
+
+    // Source Side FIFO Logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_fifo_full <= 1'b0;
+            src_fifo_empty <= 1'b1;
+        end else begin
+            if (src_fifo_valid & src_fifo_ready) begin
+                if (src_fifo_empty) begin
+                    src_fifo_empty <= 1'b0;
+                end
+                if (!src_fifo_full) begin
+                    src_fifo_full <= 1'b1;
+                end
+            end else if (~src_fifo_valid & src_fifo_ready) begin
+                if (src_fifo_full) begin
+                    src_fifo_full <= 1'b0;
+                end
+            end
+        end
+    end
+
+    // Destination Side FIFO Logic
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_fifo_full <= 1'b0;
+            dst_fifo_empty <= 1'b1;
+        end else begin
+            if (dst_req_valid & dst_pready_i) begin
+                if (dst_fifo_empty) begin
+                    dst_fifo_empty <= 1'b0;
+                end
+                if (!dst_fifo_full) begin
+                    dst_fifo_full <= 1'b1;
+                end
+            end else if (~dst_req_valid & dst_pready_i) begin
+                if (dst_fifo_full) begin
+                    dst_fifo_full <= 1'b0;
+                end
+            end
+        end
+    end
+
+    // Response FIFO Logic (Read from Dest, Write to Src)
+    // This is a simple buffer since we just need to pass the response back
+    // We use a single register to hold the response until the source is ready
+    reg [DATA_WIDTH-1:0]    resp_data_reg;
+    reg [DATA_WIDTH/8-1:0]  resp_strb_reg;
+    reg                     resp_valid_reg;
+    reg                     resp_ready_reg;
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            resp_data_reg <= '0;
+            resp_strb_reg <= '0;
+            resp_valid_reg <= 1'b0;
+            resp_ready_reg <= 1'b1;
+        end else begin
+            // Capture response when destination provides it
+            if (dst_pready_i & dst_req_valid) begin
+                resp_data_reg <= dst_prdata_i;
+                resp_strb_reg <= dst_pstrb_i; // Not used in response, but for completeness
+                resp_valid_reg <= 1'b1;
+            end else if (dst_pready_i & dst_req_valid) begin
+                // Handshake completed, reset
+                resp_valid_reg <= 1'b0;
+            end
+            
+            // Drive response to source
+            src_prdata_o <= resp_data_reg;
+            src_pslverr_o <= dst_pslverr_i;
+        end
+    end
+
+    // Handshake logic for response
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_resp_ready <= 1'b1;
+        end else begin
+            dst_resp_ready <= ~src_fifo_empty;
+        end
+    end
+
+    // Handshake logic for request
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_req_ready <= 1'b1;
+        end else begin
+            dst_req_ready <= ~dst_fifo_full;
+        end
+    end
+
+    // Handshake logic for source request
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_req_ready <= 1'b1;
+        end else begin
+            src_req_ready <= ~src_fifo_full;
+        end
+    end
+
+    // Handshake logic for source response
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_resp_ready <= 1'b1;
+        end else begin
+            src_resp_ready <= ~src_fifo_empty;
+        end
+    end
+
+    // Handshake logic for destination response
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_resp_ready_int <= 1'b1;
+        end else begin
+            dst_resp_ready_int <= ~dst_fifo_empty;
+        end
+    end
+
+    // Final output assignments
+    assign dst_pready_o = dst_pready_i;
+    assign dst_prdata_o = dst_prdata_i;
+    assign dst_pslverr_o = dst_pslverr_i;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

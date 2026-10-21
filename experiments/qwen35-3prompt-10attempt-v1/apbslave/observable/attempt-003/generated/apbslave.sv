@@ -1,0 +1,223 @@
+```verilog
+module apbslave #(
+    parameter C_APB_ADDR_WIDTH = 12,
+    parameter C_APB_DATA_WIDTH = 32,
+    localparam AW = C_APB_ADDR_WIDTH,
+    localparam DW = C_APB_DATA_WIDTH,
+    localparam APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+) (
+    input  wire            PCLK,
+    input  wire            PRESETn,
+    input  wire            PSEL,
+    input  wire            PENABLE,
+    output reg             PREADY,
+    input  wire            [AW-1:0] PADDR,
+    input  wire            PWRITE,
+    input  wire            [DW-1:0] PWDATA,
+    input  wire            [DW/8-1:0] PWSTRB,
+    input  wire            [2:0] PPROT,
+    output reg             [DW-1:0] PRDATA,
+    output wire            PSLVERR
+);
+
+    localparam STATE_IDLE = 2'b00;
+    localparam STATE_ACCESS = 2'b01;
+    localparam STATE_ERROR = 2'b10;
+
+    reg [1:0] state;
+    reg [AW-1:0] addr;
+    reg [DW-1:0] data_in;
+    reg [DW/8-1:0] strb_in;
+    reg pwrite;
+    reg pprot;
+    reg pslverr;
+    reg [DW-1:0] prdata_reg;
+
+    always @(posedge PCLK or negedge PRESETn) begin
+        if (!PRESETn) begin
+            state <= STATE_IDLE;
+            PREADY <= 1'b1;
+            PSLVERR <= 1'b0;
+            PRDATA <= {DW{1'b0}};
+        end else begin
+            case (state)
+                STATE_IDLE: begin
+                    if (PSEL && PENABLE) begin
+                        state <= STATE_ACCESS;
+                        addr <= PADDR;
+                        pwrite <= PWRITE;
+                        pprot <= PPROT;
+                        data_in <= PWDATA;
+                        strb_in <= PWSTRB;
+                        PREADY <= 1'b1;
+                        PSLVERR <= 1'b0;
+                        PRDATA <= {DW{1'b0}};
+                    end else begin
+                        PREADY <= 1'b1;
+                    end
+                end
+
+                STATE_ACCESS: begin
+                    if (PSEL && PENABLE) begin
+                        if (pwrite) begin
+                            // Write operation
+                            for (integer i = 0; i < DW/8; i = i + 1) begin
+                                if (strb_in[i]) begin
+                                    prdata_reg[i*8 +: 8] <= data_in[i*8 +: 8];
+                                end
+                            end
+                        end else begin
+                            // Read operation
+                            for (integer i = 0; i < DW/8; i = i + 1) begin
+                                if (strb_in[i]) begin
+                                    prdata_reg[i*8 +: 8] <= data_in[i*8 +: 8];
+                                end
+                            end
+                        end
+                        PREADY <= 1'b1;
+                        PRDATA <= prdata_reg;
+                        state <= STATE_IDLE;
+                    end else begin
+                        PREADY <= 1'b0;
+                    end
+                end
+
+                STATE_ERROR: begin
+                    PREADY <= 1'b0;
+                    PSLVERR <= 1'b1;
+                    state <= STATE_IDLE;
+                end
+
+                default: begin
+                    state <= STATE_IDLE;
+                    PREADY <= 1'b1;
+                    PSLVERR <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Note: In a real implementation, the data_in and strb_in would typically be sampled
+    // at the beginning of the access phase and held stable throughout the transaction.
+    // For this simplified single-clock implementation without a separate data register
+    // for the access phase, we assume the input signals are stable during the cycle.
+    // However, to strictly follow the "access phase" requirement where data is latched
+    // before the read/write occurs, we need to adjust the logic slightly to latch data
+    // when transitioning to STATE_ACCESS.
+
+    reg [DW-1:0] latch_data;
+    reg [DW/8-1:0] latch_strb;
+
+    always @(posedge PCLK or negedge PRESETn) begin
+        if (!PRESETn) begin
+            latch_data <= {DW{1'b0}};
+            latch_strb <= {DW/8{1'b0}};
+            PREADY <= 1'b1;
+            PSLVERR <= 1'b0;
+            PRDATA <= {DW{1'b0}};
+        end else begin
+            if (state === STATE_IDLE && PSEL && PENABLE) begin
+                latch_data <= PWDATA;
+                latch_strb <= PWSTRB;
+                state <= STATE_ACCESS;
+                PREADY <= 1'b1;
+                PSLVERR <= 1'b0;
+                PRDATA <= {DW{1'b0}};
+            end else if (state === STATE_ACCESS && PSEL && PENABLE) begin
+                if (pwrite) begin
+                    for (integer i = 0; i < DW/8; i = i + 1) begin
+                        if (latch_strb[i]) begin
+                            prdata_reg[i*8 +: 8] <= latch_data[i*8 +: 8];
+                        end
+                    end
+                end else begin
+                    for (integer i = 0; i < DW/8; i = i + 1) begin
+                        if (latch_strb[i]) begin
+                            prdata_reg[i*8 +: 8] <= latch_data[i*8 +: 8];
+                        end
+                    end
+                end
+                PREADY <= 1'b1;
+                PRDATA <= prdata_reg;
+                state <= STATE_IDLE;
+            end else begin
+                PREADY <= 1'b0;
+            end
+        end
+    end
+
+    // Re-assign PREADY and PSLVERR based on the corrected state machine logic above
+    // Since PREADY and PSLVERR are driven inside the always block, we just need to ensure
+    // the logic is clean. The previous block had a flaw where PREADY was set to 0 in STATE_ACCESS
+    // if PSEL/PENABLE were low, which is correct for holding the bus, but the data latching
+    // needs to happen on the transition. The logic below refines the state machine.
+
+    reg [DW-1:0] current_prdata;
+    reg [DW/8-1:0] current_strb;
+    reg pwrite_curr;
+    reg pprot_curr;
+
+    always @(posedge PCLK or negedge PRESETn) begin
+        if (!PRESETn) begin
+            state <= STATE_IDLE;
+            PREADY <= 1'b1;
+            PSLVERR <= 1'b0;
+            PRDATA <= {DW{1'b0}};
+            current_prdata <= {DW{1'b0}};
+            current_strb <= {DW/8{1'b0}};
+            pwrite_curr <= 1'b0;
+            pprot_curr <= 3'b000;
+        end else begin
+            if (state === STATE_IDLE) begin
+                if (PSEL && PENABLE) begin
+                    state <= STATE_ACCESS;
+                    addr <= PADDR;
+                    pwrite_curr <= PWRITE;
+                    pprot_curr <= PPROT;
+                    current_strb <= PWSTRB;
+                    current_prdata <= {DW{1'b0}};
+                    PREADY <= 1'b1;
+                    PSLVERR <= 1'b0;
+                end else begin
+                    PREADY <= 1'b1;
+                end
+            end else if (state === STATE_ACCESS) begin
+                if (PSEL && PENABLE) begin
+                    if (pwrite_curr) begin
+                        for (integer i = 0; i < DW/8; i = i + 1) begin
+                            if (current_strb[i]) begin
+                                current_prdata[i*8 +: 8] <= PWDATA[i*8 +: 8];
+                            end
+                        end
+                    end else begin
+                        for (integer i = 0; i < DW/8; i = i + 1) begin
+                            if (current_strb[i]) begin
+                                current_prdata[i*8 +: 8] <= PWDATA[i*8 +: 8];
+                            end
+                        end
+                    end
+                    PREADY <= 1'b1;
+                    PRDATA <= current_prdata;
+                    state <= STATE_IDLE;
+                end else begin
+                    PREADY <= 1'b0;
+                end
+            end else begin
+                state <= STATE_IDLE;
+                PREADY <= 1'b1;
+                PSLVERR <= 1'b0;
+            end
+        end
+    end
+
+    // Final cleanup to ensure outputs are driven correctly based on the last valid state
+    // The logic above drives PRDATA, PREADY, and PSLVERR directly.
+    // We just need to make sure the assignment is consistent.
+    // The logic inside the always block handles all cases.
+
+    // Assigning PSLVERR explicitly based on state if needed, though it's driven in the block.
+    // To be absolutely safe and clear:
+    assign PSLVERR = (state === STATE_ERROR) ? 1'b1 : 1'b0;
+
+endmodule
+```<|im_end|>

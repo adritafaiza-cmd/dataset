@@ -1,0 +1,293 @@
+```verilog
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam FULL_THRESHOLD = DEPTH - (1 << NFF);
+	localparam EMPTY_THRESHOLD = 1 << NFF;
+
+	// Write Pointer (Gray Code)
+	reg [LGFIFO-1:0] wr_gray;
+	reg [LGFIFO-1:0] wr_gray_next;
+	reg [LGFIFO-1:0] wr_count;
+
+	// Read Pointer (Gray Code)
+	reg [LGFIFO-1:0] rd_gray;
+	reg [LGFIFO-1:0] rd_gray_next;
+	reg [LGFIFO-1:0] rd_count;
+
+	// Internal Data Storage
+	reg [WIDTH-1:0] mem [DEPTH-1:0];
+
+	// Write Side Logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_gray <= '0;
+			wr_count <= '0;
+			o_wr_full <= 1'b0;
+		end else begin
+			// Calculate next gray code
+			wr_gray_next = wr_gray;
+			if (wr_count < DEPTH - 1) begin
+				wr_gray_next = wr_gray ^ {wr_gray[LGFIFO-2:0], {LGFIFO-1{wr_gray[LGFIFO-2]}}};
+			end
+
+			// Write Enable Logic
+			if (WRITE_ON_POSEDGE) begin
+				if (i_wr) begin
+					if (wr_count < FULL_THRESHOLD) begin
+						mem[wr_count] <= i_wr_data;
+						wr_count <= wr_count + 1;
+					end
+				end
+			end else begin
+				// Write on negative edge
+				if (!i_wr) begin
+					if (wr_count < FULL_THRESHOLD) begin
+						mem[wr_count] <= i_wr_data;
+						wr_count <= wr_count + 1;
+					end
+				end
+			end
+
+			// Update Gray Code
+			wr_gray <= wr_gray_next;
+			
+			// Full Flag Logic
+			o_wr_full <= (wr_count >= FULL_THRESHOLD);
+		end
+	end
+
+	// Read Side Logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_gray <= '0;
+			rd_count <= '0;
+			o_rd_empty <= 1'b1;
+			o_rd_data <= '0;
+		end else begin
+			// Calculate next gray code
+			rd_gray_next = rd_gray;
+			if (rd_count < DEPTH - 1) begin
+				rd_gray_next = rd_gray ^ {rd_gray[LGFIFO-2:0], {LGFIFO-1{rd_gray[LGFIFO-2]}}};
+			end
+
+			// Read Enable Logic
+			if (OPT_REGISTER_READS) begin
+				// Read from register (posedge)
+				if (i_rd) begin
+					if (rd_count > EMPTY_THRESHOLD - 1) begin
+						o_rd_data <= mem[rd_count];
+						rd_count <= rd_count - 1;
+					end
+				end
+			end else begin
+				// Read from memory directly (posedge, no register delay)
+				if (i_rd) begin
+					if (rd_count > EMPTY_THRESHOLD - 1) begin
+						o_rd_data <= mem[rd_count];
+						rd_count <= rd_count - 1;
+					end
+				end
+			end
+
+			// Update Gray Code
+			rd_gray <= rd_gray_next;
+			
+			// Empty Flag Logic
+			o_rd_empty <= (rd_count <= EMPTY_THRESHOLD - 1);
+		end
+	end
+
+	// Gray Code to Binary Conversion for Addressing
+	function [LGFIFO-1:0] gray_to_bin;
+		input [LGFIFO-1:0] gray;
+		reg [LGFIFO-1:0] bin;
+		reg [LGFIFO-1:0] temp;
+	begin
+		bin = gray;
+		temp = gray;
+		for (integer i = LGFIFO-2; i >= 0; i = i - 1) begin
+			bin[i] = bin[i+1] ^ temp[i];
+		end
+	end
+	endfunction
+
+	// Write Address Generation
+	wire [LGFIFO-1:0] wr_addr = gray_to_bin(wr_gray);
+
+	// Read Address Generation
+	wire [LGFIFO-1:0] rd_addr = gray_to_bin(rd_gray);
+
+	// Output Data Selection (Optional: Direct vs Registered)
+	// If OPT_REGISTER_READS is 0, we might want to buffer the read data to match timing,
+	// but the requirement says "Present one stored word at a time" and "After a read, empty may return high".
+	// The logic above handles the count correctly. The data output is driven by the read logic.
+	// To ensure clean output when OPT_REGISTER_READS is 0, we can hold the data.
+	
+	// Re-evaluating OPT_REGISTER_READS behavior based on standard implementations:
+	// If 1: Read happens on posedge, data is valid immediately after read pulse.
+	// If 0: Often implies reading from a register that was loaded previously, or direct memory access.
+	// Given the prompt "Present one stored word at a time", the current logic holds the data in o_rd_data.
+	// However, if OPT_REGISTER_READS is 0, sometimes it means the read data is not registered relative to the read clock edge in the same way,
+	// but for a standard FIFO, the data output is usually registered to the read clock to avoid glitches.
+	// Let's stick to the logic where o_rd_data is updated on the read clock edge if data is available.
+	
+	// Correction for OPT_REGISTER_READS = 0:
+	// Some interpretations mean the read data is taken directly from memory without an extra register stage,
+	// but since we are driving an output port, it must be stable.
+	// The most robust interpretation for "OPT_REGISTER_READS" in this context (often used in Xilinx/Altera FIFOs)
+	// is whether the read data is registered.
+	// If 1: Data is valid on the clock edge.
+	// If 0: Data is valid asynchronously or on the falling edge? 
+	// Actually, looking at standard parameter names:
+	// OPT_REGISTER_READS = 1 usually means the read data is registered (posedge read).
+	// OPT_REGISTER_READS = 0 usually means the read data is not registered (posedge read, but data comes from memory directly).
+	// However, to prevent glitches on the output port, it is safer to always register the output.
+	// Let's refine the read logic to strictly follow the parameter intent if possible, 
+	// but prioritize stability. 
+	// Standard behavior: 
+	// If OPT_REGISTER_READS == 1: Read data is valid on the rising edge of i_rclk.
+	// If OPT_REGISTER_READS == 0: Read data is valid on the falling edge of i_rclk (or immediately after posedge).
+	// Let's implement the falling edge read for OPT_REGISTER_READS = 0 to differentiate.
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_gray <= '0;
+			rd_count <= '0;
+			o_rd_empty <= 1'b1;
+			o_rd_data <= '0;
+		end else begin
+			// Calculate next gray code
+			rd_gray_next = rd_gray;
+			if (rd_count < DEPTH - 1) begin
+				rd_gray_next = rd_gray ^ {rd_gray[LGFIFO-2:0], {LGFIFO-1{rd_gray[LGFIFO-2]}}};
+			end
+
+			if (OPT_REGISTER_READS) begin
+				// Read on Posedge
+				if (i_rd) begin
+					if (rd_count > EMPTY_THRESHOLD - 1) begin
+						o_rd_data <= mem[rd_count];
+						rd_count <= rd_count - 1;
+					end
+				end
+			end else begin
+				// Read on Negedge (to simulate non-registered read behavior relative to posedge)
+				if (!i_rd) begin
+					if (rd_count > EMPTY_THRESHOLD - 1) begin
+						o_rd_data <= mem[rd_count];
+						rd_count <= rd_count - 1;
+					end
+				end
+			end
+
+			rd_gray <= rd_gray_next;
+			o_rd_empty <= (rd_count <= EMPTY_THRESHOLD - 1);
+		end
+	end
+
+	// Final Address Mapping for Memory Access
+	// The pointers are Gray coded internally. We need to convert them to binary to index the memory array.
+	// However, in the previous block, I used a function. In Verilog-2001, functions cannot be called inside combinational logic or always blocks in some synthesizers efficiently if not careful, 
+	// but here it's sequential. 
+	// Actually, the standard way is to generate the binary address in the same always block or a combinational block.
+	// Let's move the conversion to a combinational block for clarity and synthesis friendliness.
+
+	reg [LGFIFO-1:0] wr_bin;
+	reg [LGFIFO-1:0] rd_bin;
+
+	always @(*) begin
+		wr_bin = wr_gray;
+		for (integer i = LGFIFO-2; i >= 0; i = i - 1) begin
+			wr_bin[i] = wr_bin[i+1] ^ wr_gray[i];
+		end
+
+		rd_bin = rd_gray;
+		for (integer i = LGFIFO-2; i >= 0; i = i - 1) begin
+			rd_bin[i] = rd_bin[i+1] ^ rd_gray[i];
+		end
+	end
+
+	// Update the memory write and read logic to use wr_bin and rd_bin
+	// Re-writing the always blocks to use the binary addresses directly.
+
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_gray <= '0;
+			wr_count <= '0;
+			o_wr_full <= 1'b0;
+		end else begin
+			wr_gray_next = wr_gray;
+			if (wr_count < DEPTH - 1) begin
+				wr_gray_next = wr_gray ^ {wr_gray[LGFIFO-2:0], {LGFIFO-1{wr_gray[LGFIFO-2]}}};
+			end
+
+			if (WRITE_ON_POSEDGE) begin
+				if (i_wr) begin
+					if (wr_count < FULL_THRESHOLD) begin
+						mem[wr_bin] <= i_wr_data;
+						wr_count <= wr_count + 1;
+					end
+				end
+			end else begin
+				if (!i_wr) begin
+					if (wr_count < FULL_THRESHOLD) begin
+						mem[wr_bin] <= i_wr_data;
+						wr_count <= wr_count + 1;
+					end
+				end
+			end
+
+			wr_gray <= wr_gray_next;
+			o_wr_full <= (wr_count >= FULL_THRESHOLD);
+		end
+	end
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_gray <= '0;
+			rd_count <= '0;
+			o_rd_empty <= 1'b1;
+			o_rd_data <= '0;
+		end else begin
+			rd_gray_next = rd_gray;
+			if (rd_count < DEPTH - 1) begin
+				rd_gray_next = rd_gray ^ {rd_gray[LGFIFO-2:0], {LGFIFO-1{rd_gray[LGFIFO-2]}}};
+			end
+
+			if (OPT_REGISTER_READS) begin
+				if (i_rd) begin
+					if (rd_count > EMPTY_THRESHOLD - 1) begin
+						o_rd_data <= mem[rd_bin];
+						rd_count <= rd_count - 1;
+					end
+				end
+			end else begin
+				if (!i_rd) begin
+					if (rd_count > EMPTY_THRESHOLD - 1) begin
+						o_rd_data <= mem[rd_bin];
+						rd_count <= rd_count - 1;
+					end
+				end
+			end
+
+			rd_gray <= rd_gray_next;
+			o_rd_empty <= (rd_count <= EMPTY_THRESHOLD - 1);
+		end
+	end
+
+endmodule
+```<|im_end|>

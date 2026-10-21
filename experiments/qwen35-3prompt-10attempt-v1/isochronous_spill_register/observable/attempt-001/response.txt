@@ -1,0 +1,232 @@
+```verilog
+`timescale 1ns/1ps
+
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output reg [WIDTH-1:0] dst_data_o
+);
+
+    // State encoding
+    // IDLE: Buffer is empty
+    // FILL: Buffer has 1 item, waiting for 2nd
+    // FULL: Buffer has 2 items, waiting for drain
+    localparam IDLE = 2'd0;
+    localparam FILL = 2'd1;
+    localparam FULL = 2'd2;
+
+    reg [1:0] state_reg;
+    reg [WIDTH-1:0] buffer_reg;
+    reg [WIDTH-1:0] buffer_reg_next;
+    reg src_valid_reg;
+    reg src_ready_reg;
+    reg dst_valid_reg;
+    reg dst_ready_reg;
+
+    // Synchronize src_valid to dst_clk domain to detect arrival of data
+    reg src_valid_synced;
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_valid_synced <= 1'b0;
+        else
+            src_valid_synced <= src_valid_i;
+    end
+
+    // Synchronize dst_ready to src_clk domain to detect when buffer can be drained
+    reg dst_ready_synced;
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ready_synced <= 1'b0;
+        else
+            dst_ready_synced <= dst_ready_i;
+    end
+
+    // State Machine Logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            state_reg <= IDLE;
+        else
+            case (state_reg)
+                IDLE: begin
+                    if (src_valid_i)
+                        state_reg <= FILL;
+                    else
+                        state_reg <= IDLE;
+                end
+                FILL: begin
+                    if (src_valid_i)
+                        state_reg <= FULL;
+                    else
+                        state_reg <= FILL;
+                end
+                FULL: begin
+                    if (dst_ready_synced)
+                        state_reg <= FILL;
+                    else
+                        state_reg <= FULL;
+                end
+                default: state_reg <= IDLE;
+            endcase
+    end
+
+    // Data Buffer Logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            buffer_reg <= {WIDTH{1'b0}};
+        else if (state_reg == FILL && src_valid_i)
+            buffer_reg <= src_data_i;
+        else if (state_reg == FULL && dst_ready_synced)
+            buffer_reg <= buffer_reg_next; // Placeholder, logic below handles update
+    end
+
+    // Calculate next buffer value and handle output
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_data_o <= {WIDTH{1'b0}};
+            dst_valid_reg <= 1'b0;
+        end
+        else begin
+            if (state_reg == FULL && dst_ready_synced) begin
+                // Move data from buffer_reg to dst_data_o
+                // Since we are in the same clock cycle as the state transition,
+                // we need to ensure dst_data_o is updated correctly.
+                // However, standard FIFO logic usually updates the output register
+                // in the same cycle as the read happens.
+                // To avoid combinational loops or race conditions with the state update,
+                // we can use a separate register for the data to be outputted or
+                // update dst_data_o directly if the state machine logic is purely sequential.
+                // Given the requirement "Deliver accepted data once in order", 
+                // we update dst_data_o when we are about to pop.
+                
+                // We need to capture the current buffer content before it shifts.
+                // Since this is a 2-deep buffer, we can just shift the register.
+                // But Verilog registers update at the end of the cycle.
+                // So we need to store the 'to-be-output' data in a temp reg or update dst_data_o
+                // based on the state transition logic carefully.
+                
+                // Approach: Use a dedicated register for the data currently being outputted
+                // or update dst_data_o in a separate process if allowed, but single process is cleaner.
+                // Let's use a 'data_to_output' register.
+                
+                // Actually, simpler approach for 2-deep:
+                // When state goes FULL -> FILL, we have data in buffer_reg.
+                // We need to output that data.
+                // We can update dst_data_o in the same block if we are careful, 
+                // but since dst_data_o is an output, it's better to drive it from a register.
+                
+                // Let's refine the logic:
+                // We will maintain 'buffer_reg' as the storage.
+                // We will maintain 'dst_data_o' as the output.
+                // When popping, we move buffer_reg[1] to dst_data_o and shift buffer_reg.
+                // Since we can't read the updated buffer_reg in the same cycle to shift it 
+                // if we also update dst_data_o from it in the same block without a temp var,
+                // we use a temp variable for the shift.
+                
+                // Re-evaluating the single-process approach for clarity and correctness:
+                // 1. Determine new state.
+                // 2. Determine new buffer content.
+                // 3. Determine new output data.
+                
+                // Let's use a temporary variable for the buffer content before shift.
+                reg [WIDTH-1:0] buffer_reg_temp;
+                
+                if (state_reg == FULL && dst_ready_synced) begin
+                    buffer_reg_temp = buffer_reg;
+                    state_reg <= FILL;
+                    buffer_reg <= {WIDTH{1'b0}}; // Clear the buffer after pop? 
+                    // Wait, if we clear buffer_reg, we lose the data we just popped if we don't save it.
+                    // Correct logic:
+                    // If FULL and ready:
+                    //   Next State = FILL
+                    //   New Buffer = {WIDTH{1'b0}} (since we popped the only valid item)
+                    //   Output Data = Old Buffer Content
+                    // Else if FULL and not ready:
+                    //   Next State = FULL
+                    //   New Buffer = Old Buffer
+                    //   Output Data = Old Buffer Content
+                    // Else if FILL and valid:
+                    //   Next State = FULL
+                    //   New Buffer = src_data_i
+                    //   Output Data = Old Buffer Content (which is empty/invalid)
+                    
+                    // To handle the "Output Data" correctly without a separate register for it:
+                    // We can update dst_data_o in the same block, but we must ensure we read the 
+                    // OLD value of buffer_reg before overwriting it.
+                    
+                    // Let's restructure slightly to be safe:
+                    // Use a separate register for the data currently being driven to dst_data_o
+                    // OR just update dst_data_o directly if we don't overwrite buffer_reg until next cycle.
+                    // But buffer_reg needs to be updated in the same cycle if we are shifting.
+                    
+                    // Best practice for single-process FIFO:
+                    // Use a temporary register for the buffer content before shifting.
+                    
+                    // However, the prompt asks for a specific implementation. 
+                    // Let's use a dedicated register for the data to be outputted to avoid ambiguity.
+                    // But the interface only has dst_data_o.
+                    
+                    // Let's try the standard way:
+                    // If we are popping, dst_data_o gets the value of buffer_reg.
+                    // Then buffer_reg gets shifted/cleared.
+                    // Since dst_data_o is an output, it can be driven directly.
+                    // The issue is updating buffer_reg in the same cycle.
+                    // Verilog allows reading a register and writing to it in the same always block.
+                    // So:
+                    // dst_data_o <= buffer_reg;
+                    // buffer_reg <= ...;
+                    // This is safe.
+                    
+                    dst_data_o <= buffer_reg;
+                    buffer_reg <= {WIDTH{1'b0}};
+                    state_reg <= FILL;
+                end
+                else if (state_reg == FILL && src_valid_i) begin
+                    buffer_reg <= src_data_i;
+                    state_reg <= FULL;
+                    // dst_data_o remains unchanged (idle)
+                end
+                else begin
+                    // State remains same, buffer remains same
+                    // dst_data_o remains unchanged
+                end
+            end
+        end
+    end
+
+    // Output Control Signals
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_ready_o <= 1'b1;
+        else
+            case (state_reg)
+                IDLE: src_ready_o <= 1'b1;
+                FILL: src_ready_o <= 1'b0;
+                FULL: src_ready_o <= 1'b0;
+                default: src_ready_o <= 1'b1;
+            endcase
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_valid_o <= 1'b0;
+        else
+            case (state_reg)
+                IDLE: dst_valid_o <= 1'b0;
+                FILL: dst_valid_o <= 1'b0;
+                FULL: dst_valid_o <= 1'b1;
+                default: dst_valid_o <= 1'b0;
+            endcase
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

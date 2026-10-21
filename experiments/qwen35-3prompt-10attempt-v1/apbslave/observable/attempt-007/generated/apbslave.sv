@@ -1,0 +1,127 @@
+```verilog
+module apbslave #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH,
+	localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+) (
+	input	wire			PCLK, PRESETn,
+	input	wire			PSEL,
+	input	wire			PENABLE,
+	output	reg			PREADY,
+	input	wire		[AW-1:0]	PADDR,
+	input	wire			PWRITE,
+	input	wire		[DW-1:0]	PWDATA,
+	input	wire		[DW/8-1:0]	PWSTRB,
+	input	wire		[2:0]		PPROT,
+	output	reg		[DW-1:0]	PRDATA,
+	output	wire			PSLVERR
+);
+
+	localparam	NUM_BYTES = DW/8;
+	localparam	NUM_WORDS = 1; // Assuming single word register for simplicity in this generic implementation
+	localparam	ADDR_MASK = ~((1<<AW)-1);
+
+	reg	[AW-1:0]	ADDR_REG;
+	reg	[DW-1:0]	DATA_REG;
+	reg			STATE; // IDLE, SETUP, ACCESS
+	reg			WRITE_ENABLE;
+	reg			VALID;
+	reg			STRB_VALID;
+	reg		[APBLSB:0]	STRB_MASK;
+	reg		[DW-1:0]	READ_DATA;
+	reg			PSLVERR_INT;
+
+	// State Machine
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			STATE <= IDLE;
+			PREADY <= 1'b1;
+			PRDATA <= {DW{1'b0}};
+			PSLVERR <= 1'b0;
+			ADDR_REG <= {AW{1'b0}};
+			DATA_REG <= {DW{1'b0}};
+			VALID <= 1'b0;
+			WRITE_ENABLE <= 1'b0;
+			STRB_VALID <= 1'b0;
+			STRB_MASK <= {APBLSB{1'b0}};
+			READ_DATA <= {DW{1'b0}};
+			PSLVERR_INT <= 1'b0;
+		end
+		else begin
+			case (STATE)
+				IDLE: begin
+					if (PSEL && PENABLE) begin
+						STATE <= SETUP;
+						ADDR_REG <= PADDR;
+						VALID <= 1'b1;
+						WRITE_ENABLE <= PWRITE;
+						STRB_VALID <= 1'b1;
+						STRB_MASK <= PWSTRB;
+						READ_DATA <= {DW{1'b0}};
+						PSLVERR_INT <= 1'b0;
+					end
+					else begin
+						PREADY <= 1'b1;
+					end
+				end
+
+				SETUP: begin
+					if (PSEL && PENABLE) begin
+						STATE <= ACCESS;
+						PREADY <= 1'b0;
+					end
+					else begin
+						PREADY <= 1'b1;
+					end
+				end
+
+				ACCESS: begin
+					if (PSEL && PENABLE) begin
+						if (WRITE_ENABLE) begin
+							// Byte-strobed write
+							for (integer i = 0; i < NUM_BYTES; i = i + 1) begin
+								if (STRB_MASK[i]) begin
+									DATA_REG[i*8 +: 8] <= PWDATA[i*8 +: 8];
+								end
+							end
+						end
+						else begin
+							// Read
+							READ_DATA <= DATA_REG;
+						end
+						PREADY <= 1'b1;
+						STATE <= IDLE;
+					end
+					else begin
+						PREADY <= 1'b1;
+					end
+				end
+			endcase
+		end
+	end
+
+	// Output assignments
+	assign PREADY = (STATE == IDLE) || (STATE == SETUP) || (STATE == ACCESS);
+	assign PRDATA = (STATE == ACCESS && !WRITE_ENABLE) ? READ_DATA : {DW{1'b0}};
+	assign PSLVERR = PSLVERR_INT;
+
+	// Simple error generation example: Invalid address or protocol violation
+	// This is a placeholder for actual error logic based on PPROT or address decoding
+	always @(*) begin
+		PSLVERR_INT = 1'b0;
+		if (STATE == ACCESS) begin
+			// Example: If address is out of range (assuming only address 0 is valid for this simple model)
+			if (ADDR_REG != 0) begin
+				PSLVERR_INT = 1'b1;
+			end
+			// Example: If PPROT is invalid (assuming 0 is valid, others are not)
+			if (PPROT != 0) begin
+				PSLVERR_INT = 1'b1;
+			end
+		end
+	end
+
+endmodule
+```<|im_end|>

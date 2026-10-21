@@ -1,0 +1,483 @@
+```verilog
+`timescale 1ns/1ps
+
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam INT_ASIZE = ASIZE;
+    localparam INT_DEPTH = 1 << ASIZE;
+
+    // Write domain signals
+    reg [INT_ASIZE-1:0] wptr;
+    reg [INT_ASIZE-1:0] wptr_next;
+    reg [INT_ASIZE-1:0] wgray;
+    reg [INT_ASIZE-1:0] wgray_next;
+    reg [INT_ASIZE-1:0] wgray_reg;
+    reg wfull_reg;
+    reg awfull_reg;
+
+    // Read domain signals
+    reg [INT_ASIZE-1:0] rptr;
+    reg [INT_ASIZE-1:0] rptr_next;
+    reg [INT_ASIZE-1:0] rgray;
+    reg [INT_ASIZE-1:0] rgray_next;
+    reg [INT_ASIZE-1:0] rgray_reg;
+    reg rempty_reg;
+    reg arempty_reg;
+
+    // Cross-domain pointers (Gray encoded)
+    wire [INT_ASIZE-1:0] wptr_gray;
+    wire [INT_ASIZE-1:0] rptr_gray;
+
+    // FIFO Memory
+    reg [DSIZE-1:0] mem [INT_DEPTH-1:0];
+
+    // ---------------------------------------------------------
+    // Write Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= 1'b0;
+            wfull_reg <= 1'b0;
+            awfull_reg <= 1'b0;
+        end else begin
+            // Calculate next pointer
+            wptr_next = wptr + 1'b1;
+            if (wptr_next == 1'b0) begin
+                wptr_next = 1'b0;
+            end
+
+            // Determine if we are full
+            // Full condition: wptr == rptr (in Gray domain)
+            // We compare wptr_next against the registered read pointer (rgray_reg)
+            // However, standard implementation compares current wptr_next with rgray_reg
+            // to decide if the write should happen.
+            
+            // Check for full before writing
+            if (wptr_next == rgray_reg) begin
+                wfull_reg <= 1'b1;
+                awfull_reg <= 1'b1;
+            end else begin
+                wfull_reg <= 1'b0;
+                // Almost full: depth - 1. 
+                // If (INT_DEPTH - 1) - wptr_next < 1, i.e., wptr_next > INT_DEPTH - 2
+                // Simpler logic: if wptr_next is close to wrapping and not full
+                // awfull is high if (INT_DEPTH - 1) - wptr_next <= 1
+                if (wptr_next == (INT_DEPTH - 1)) begin
+                    awfull_reg <= 1'b1;
+                end else begin
+                    awfull_reg <= 1'b0;
+                end
+            end
+
+            // Perform write if not full
+            if (winc && !wfull_reg) begin
+                wptr <= wptr_next;
+                mem[wptr] <= wdata;
+            end
+        end
+    end
+
+    // Generate Gray code for write pointer
+    assign wgray = wptr ^ (wptr >> 1);
+    assign wgray_next = wptr_next ^ (wptr_next >> 1);
+    assign wptr_gray = wgray_reg; // Output the registered gray pointer for cross-domain comparison
+
+    // ---------------------------------------------------------
+    // Read Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= 1'b0;
+            rempty_reg <= 1'b1;
+            arempty_reg <= 1'b0;
+        end else begin
+            // Calculate next pointer
+            rptr_next = rptr + 1'b1;
+            if (rptr_next == 1'b0) begin
+                rptr_next = 1'b0;
+            end
+
+            // Determine if we are empty
+            // Empty condition: rptr == wptr (in Gray domain)
+            // We compare rptr_next against the registered write pointer (wgray_reg)
+            
+            if (rptr_next == wgray_reg) begin
+                rempty_reg <= 1'b1;
+                arempty_reg <= 1'b0;
+            end else begin
+                rempty_reg <= 1'b0;
+                // Almost empty: 1 item left.
+                // If (INT_DEPTH - 1) - rptr_next <= 1
+                if (rptr_next == 1'b0) begin
+                    // Special case for wrap around almost empty
+                    // If we are at 0 and not empty, it means we have at least 1 item (since not empty)
+                    // Actually, if rptr_next is 0, it means we just wrapped.
+                    // If we are not empty, we have items.
+                    // Almost empty logic: if (INT_DEPTH - 1) - rptr_next <= 1
+                    // When rptr_next is 0, (INT_DEPTH-1) - 0 = INT_DEPTH-1. This is not <= 1 unless depth is small.
+                    // Correct logic for almost empty: 
+                    // The number of items is (wgray_reg - rgray_reg) mod 2^N.
+                    // If count == 1, then almost empty.
+                    // If rptr_next == wgray_reg, count is 0.
+                    // If rptr_next == wgray_reg + 1, count is 1.
+                    // So if rptr_next == wgray_reg + 1, then arempty is high.
+                    // But we must handle wrap around.
+                    // Simpler: arempty is high if (INT_DEPTH - 1) - rptr_next <= 1 AND !rempty
+                    if (rptr_next == 1'b0) begin
+                        // If we wrap to 0, and we are not empty, we have at least 1 item.
+                        // If we have exactly 1 item, then wgray_reg must be 1 (since rptr was 0, rptr_next is 1? No)
+                        // Let's stick to the count logic.
+                        // Count = (wgray_reg - rgray_reg) mod 2^N.
+                        // If Count == 1, arempty = 1.
+                        // If Count == 0, rempty = 1.
+                        // If Count > 1, neither.
+                        // Implementation:
+                        // If rptr_next == wgray_reg, count=0.
+                        // If rptr_next == wgray_reg + 1, count=1.
+                        // If rptr_next == wgray_reg - 1, count=2^N-1 (Full).
+                        
+                        // Let's re-evaluate arempty based on rptr_next vs wgray_reg
+                        // If rptr_next == wgray_reg, empty.
+                        // If rptr_next == wgray_reg + 1, almost empty (1 item).
+                        // Note: wgray_reg is the registered value.
+                        // If rptr_next == wgray_reg + 1, then after this read, we will be empty.
+                        if (rptr_next == wgray_reg + 1) begin
+                            arempty_reg <= 1'b1;
+                        end else begin
+                            arempty_reg <= 1'b0;
+                        end
+                    end else begin
+                        if (rptr_next == wgray_reg + 1) begin
+                            arempty_reg <= 1'b1;
+                        end else begin
+                            arempty_reg <= 1'b0;
+                        end
+                    end
+                end else begin
+                    if (rptr_next == wgray_reg + 1) begin
+                        arempty_reg <= 1'b1;
+                    end else begin
+                        arempty_reg <= 1'b0;
+                    end
+                end
+            end
+
+            // Perform read if not empty
+            if (rinc && !rempty_reg) begin
+                rptr <= rptr_next;
+                // Data output logic depends on FALLTHROUGH
+                if (FALLTHROUGH) begin
+                    // In fallthrough mode, rdata is the data at the current rptr (before increment)
+                    // But the read happens on the clock edge. 
+                    // If FALLTHROUGH is true, we want to see the data that was written to rptr.
+                    // However, the standard async FIFO behavior with fallthrough:
+                    // rdata is updated when the read pointer moves? 
+                    // Specification: "rdata presents the current oldest unread word without requiring an additional registered-read cycle."
+                    // This implies rdata is combinational with respect to rptr, but rptr is registered.
+                    // So rdata = mem[rptr].
+                    // Wait, if rinc is high, we increment rptr. 
+                    // If FALLTHROUGH, we don't update rdata immediately? 
+                    // "Otherwise, rdata may be updated by an accepted read."
+                    // Interpretation: 
+                    // If FALLTHROUGH: rdata = mem[rptr] (current pointer). Even if rinc is high, rdata stays until rptr changes.
+                    // If !FALLTHROUGH: rdata = mem[rptr_next] (next pointer). Updated immediately after successful read.
+                    
+                    // Let's refine:
+                    // If FALLTHROUGH: rdata is always mem[rptr].
+                    // If !FALLTHROUGH: rdata is mem[rptr_next] (after read).
+                    
+                    // Since this is inside the clock block, we can assign rdata here.
+                    // But rdata is an output wire. We need to drive it.
+                    // If FALLTHROUGH, rdata is driven by mem[rptr].
+                    // If !FALLTHROUGH, rdata is driven by mem[rptr_next] ONLY if read happened?
+                    // Or always mem[rptr_next]?
+                    // "rdata presents the current oldest unread word". 
+                    // If FALLTHROUGH, the oldest unread word is at rptr.
+                    // If !FALLTHROUGH, the oldest unread word is at rptr_next (after the read operation).
+                    
+                    // Let's implement the assignment logic here.
+                    if (FALLTHROUGH) begin
+                        rdata <= mem[rptr];
+                    end else begin
+                        rdata <= mem[rptr_next];
+                    end
+                end else begin
+                    // Non-fallthrough: rdata is updated to the new data immediately after read
+                    if (rinc && !rempty_reg) begin
+                        rdata <= mem[rptr_next];
+                    end else begin
+                        // Keep old value? Or undefined? 
+                        // Usually, if no read, rdata holds previous value or is X.
+                        // To be safe, hold previous value.
+                        // But in non-fallthrough, rdata is expected to be valid only when not empty?
+                        // Let's hold the last valid value.
+                        // However, the spec says "rdata presents the current oldest unread word".
+                        // If we don't read, the oldest unread word is still at rptr.
+                        // So rdata should be mem[rptr] if !FALLTHROUGH and no read?
+                        // No, if !FALLTHROUGH, rdata is updated on read.
+                        // If no read, rdata should probably stay at the last read value or be undefined.
+                        // Let's assume it holds the last valid value.
+                        // But wait, if FALLTHROUGH is false, rdata is updated to mem[rptr_next] on read.
+                        // If no read, rdata should remain mem[rptr] (the one we just read)?
+                        // Actually, if !FALLTHROUGH, rdata is the data of the *next* read.
+                        // So if we don't read, rdata is undefined or holds previous.
+                        // Let's just hold the previous value.
+                        // But to be precise: if !FALLTHROUGH, rdata is valid only after a read.
+                        // Let's set it to mem[rptr] if no read happened? No, that's fallthrough behavior.
+                        // Let's set it to mem[rptr_next] only if read happened.
+                        // If read didn't happen, keep old rdata.
+                        // But we need to initialize rdata.
+                        // Let's assume rdata holds the last successfully read data.
+                        // If no read, it stays.
+                        // However, the spec says "rdata presents the current oldest unread word".
+                        // If !FALLTHROUGH, the "current oldest unread word" is at rptr.
+                        // But the output is updated to rptr_next.
+                        // This is confusing. Let's stick to the standard interpretation:
+                        // FALLTHROUGH: rdata = mem[rptr] (always).
+                        // !FALLTHROUGH: rdata = mem[rptr_next] (only after read).
+                        // If !FALLTHROUGH and no read, rdata is undefined/hold.
+                        // Let's implement:
+                        if (rinc && !rempty_reg) begin
+                            rdata <= mem[rptr_next];
+                        end else begin
+                            // Hold previous value
+                            // We need to capture the previous rdata.
+                            // Since rdata is a wire, we can't hold it easily without a reg.
+                            // Let's use a reg for rdata_internal if needed, or just assign.
+                            // But the port is output wire.
+                            // We can use a reg inside the module to store the last valid rdata.
+                            // But the spec says "rdata is one read-clock sample".
+                            // Let's assume if no read, rdata is X or holds previous.
+                            // To avoid X propagation, let's hold the last value.
+                            // We need a reg to store the last rdata.
+                            // But the prompt asks for one source file, no extra regs if possible?
+                            // Let's add a reg for rdata_storage.
+                            // Wait, I can just assign rdata = mem[rptr] if !FALLTHROUGH and !rinc?
+                            // No, that would be fallthrough behavior.
+                            // Let's assume standard behavior: if !FALLTHROUGH, rdata is updated on read.
+                            // If no read, it's undefined.
+                            // But to be safe, let's hold the last value.
+                            // I will add a reg for rdata_storage.
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    // Re-structure Read Domain to handle rdata properly
+    // We need a reg to store the last read data for non-fallthrough mode when no read occurs.
+    reg [DSIZE-1:0] rdata_storage;
+    reg [DSIZE-1:0] rdata_storage_next;
+
+    // Reset rdata_storage
+    // In the always block above, we can handle rdata assignment.
+    // Let's rewrite the Read Domain logic cleanly.
+
+    // ---------------------------------------------------------
+    // Read Domain Logic (Refined)
+    // ---------------------------------------------------------
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= 1'b0;
+            rempty_reg <= 1'b1;
+            arempty_reg <= 1'b0;
+            rdata_storage <= 1'b0; // Initialize to 0
+        end else begin
+            rptr_next = rptr + 1'b1;
+            if (rptr_next == 1'b0) begin
+                rptr_next = 1'b0;
+            end
+
+            if (rptr_next == wgray_reg) begin
+                rempty_reg <= 1'b1;
+                arempty_reg <= 1'b0;
+            end else begin
+                rempty_reg <= 1'b0;
+                if (rptr_next == wgray_reg + 1) begin
+                    arempty_reg <= 1'b1;
+                end else begin
+                    arempty_reg <= 1'b0;
+                end
+            end
+
+            if (rinc && !rempty_reg) begin
+                rptr <= rptr_next;
+                // Update storage
+                rdata_storage <= mem[rptr_next];
+                
+                // Drive rdata based on FALLTHROUGH
+                if (FALLTHROUGH) begin
+                    rdata <= mem[rptr]; // Current oldest
+                end else begin
+                    rdata <= mem[rptr_next]; // New oldest
+                end
+            end else begin
+                // No read occurred
+                if (FALLTHROUGH) begin
+                    rdata <= mem[rptr]; // Current oldest
+                end else begin
+                    // Hold the last read value
+                    rdata <= rdata_storage;
+                end
+            end
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Cross-domain Pointer Generation
+    // ---------------------------------------------------------
+    // Write domain generates Gray code for rptr to compare with wptr
+    // Read domain generates Gray code for wptr to compare with rptr
+    
+    // We need to generate the Gray code for the read pointer in the write domain
+    // and the Gray code for the write pointer in the read domain.
+    
+    // In Write Domain:
+    // We need rgray_reg (registered read pointer gray code) to compare with wptr_next.
+    // This is generated in the Read Domain and passed through a register in Write Domain?
+    // No, the pointers are cross-domain.
+    // The standard approach:
+    // 1. Write domain has wptr (binary).
+    // 2. Read domain has rptr (binary).
+    // 3. Write domain needs to know rptr_gray (registered).
+    // 4. Read domain needs to know wptr_gray (registered).
+    
+    // How to get rptr_gray in write domain?
+    // rptr is in read domain. We generate rgray in read domain.
+    // Then we pass rgray to write domain.
+    // But rgray is asynchronous to wclk.
+    // So we register rgray in the write domain.
+    
+    // Similarly, wgray is generated in write domain.
+    // We pass wgray to read domain.
+    // We register wgray in the read domain.
+    
+    // Let's adjust the architecture:
+    // Write Domain:
+    //   - Calculates wptr_next.
+    //   - Compares wptr_next with rgray_reg (registered rgray).
+    //   - Generates wgray (current wptr gray).
+    //   - Registers wgray to get wgray_reg for read domain.
+    
+    // Read Domain:
+    //   - Calculates rptr_next.
+    //   - Compares rptr_next with wgray_reg (registered wgray).
+    //   - Generates rgray (current rptr gray).
+    //   - Registers rgray to get rgray_reg for write domain.
+    
+    // This requires passing wgray and rgray across domains.
+    // Since they are asynchronous, we just wire them.
+    // But we need to ensure the registration happens in the correct domain.
+    
+    // Revised Write Domain:
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= 1'b0;
+            wfull_reg <= 1'b0;
+            awfull_reg <= 1'b0;
+            wgray_reg <= 1'b0; // Register for cross-domain
+        end else begin
+            wptr_next = wptr + 1'b1;
+            if (wptr_next == 1'b0) wptr_next = 1'b0;
+
+            // Full check: wptr_next == rgray_reg
+            if (wptr_next == rgray_reg) begin
+                wfull_reg <= 1'b1;
+                awfull_reg <= 1'b1;
+            end else begin
+                wfull_reg <= 1'b0;
+                if (wptr_next == (INT_DEPTH - 1)) begin
+                    awfull_reg <= 1'b1;
+                end else begin
+                    awfull_reg <= 1'b0;
+                end
+            end
+
+            if (winc && !wfull_reg) begin
+                wptr <= wptr_next;
+                mem[wptr] <= wdata;
+            end
+
+            // Generate wgray for read domain
+            wgray = wptr ^ (wptr >> 1);
+            wgray_reg <= wgray; // Register wgray for read domain
+        end
+    end
+
+    // Revised Read Domain:
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= 1'b0;
+            rempty_reg <= 1'b1;
+            arempty_reg <= 1'b0;
+            rdata_storage <= 1'b0;
+            rgray_reg <= 1'b0; // Register for cross-domain
+        end else begin
+            rptr_next = rptr + 1'b1;
+            if (rptr_next == 1'b0) rptr_next = 1'b0;
+
+            // Empty check: rptr_next == wgray_reg
+            if (rptr_next == wgray_reg) begin
+                rempty_reg <= 1'b1;
+                arempty_reg <= 1'b0;
+            end else begin
+                rempty_reg <= 1'b0;
+                if (rptr_next == wgray_reg + 1) begin
+                    arempty_reg <= 1'b1;
+                end else begin
+                    arempty_reg <= 1'b0;
+                end
+            end
+
+            if (rinc && !rempty_reg) begin
+                rptr <= rptr_next;
+                rdata_storage <= mem[rptr_next];
+                
+                if (FALLTHROUGH) begin
+                    rdata <= mem[rptr];
+                end else begin
+                    rdata <= mem[rptr_next];
+                end
+            end else begin
+                if (FALLTHROUGH) begin
+                    rdata <= mem[rptr];
+                end else begin
+                    rdata <= rdata_storage;
+                end
+            end
+
+            // Generate rgray for write domain
+            rgray = rptr ^ (rptr >> 1);
+            rgray_reg <= rgray; // Register rgray for write domain
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Output Assignments
+    // ---------------------------------------------------------
+    assign wfull = wfull_reg;
+    assign awfull = awfull_reg;
+    assign rempty = rempty_reg;
+    assign arempty = arempty_reg;
+
+endmodule
+```<|im_end|>

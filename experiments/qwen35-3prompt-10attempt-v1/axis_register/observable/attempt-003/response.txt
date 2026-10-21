@@ -1,0 +1,287 @@
+```verilog
+module axis_register #
+(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI Stream input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI Stream output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser
+);
+
+    // Internal registers for state and data
+    reg [DATA_WIDTH-1:0] reg_data;
+    reg [KEEP_WIDTH-1:0] reg_keep;
+    reg reg_last;
+    reg [ID_WIDTH-1:0] reg_id;
+    reg [DEST_WIDTH-1:0] reg_dest;
+    reg [USER_WIDTH-1:0] reg_user;
+    reg reg_valid;
+    reg reg_ready;
+
+    // Control signals based on REG_TYPE
+    // REG_TYPE = 0: Wire (Transparent)
+    // REG_TYPE = 1: Buffer (Valid/Ready handshake only)
+    // REG_TYPE = 2: Skid Buffer (Store data, release on ready)
+    
+    wire wire_mode = (REG_TYPE == 0);
+    wire buffer_mode = (REG_TYPE == 1);
+    wire skid_mode = (REG_TYPE == 2);
+
+    // Logic to determine if we should accept new data
+    // In all modes, we accept if s_axis_tvalid is high and m_axis_tready is high
+    // For Skid Buffer, we also need to consider if we have space (always 1 slot here)
+    // and if we are not currently stalled by the output side in a way that prevents storage.
+    // Actually, for a single register slice:
+    // Wire: Pass through immediately.
+    // Buffer: Store if input valid and output ready.
+    // Skid: Store if input valid. Output ready when we have data and output ready.
+    
+    // Determine if we can write to the register
+    wire can_write = s_axis_tvalid;
+    
+    // Determine if we can read from the register (output valid)
+    // Wire: Output valid = Input valid (if input ready)
+    // Buffer: Output valid = (Stored data valid) AND m_axis_tready
+    // Skid: Output valid = (Stored data valid) AND m_axis_tready
+    
+    // Calculate s_axis_tready
+    // We are ready if we can accept data.
+    // Wire: Always ready if we can pass (which is immediate). But strictly, a wire passes when both sides agree.
+    // However, the requirement says "behaves as a wire, buffer, or skid buffer".
+    // A wire in AXI context usually means no storage, just a pass-through. 
+    // If s_axis_tvalid and m_axis_tready are both high, we pass.
+    // If m_axis_tready is low, we must assert s_axis_tready low to stall the source.
+    // So s_axis_tready = m_axis_tready (for wire mode).
+    
+    // Buffer/Skid: We can accept data if s_axis_tvalid is high.
+    // s_axis_tready = 1'b1; (We always accept input to store it, assuming single depth)
+    // Wait, if we are full, we can't accept. Since it's a single register, it's full if reg_valid is 1.
+    // So s_axis_tready = ~reg_valid | s_axis_tvalid? No.
+    // s_axis_tready = 1'b1 if we can store. We can store if !reg_valid.
+    // If reg_valid is 1, we are full, so s_axis_tready = 0.
+    
+    // Let's refine the logic per mode:
+    
+    // Mode 0 (Wire):
+    // s_axis_tready = m_axis_tready;
+    // m_axis_tvalid = s_axis_tvalid;
+    // Data passes through.
+    
+    // Mode 1 (Buffer) & Mode 2 (Skid):
+    // These are storage elements.
+    // s_axis_tready = 1'b1; // We accept data as long as we have space.
+    // Space is available if !reg_valid.
+    // So s_axis_tready = ~reg_valid;
+    
+    // Wait, standard AXI-Stream register behavior:
+    // If it's a buffer, it stores the packet. It asserts ready to the source.
+    // It asserts valid to the sink when it has data and sink is ready.
+    
+    // Let's implement the logic inside the always block to handle the modes cleanly.
+    
+    // Helper: Check if we have data stored
+    wire has_data = reg_valid;
+    
+    // Helper: Check if we can write
+    wire can_store = !has_data;
+    
+    // Helper: Check if we can read (output valid)
+    // For Wire: Output valid is same as Input valid (if we are passing).
+    // But if we are a wire, we don't store. So if s_axis_tvalid is high, we pass.
+    // If m_axis_tready is low, we must hold s_axis_tready low.
+    // So for Wire: s_axis_tready = m_axis_tready.
+    
+    // For Buffer/Skid:
+    // s_axis_tready = can_store;
+    // m_axis_tvalid = has_data && m_axis_tready;
+    
+    assign s_axis_tready = (wire_mode) ? m_axis_tready : can_store;
+    
+    // Update registers
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            reg_data <= 0;
+            reg_keep <= 0;
+            reg_last <= 0;
+            reg_id <= 0;
+            reg_dest <= 0;
+            reg_user <= 0;
+            reg_valid <= 0;
+            reg_ready <= 0;
+        end else begin
+            if (wire_mode) begin
+                // Wire Mode: Transparent
+                // Only update if we are passing (s_axis_tvalid && m_axis_tready)
+                // Actually, for a wire, we just pass. The registers are not used for storage.
+                // But to keep the interface consistent, we can just wire the signals.
+                // However, the prompt asks for a module with this interface.
+                // A pure wire implementation doesn't need registers, but to fit the "register slice"
+                // abstraction, we can just pass through.
+                // But wait, if s_axis_tvalid is high and m_axis_tready is low, we must stall.
+                // So s_axis_tready = m_axis_tready.
+                // m_axis_tvalid = s_axis_tvalid & m_axis_tready;
+                // Data is passed directly.
+                
+                // To strictly follow "register slice" even in wire mode (sometimes wires have latency),
+                // but usually wire means 0 latency. Let's assume 0 latency for wire.
+                // But the prompt says "Keep pending data ... through a stall".
+                // A wire doesn't have pending data.
+                // So for Wire mode, we just pass.
+                
+                // However, to make the code uniform and robust, let's use the register logic
+                // but only update if we are in buffer/skid mode.
+                // Or, simpler:
+                // If wire_mode:
+                //   s_axis_tready = m_axis_tready;
+                //   m_axis_tvalid = s_axis_tvalid & m_axis_tready;
+                //   m_axis_tdata = s_axis_tdata;
+                //   ...
+                //   // No register updates needed for wire mode as it's transparent.
+                //   // But we must ensure we don't accidentally latch data if not needed.
+                //   // Let's just assign outputs directly.
+                
+                // Re-evaluating "Wire" in AXI context:
+                // Often "Wire" means a pass-through with no buffering.
+                // So:
+                s_axis_tready = m_axis_tready;
+                m_axis_tvalid = s_axis_tvalid & m_axis_tready;
+                m_axis_tdata = s_axis_tdata;
+                m_axis_tkeep = s_axis_tkeep;
+                m_axis_tlast = s_axis_tlast;
+                m_axis_tid = s_axis_tid;
+                m_axis_tdest = s_axis_tdest;
+                m_axis_tuser = s_axis_tuser;
+                
+                // No register updates for wire mode
+            end else begin
+                // Buffer or Skid Mode
+                // Update registers if we can store
+                if (can_store && s_axis_tvalid) begin
+                    reg_data <= s_axis_tdata;
+                    reg_keep <= s_axis_tkeep;
+                    reg_last <= s_axis_tlast;
+                    reg_id <= s_axis_tid;
+                    reg_dest <= s_axis_tdest;
+                    reg_user <= s_axis_tuser;
+                    reg_valid <= 1'b1;
+                end else if (can_store && !s_axis_tvalid) begin
+                    // If we have data and input becomes invalid, we keep the data.
+                    // If we don't have data and input is invalid, we stay empty.
+                    // The condition 'can_store' handles the empty case.
+                    // If !can_store (full) and !s_axis_tvalid, we stay full.
+                    // If !can_store (full) and s_axis_tvalid, we stay full (overwrite? No, single depth).
+                    // Actually, if full, we ignore new data until we pop.
+                end
+                
+                // Output logic
+                if (buffer_mode) begin
+                    // Buffer: Output valid when we have data and sink is ready
+                    m_axis_tvalid = reg_valid && m_axis_tready;
+                    s_axis_tready = ~reg_valid; // Ready if empty
+                    
+                    if (reg_valid && m_axis_tready) begin
+                        m_axis_tdata = reg_data;
+                        m_axis_tkeep = reg_keep;
+                        m_axis_tlast = reg_last;
+                        m_axis_tid = reg_id;
+                        m_axis_tdest = reg_dest;
+                        m_axis_tuser = reg_user;
+                        
+                        // Pop data
+                        reg_valid <= 1'b0;
+                        // Data registers don't strictly need to be cleared if valid is 0, 
+                        // but good practice.
+                        reg_data <= 0;
+                        reg_keep <= 0;
+                        reg_last <= 0;
+                        reg_id <= 0;
+                        reg_dest <= 0;
+                        reg_user <= 0;
+                    end else begin
+                        // Hold data
+                        m_axis_tdata = reg_data;
+                        m_axis_tkeep = reg_keep;
+                        m_axis_tlast = reg_last;
+                        m_axis_tid = reg_id;
+                        m_axis_tdest = reg_dest;
+                        m_axis_tuser = reg_user;
+                    end
+                end else if (skid_mode) begin
+                    // Skid Buffer: Same as Buffer for single depth.
+                    // The difference usually arises in multi-depth FIFOs where 'skid' implies
+                    // decoupling timing without strict ordering guarantees or specific flow control nuances.
+                    // For a single register slice, Buffer and Skid are functionally identical
+                    // regarding data storage and valid/ready handshake.
+                    // Both store on valid, release on ready.
+                    
+                    m_axis_tvalid = reg_valid && m_axis_tready;
+                    s_axis_tready = ~reg_valid;
+                    
+                    if (reg_valid && m_axis_tready) begin
+                        m_axis_tdata = reg_data;
+                        m_axis_tkeep = reg_keep;
+                        m_axis_tlast = reg_last;
+                        m_axis_tid = reg_id;
+                        m_axis_tdest = reg_dest;
+                        m_axis_tuser = reg_user;
+                        
+                        reg_valid <= 1'b0;
+                        reg_data <= 0;
+                        reg_keep <= 0;
+                        reg_last <= 0;
+                        reg_id <= 0;
+                        reg_dest <= 0;
+                        reg_user <= 0;
+                    end else begin
+                        m_axis_tdata = reg_data;
+                        m_axis_tkeep = reg_keep;
+                        m_axis_tlast = reg_last;
+                        m_axis_tid = reg_id;
+                        m_axis_tdest = reg_dest;
+                        m_axis_tuser = reg_user;
+                    end
+                end
+            end
+        end
+    end
+
+    // Output assignments for Wire mode (handled inside the block above, but need to ensure they are driven)
+    // The logic inside the 'if (wire_mode)' block drives the outputs.
+    // The logic inside the 'else' block drives the outputs.
+    // This covers all cases.
+
+endmodule
+```<|im_end|>
+<|endoftext|>

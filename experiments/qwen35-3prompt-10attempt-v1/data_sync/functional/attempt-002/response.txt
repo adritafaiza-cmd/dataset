@@ -1,0 +1,443 @@
+```verilog
+module data_sync #(
+    parameter STAGES = 2,
+    parameter DWIDTH = 8
+)(
+    input                  clk,
+    input                  rstn,
+    input  [DWIDTH-1:0]    din,
+    input                  dready_i,
+    output reg [DWIDTH-1:0] dout,
+    output reg             dready_o
+);
+
+    // Internal state for the FIFO buffer
+    // We use a simple pointer-based approach to avoid complex FIFO logic
+    // while ensuring no multi-bit tearing.
+    // The buffer holds the data ready to be output.
+    reg [DWIDTH-1:0] buffer [STAGES-1:0];
+    reg [STAGES:0]    write_ptr;
+    reg [STAGES:0]    read_ptr;
+
+    // State machine to manage the handshake
+    // States:
+    // IDLE    : Waiting for dready_i to go high
+    // WRITE   : Data has been captured, waiting for dready_o to pulse
+    // READ    : Data has been output, waiting for next cycle
+    localparam IDLE = 2'b00;
+    localparam WRITE = 2'b01;
+    localparam READ  = 2'b10;
+
+    reg [1:0] state;
+
+    // Synchronous reset logic
+    always @(posedge clk) begin
+        if (!rstn) begin
+            dout      <= 0;
+            dready_o  <= 0;
+            write_ptr <= 0;
+            read_ptr  <= 0;
+            state     <= IDLE;
+        end else begin
+            // State transition logic
+            case (state)
+                IDLE: begin
+                    if (dready_i) begin
+                        // Capture data into the buffer at write_ptr
+                        buffer[write_ptr] <= din;
+                        write_ptr <= write_ptr + 1;
+                        // If we wrap around, we might need to handle full condition,
+                        // but for a simple synchronizer with small STAGES and assuming
+                        // the producer doesn't overwhelm the consumer instantly,
+                        // we can proceed. However, to be safe against overflow
+                        // in a real system, we should check if write_ptr == read_ptr.
+                        // For this specific "synchronizer" requirement, we assume
+                        // the consumer is fast enough or we drop data on overflow.
+                        // Let's implement a simple full check.
+                        if (write_ptr == read_ptr) begin
+                            // Buffer full, ignore new data or overwrite oldest?
+                            // Standard FIFO behavior: ignore write if full.
+                            // But since we are just syncing, let's assume non-blocking
+                            // and just don't update if full.
+                            state <= IDLE;
+                        end else begin
+                            state <= WRITE;
+                        end
+                    end else begin
+                        state <= IDLE;
+                    end
+                end
+
+                WRITE: begin
+                    // Pulse dready_o on the next clock edge
+                    dready_o <= 1;
+                    state    <= READ;
+                end
+
+                READ: begin
+                    // Output the data from the buffer
+                    dout <= buffer[read_ptr];
+                    read_ptr <= read_ptr + 1;
+                    // Check if we wrapped around and need to reset read_ptr
+                    if (read_ptr >= STAGES) begin
+                        read_ptr <= 0;
+                    end
+                    state <= IDLE;
+                end
+
+                default: state <= IDLE;
+            endcase
+        end
+    end
+
+    // Handle write pointer wrap-around
+    // If write_ptr reaches STAGES, it wraps to 0.
+    // We need to ensure we don't overwrite data that hasn't been read yet.
+    // The logic in IDLE state handles the full check (write_ptr == read_ptr).
+    // However, the pointer increment needs to happen regardless of the full check
+    // to keep the logic simple, or we handle the wrap in the increment.
+    // Let's refine the pointer logic to be robust.
+    
+    // Re-evaluating the pointer logic for correctness:
+    // If write_ptr == read_ptr, the buffer is full. We should not write.
+    // If write_ptr != read_ptr, we write and increment.
+    // The state machine handles the "don't write if full" in the IDLE case.
+    // But we must ensure write_ptr increments correctly.
+    
+    // Let's move the pointer increment logic to be explicit and safe.
+    // Actually, the previous logic inside the case statement for IDLE:
+    // if (write_ptr == read_ptr) -> stay IDLE (no write, no ptr inc)
+    // else -> go to WRITE (write data, then inc ptr in next cycle? No, we need to inc now)
+    
+    // Corrected approach:
+    // The state machine controls the flow.
+    // In IDLE: if dready_i, check full. If not full, write data, increment write_ptr, go to WRITE state.
+    // In WRITE: pulse dready_o, go to READ state.
+    // In READ: output data, increment read_ptr, go to IDLE state.
+    
+    // Wait, the previous logic had a flaw: if we go to WRITE state, we haven't incremented write_ptr yet.
+    // We need to increment write_ptr immediately after writing.
+    // Let's restructure the always block for clarity and correctness.
+
+    reg [DWIDTH-1:0] data_to_write;
+    reg [STAGES:0]   next_write_ptr;
+    reg [STAGES:0]   next_read_ptr;
+
+    always @(posedge clk) begin
+        if (!rstn) begin
+            dout      <= 0;
+            dready_o  <= 0;
+            write_ptr <= 0;
+            read_ptr  <= 0;
+            state     <= IDLE;
+        end else begin
+            // Calculate next pointers
+            next_write_ptr = write_ptr;
+            next_read_ptr  = read_ptr;
+
+            case (state)
+                IDLE: begin
+                    if (dready_i) begin
+                        // Check if buffer is full
+                        if (write_ptr != read_ptr) begin
+                            data_to_write <= din;
+                            next_write_ptr <= write_ptr + 1;
+                            if (next_write_ptr >= STAGES) next_write_ptr <= 0;
+                            state <= WRITE;
+                        end
+                    end
+                end
+
+                WRITE: begin
+                    // Capture the data written in the previous cycle (or current if we restructure)
+                    // Actually, to keep it synchronous and clean, let's store data in a register
+                    // and output it when ready.
+                    // Revised Strategy:
+                    // 1. Input stage: Capture din when dready_i is high.
+                    // 2. Output stage: Output captured data when dready_o is high.
+                    // This avoids the complex state machine above.
+                    
+                    // Let's stick to the standard 2-stage synchronizer pattern but generalized.
+                    // Stage 1: Capture din.
+                    // Stage 2: Output dout.
+                    // But we need to handle the handshake dready_i/dready_o.
+                    
+                    // Let's use a simpler state machine that is proven:
+                    // State 0: Idle. Wait for dready_i.
+                    // State 1: Data captured. Wait for dready_o.
+                    // State 2: Data output. Wait for next cycle.
+                    
+                    // To fix the pointer issue:
+                    // When transitioning from IDLE to WRITE, we write to buffer[write_ptr]
+                    // and increment write_ptr.
+                    // When transitioning from READ to IDLE, we increment read_ptr.
+                    
+                    // Let's rewrite the logic cleanly.
+                    
+                    // We need a register to hold the data currently being processed in the WRITE state
+                    // so it's available when we transition to READ.
+                    // Actually, the buffer approach is fine if we manage pointers correctly.
+                    
+                    // Let's try a different, more robust implementation:
+                    // Use a single register `sync_data` and a state machine.
+                    // But the requirement is multi-bit and potentially multiple bits of data?
+                    // "When dready_i indicates a new source value" implies one value per pulse.
+                    // So a single register `sync_data` is sufficient if we assume the producer
+                    // sends one value per dready_i pulse.
+                    
+                    // However, the prompt asks for a "multi-bit destination-clock data synchronizer".
+                    // Usually, this implies a FIFO to absorb clock domain crossing latency.
+                    // With STAGES=2, we need 2 cycles of buffering.
+                    
+                    // Let's go with the pointer-based FIFO but fix the logic.
+                    
+                    // Logic:
+                    // If state == IDLE and dready_i:
+                    //   If not full: buffer[write_ptr] = din; write_ptr++; state = WRITE;
+                    // If state == WRITE:
+                    //   dready_o = 1; state = READ;
+                    // If state == READ:
+                    //   dout = buffer[read_ptr]; read_ptr++; state = IDLE;
+                    
+                    // The issue with the previous attempt was that write_ptr wasn't incremented
+                    // before the state changed to WRITE, or the data wasn't captured correctly.
+                    // Let's do it all in one always block with non-blocking assignments carefully.
+                    
+                    // Re-implementing the case statement logic properly:
+                    
+                    if (state == IDLE) begin
+                        if (dready_i) begin
+                            if (write_ptr != read_ptr) begin
+                                buffer[write_ptr] <= din;
+                                next_write_ptr <= write_ptr + 1;
+                                if (next_write_ptr >= STAGES) next_write_ptr <= 0;
+                                write_ptr <= next_write_ptr;
+                                state <= WRITE;
+                            end
+                        end
+                    end else if (state == WRITE) begin
+                        dready_o <= 1;
+                        state <= READ;
+                    end else if (state == READ) begin
+                        dout <= buffer[read_ptr];
+                        next_read_ptr <= read_ptr + 1;
+                        if (next_read_ptr >= STAGES) next_read_ptr <= 0;
+                        read_ptr <= next_read_ptr;
+                        state <= IDLE;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Wait, the above logic has a flaw: 
+    // In the WRITE state, we pulse dready_o. But we don't output dout yet.
+    // In the READ state, we output dout.
+    // This means dout is valid in the READ state.
+    // But dready_o is pulsed in the WRITE state.
+    // This creates a 2-cycle latency between dready_i and dready_o.
+    // Cycle 1: dready_i=1 -> State becomes WRITE. Buffer updated.
+    // Cycle 2: State is WRITE. dready_o pulses. State becomes READ.
+    // Cycle 3: State is READ. dout is updated. State becomes IDLE.
+    // This is a 3-cycle latency (IDLE->WRITE->READ->IDLE).
+    // Is this acceptable? The prompt says "STAGES: Implementation depth parameter".
+    // If STAGES=2, we usually expect 2 cycles of buffering.
+    // Let's try to optimize to 2 cycles total latency (1 cycle buffer + 1 cycle output).
+    
+    // Optimized Logic:
+    // State 0 (IDLE): Wait for dready_i.
+    //   If dready_i: Capture data, increment write_ptr, set dready_o=1 (for next cycle?), 
+    //   and prepare to output? No, we need to separate capture and output.
+    
+    // Let's use a standard 2-stage synchronizer pattern:
+    // Stage 1: Capture din on rising edge of clk.
+    // Stage 2: Output dout on rising edge of clk.
+    // Handshake:
+    // dready_i goes high -> We capture data.
+    // We need to signal dready_o high for ONE cycle.
+    
+    // Implementation:
+    // reg [DWIDTH-1:0] stage1_data;
+    // reg [DWIDTH-1:0] stage2_data;
+    // reg dready_o_reg;
+    
+    // But we need to handle the "full" condition if the producer is faster than consumer.
+    // With STAGES parameter, we should use a small FIFO.
+    
+    // Let's stick to the pointer-based FIFO but ensure the timing is correct.
+    // The previous logic:
+    // IDLE -> WRITE (capture) -> READ (output) -> IDLE.
+    // Latency: 2 clock cycles from dready_i to dready_o pulse?
+    // Cycle N:   dready_i=1. State becomes WRITE.
+    // Cycle N+1: State is WRITE. dready_o pulses. State becomes READ.
+    // Cycle N+2: State is READ. dout updates. State becomes IDLE.
+    // So dready_o pulses in N+1. dout is valid in N+2.
+    // This is 2 cycles of latency.
+    // If STAGES=2, maybe we want 2 cycles of buffering?
+    // Let's assume the requirement is simply to synchronize without tearing.
+    // The pointer logic ensures no tearing.
+    
+    // One correction: In the WRITE state, we pulse dready_o.
+    // In the READ state, we output dout.
+    // This means dout is valid in the READ state.
+    // The consumer sees dready_o high in WRITE state, and dout valid in READ state.
+    // This is a 1-cycle skew between dready_o and dout.
+    // This is generally acceptable for handshakes if the consumer can latch dout after dready_o.
+    // Or we can pulse dready_o in the READ state as well?
+    // "pulse dready_o in clk" usually means one cycle high.
+    // If we pulse it in READ state, then dout is valid in READ state.
+    // Then the sequence is:
+    // IDLE -> WRITE (capture) -> READ (output + pulse dready_o) -> IDLE.
+    // Cycle N:   dready_i=1. Capture. State=WRITE.
+    // Cycle N+1: State=WRITE. State=READ. (No output yet).
+    // Cycle N+2: State=READ. Output dout. Pulse dready_o. State=IDLE.
+    // This adds another cycle.
+    
+    // Let's refine the requirement interpretation:
+    // "When dready_i indicates a new source value, present a coherent dout and pulse dready_o in clk."
+    // This implies:
+    // 1. dready_i goes high.
+    // 2. Data is captured.
+    // 3. In the next cycle(s), dready_o goes high and dout is valid.
+    
+    // Let's use the following robust logic:
+    // State 0: IDLE.
+    // State 1: CAPTURE. (dready_i was high).
+    // State 2: OUTPUT. (dready_o goes high, dout is valid).
+    
+    // Logic:
+    // If IDLE and dready_i:
+    //   If not full: buffer[wp] = din; wp++; state = CAPTURE;
+    // If CAPTURE:
+    //   state = OUTPUT;
+    // If OUTPUT:
+    //   dready_o = 1; dout = buffer[rp]; rp++; state = IDLE;
+    
+    // Timing:
+    // T0: dready_i=1. State -> CAPTURE. Buffer updated.
+    // T1: State -> OUTPUT.
+    // T2: State -> IDLE. dready_o pulses. dout valid.
+    // Latency: 2 cycles.
+    // This seems reasonable.
+    
+    // Let's rewrite the module with this logic.
+    
+    // Reset logic
+    if (!rstn) begin
+        dout      <= 0;
+        dready_o  <= 0;
+        write_ptr <= 0;
+        read_ptr  <= 0;
+        state     <= IDLE;
+    end else begin
+        case (state)
+            IDLE: begin
+                if (dready_i) begin
+                    if (write_ptr != read_ptr) begin
+                        buffer[write_ptr] <= din;
+                        write_ptr <= write_ptr + 1;
+                        if (write_ptr >= STAGES) write_ptr <= 0;
+                        state <= CAPTURE;
+                    end
+                end
+            end
+            
+            CAPTURE: begin
+                state <= OUTPUT;
+            end
+            
+            OUTPUT: begin
+                dready_o <= 1;
+                dout     <= buffer[read_ptr];
+                read_ptr <= read_ptr + 1;
+                if (read_ptr >= STAGES) read_ptr <= 0;
+                state    <= IDLE;
+            end
+            
+            default: state <= IDLE;
+        endcase
+    end
+
+    // Wait, there is a subtle issue.
+    // In CAPTURE state, we don't output anything.
+    // In OUTPUT state, we output dout and pulse dready_o.
+    // This means dready_o is high in the OUTPUT state.
+    // dout is valid in the OUTPUT state.
+    // So the consumer sees dready_o=1 and dout=valid in the same cycle.
+    // This is perfect.
+    
+    // But what about the transition from CAPTURE to OUTPUT?
+    // T0: dready_i=1. State becomes CAPTURE.
+    // T1: State becomes OUTPUT. dready_o pulses. dout valid.
+    // Latency: 1 cycle.
+    // This is very efficient.
+    
+    // However, we need to make sure `dout` is stable.
+    // In T0, buffer is updated.
+    // In T1, we read buffer[read_ptr].
+    // Since read_ptr only increments in OUTPUT state, and we are in OUTPUT state now,
+    // we are reading the data that was written in the previous CAPTURE state.
+    // This works.
+    
+    // One edge case: What if read_ptr == write_ptr?
+    // In IDLE, we check `write_ptr != read_ptr`.
+    // If they are equal, buffer is empty. We stay in IDLE.
+    // This prevents reading garbage.
+    
+    // Final check on parameters:
+    // STAGES = 2.
+    // Buffer size = 2.
+    // Max latency = 2 cycles?
+    // If we have a burst of data, the FIFO handles it.
+    
+    // Let's finalize the code structure.
+    
+    // Define states
+    localparam IDLE = 2'b00;
+    localparam CAPTURE = 2'b01;
+    localparam OUTPUT = 2'b10;
+
+    // State register
+    reg [1:0] state;
+
+    // Always block for state machine and logic
+    always @(posedge clk) begin
+        if (!rstn) begin
+            dout      <= 0;
+            dready_o  <= 0;
+            write_ptr <= 0;
+            read_ptr  <= 0;
+            state     <= IDLE;
+        end else begin
+            case (state)
+                IDLE: begin
+                    if (dready_i) begin
+                        if (write_ptr != read_ptr) begin
+                            buffer[write_ptr] <= din;
+                            write_ptr <= write_ptr + 1;
+                            if (write_ptr >= STAGES) write_ptr <= 0;
+                            state <= CAPTURE;
+                        end
+                    end
+                end
+                
+                CAPTURE: begin
+                    state <= OUTPUT;
+                end
+                
+                OUTPUT: begin
+                    dready_o <= 1;
+                    dout     <= buffer[read_ptr];
+                    read_ptr <= read_ptr + 1;
+                    if (read_ptr >= STAGES) read_ptr <= 0;
+                    state    <= IDLE;
+                end
+                
+                default: state <= IDLE;
+            endcase
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

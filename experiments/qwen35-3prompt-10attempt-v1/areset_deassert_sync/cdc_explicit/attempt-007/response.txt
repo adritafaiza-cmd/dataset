@@ -1,0 +1,64 @@
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    // Internal signal to handle polarity inversion if needed
+    // If RST_POL is 0, we invert the input so the logic below (active-high assumption) works uniformly
+    wire rst_active;
+    assign rst_active = RST_POL ? async_rst_i : ~async_rst_i;
+
+    // Stage 0: Immediate Assertion Capture
+    // This stage ensures that if the reset is asserted, the output is asserted immediately.
+    // It uses a flip-flop triggered by clk. On reset, it captures the '1'.
+    // When rst_active goes low (deassert), this stage will eventually go low after one clock cycle.
+    reg rst_stage0;
+    always @(posedge clk or posedge rst_active) begin
+        if (rst_active)
+            rst_stage0 <= 1'b1;
+        else
+            rst_stage0 <= 1'b0;
+    end
+
+    // Pipeline stages for safe deassertion (Release)
+    // We chain CHAINS flip-flops. The reset signal propagates through them.
+    // Only after the signal has traversed the entire chain and returned to 0
+    // do we consider the reset fully released.
+    genvar i;
+    reg rst_chain[CHAINS-1:0];
+
+    generate
+        for (i = 0; i < CHAINS; i = i + 1) begin : rst_chain_gen
+            always @(posedge clk or posedge rst_active) begin
+                if (rst_active)
+                    rst_chain[i] <= 1'b1;
+                else
+                    rst_chain[i] <= rst_chain[i-1] ? 1'b1 : 1'b0;
+            end
+        end
+    endgenerate
+
+    // Final Output Logic
+    // sync_rst_o is asserted if:
+    // 1. The immediate capture (rst_stage0) is high (handles immediate assertion).
+    // 2. OR, any stage in the release chain is still high (indicating the release hasn't completed).
+    //
+    // Logic derivation:
+    // - If rst_active is high, rst_stage0 becomes 1. Output = 1.
+    // - If rst_active goes low:
+    //   - rst_stage0 goes low after 1 cycle.
+    //   - rst_chain[0] goes low after 1 cycle.
+    //   - ...
+    //   - rst_chain[CHAINS-1] goes low after CHAINS+1 cycles.
+    //   - Until all are low, output remains 1.
+    //   - Once all are low, output becomes 0.
+    //
+    // This ensures the reset is held high until the CDC hazard of early deassertion is eliminated.
+    assign sync_rst_o = rst_stage0 | rst_chain[CHAINS-1];
+
+endmodule<|im_end|>
+<|endoftext|>

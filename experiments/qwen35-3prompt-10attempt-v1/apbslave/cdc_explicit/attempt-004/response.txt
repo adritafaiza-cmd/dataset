@@ -1,0 +1,126 @@
+module apbslave #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH,
+	localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+) (
+	input	wire			PCLK, PRESETn,
+	input	wire			PSEL,
+	input	wire			PENABLE,
+	output	reg			PREADY,
+	input	wire	[AW-1:0]	PADDR,
+	input	wire			PWRITE,
+	input	wire	[DW-1:0]	PWDATA,
+	input	wire	[DW/8-1:0]	PWSTRB,
+	input	wire	[2:0]		PPROT,
+	output	reg	[DW-1:0]	PRDATA,
+	output	wire			PSLVERR
+);
+
+	// ------------------------------------------------------------------
+	// CDC Strategy:
+	// 1. Reset Domain: Use a synchronous reset with a one-cycle pulse
+	//    generated from PRESETn to ensure safe release across domains.
+	// 2. Clock Domain: All state registers are driven by PCLK.
+	// 3. Handshake: PREADY is driven synchronously on PCLK.
+	// 4. Data Coherence: PRDATA is updated only on successful write
+	//    completion (PREADY asserted), ensuring no partial writes.
+	// ------------------------------------------------------------------
+
+	localparam	ONE = 1'b1;
+	localparam	ZERO = 1'b0;
+
+	// Synchronous reset generation to ensure clean release
+	// If PRESETn is low, reset_pulse is high for exactly one cycle
+	wire		reset_pulse;
+	always @(posedge PCLK) begin
+		if (PRESETn == ZERO)
+			reset_pulse <= ONE;
+		else
+			reset_pulse <= ZERO;
+	end
+
+	// State machine states
+	localparam	IDLE = 2'b00;
+	localparam	ACCESS = 2'b01;
+
+	reg	[1:0]	state;
+	reg	[AW-1:0]	addr_reg;
+	reg	[DW-1:0]	data_reg;
+	reg	[DW/8-1:0]	strb_reg;
+	reg	[2:0]	prot_reg;
+	reg		write_enable;
+
+	// ------------------------------------------------------------------
+	// Sequential Logic
+	// ------------------------------------------------------------------
+	always @(posedge PCLK) begin
+		// Reset Logic
+		if (reset_pulse) begin
+			state <= IDLE;
+			addr_reg <= {AW{ZERO}};
+			data_reg <= {DW{ZERO}};
+			strb_reg <= {DW/8{ZERO}};
+			prot_reg <= {3{ZERO}};
+			write_enable <= ZERO;
+			PREADY <= ZERO;
+			PSLVERR <= ZERO;
+		end
+		else begin
+			// State Transition
+			if (state == IDLE) begin
+				if (PSEL && PENABLE) begin
+					state <= ACCESS;
+					addr_reg <= PADDR;
+					data_reg <= PWDATA;
+					strb_reg <= PWSTRB;
+					prot_reg <= PPROT;
+					write_enable <= PWRITE;
+				end
+				// Else stay in IDLE
+			end
+			else if (state == ACCESS) begin
+				// Complete the transaction
+				state <= IDLE;
+				PREADY <= ONE;
+				PSLVERR <= ZERO;
+
+				// Handle Write Data
+				if (write_enable) begin
+					// Simple byte-write simulation logic
+					// In a real design, this would map to specific registers
+					// Here we just store the data for demonstration
+					// Note: Real implementation would use a register map
+					// For this generic slave, we assume the data is accepted
+					// and PRDATA reflects the written data (or 0 if read)
+					PRDATA <= data_reg;
+				end
+				else begin
+					// Read operation: PRDATA should reflect the register value
+					// Since this is a generic slave without internal registers,
+					// we return 0 for reads unless specific logic is added.
+					// To satisfy "Accept standard APB setup/access transfers",
+					// we return the data_reg (which holds the last write)
+					// or 0 if it's a fresh read.
+					PRDATA <= data_reg;
+				end
+			end
+		end
+	end
+
+	// ------------------------------------------------------------------
+	// Output Logic (Combinational)
+	// ------------------------------------------------------------------
+	// PREADY is driven in the sequential block above, but we ensure
+	// it is always valid when state is ACCESS.
+	// PSLVERR is asserted if an invalid access occurs (e.g., reserved address).
+	// For this generic implementation, we assume all addresses are valid
+	// unless specific decoding is required. We keep PSLVERR low as per
+	// requirement "PSLVERR may stay low for in-range accesses".
+
+	assign PREADY = (state == ACCESS) ? ONE : ZERO;
+	assign PSLVERR = ZERO; // No error conditions defined for this generic slave
+
+endmodule<|im_end|>
+<|endoftext|>

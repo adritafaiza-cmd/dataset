@@ -1,0 +1,424 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam LOG_PORTS = $clog2(PORTS);
+    localparam NUM_BITS = PORTS;
+    localparam MAX_DELAY = 2; // Safety margin for CDC
+
+    // State encoding for Round Robin
+    // We use a "next_requestor" counter to track who is next in line.
+    // State 0: No one requested, or just finished.
+    // State 1..PORTS: The index of the next requestor to check.
+    reg [LOG_PORTS-1:0] next_requestor_idx;
+    reg [LOG_PORTS-1:0] current_requestor_idx;
+    
+    // For Round Robin, we need to track if we have seen a request since the last grant
+    // to decide whether to rotate or stay.
+    // Actually, a simpler RR implementation:
+    // Maintain a 'next' pointer. When a request is granted, if that port still requests,
+    // keep it. If not, move 'next' to the next index.
+    
+    // To ensure CDC safety, we will use a synchronous state machine.
+    // All state updates happen on clk.
+    
+    reg [LOG_PORTS-1:0] rr_next;
+    reg [LOG_PORTS-1:0] rr_current;
+    reg [LOG_PORTS-1:0] rr_last_granted;
+    
+    // For Fixed Priority, we don't need complex state, just logic.
+    // However, to keep the architecture uniform and safe, we can use a single FSM
+    // that branches based on ARB_TYPE_ROUND_ROBIN.
+    
+    // State Machine for Arbitration Logic
+    // States:
+    // IDLE: Waiting for requests.
+    // GRANTING: Currently holding a grant, waiting for ack or request drop.
+    
+    reg [1:0] arb_state; // 0: IDLE, 1: GRANTING
+    reg [LOG_PORTS-1:0] state_next_requestor;
+    reg [LOG_PORTS-1:0] state_last_granted_idx;
+    
+    // Synchronous registers for state
+    reg [1:0] state_reg;
+    reg [LOG_PORTS-1:0] state_next_req_reg;
+    reg [LOG_PORTS-1:0] state_last_grant_reg;
+    
+    // Internal signals for logic
+    wire [LOG_PORTS-1:0] req_mask;
+    wire any_request;
+    wire [LOG_PORTS-1:0] fixed_priority_winner;
+    wire round_robin_winner;
+    wire grant_this_cycle;
+    wire hold_grant;
+    
+    // CDC Safety: All registers are synchronous. No async resets except the top-level rst
+    // which is propagated synchronously.
+    
+    // --- Combinational Logic for State Next State ---
+    always @(*) begin
+        state_next_req_reg = 0;
+        state_last_grant_reg = 0;
+        state_reg = state_reg; // Default hold
+        
+        any_request = 0;
+        for (int i = 0; i < PORTS; i++) begin
+            if (request[i]) any_request = 1;
+        end
+        
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            // Round Robin Logic
+            // If no requests, reset to 0.
+            if (!any_request) begin
+                state_next_req_reg = 0;
+                state_last_grant_reg = 0;
+            end else begin
+                // If we are in GRANTING state and the last granted port is still requesting,
+                // we keep the same next_requestor (effectively holding the grant).
+                // If the last granted port is NOT requesting, we rotate to the next.
+                
+                // Determine if we should rotate
+                wire rotate_needed = 0;
+                if (state_reg == 1) begin // In GRANTING state
+                    if (request[state_last_grant_reg] == 1) begin
+                        // Still requesting, do not rotate
+                        rotate_needed = 0;
+                    end else begin
+                        // Released, rotate
+                        rotate_needed = 1;
+                    end
+                end else begin
+                    // In IDLE, if there are requests, start from the saved next pointer
+                    // If no requests, reset to 0
+                    if (any_request) begin
+                        rotate_needed = 0;
+                    end else begin
+                        rotate_needed = 1;
+                    end
+                end
+                
+                if (rotate_needed) begin
+                    state_next_req_reg = state_next_req_reg + 1;
+                    if (state_next_req_reg >= PORTS) state_next_req_reg = 0;
+                end
+                
+                state_last_grant_reg = state_next_req_reg;
+            end
+            
+            // Determine winner for this cycle based on RR logic
+            // The winner is the first requestor encountered starting from state_next_req_reg
+            // that has a request.
+            wire [LOG_PORTS-1:0] rr_candidate;
+            wire [LOG_PORTS-1:0] rr_temp = state_next_req_reg;
+            wire [LOG_PORTS-1:0] rr_found = 0;
+            
+            for (int i = 0; i < PORTS; i++) begin
+                if (rr_found) break;
+                if (request[rr_temp]) begin
+                    rr_candidate = rr_temp;
+                    rr_found = 1;
+                end
+                rr_temp = rr_temp + 1;
+                if (rr_temp >= PORTS) rr_temp = 0;
+            end
+            
+            round_robin_winner = rr_found;
+            if (round_robin_winner) begin
+                grant_this_cycle = 1;
+                // Update state to GRANTING
+                state_reg = 1;
+                state_last_grant_reg = rr_candidate;
+            end else begin
+                grant_this_cycle = 0;
+                // Stay in IDLE
+                state_reg = 0;
+            end
+            
+        end else begin
+            // Fixed Priority Logic
+            // Priority determined by ARB_LSB_HIGH_PRIORITY
+            wire [LOG_PORTS-1:0] priority_start;
+            if (ARB_LSB_HIGH_PRIORITY) begin
+                priority_start = 0;
+            end else begin
+                priority_start = PORTS - 1;
+            end
+            
+            wire [LOG_PORTS-1:0] fixed_winner = 0;
+            wire [LOG_PORTS-1:0] fixed_temp = priority_start;
+            wire [LOG_PORTS-1:0] fixed_found = 0;
+            
+            for (int i = 0; i < PORTS; i++) begin
+                if (fixed_found) break;
+                if (request[fixed_temp]) begin
+                    fixed_winner = fixed_temp;
+                    fixed_found = 1;
+                end
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    fixed_temp = fixed_temp + 1;
+                    if (fixed_temp >= PORTS) fixed_temp = 0;
+                end else begin
+                    fixed_temp = fixed_temp - 1;
+                    if (fixed_temp < 0) fixed_temp = PORTS - 1;
+                end
+            end
+            
+            if (fixed_found) begin
+                grant_this_cycle = 1;
+                state_reg = 1; // Enter GRANTING
+                state_last_grant_reg = fixed_winner;
+            end else begin
+                grant_this_cycle = 0;
+                state_reg = 0; // Stay IDLE
+            end
+        end
+    end
+    
+    // --- Sequential Logic for State ---
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state_reg <= 0;
+            state_next_req_reg <= 0;
+            state_last_grant_reg <= 0;
+        end else begin
+            state_reg <= state_next_req_reg;
+            state_next_req_reg <= state_next_req_reg; // This line is redundant due to combinational logic above, 
+                                                       // but explicit assignment ensures synthesis clarity.
+                                                       // Actually, the combinational block calculates 'state_next_req_reg'
+                                                       // based on current state. The sequential block assigns it.
+                                                       // Wait, the combinational block calculates 'state_next_req_reg' 
+                                                       // which is the NEXT value.
+                                                       // So:
+            state_reg <= state_next_req_reg; // This is wrong naming in combinational block.
+            // Let's refactor the naming in combinational block to be 'next_state'
+            
+            // Re-evaluating the combinational block logic above:
+            // I named the output of the combinational block 'state_next_req_reg'.
+            // In the sequential block, I assigned 'state_reg <= state_next_req_reg'.
+            // This is correct.
+            
+            // However, I need to make sure the combinational block outputs are driven correctly.
+            // The variable 'state_next_req_reg' in the combinational block is the calculated next state.
+            // The variable 'state_reg' in the combinational block is the current state (input).
+            // The assignment 'state_reg = state_reg' is just to initialize the variable if not used.
+            
+            // Correct flow:
+            // 1. Combinational block calculates 'next_state' and 'next_rr_next' based on current 'state_reg'.
+            // 2. Sequential block updates 'state_reg' and 'rr_next' (if needed).
+            
+            // Let's rewrite the combinational block to use clear names for next state.
+        end
+    end
+    
+    // Re-implementing the combinational logic with clearer variable names for synthesis
+    wire [1:0] next_state;
+    wire [LOG_PORTS-1:0] next_rr_next;
+    wire [LOG_PORTS-1:0] next_rr_last;
+    wire grant_rr;
+    wire grant_fixed;
+    
+    always @(*) begin
+        next_state = 0;
+        next_rr_next = 0;
+        next_rr_last = 0;
+        grant_rr = 0;
+        grant_fixed = 0;
+        
+        any_request = 0;
+        for (int i = 0; i < PORTS; i++) begin
+            if (request[i]) any_request = 1;
+        end
+        
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            wire rotate = 0;
+            if (state_reg == 1) begin
+                if (request[state_last_grant_reg] == 1) rotate = 0;
+                else rotate = 1;
+            end else begin
+                if (any_request) rotate = 0;
+                else rotate = 1;
+            end
+            
+            if (rotate) begin
+                next_rr_next = state_next_req_reg + 1;
+                if (next_rr_next >= PORTS) next_rr_next = 0;
+            end else begin
+                next_rr_next = state_next_req_reg;
+            end
+            
+            // Find winner starting from next_rr_next
+            wire [LOG_PORTS-1:0] rr_temp = next_rr_next;
+            wire [LOG_PORTS-1:0] rr_found = 0;
+            wire [LOG_PORTS-1:0] rr_win = 0;
+            
+            for (int i = 0; i < PORTS; i++) begin
+                if (rr_found) break;
+                if (request[rr_temp]) begin
+                    rr_win = rr_temp;
+                    rr_found = 1;
+                end
+                rr_temp = rr_temp + 1;
+                if (rr_temp >= PORTS) rr_temp = 0;
+            end
+            
+            if (rr_found) begin
+                grant_rr = 1;
+                next_state = 1; // GRANTING
+                next_rr_last = rr_win;
+            end else begin
+                grant_rr = 0;
+                next_state = 0; // IDLE
+            end
+            
+        end else begin
+            // Fixed Priority
+            wire [LOG_PORTS-1:0] p_start = (ARB_LSB_HIGH_PRIORITY) ? 0 : (PORTS - 1);
+            wire [LOG_PORTS-1:0] f_temp = p_start;
+            wire [LOG_PORTS-1:0] f_found = 0;
+            wire [LOG_PORTS-1:0] f_win = 0;
+            
+            for (int i = 0; i < PORTS; i++) begin
+                if (f_found) break;
+                if (request[f_temp]) begin
+                    f_win = f_temp;
+                    f_found = 1;
+                end
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    f_temp = f_temp + 1;
+                    if (f_temp >= PORTS) f_temp = 0;
+                end else begin
+                    f_temp = f_temp - 1;
+                    if (f_temp < 0) f_temp = PORTS - 1;
+                end
+            end
+            
+            if (f_found) begin
+                grant_fixed = 1;
+                next_state = 1; // GRANTING
+                next_rr_last = f_win; // Store for potential block logic if needed, though fixed doesn't rotate
+            end else begin
+                grant_fixed = 0;
+                next_state = 0; // IDLE
+            end
+        end
+    end
+    
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state_reg <= 0;
+            state_next_req_reg <= 0;
+            state_last_grant_reg <= 0;
+        end else begin
+            state_reg <= next_state;
+            state_next_req_reg <= next_rr_next;
+            state_last_grant_reg <= next_rr_last;
+        end
+    end
+    
+    // --- Grant Logic with Blocking Support ---
+    
+    // Determine if we should grant based on state and block settings
+    wire immediate_grant = (state_reg == 1) ? 1 : 0;
+    
+    wire block_condition = 0;
+    if (ARB_BLOCK) begin
+        if (ARB_BLOCK_ACK) begin
+            // Hold until acknowledge
+            // We need to check if the specific port we granted last is still requesting
+            // AND if the acknowledge signal for that port is low.
+            // If acknowledge is high, we release.
+            // If acknowledge is low AND request is high, we hold.
+            // If acknowledge is low AND request is low, we release (next cycle).
+            
+            // Note: acknowledge is input. We assume it's stable.
+            // To be safe against glitches, we might want to sample acknowledge, 
+            // but for a simple arbiter, direct logic is usually acceptable if acknowledge is synchronous.
+            // Given the requirement for CDC safety, we assume acknowledge is in the same domain or properly synchronized.
+            // Since acknowledge is an input, we treat it as stable.
+            
+            if (state_reg == 1) begin
+                if (request[state_last_grant_reg] == 1 && acknowledge[state_last_grant_reg] == 0) begin
+                    block_condition = 1;
+                end else begin
+                    block_condition = 0;
+                end
+            end else begin
+                block_condition = 0;
+            end
+        end else begin
+            // ARB_BLOCK_ACK is 0: Hold until request drops.
+            // This is the same logic as above: if request is high, hold.
+            if (state_reg == 1) begin
+                if (request[state_last_grant_reg] == 1) begin
+                    block_condition = 1;
+                end else begin
+                    block_condition = 0;
+                end
+            end else begin
+                block_condition = 0;
+            end
+        end
+    end else begin
+        block_condition = 0;
+    end
+    
+    // Final Grant Decision
+    wire final_grant = immediate_grant && !block_condition;
+    
+    // Output Assignment
+    // grant_valid is high when we are granting
+    grant_valid = final_grant;
+    
+    // grant_encoded is the index of the winner
+    if (final_grant) begin
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            grant_encoded = state_next_req_reg;
+        end else begin
+            // Re-calculate fixed priority winner here to match the logic above
+            wire [LOG_PORTS-1:0] p_start = (ARB_LSB_HIGH_PRIORITY) ? 0 : (PORTS - 1);
+            wire [LOG_PORTS-1:0] f_temp = p_start;
+            wire [LOG_PORTS-1:0] f_win = 0;
+            wire [LOG_PORTS-1:0] f_found = 0;
+            
+            for (int i = 0; i < PORTS; i++) begin
+                if (f_found) break;
+                if (request[f_temp]) begin
+                    f_win = f_temp;
+                    f_found = 1;
+                end
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    f_temp = f_temp + 1;
+                    if (f_temp >= PORTS) f_temp = 0;
+                end else begin
+                    f_temp = f_temp - 1;
+                    if (f_temp < 0) f_temp = PORTS - 1;
+                end
+            end
+            grant_encoded = f_win;
+        end
+    end else begin
+        grant_encoded = 0;
+    end
+    
+    // grant vector assignment
+    for (int i = 0; i < PORTS; i++) begin
+        grant[i] = (grant_encoded == i) ? 1 : 0;
+    end
+
+endmodule
+```<|im_end|>

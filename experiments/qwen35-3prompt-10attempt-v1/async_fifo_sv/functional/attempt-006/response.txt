@@ -1,0 +1,205 @@
+```systemverilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam INT_WIDTH = ADDR_WIDTH + 1;
+    localparam MAX_DEPTH = 2**ADDR_WIDTH;
+    localparam GRANT_WIDTH = INT_WIDTH - 1;
+
+    // Generate sync stages
+    genvar i;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : sync_stage
+            wire sync_winc, sync_rinc, sync_wfull, sync_rempty;
+            
+            wire [INT_WIDTH-1:0] sync_waddr, sync_raddr;
+            
+            wire [INT_WIDTH-1:0] sync_waddr_d, sync_waddr_q;
+            wire [INT_WIDTH-1:0] sync_raddr_d, sync_raddr_q;
+            
+            // Write side sync
+            always @(posedge wclk or negedge wrst_n) begin
+                if (!wrst_n) begin
+                    sync_waddr <= {1'b0, {INT_WIDTH-1{1'b0}}};
+                    sync_winc  <= 1'b0;
+                    sync_wfull <= 1'b0;
+                end else begin
+                    sync_waddr <= sync_waddr_d;
+                    sync_winc  <= winc;
+                    sync_wfull <= wfull;
+                end
+            end
+            
+            // Read side sync
+            always @(posedge rclk or negedge rrst_n) begin
+                if (!rrst_n) begin
+                    sync_raddr <= {1'b0, {INT_WIDTH-1{1'b0}}};
+                    sync_rinc  <= 1'b0;
+                    sync_rempty <= 1'b1;
+                end else begin
+                    sync_raddr <= sync_raddr_d;
+                    sync_rinc  <= rinc;
+                    sync_rempty <= rempty;
+                end
+            end
+            
+            // Address registers for sync
+            always @(posedge wclk or negedge wrst_n) begin
+                if (!wrst_n)
+                    sync_waddr_d <= {1'b0, {INT_WIDTH-1{1'b0}}};
+                else
+                    sync_waddr_d <= sync_waddr;
+            end
+            
+            always @(posedge rclk or negedge rrst_n) begin
+                if (!rrst_n)
+                    sync_raddr_d <= {1'b0, {INT_WIDTH-1{1'b0}}};
+                else
+                    sync_raddr_d <= sync_raddr;
+            end
+            
+            // Output sync
+            always @(posedge wclk or negedge wrst_n) begin
+                if (!wrst_n) begin
+                    waddr <= {1'b0, {INT_WIDTH-1{1'b0}}};
+                    wfull <= 1'b0;
+                end else begin
+                    waddr <= sync_waddr;
+                    wfull <= sync_wfull;
+                end
+            end
+            
+            always @(posedge rclk or negedge rrst_n) begin
+                if (!rrst_n) begin
+                    raddr <= {1'b0, {INT_WIDTH-1{1'b0}}};
+                    rempty <= 1'b1;
+                end else begin
+                    raddr <= sync_raddr;
+                    rempty <= sync_rempty;
+                end
+            end
+        end
+    endgenerate
+
+    // Internal signals
+    reg [INT_WIDTH-1:0] wptr, rptr;
+    reg [INT_WIDTH-1:0] wptr_sync, rptr_sync;
+    reg [DATA_WIDTH-1:0] mem [0:MAX_DEPTH-1];
+    reg [INT_WIDTH-1:0] wptr_sync_reg, rptr_sync_reg;
+    reg [INT_WIDTH-1:0] wptr_sync_reg2, rptr_sync_reg2;
+    reg wfull_int, rempty_int;
+    reg [DATA_WIDTH-1:0] rdata_reg;
+
+    // Write pointer logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {1'b0, {INT_WIDTH-1{1'b0}}};
+            wfull_int <= 1'b0;
+        end else begin
+            wptr <= wptr + winc;
+            wfull_int <= (wptr == rptr) && (winc && rinc);
+        end
+    end
+
+    // Read pointer logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= {1'b0, {INT_WIDTH-1{1'b0}}};
+            rempty_int <= 1'b1;
+        end else begin
+            rempty_int <= (rptr == wptr);
+            if (rinc && !rempty_int) begin
+                rptr <= rptr + 1;
+            end
+        end
+    end
+
+    // Memory write
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            mem <= '0;
+        end else if (winc && !wfull_int) begin
+            mem[wptr] <= wdata;
+        end
+    end
+
+    // Memory read
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rdata_reg <= '0;
+        end else if (rinc && !rempty_int) begin
+            rdata_reg <= mem[rptr];
+        end
+    end
+
+    // Cross-domain synchronization for pointers
+    // Write pointer sync to read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_sync <= {1'b0, {INT_WIDTH-1{1'b0}}};
+            wptr_sync_reg <= {1'b0, {INT_WIDTH-1{1'b0}}};
+            wptr_sync_reg2 <= {1'b0, {INT_WIDTH-1{1'b0}}};
+        end else begin
+            wptr_sync <= wptr;
+            wptr_sync_reg <= wptr_sync;
+            wptr_sync_reg2 <= wptr_sync_reg;
+        end
+    end
+
+    // Read pointer sync to write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_sync <= {1'b0, {INT_WIDTH-1{1'b0}}};
+            rptr_sync_reg <= {1'b0, {INT_WIDTH-1{1'b0}}};
+            rptr_sync_reg2 <= {1'b0, {INT_WIDTH-1{1'b0}}};
+        end else begin
+            rptr_sync <= rptr;
+            rptr_sync_reg <= rptr_sync;
+            rptr_sync_reg2 <= rptr_sync_reg;
+        end
+    end
+
+    // Full signal generation (write domain)
+    // Full when wptr == rptr and we have a pending write
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wfull <= 1'b0;
+        end else begin
+            wfull <= (wptr == rptr_sync_reg2) && winc;
+        end
+    end
+
+    // Empty signal generation (read domain)
+    // Empty when rptr == wptr and no pending read
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rempty <= 1'b1;
+        end else begin
+            rempty <= (rptr == wptr_sync_reg2) && !rinc;
+        end
+    end
+
+    // Output assignments
+    assign rdata = rdata_reg;
+    assign waddr = wptr;
+    assign raddr = rptr;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,41 @@
+module sync_wedge #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    // Synchronizer chain for serial_i
+    logic [STAGES-1:0] sync_reg;
+    logic sync_next;
+
+    // Reset logic for the chain
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+            sync_reg <= '{default: 1'b0};
+        else
+            sync_reg <= sync_next;
+    end
+
+    // Shift register logic
+    assign sync_next = sync_reg[STAGES-2] ? sync_reg[STAGES-2] : serial_i;
+
+    // Edge detection on the synchronized signal
+    logic prev_sync;
+    assign prev_sync = sync_reg[STAGES-2];
+
+    // Rising edge detection
+    assign r_edge_o = (en_i) ? (sync_reg[STAGES-1] && !prev_sync) : 1'b0;
+
+    // Falling edge detection
+    assign f_edge_o = (en_i) ? (!sync_reg[STAGES-1] && prev_sync) : 1'b0;
+
+    // Output the synchronized bit
+    assign serial_o = sync_reg[STAGES-1];
+
+endmodule<|im_end|>

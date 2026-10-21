@@ -1,0 +1,360 @@
+```verilog
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  wire a_clk_i,
+    input  wire a_rst_ni,
+    input  wire a_clear_i,
+    output wire a_clear_o,
+    input  wire a_clear_ack_i,
+    output wire a_isolate_o,
+    input  wire a_isolate_ack_i,
+    input  wire b_clk_i,
+    input  wire b_rst_ni,
+    input  wire b_clear_i,
+    output wire b_clear_o,
+    input  wire b_clear_ack_i,
+    output wire b_isolate_o,
+    input  wire b_isolate_ack_i
+);
+
+    localparam [3:0] IDLE = 4'b0000;
+    localparam [3:0] REQ_A = 4'b0001;
+    localparam [3:0] REQ_B = 4'b0010;
+    localparam [3:0] ISOLATING = 4'b0011;
+    localparam [3:0] ISOLATED = 4'b0100;
+    localparam [3:0] CLEARING = 4'b0101;
+    localparam [3:0] CLEARED = 4'b0110;
+    localparam [3:0] DONE = 4'b0111;
+
+    // State machine for the control logic
+    // State encoding:
+    // 0000: IDLE - Normal operation
+    // 0001: REQ_A - A requested clear, waiting for B to see it
+    // 0010: REQ_B - B requested clear, waiting for A to see it
+    // 0011: ISOLATING - Both requested, isolating both domains
+    // 0100: ISOLATED - Isolation complete, waiting for clear request to propagate
+    // 0101: CLEARING - Clear active, waiting for acks
+    // 0110: CLEARED - Clear acks received, waiting for peer completion
+    // 0111: DONE - All clear, releasing isolation
+
+    reg [3:0] state, next_state;
+    reg [3:0] peer_req; // 1 if peer requested clear
+    reg [3:0] peer_done; // 1 if peer completed the clear sequence
+
+    // Synchronizers for peer signals
+    reg [SYNC_STAGES-1:0] a_clear_sync;
+    reg [SYNC_STAGES-1:0] a_isolate_sync;
+    reg [SYNC_STAGES-1:0] b_clear_sync;
+    reg [SYNC_STAGES-1:0] b_isolate_sync;
+
+    // Internal flags for handshake completion
+    reg a_clear_req_seen;
+    reg b_clear_req_seen;
+    reg a_isolate_req_seen;
+    reg b_isolate_req_seen;
+
+    // Output registers
+    reg a_clear_o_reg;
+    reg a_isolate_o_reg;
+    reg b_clear_o_reg;
+    reg b_isolate_o_reg;
+
+    // Synchronizers for peer acks
+    reg [SYNC_STAGES-1:0] a_clear_ack_sync;
+    reg [SYNC_STAGES-1:0] a_isolate_ack_sync;
+    reg [SYNC_STAGES-1:0] b_clear_ack_sync;
+    reg [SYNC_STAGES-1:0] b_isolate_ack_sync;
+
+    // Synchronizers for peer clear outputs (to detect peer completion)
+    reg [SYNC_STAGES-1:0] b_clear_o_sync;
+    reg [SYNC_STAGES-1:0] b_isolate_o_sync;
+
+    // Synchronizers for peer isolate outputs (to detect peer completion)
+    reg [SYNC_STAGES-1:0] a_clear_o_sync;
+    reg [SYNC_STAGES-1:0] a_isolate_o_sync;
+
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            state <= IDLE;
+            peer_req <= 4'b0000;
+            peer_done <= 4'b0000;
+            a_clear_o_reg <= 1'b0;
+            a_isolate_o_reg <= 1'b0;
+            b_clear_o_reg <= 1'b0;
+            b_isolate_o_reg <= 1'b0;
+            a_clear_req_seen <= 1'b0;
+            b_clear_req_seen <= 1'b0;
+            a_isolate_req_seen <= 1'b0;
+            b_isolate_req_seen <= 1'b0;
+        end else begin
+            state <= next_state;
+            peer_req <= b_clear_sync[0];
+            peer_done <= b_isolate_o_sync[0] | b_clear_o_sync[0];
+            a_clear_o_reg <= a_clear_o;
+            a_isolate_o_reg <= a_isolate_o;
+            b_clear_o_reg <= b_clear_o;
+            b_isolate_o_reg <= b_isolate_o;
+        end
+    end
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            state <= IDLE;
+            peer_req <= 4'b0000;
+            peer_done <= 4'b0000;
+            b_clear_o_reg <= 1'b0;
+            b_isolate_o_reg <= 1'b0;
+            a_clear_req_seen <= 1'b0;
+            b_clear_req_seen <= 1'b0;
+            a_isolate_req_seen <= 1'b0;
+            b_isolate_req_seen <= 1'b0;
+        end else begin
+            state <= next_state;
+            peer_req <= a_clear_sync[0];
+            peer_done <= a_isolate_o_sync[0] | a_clear_o_sync[0];
+            b_clear_o_reg <= b_clear_o;
+            b_isolate_o_reg <= b_isolate_o;
+            a_clear_req_seen <= a_clear_i;
+            b_clear_req_seen <= b_clear_i;
+            a_isolate_req_seen <= a_isolate_o;
+            b_isolate_req_seen <= b_isolate_o;
+        end
+    end
+
+    // Synchronizer logic for A domain
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            a_clear_sync <= {SYNC_STAGES{1'b0}};
+        else
+            a_clear_sync <= {a_clear_sync[SYNC_STAGES-2:0], a_clear_i};
+    end
+
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            a_isolate_sync <= {SYNC_STAGES{1'b0}};
+        else
+            a_isolate_sync <= {a_isolate_sync[SYNC_STAGES-2:0], a_isolate_o};
+    end
+
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            a_clear_ack_sync <= {SYNC_STAGES{1'b0}};
+        else
+            a_clear_ack_sync <= {a_clear_ack_sync[SYNC_STAGES-2:0], a_clear_ack_i};
+    end
+
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            a_isolate_ack_sync <= {SYNC_STAGES{1'b0}};
+        else
+            a_isolate_ack_sync <= {a_isolate_ack_sync[SYNC_STAGES-2:0], a_isolate_ack_i};
+    end
+
+    // Synchronizer logic for B domain
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            b_clear_sync <= {SYNC_STAGES{1'b0}};
+        else
+            b_clear_sync <= {b_clear_sync[SYNC_STAGES-2:0], b_clear_i};
+    end
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            b_isolate_sync <= {SYNC_STAGES{1'b0}};
+        else
+            b_isolate_sync <= {b_isolate_sync[SYNC_STAGES-2:0], b_isolate_o};
+    end
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            b_clear_ack_sync <= {SYNC_STAGES{1'b0}};
+        else
+            b_clear_ack_sync <= {b_clear_ack_sync[SYNC_STAGES-2:0], b_clear_ack_i};
+    end
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            b_isolate_ack_sync <= {SYNC_STAGES{1'b0}};
+        else
+            b_isolate_ack_sync <= {b_isolate_ack_sync[SYNC_STAGES-2:0], b_isolate_ack_i};
+    end
+
+    // Synchronizers for peer outputs (to detect completion)
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            b_clear_o_sync <= {SYNC_STAGES{1'b0}};
+        else
+            b_clear_o_sync <= {b_clear_o_sync[SYNC_STAGES-2:0], b_clear_o};
+    end
+
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            b_isolate_o_sync <= {SYNC_STAGES{1'b0}};
+        else
+            b_isolate_o_sync <= {b_isolate_o_sync[SYNC_STAGES-2:0], b_isolate_o};
+    end
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            a_clear_o_sync <= {SYNC_STAGES{1'b0}};
+        else
+            a_clear_o_sync <= {a_clear_o_sync[SYNC_STAGES-2:0], a_clear_o};
+    end
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            a_isolate_o_sync <= {SYNC_STAGES{1'b0}};
+        else
+            a_isolate_o_sync <= {a_isolate_o_sync[SYNC_STAGES-2:0], a_isolate_o};
+    end
+
+    // Next state logic
+    always @(*) begin
+        next_state = state;
+        case (state)
+            IDLE: begin
+                if (a_clear_req_seen && b_clear_req_seen)
+                    next_state = ISOLATING;
+                else if (a_clear_req_seen)
+                    next_state = REQ_A;
+                else if (b_clear_req_seen)
+                    next_state = REQ_B;
+                else
+                    next_state = IDLE;
+            end
+
+            REQ_A: begin
+                if (b_clear_req_seen)
+                    next_state = ISOLATING;
+                else if (a_isolate_ack_sync[0] && a_clear_ack_sync[0])
+                    next_state = CLEARED;
+                else
+                    next_state = REQ_A;
+            end
+
+            REQ_B: begin
+                if (a_clear_req_seen)
+                    next_state = ISOLATING;
+                else if (b_isolate_ack_sync[0] && b_clear_ack_sync[0])
+                    next_state = CLEARED;
+                else
+                    next_state = REQ_B;
+            end
+
+            ISOLATING: begin
+                if (a_isolate_ack_sync[0] && b_isolate_ack_sync[0])
+                    next_state = ISOLATED;
+                else
+                    next_state = ISOLATING;
+            end
+
+            ISOLATED: begin
+                if (a_clear_req_seen && b_clear_req_seen)
+                    next_state = CLEARING;
+                else
+                    next_state = ISOLATED;
+            end
+
+            CLEARING: begin
+                if (a_clear_ack_sync[0] && b_clear_ack_sync[0])
+                    next_state = CLEARED;
+                else
+                    next_state = CLEARING;
+            end
+
+            CLEARED: begin
+                // Wait for peer to complete its clear sequence (peer_done)
+                if (peer_done)
+                    next_state = DONE;
+                else
+                    next_state = CLEARED;
+            end
+
+            DONE: begin
+                if (a_clear_req_seen && b_clear_req_seen)
+                    next_state = IDLE;
+                else
+                    next_state = DONE;
+            end
+
+            default: next_state = IDLE;
+        endcase
+    end
+
+    // Output logic
+    always @(*) begin
+        a_clear_o = 1'b0;
+        a_isolate_o = 1'b0;
+        b_clear_o = 1'b0;
+        b_isolate_o = 1'b0;
+
+        case (state)
+            IDLE: begin
+                a_clear_o = 1'b0;
+                a_isolate_o = 1'b0;
+                b_clear_o = 1'b0;
+                b_isolate_o = 1'b0;
+            end
+
+            REQ_A: begin
+                a_clear_o = 1'b0;
+                a_isolate_o = 1'b0;
+                b_clear_o = 1'b0;
+                b_isolate_o = 1'b0;
+            end
+
+            REQ_B: begin
+                a_clear_o = 1'b0;
+                a_isolate_o = 1'b0;
+                b_clear_o = 1'b0;
+                b_isolate_o = 1'b0;
+            end
+
+            ISOLATING: begin
+                a_clear_o = 1'b0;
+                a_isolate_o = 1'b1;
+                b_clear_o = 1'b0;
+                b_isolate_o = 1'b1;
+            end
+
+            ISOLATED: begin
+                a_clear_o = 1'b1;
+                a_isolate_o = 1'b1;
+                b_clear_o = 1'b1;
+                b_isolate_o = 1'b1;
+            end
+
+            CLEARING: begin
+                a_clear_o = 1'b1;
+                a_isolate_o = 1'b1;
+                b_clear_o = 1'b1;
+                b_isolate_o = 1'b1;
+            end
+
+            CLEARED: begin
+                a_clear_o = 1'b1;
+                a_isolate_o = 1'b1;
+                b_clear_o = 1'b1;
+                b_isolate_o = 1'b1;
+            end
+
+            DONE: begin
+                a_clear_o = 1'b0;
+                a_isolate_o = 1'b0;
+                b_clear_o = 1'b0;
+                b_isolate_o = 1'b0;
+            end
+
+            default: begin
+                a_clear_o = 1'b0;
+                a_isolate_o = 1'b0;
+                b_clear_o = 1'b0;
+                b_isolate_o = 1'b0;
+            end
+        endcase
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,165 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  wire        src_rst_ni,
+  input  wire        src_clk_i,
+  input  wire        src_valid_i,
+  input  wire        dst_rst_ni,
+  input  wire        dst_clk_i,
+  input  wire        dst_ready_i,
+  output reg         src_ready_o,
+  output reg         dst_valid_o,
+  output reg [WIDTH-1:0] dst_data_o
+);
+
+  // Internal state registers for Source Domain
+  logic src_state;
+  logic src_data_reg;
+  logic src_valid_reg;
+  logic src_valid_next;
+  logic src_ready_next;
+  logic src_valid_next_reg;
+
+  // Internal state registers for Destination Domain
+  logic dst_state;
+  logic dst_data_reg;
+  logic dst_valid_reg;
+  logic dst_valid_next;
+  logic dst_ready_reg;
+  logic dst_valid_next_reg;
+
+  // State Encoding
+  // Source Domain States
+  localparam SRC_IDLE = 1'b0;
+  localparam SRC_WAIT = 1'b1; // Waiting for dst_ready
+
+  // Destination Domain States
+  localparam DST_IDLE = 1'b0;
+  localparam DST_WAIT = 1'b1; // Waiting for src_valid (for next item)
+  localparam DST_SEND_RESET = 1'b2; // Sending reset message
+
+  // --- Source Domain Logic ---
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_state <= SRC_IDLE;
+      src_data_reg <= '0;
+      src_valid_reg <= 1'b0;
+      src_valid_next <= 1'b0;
+      src_ready_next <= 1'b1;
+    end else begin
+      src_state <= src_state_next;
+      src_data_reg <= src_data_reg_next;
+      src_valid_reg <= src_valid_next;
+      src_valid_next <= src_valid_next_reg;
+      src_ready_next <= src_ready_next_reg;
+    end
+  end
+
+  // Next State Logic for Source
+  always_comb begin
+    src_state_next = src_state;
+    src_data_reg_next = src_data_reg;
+    src_valid_next = src_valid_reg;
+    src_valid_next_reg = src_valid_reg;
+    src_ready_next = src_ready_o; // Default to current output for stability during transition
+
+    case (src_state)
+      SRC_IDLE: begin
+        // If decoupled, we can accept new data immediately if valid
+        if (src_valid_i && DECOUPLED) begin
+          src_state_next = SRC_WAIT;
+          src_data_reg_next = src_data_i;
+          src_valid_next = 1'b1;
+          src_valid_next_reg = 1'b1;
+          src_ready_next = 1'b1;
+        end else begin
+          src_ready_next = 1'b0;
+        end
+      end
+
+      SRC_WAIT: begin
+        // Wait for dst_ready
+        if (dst_ready_i) begin
+          src_state_next = SRC_IDLE;
+          src_valid_next = 1'b0;
+          src_valid_next_reg = 1'b0;
+          src_ready_next = 1'b1;
+        end else begin
+          src_ready_next = 1'b0;
+        end
+      end
+    endcase
+  end
+
+  // --- Destination Domain Logic ---
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_state <= DST_IDLE;
+      dst_data_reg <= '0;
+      dst_valid_reg <= 1'b0;
+      dst_valid_next <= 1'b0;
+      dst_ready_reg <= 1'b1;
+    end else begin
+      dst_state <= dst_state_next;
+      dst_data_reg <= dst_data_reg_next;
+      dst_valid_reg <= dst_valid_next;
+      dst_valid_next <= dst_valid_next_reg;
+      dst_ready_reg <= dst_ready_i;
+    end
+  end
+
+  // Next State Logic for Destination
+  always_comb begin
+    dst_state_next = dst_state;
+    dst_data_reg_next = dst_data_reg;
+    dst_valid_next = dst_valid_reg;
+    dst_valid_next_reg = dst_valid_reg;
+    dst_ready_reg = dst_ready_i;
+
+    case (dst_state)
+      DST_IDLE: begin
+        // Wait for src_valid
+        if (src_valid_reg) begin
+          dst_state_next = DST_WAIT;
+          dst_data_reg_next = src_data_reg;
+          dst_valid_next = 1'b1;
+          dst_valid_next_reg = 1'b1;
+        end
+      end
+
+      DST_WAIT: begin
+        // Wait for dst_ready to complete the handshake
+        if (dst_ready_i) begin
+          dst_state_next = DST_IDLE;
+          dst_valid_next = 1'b0;
+          dst_valid_next_reg = 1'b0;
+        end
+        // If dst_ready is low, stay in DST_WAIT and hold data stable
+      end
+
+      DST_SEND_RESET: begin
+        // Send reset message
+        dst_data_reg_next = RESET_MSG;
+        dst_valid_next = 1'b1;
+        dst_valid_next_reg = 1'b1;
+        
+        if (dst_ready_i) begin
+          dst_state_next = DST_IDLE;
+          dst_valid_next = 1'b0;
+          dst_valid_next_reg = 1'b0;
+        end
+      end
+    endcase
+  end
+
+  // Output Assignments
+  assign src_ready_o = src_ready_next;
+  assign dst_data_o = dst_data_reg;
+  assign dst_valid_o = dst_valid_next;
+
+endmodule
+```<|im_end|>

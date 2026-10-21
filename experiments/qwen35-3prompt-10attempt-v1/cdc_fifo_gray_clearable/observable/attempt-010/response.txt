@@ -1,0 +1,346 @@
+```verilog
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam GRAY_WIDTH = LOG_DEPTH;
+
+    // Internal signals for pointers
+    reg [GRAY_WIDTH-1:0] src_gray_ptr;
+    reg [GRAY_WIDTH-1:0] dst_gray_ptr;
+    reg [LOG_DEPTH-1:0] src_bin_ptr;
+    reg [LOG_DEPTH-1:0] dst_bin_ptr;
+    
+    // Clear state machine flags
+    reg src_clear_req;
+    reg dst_clear_req;
+    reg src_clear_ack;
+    reg dst_clear_ack;
+    
+    // Clear pending flags (output)
+    reg src_clear_pending;
+    reg dst_clear_pending;
+
+    // Data storage
+    reg [WIDTH-1:0] mem [DEPTH-1:0];
+    reg [LOG_DEPTH-1:0] write_ptr_bin;
+    reg [LOG_DEPTH-1:0] read_ptr_bin;
+    reg write_en;
+    reg read_en;
+    reg full;
+    reg empty;
+
+    // Synchronizers for clear requests
+    reg [SYNC_STAGES-1:0] src_clear_sync;
+    reg [SYNC_STAGES-1:0] dst_clear_sync;
+    
+    // Synchronizers for clear acks (to detect completion)
+    reg [SYNC_STAGES-1:0] src_clear_ack_sync;
+    reg [SYNC_STAGES-1:0] dst_clear_ack_sync;
+
+    // Synchronizers for ready signals
+    reg [SYNC_STAGES-1:1] src_ready_sync;
+    reg [SYNC_STAGES-1:1] dst_valid_sync;
+
+    // ------------------------------------------------------------------
+    // CDC: Clear Request Synchronizers
+    // ------------------------------------------------------------------
+    always @(posedge src_clk_i or posedge src_rst_ni) begin
+        if (src_rst_ni)
+            src_clear_sync <= {SYNC_STAGES{1'b0}};
+        else
+            src_clear_sync <= {src_clear_sync[SYNC_STAGES-2:0], src_clear_i};
+    end
+
+    always @(posedge dst_clk_i or posedge dst_rst_ni) begin
+        if (dst_rst_ni)
+            dst_clear_sync <= {SYNC_STAGES{1'b0}};
+        else
+            dst_clear_sync <= {dst_clear_sync[SYNC_STAGES-2:0], dst_clear_i};
+    end
+
+    // ------------------------------------------------------------------
+    // CDC: Clear Ack Synchronizers
+    // ------------------------------------------------------------------
+    always @(posedge src_clk_i or posedge src_rst_ni) begin
+        if (src_rst_ni)
+            src_clear_ack_sync <= {SYNC_STAGES{1'b0}};
+        else
+            src_clear_ack_sync <= {src_clear_ack_sync[SYNC_STAGES-2:0], src_clear_ack};
+    end
+
+    always @(posedge dst_clk_i or posedge dst_rst_ni) begin
+        if (dst_rst_ni)
+            dst_clear_ack_sync <= {SYNC_STAGES{1'b0}};
+        else
+            dst_clear_ack_sync <= {dst_clear_ack_sync[SYNC_STAGES-2:0], dst_clear_ack};
+    end
+
+    // ------------------------------------------------------------------
+    // CDC: Ready/Valid Synchronizers
+    // ------------------------------------------------------------------
+    always @(posedge src_clk_i or posedge src_rst_ni) begin
+        if (src_rst_ni)
+            src_ready_sync <= {SYNC_STAGES{1'b0}};
+        else
+            src_ready_sync <= {src_ready_sync[SYNC_STAGES-2:0], dst_ready_i};
+    end
+
+    always @(posedge dst_clk_i or posedge dst_rst_ni) begin
+        if (dst_rst_ni)
+            dst_valid_sync <= {SYNC_STAGES{1'b0}};
+        else
+            dst_valid_sync <= {dst_valid_sync[SYNC_STAGES-2:0], src_valid_i};
+    end
+
+    // ------------------------------------------------------------------
+    // Pointer Logic (Binary)
+    // ------------------------------------------------------------------
+    always @(posedge src_clk_i or posedge src_rst_ni) begin
+        if (src_rst_ni) begin
+            src_bin_ptr <= 1'b0;
+            write_ptr_bin <= 1'b0;
+            src_clear_ack <= 1'b0;
+        end else begin
+            src_bin_ptr <= src_bin_ptr;
+            write_ptr_bin <= write_ptr_bin;
+            src_clear_ack <= src_clear_ack;
+        end
+    end
+
+    always @(posedge dst_clk_i or posedge dst_rst_ni) begin
+        if (dst_rst_ni) begin
+            dst_bin_ptr <= 1'b0;
+            read_ptr_bin <= 1'b0;
+            dst_clear_ack <= 1'b0;
+        end else begin
+            dst_bin_ptr <= dst_bin_ptr;
+            read_ptr_bin <= read_ptr_bin;
+            dst_clear_ack <= dst_clear_ack;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Gray Code Conversion
+    // ------------------------------------------------------------------
+    assign src_gray_ptr = src_bin_ptr ^ {GRAY_WIDTH{src_bin_ptr[LOG_DEPTH-2:0]}};
+    assign dst_gray_ptr = dst_bin_ptr ^ {GRAY_WIDTH{dst_bin_ptr[LOG_DEPTH-2:0]}};
+
+    // ------------------------------------------------------------------
+    // Full/Empty Logic
+    // ------------------------------------------------------------------
+    assign full = (src_bin_ptr == dst_bin_ptr) && (src_clear_ack && dst_clear_ack);
+    assign empty = (src_bin_ptr == dst_bin_ptr) && (!src_clear_ack || !dst_clear_ack);
+
+    // ------------------------------------------------------------------
+    // Clear State Machine
+    // ------------------------------------------------------------------
+    always @(posedge src_clk_i or posedge src_rst_ni) begin
+        if (src_rst_ni) begin
+            src_clear_req <= 1'b0;
+            src_clear_pending <= 1'b0;
+        end else begin
+            src_clear_req <= src_clear_sync[SYNC_STAGES-1];
+            src_clear_pending <= src_clear_req;
+        end
+    end
+
+    always @(posedge dst_clk_i or posedge dst_rst_ni) begin
+        if (dst_rst_ni) begin
+            dst_clear_req <= 1'b0;
+            dst_clear_pending <= 1'b0;
+        end else begin
+            dst_clear_req <= dst_clear_sync[SYNC_STAGES-1];
+            dst_clear_pending <= dst_clear_req;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Write Logic (Source Side)
+    // ------------------------------------------------------------------
+    always @(posedge src_clk_i or posedge src_rst_ni) begin
+        if (src_rst_ni) begin
+            write_en <= 1'b0;
+            full <= 1'b0;
+        end else begin
+            write_en <= src_valid_i && src_ready_o;
+            // Full condition: pointers equal AND clear is not active on both sides
+            // Actually, if clear is pending, we treat it as not full until clear completes?
+            // No, standard behavior: if clear is requested, we stop writing.
+            // Full is true if pointers equal AND no clear is in progress on either side.
+            // However, the problem states: "A clear request should flush pending data together".
+            // So if clear is requested, we stop writing immediately.
+            // Full logic: (src_bin == dst_bin) AND (src_clear_ack == 0) AND (dst_clear_ack == 0)
+            // But wait, if clear is requested, we must stop writing.
+            // Let's refine full logic:
+            // Full = (src_bin == dst_bin) AND (src_clear_ack == 0) AND (dst_clear_ack == 0)
+            // If clear is requested, we assume it will complete eventually.
+            // To be safe, if clear is requested on either side, we consider the FIFO "cleared" 
+            // but not necessarily empty until acks come back? 
+            // Actually, the simplest robust logic:
+            // Full = (src_bin == dst_bin) AND (src_clear_ack == 0) AND (dst_clear_ack == 0)
+            // If clear is requested, we stop writing. The pointers will diverge as we read.
+            // But if clear is requested, we must ensure we don't write new data.
+            // So: if (src_clear_req || dst_clear_req) write_en = 0;
+            
+            if (src_clear_req || dst_clear_req)
+                full <= 1'b1; // Force full to stop writing
+            else
+                full <= (src_bin_ptr == dst_bin_ptr);
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Read Logic (Destination Side)
+    // ------------------------------------------------------------------
+    always @(posedge dst_clk_i or posedge dst_rst_ni) begin
+        if (dst_rst_ni) begin
+            read_en <= 1'b0;
+            empty <= 1'b1;
+        end else begin
+            read_en <= dst_valid_o && dst_ready_i;
+            // Empty condition: pointers equal AND clear is not active
+            if (dst_clear_req || src_clear_req)
+                empty <= 1'b0; // Force empty to stop reading (or rather, prevent reading stale data)
+            else
+                empty <= (dst_bin_ptr == src_bin_ptr);
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Pointer Updates
+    // ------------------------------------------------------------------
+    always @(posedge src_clk_i or posedge src_rst_ni) begin
+        if (src_rst_ni)
+            src_bin_ptr <= 1'b0;
+        else if (write_en)
+            src_bin_ptr <= src_bin_ptr + 1'b1;
+    end
+
+    always @(posedge dst_clk_i or posedge dst_rst_ni) begin
+        if (dst_rst_ni)
+            dst_bin_ptr <= 1'b0;
+        else if (read_en)
+            dst_bin_ptr <= dst_bin_ptr + 1'b1;
+    end
+
+    // ------------------------------------------------------------------
+    // Data Output
+    // ------------------------------------------------------------------
+    assign dst_data_o = mem[dst_bin_ptr];
+    assign dst_valid_o = read_en && !empty;
+
+    // ------------------------------------------------------------------
+    // Write Enable
+    // ------------------------------------------------------------------
+    assign src_ready_o = !full;
+
+    // ------------------------------------------------------------------
+    // Clear Ack Generation
+    // ------------------------------------------------------------------
+    // Acknowledge when both sides have processed the clear request
+    // We use a simple counter or state machine to ensure both sides have seen the clear
+    // Since we have synchronized clear requests, we can just wait for both to be high
+    // and then assert ack.
+    
+    // Simple approach: if both clear requests are high, assert ack.
+    // To avoid glitches, we can use a small state machine or just logic with synchronization.
+    // Given the requirement "clear resets each binary pointer and the Gray register that feeds its synchronizer on the same edge",
+    // we need to ensure the pointers are reset when clear is acknowledged.
+    
+    // Let's use a simple logic: if both clear requests are high, assert ack.
+    // This will be synchronized to both clocks.
+    
+    // However, to prevent multiple acks, we can use a flip-flop to latch the ack condition.
+    // But since the clear request is one-shot (usually), we can just assert ack when both are high.
+    // To make it robust, we can use a small state machine.
+    
+    // Simpler approach: 
+    // src_clear_ack = (src_clear_req && dst_clear_req)
+    // dst_clear_ack = (src_clear_req && dst_clear_req)
+    // This works because the clear request is synchronized.
+    
+    // But we need to ensure that the ack is only asserted once per clear cycle.
+    // If the clear signal is held high, we don't want to toggle the ack.
+    // So we can use a D flip-flop to latch the ack condition.
+    
+    reg src_clear_ack_latch;
+    reg dst_clear_ack_latch;
+
+    always @(posedge src_clk_i or posedge src_rst_ni) begin
+        if (src_rst_ni)
+            src_clear_ack_latch <= 1'b0;
+        else if (src_clear_req && dst_clear_req && !src_clear_ack_latch)
+            src_clear_ack_latch <= 1'b1;
+    end
+
+    always @(posedge dst_clk_i or posedge dst_rst_ni) begin
+        if (dst_rst_ni)
+            dst_clear_ack_latch <= 1'b0;
+        else if (src_clear_req && dst_clear_req && !dst_clear_ack_latch)
+            dst_clear_ack_latch <= 1'b1;
+    end
+
+    assign src_clear_ack = src_clear_ack_latch;
+    assign dst_clear_ack = dst_clear_ack_latch;
+
+    // ------------------------------------------------------------------
+    // Pointer Reset on Clear Ack
+    // ------------------------------------------------------------------
+    // The problem states: "A clear resets each binary pointer and the Gray register that feeds its synchronizer on the same edge."
+    // This implies that when the clear is acknowledged, the pointers are reset.
+    // We can do this in the pointer update logic.
+    
+    // Modify src_bin_ptr update:
+    always @(posedge src_clk_i or posedge src_rst_ni) begin
+        if (src_rst_ni || src_clear_ack)
+            src_bin_ptr <= 1'b0;
+        else if (write_en)
+            src_bin_ptr <= src_bin_ptr + 1'b1;
+    end
+
+    // Modify dst_bin_ptr update:
+    always @(posedge dst_clk_i or posedge dst_rst_ni) begin
+        if (dst_rst_ni || dst_clear_ack)
+            dst_bin_ptr <= 1'b0;
+        else if (read_en)
+            dst_bin_ptr <= dst_bin_ptr + 1'b1;
+    end
+
+    // ------------------------------------------------------------------
+    // Memory Write
+    // ------------------------------------------------------------------
+    always @(posedge src_clk_i or posedge src_rst_ni) begin
+        if (src_rst_ni || write_en) begin
+            mem[write_ptr_bin] <= src_data_i;
+            write_ptr_bin <= src_bin_ptr;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Output Clear Pending
+    // ------------------------------------------------------------------
+    // src_clear_pending_o is already generated above
+    // dst_clear_pending_o is already generated above
+
+endmodule
+```<|im_end|>
+<|endoftext|>

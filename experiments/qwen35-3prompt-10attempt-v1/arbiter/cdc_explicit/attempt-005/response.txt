@@ -1,0 +1,513 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam LOG_PORTS = $clog2(PORTS);
+    localparam NUM_PORTS = 1 << LOG_PORTS;
+
+    // State encoding for Round Robin
+    // State is a bitmask of length PORTS. Bit i is set if port i has been granted in the current cycle.
+    // This allows us to track the "next" port to grant.
+    localparam STATE_WIDTH = PORTS;
+    localparam STATE_IDLE = 0; // No requests active (or initial state)
+    
+    // Internal state registers
+    reg [STATE_WIDTH-1:0] rr_state;
+    reg [STATE_WIDTH-1:0] rr_next_state;
+    
+    // For fixed priority, we just need the current request vector, but we need to track if we are in a block state.
+    // However, to keep the logic unified and safe, we will use a single FSM that handles both modes.
+    // Mode selection:
+    // If ARB_TYPE_ROUND_ROBIN == 1, we use the RR state machine.
+    // If ARB_TYPE_ROUND_ROBIN == 0, we use a simple priority encoder with blocking logic.
+
+    // To ensure CDC safety and structural clarity, we separate the logic into:
+    // 1. State Register (synchronous, reset safe)
+    // 2. Combinational Logic for Next State and Outputs
+    // 3. Output Registers (if needed for handshake, but grant_valid is combinational based on state)
+    
+    // We will use a unified state machine approach.
+    // State 0: Idle / Waiting for request.
+    // State 1..PORTS: Active grant state for Round Robin.
+    // For Fixed Priority, we can treat it as a specific state machine or parallel logic.
+    // Given the requirement for a single module and clean CDC, a unified FSM is best.
+    
+    // Let's define states explicitly for clarity and safety.
+    // State encoding:
+    // 0: IDLE
+    // 1..PORTS: RR_STATE_1 .. RR_STATE_PORT (for Round Robin)
+    // If Fixed Priority, we can map the logic to always check priority, but to reuse the state register 
+    // effectively for blocking, we might need a "BLOCKING" state or just rely on the request/ack handshake 
+    // within the combinational logic if ARB_BLOCK is 0.
+    
+    // Refined Architecture:
+    // We will use a single state register `state_reg`.
+    // If ARB_TYPE_ROUND_ROBIN:
+    //   State holds the "last granted port" or "next candidate". 
+    //   Actually, standard RR keeps a counter of who was last granted.
+    //   Let's use `rr_next` as the counter of the next port to grant.
+    // If ARB_TYPE_FIXED_PRIORITY:
+    //   We don't need a rotating counter. We can use a simple priority encoder.
+    //   However, to support ARB_BLOCK in fixed priority, we need to hold the grant.
+    //   We can use a separate state machine for Fixed Priority that has states like "GRANTING_0", "GRANTING_1", etc.
+    
+    // To minimize code duplication and ensure robust CDC, let's implement two distinct internal FSMs 
+    // controlled by the parameters, or one generic FSM that adapts.
+    // A generic FSM is safer for synthesis tools to optimize.
+    
+    // Let's define a state that represents "Who is currently being granted".
+    // State 0: No grant active (or waiting for request).
+    // State i (1..PORTS): Port i is granted.
+    
+    reg [LOG_PORTS-1:0] current_grant_idx; // The port index currently granted (0 to PORTS-1)
+    reg [LOG_PORTS-1:0] next_grant_idx;    // The port index to grant next
+    
+    // For Round Robin, we need to track the last granted port to rotate.
+    // Let's use a dedicated register for RR rotation.
+    reg [LOG_PORTS-1:0] rr_last_granted;
+    
+    // State Machine Logic
+    // We will use a single state register `sm_state` of width PORTS.
+    // Bit i is 1 if port i is currently granted.
+    // This simplifies the "Block" logic significantly.
+    
+    reg [STATE_WIDTH-1:0] sm_state;
+    reg [STATE_WIDTH-1:0] sm_next_state;
+    
+    // Additional logic for Round Robin rotation
+    reg [LOG_PORTS-1:0] rr_counter; // Tracks the next port to try in RR mode
+    
+    // --- Combinational Logic for Next State and Outputs ---
+    
+    always @(*) begin
+        // Default assignment
+        sm_next_state = sm_state;
+        grant = 1'b0;
+        grant_valid = 1'b0;
+        grant_encoded = 0;
+        
+        // Determine mode
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            // Round Robin Logic
+            // 1. Identify active requests.
+            // 2. If no requests, reset RR counter and state.
+            // 3. If requests exist, find the first one >= rr_counter (wrapping around).
+            
+            // Check if any request is active
+            wire any_request = |request;
+            
+            if (!any_request) begin
+                // No requests: Reset state and counter
+                sm_next_state = 0;
+                rr_counter = 0;
+                grant = 1'b0;
+                grant_valid = 1'b0;
+                grant_encoded = 0;
+            end else begin
+                // Find the next port to grant based on rr_counter
+                // We need to find the lowest index i such that request[i] == 1 and i >= rr_counter (with wrap)
+                
+                // Helper: Is i >= rr_counter?
+                // Since we are in Verilog, we can iterate or use a loop construct in combinational logic.
+                // Given PORTS is small (parameter), we can unroll or use a simple check.
+                
+                wire [LOG_PORTS-1:0] next_port;
+                wire found;
+                
+                // Logic to find next port
+                // We check ports from rr_counter to PORTS-1, then 0 to rr_counter-1
+                // To do this efficiently in combinational logic without loops:
+                // We can construct a mask of valid ports starting from rr_counter.
+                
+                // Mask of ports >= rr_counter
+                wire [LOG_PORTS-1:0] mask_high = (rr_counter == 0) ? {PORTS{1'b1}} : 
+                                                  {{(LOG_PORTS-1){1'b0}}, rr_counter};
+                // Actually, simpler: 
+                // If rr_counter == 0, all ports are candidates.
+                // If rr_counter > 0, candidates are rr_counter..PORTS-1 and 0..rr_counter-1.
+                
+                // Let's create a signal `candidate` for each port
+                wire [LOG_PORTS-1:0] is_candidate;
+                for (genvar i = 0; i < PORTS; i=i+1) begin : gen_candidate
+                    if (i >= rr_counter) begin
+                        is_candidate[i] = 1'b1;
+                    end else begin
+                        is_candidate[i] = 1'b0;
+                    end
+                end
+                
+                // Combine candidate with request
+                wire [LOG_PORTS-1:0] valid_request = request & is_candidate;
+                
+                // Find the first '1' in valid_request starting from rr_counter
+                // We can use a priority encoder logic here.
+                // Since we want the lowest index >= rr_counter, and then wrap.
+                // Actually, standard RR picks the lowest index >= current, wrapping to 0.
+                
+                // Let's find the lowest set bit in `valid_request`.
+                // But `valid_request` might have bits set below rr_counter (which shouldn't happen if logic is correct)
+                // Wait, my `is_candidate` logic above:
+                // If i >= rr_counter, candidate=1.
+                // If i < rr_counter, candidate=0.
+                // So `valid_request` only has bits set for i >= rr_counter.
+                // If `valid_request` is all zeros, it means no requests in the upper range.
+                // Then we must wrap to 0.
+                
+                wire upper_has_request = |valid_request;
+                
+                if (upper_has_request) begin
+                    // Find lowest set bit in valid_request
+                    // We can use a simple priority encoder or a loop.
+                    // Since PORTS is small, a loop is fine.
+                    wire [LOG_PORTS-1:0] selected_port;
+                    wire [LOG_PORTS-1:0] temp_valid = valid_request;
+                    
+                    // Find lowest bit
+                    // We can use a for-loop to find the first 1
+                    // But synthesizers handle this well.
+                    // Let's use a specific logic:
+                    // If valid_request[rr_counter] is 1, pick rr_counter.
+                    // Else if valid_request[rr_counter+1] is 1, pick rr_counter+1...
+                    
+                    // To make it generic and safe:
+                    // We can use a priority encoder on the upper part.
+                    // However, writing a generic priority encoder in combinational logic for a parameter is verbose.
+                    // Alternative: Use a counter approach.
+                    
+                    // Let's try a different approach for RR:
+                    // Shift the request vector left by rr_counter, then find the lowest bit.
+                    // But shifting by variable amount in combinational logic is tricky without loops.
+                    
+                    // Let's stick to the explicit check for small PORTS or a generic loop.
+                    // Generic loop for finding lowest bit:
+                    wire [LOG_PORTS-1:0] rr_result;
+                    wire [LOG_PORTS-1:0] rr_mask = {PORTS{1'b1}}; // All ones
+                    
+                    // We need the lowest bit index where valid_request is 1.
+                    // We can use a priority encoder logic:
+                    // If valid_request[LOG_PORTS-1] then ... else if ...
+                    // This is hard to parameterize cleanly in one block without genvars.
+                    
+                    // Let's use a helper function approach via genvar loop to build the priority logic.
+                    // But since we are inside an always @(*) block, we can't define functions easily.
+                    
+                    // Re-evaluating: Is there a simpler way?
+                    // Yes. We can use a counter that increments until it finds a request.
+                    // But that's sequential.
+                    
+                    // Let's use the property that we want the lowest index i >= rr_counter.
+                    // We can construct a signal `next_rr` which is the lowest set bit of `valid_request`.
+                    // If `valid_request` is 0, then we wrap to 0.
+                    
+                    // Implementation of "lowest set bit" for parameterized PORTS:
+                    // We can use a loop to generate a priority encoder.
+                    // However, to keep the code clean and single-file, let's assume PORTS <= 16 for efficiency 
+                    // or use a generic loop.
+                    
+                    // Let's use a generic loop to find the lowest bit.
+                    // We'll create a temporary signal `found_idx`.
+                    wire [LOG_PORTS-1:0] found_idx;
+                    found_idx = 0;
+                    
+                    // We need to check from rr_counter upwards.
+                    // If we find a request, we stop.
+                    // If we reach the end without finding one, we wrap to 0.
+                    
+                    // Since we are in combinational logic, we can't break.
+                    // We can use a priority encoder on the whole `valid_request` vector, 
+                    // but we must ensure we don't pick bits below rr_counter.
+                    // My `is_candidate` logic ensures `valid_request` is 0 below rr_counter.
+                    // So the lowest set bit of `valid_request` is exactly what we want.
+                    
+                    // How to get lowest set bit of a vector in Verilog?
+                    // $clog2 is for power of 2.
+                    // We can use a loop to assign.
+                    
+                    // Let's use a simple loop to find the lowest bit.
+                    // We'll iterate from 0 to PORTS-1.
+                    // If valid_request[i] is 1, then found_idx = i, and we stop? 
+                    // No, we can't stop in combinational.
+                    // We can use a priority encoder structure.
+                    
+                    // Let's use a different strategy:
+                    // Create a mask `upper_mask` that has 1s from rr_counter to PORTS-1.
+                    // AND with request.
+                    // If result is 0, then wrap to 0 (assuming request[0] might be 1).
+                    // If result is not 0, find lowest bit.
+                    
+                    // To find lowest bit of a vector `v` in combinational logic:
+                    // We can use a loop.
+                    // wire [LOG_PORTS-1:0] lowest_bit;
+                    // for (genvar k = 0; k < PORTS; k=k+1) begin : gen_lowest
+                    //     if (valid_request[k]) begin
+                    //         lowest_bit = k;
+                    //     end
+                    // end
+                    // This doesn't work because the last assignment wins.
+                    
+                    // Correct way: Priority Encoder using if-else chain or a specific loop.
+                    // Since PORTS is a parameter, we can unroll.
+                    
+                    // Let's use a helper logic block inside the always block? No.
+                    // Let's use a loop that accumulates the result.
+                    // We want the smallest k such that valid_request[k] == 1.
+                    // We can initialize `lowest_bit` to PORTS (invalid).
+                    // Then iterate k from 0 to PORTS-1.
+                    // If valid_request[k] == 1, `lowest_bit` = k.
+                    // But again, the last iteration overwrites.
+                    
+                    // Solution: Use a priority encoder on the inverted mask?
+                    // Or simply:
+                    // wire [LOG_PORTS-1:0] next_port = (valid_request == 0) ? 0 : $clog2(valid_request);
+                    // Wait, $clog2 returns the log2 of the value, which corresponds to the index of the MSB.
+                    // We need the LSB.
+                    
+                    // We can use a trick: 
+                    // If we reverse the bits of `valid_request`, find MSB, then reverse back?
+                    // No, that's complex.
+                    
+                    // Let's use a loop that builds the index.
+                    // wire [LOG_PORTS-1:0] idx = 0;
+                    // for (genvar k = 0; k < PORTS; k=k+1) begin : gen_idx
+                    //     if (valid_request[k]) idx = k;
+                    // end
+                    // This still overwrites.
+                    
+                    // Correct Combinational Priority Encoder for LSB:
+                    // We can use a loop that checks from 0 upwards and sets a flag.
+                    // But we need the value.
+                    
+                    // Let's use a different approach:
+                    // We know `valid_request` has 0s below `rr_counter`.
+                    // We want the lowest 1.
+                    // We can use a loop to generate a signal `is_lowest`.
+                    
+                    // Actually, the simplest robust way for parameterized PORTS in combinational logic:
+                    // Use a loop to assign `next_port` conditionally.
+                    // But we can't break.
+                    // We can use a loop that updates `next_port` only if the current bit is 1 AND we haven't found one yet.
+                    // But we don't have a "found" flag in combinational without a register.
+                    
+                    // Alternative: Use a priority encoder on the vector `valid_request` but we need LSB.
+                    // We can use the property: 
+                    // LSB index = $clog2(valid_request & ~((valid_request >> 1) | (valid_request >> 2) ...)) ? No.
+                    
+                    // Let's use a loop that iterates from 0 to PORTS-1.
+                    // We maintain a variable `candidate`.
+                    // Initially `candidate` = PORTS (invalid).
+                    // For k = 0 to PORTS-1:
+                    //   if (valid_request[k]) candidate = k;
+                    // This doesn't work because the last k wins.
+                    
+                    // We need to ensure we pick the FIRST k.
+                    // We can do:
+                    // wire [LOG_PORTS-1:0] result = 0;
+                    // for (genvar k = 0; k < PORTS; k=k+1) begin : gen_res
+                    //     if (valid_request[k]) begin
+                    //         result = k;
+                    //     end
+                    // end
+                    // This is still wrong.
+                    
+                    // Correct approach for LSB priority in combinational logic:
+                    // Use a loop that checks if the current bit is 1 AND all previous bits are 0.
+                    // wire [LOG_PORTS-1:0] result;
+                    // for (genvar k = 0; k < PORTS; k=k+1) begin : gen_lsb
+                    //     wire all_prev_zero = (k == 0) ? 1'b1 : &valid_request[0:k-1];
+                    //     if (valid_request[k] && all_prev_zero) begin
+                    //         result = k;
+                    //     end
+                    // end
+                    // This works! It assigns `result` to `k` only if `valid_request[k]` is 1 and all lower bits are 0.
+                    // Since only one such `k` can exist (the lowest set bit), the final value of `result` will be correct.
+                    
+                    wire [LOG_PORTS-1:0] rr_selected;
+                    for (genvar k = 0; k < PORTS; k=k+1) begin : gen_rr_select
+                        wire all_prev_zero = (k == 0) ? 1'b1 : &valid_request[0:k-1];
+                        if (valid_request[k] && all_prev_zero) begin
+                            rr_selected = k;
+                        end
+                    end
+                    
+                    // If no request found in upper range (valid_request == 0), rr_selected remains 0 (from default).
+                    // But wait, if valid_request is 0, the loop never sets rr_selected.
+                    // We need to handle the wrap case.
+                    // If valid_request is 0, we should grant 0 (if request[0] is 1? No, if valid_request is 0, it means no requests >= rr_counter).
+                    // If no requests >= rr_counter, we wrap to 0.
+                    // But we must check if request[0] is 1.
+                    // If request[0] is 1, then valid_request[0] would be 1 (since 0 < rr_counter is false? No).
+                    // My `is_candidate` logic: if i < rr_counter, is_candidate[i] = 0.
+                    // So if rr_counter > 0, request[0] is masked out.
+                    // So if valid_request is 0, it means NO requests in [rr_counter, PORTS-1].
+                    // We must wrap to 0.
+                    // But we must ensure request[0] is actually 1.
+                    // If request[0] is 0, then there are no requests at all?
+                    // No, there could be requests in [rr_counter, PORTS-1] which we already checked.
+                    // If valid_request is 0, it means no requests in the upper range.
+                    // So we wrap to 0.
+                    // But we need to make sure we don't grant if request[0] is 0.
+                    // Actually, if we wrap to 0, we are effectively saying "try 0".
+                    // If request[0] is 0, then next time we will try 1 (if rr_counter becomes 1).
+                    // So the logic is:
+                    // If valid_request != 0, grant rr_selected.
+                    // Else, grant 0.
+                    
+                    if (valid_request != 0) begin
+                        next_grant_idx = rr_selected;
+                    end else begin
+                        next_grant_idx = 0;
+                    end
+                    
+                    // Update rr_counter for next cycle
+                    // If we granted next_grant_idx, next time we start from next_grant_idx + 1.
+                    // If we wrapped (valid_request == 0), we start from 0.
+                    // Wait, if we wrap, it means we tried all ports from rr_counter to PORTS-1 and found nothing.
+                    // So we start from 0.
+                    // But what if request[0] is 0? Then next time we will try 1.
+                    // So the new rr_counter should be next_grant_idx + 1 (mod PORTS).
+                    
+                    if (next_grant_idx == 0 && valid_request == 0) begin
+                        // We wrapped. Next start from 0.
+                        rr_counter = 0;
+                    end else begin
+                        // We granted next_grant_idx. Next start from next_grant_idx + 1.
+                        rr_counter = next_grant_idx + 1;
+                        if (rr_counter == PORTS) rr_counter = 0;
+                    end
+                    
+                    // Update state
+                    // State bit i is 1 if port i is granted.
+                    sm_next_state = 1 << next_grant_idx;
+                    
+                    // Outputs
+                    grant = 1'b1;
+                    grant_valid = 1'b1;
+                    grant_encoded = next_grant_idx;
+                    
+                end else begin
+                    // No requests
+                    sm_next_state = 0;
+                    grant = 1'b0;
+                    grant_valid = 1'b0;
+                    grant_encoded = 0;
+                end
+            end
+        end else begin
+            // Fixed Priority Logic
+            // Priority: LSB High if ARB_LSB_HIGH_PRIORITY, else MSB High.
+            // Blocking: If ARB_BLOCK, hold grant until ack or request drops.
+            
+            // Determine priority direction
+            wire priority_dir = ARB_LSB_HIGH_PRIORITY ? 1'b0 : 1'b1; // 0 = LSB high, 1 = MSB high
+            
+            // Find the highest priority port
+            wire [LOG_PORTS-1:0] priority_idx;
+            
+            if (priority_dir) begin
+                // MSB High: Check from PORTS-1 down to 0
+                wire [LOG_PORTS-1:0] p_idx;
+                for (genvar k = PORTS-1; k >= 0; k=k-1) begin : gen_p_idx
+                    if (request[k]) begin
+                        p_idx = k;
+                    end
+                end
+                priority_idx = p_idx;
+            end else begin
+                // LSB High: Check from 0 up to PORTS-1
+                wire [LOG_PORTS-1:0] p_idx;
+                for (genvar k = 0; k < PORTS; k=k+1) begin : gen_p_idx
+                    if (request[k]) begin
+                        p_idx = k;
+                    end
+                end
+                priority_idx = p_idx;
+            end
+            
+            // Blocking Logic
+            // If ARB_BLOCK is 1:
+            //   If acknowledge[priority_idx] is 1, release grant (state goes to idle).
+            //   Else if request[priority_idx] is 0, release grant (state goes to idle).
+            //   Else, hold grant.
+            // If ARB_BLOCK is 0:
+            //   Grant only if request is active.
+            
+            wire is_blocked = (ARB_BLOCK && (ARB_BLOCK_ACK != 0));
+            
+            if (is_blocked) begin
+                // Check if we should release
+                wire should_release = (acknowledge[priority_idx] || !request[priority_idx]);
+                
+                if (should_release) begin
+                    sm_next_state = 0;
+                    grant = 1'b0;
+                    grant_valid = 1'b0;
+                    grant_encoded = 0;
+                end else begin
+                    sm_next_state = 1 << priority_idx;
+                    grant = 1'b1;
+                    grant_valid = 1'b1;
+                    grant_encoded = priority_idx;
+                end
+            end else begin
+                // Non-blocking
+                if (request[priority_idx]) begin
+                    sm_next_state = 1 << priority_idx;
+                    grant = 1'b1;
+                    grant_valid = 1'b1;
+                    grant_encoded = priority_idx;
+                end else begin
+                    sm_next_state = 0;
+                    grant = 1'b0;
+                    grant_valid = 1'b0;
+                    grant_encoded = 0;
+                end
+            end
+        end
+    end
+
+    // State Register
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            sm_state <= 0;
+        end else begin
+            sm_state <= sm_next_state;
+        end
+    end
+
+    // Output Assignment
+    assign grant = sm_state[0] ? (sm_state[0] ? 1'b1 : 1'b0) : 1'b0; // Simplified: just check if state is non-zero?
+    // Actually, sm_state is a bitmask. If bit i is set, port i is granted.
+    // But in our logic, only one bit is ever set at a time.
+    // So grant = sm_state != 0;
+    assign grant = (sm_state != 0) ? 1'b1 : 1'b0;
+    
+    assign grant_valid = (sm_state != 0) ? 1'b1 : 1'b0;
+    
+    // Extract encoded index from sm_state
+    // Since only one bit is set, we can use $clog2 or a loop.
+    // To be safe and parameterized:
+    assign grant_encoded = 0;
+    for (genvar k = 0; k < PORTS; k=k+1) begin : gen_encode
+        if (sm_state[k]) begin
+            grant_encoded = k;
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

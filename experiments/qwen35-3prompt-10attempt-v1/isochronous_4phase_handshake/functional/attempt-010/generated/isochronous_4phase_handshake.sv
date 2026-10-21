@@ -1,0 +1,114 @@
+module isochronous_4phase_handshake (
+    input  src_clk_i,
+    input  src_rst_ni,
+    input  src_valid_i,
+    output src_ready_o,
+    input  dst_clk_i,
+    input  dst_rst_ni,
+    output dst_valid_o,
+    input  dst_ready_i
+);
+
+    reg src_state;
+    reg dst_state;
+    reg src_valid_reg;
+    reg dst_valid_reg;
+    reg dst_ready_reg;
+
+    // State encoding: 0=Idle, 1=SentValid, 2=SentReady, 3=SentValidAgain
+    parameter IDLE = 2'b00;
+    parameter SENT_VALID = 2'b01;
+    parameter SENT_READY = 2'b10;
+    parameter SENT_VALID_AGAIN = 2'b11;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_state <= IDLE;
+        else
+            src_state <= src_state;
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_state <= IDLE;
+        else
+            dst_state <= dst_state;
+    end
+
+    // Source domain logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_valid_reg <= 1'b0;
+        else
+            src_valid_reg <= src_valid_i;
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ready_reg <= 1'b0;
+        else
+            dst_ready_reg <= dst_ready_i;
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_ready_o <= 1'b0;
+        else
+            case (src_state)
+                IDLE:
+                    if (src_valid_reg)
+                        src_state <= SENT_VALID;
+                    else
+                        src_state <= IDLE;
+                SENT_VALID:
+                    if (dst_ready_reg)
+                        src_state <= SENT_READY;
+                    else
+                        src_state <= SENT_VALID;
+                SENT_READY:
+                    if (src_valid_reg)
+                        src_state <= SENT_VALID_AGAIN;
+                    else
+                        src_state <= SENT_READY;
+                SENT_VALID_AGAIN:
+                    if (dst_ready_reg)
+                        src_state <= IDLE;
+                    else
+                        src_state <= SENT_VALID_AGAIN;
+                default:
+                    src_state <= IDLE;
+            endcase
+    end
+
+    // Destination domain logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_valid_o <= 1'b0;
+        else
+            case (dst_state)
+                IDLE:
+                    if (src_ready_o)
+                        dst_state <= SENT_VALID;
+                    else
+                        dst_state <= IDLE;
+                SENT_VALID:
+                    if (src_valid_reg)
+                        dst_state <= SENT_READY;
+                    else
+                        dst_state <= SENT_VALID;
+                SENT_READY:
+                    if (dst_ready_i)
+                        dst_state <= SENT_VALID_AGAIN;
+                    else
+                        dst_state <= SENT_READY;
+                SENT_VALID_AGAIN:
+                    if (src_ready_o)
+                        dst_state <= IDLE;
+                    else
+                        dst_state <= SENT_VALID_AGAIN;
+                default:
+                    dst_state <= IDLE;
+            endcase
+    end
+
+endmodule<|im_end|>

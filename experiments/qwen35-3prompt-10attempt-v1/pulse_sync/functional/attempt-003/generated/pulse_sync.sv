@@ -1,0 +1,70 @@
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    localparam WIDTH = STAGES + 1;
+    reg [WIDTH-1:0] shift_reg;
+    reg busy;
+
+    // Domain A: Capture pulse and load into FIFO
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            shift_reg <= 0;
+            busy      <= 0;
+        end else begin
+            // Shift register: shift in new bit, shift out old bit
+            shift_reg <= {shift_reg[WIDTH-2:0], pulseA_i};
+            
+            // Detect rising edge of pulseA_i to start transfer
+            if (pulseA_i && ~shift_reg[WIDTH-1]) begin
+                busy <= 1;
+            end
+        end
+    end
+
+    // Domain B: Read from FIFO and generate output pulse
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            pulseB_o <= 0;
+            busy     <= 0;
+        end else begin
+            // Read MSB of shift_reg
+            pulseB_o <= shift_reg[WIDTH-1];
+            
+            // If MSB is 1, it means a pulse was detected in domain A
+            // We need to wait until the entire pulse has been shifted out
+            // to ensure we don't output multiple pulses for one input pulse
+            if (shift_reg[WIDTH-1]) begin
+                busy <= 1;
+            end else begin
+                busy <= 0;
+            end
+        end
+    end
+
+    // Ensure busy_o is driven correctly based on the logic above
+    // The busy signal should be high while any bit of the pulse is in the pipeline
+    // Since we use a shift register of depth STAGES+1, the pulse takes STAGES+1 cycles to clear
+    // We can simplify busy_o logic: it's high if the MSB is 1 (indicating a pulse is being processed)
+    // However, to be more precise about "pulse in flight", we check if the pipeline is not empty of the pulse
+    // Given the shift register behavior, if MSB is 1, a pulse is currently being output or about to be output
+    // Let's refine: busy should be high from the moment we detect the pulse until the last bit shifts out
+    
+    // Re-evaluating busy logic for correctness:
+    // When pulseA_i goes high, we set busy=1 in domain A.
+    // In domain B, we output the MSB. If MSB is 1, we are outputting the pulse.
+    // The pulse is "in flight" as long as the MSB is 1.
+    // Once the MSB becomes 0, the pulse has finished.
+    // So busy_o = MSB is sufficient for the requirement "busy while a pulse is in flight"
+    
+    assign busy_o = busy;
+
+endmodule<|im_end|>

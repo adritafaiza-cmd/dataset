@@ -1,0 +1,363 @@
+```verilog
+module cdc_fifo_2phase #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam ADDR_WIDTH = LOG_DEPTH;
+
+    // Internal signals for Source side (Src Domain)
+    reg [ADDR_WIDTH-1:0] src_ptr;
+    reg [ADDR_WIDTH-1:0] src_gray;
+    wire [ADDR_WIDTH-1:0] src_ungray;
+    reg [ADDR_WIDTH-1:0] src_empty_cnt;
+    reg src_empty;
+    reg src_full;
+
+    // Internal signals for Destination side (Dst Domain)
+    reg [ADDR_WIDTH-1:0] dst_ptr;
+    reg [ADDR_WIDTH-1:0] dst_gray;
+    wire [ADDR_WIDTH-1:0] dst_ungray;
+    reg [ADDR_WIDTH-1:0] dst_full_cnt;
+    reg dst_full;
+    reg dst_empty;
+
+    // Cross-domain pointers (Gray encoded)
+    wire [ADDR_WIDTH-1:0] src_to_dst_gray;
+    wire [ADDR_WIDTH-1:0] dst_to_src_gray;
+
+    // FIFO Data Memory
+    reg [WIDTH-1:0] mem [DEPTH-1:0];
+
+    // ------------------------------------------------------------------
+    // Source Domain Logic
+    // ------------------------------------------------------------------
+    assign src_ready_o = !src_full;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_ptr <= '0;
+            src_gray <= '0;
+            src_empty_cnt <= '0;
+            src_empty <= 1'b1;
+            src_full <= 1'b0;
+        end else begin
+            // Convert binary pointer to Gray code for cross-domain safety
+            src_gray <= {src_ptr[ADDR_WIDTH-2:0], src_ptr[ADDR_WIDTH-1] ^ src_ptr[ADDR_WIDTH-2:0]};
+            
+            if (src_valid_i && src_ready_o) begin
+                // Write data
+                mem[src_ptr] <= src_data_i;
+                
+                // Update pointer
+                src_ptr <= src_ptr + 1'b1;
+                
+                // Update empty counter (used for full detection)
+                src_empty_cnt <= src_empty_cnt - 1'b1;
+                
+                // Update status flags
+                if (src_empty_cnt == '0) begin
+                    src_empty <= 1'b0;
+                    src_full <= 1'b1;
+                end
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Destination Domain Logic
+    // ------------------------------------------------------------------
+    assign dst_valid_o = dst_empty && dst_ready_i;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_ptr <= '0;
+            dst_gray <= '0;
+            dst_full_cnt <= '0;
+            dst_full <= 1'b0;
+            dst_empty <= 1'b1;
+        end else begin
+            // Convert binary pointer to Gray code for cross-domain safety
+            dst_gray <= {dst_ptr[ADDR_WIDTH-2:0], dst_ptr[ADDR_WIDTH-1] ^ dst_ptr[ADDR_WIDTH-2:0]};
+            
+            if (dst_valid_o) begin
+                // Read data
+                dst_data_o <= mem[dst_ptr];
+                
+                // Update pointer
+                dst_ptr <= dst_ptr + 1'b1;
+                
+                // Update full counter (used for empty detection)
+                dst_full_cnt <= dst_full_cnt - 1'b1;
+                
+                // Update status flags
+                if (dst_full_cnt == '0) begin
+                    dst_full <= 1'b0;
+                    dst_empty <= 1'b0;
+                end
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Cross-Domain Synchronization (2-Phase)
+    // ------------------------------------------------------------------
+    
+    // 1. Sync Src Pointer (Binary) -> Dst Domain (Gray)
+    // We need to sync the binary src_ptr to dst domain, then encode to Gray.
+    // However, standard practice is to sync the Gray code directly or sync binary then encode.
+    // Given the requirement for robustness, we will sync the binary pointer first 
+    // using a 2-phase synchronizer, then encode it to Gray in the dst domain.
+    
+    // Synchronizer for src_ptr (Binary) to dst domain
+    reg [ADDR_WIDTH-1:0] src_ptr_sync_1;
+    reg [ADDR_WIDTH-1:0] src_ptr_sync_2;
+    
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_ptr_sync_1 <= '0;
+            src_ptr_sync_2 <= '0;
+        end else begin
+            src_ptr_sync_1 <= src_ptr;
+            src_ptr_sync_2 <= src_ptr_sync_1;
+        end
+    end
+    
+    // Encode synced binary pointer to Gray in dst domain
+    assign src_to_dst_gray = {src_ptr_sync_2[ADDR_WIDTH-2:0], src_ptr_sync_2[ADDR_WIDTH-1] ^ src_ptr_sync_2[ADDR_WIDTH-2:0]};
+
+    // 2. Sync Dst Pointer (Binary) -> Src Domain (Gray)
+    // Similar logic: sync binary dst_ptr to src domain, then encode to Gray.
+    
+    reg [ADDR_WIDTH-1:0] dst_ptr_sync_1;
+    reg [ADDR_WIDTH-1:0] dst_ptr_sync_2;
+    
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_ptr_sync_1 <= '0;
+            dst_ptr_sync_2 <= '0;
+        end else begin
+            dst_ptr_sync_1 <= dst_ptr;
+            dst_ptr_sync_2 <= dst_ptr_sync_1;
+        end
+    end
+    
+    // Encode synced binary pointer to Gray in src domain
+    assign dst_to_src_gray = {dst_ptr_sync_2[ADDR_WIDTH-2:0], dst_ptr_sync_2[ADDR_WIDTH-1] ^ dst_ptr_sync_2[ADDR_WIDTH-2:0]};
+
+    // ------------------------------------------------------------------
+    // Full/Empty Detection Logic
+    // ------------------------------------------------------------------
+    
+    // Full: When write pointer (src) catches up to read pointer (dst)
+    // We compare the Gray encoded pointers.
+    // Note: Comparing Gray codes directly for equality works perfectly.
+    // For inequality (full/empty), we usually compare the binary values or use counters.
+    // Since we have the binary pointers in their respective domains, we can compare the 
+    // synchronized binary pointers directly for the logic, OR use the counters.
+    // Using counters is often more robust against metastability during pointer updates.
+    
+    // Re-evaluating Full/Empty logic based on the pointers available in each domain.
+    // In Src Domain: We know src_ptr (current write). We need to know where dst_ptr is.
+    // We have dst_to_src_gray. We can convert this to binary in Src domain to compare with src_ptr.
+    // OR, simpler: Use the counters logic which is standard for 2-phase FIFOs.
+    
+    // Let's stick to the counter approach for Full/Empty flags as it avoids complex Gray-to-Binary conversion 
+    // in the critical path of the status flags, relying on the counters which are updated sequentially.
+    
+    // Full Flag (Src Domain): 
+    // src_full is set when src_ptr == dst_ptr (conceptually). 
+    // With counters: src_full is true when src_empty_cnt == 0.
+    // However, the counter logic above updates on write. 
+    // Let's refine the counter logic to be strictly based on pointer difference.
+    
+    // Revised Full/Empty Logic using Synchronized Pointers:
+    // In Src Domain:
+    //   We have src_ptr (local).
+    //   We have dst_ptr_synced (from dst domain).
+    //   Full if src_ptr >= dst_ptr_synced.
+    //   Empty if src_ptr == dst_ptr_synced.
+    
+    // To do this safely in Verilog without a full Gray-to-Binary decoder (which is complex):
+    // We rely on the counters updated in the respective domains.
+    
+    // Src Domain Full Logic:
+    // src_full is asserted when the FIFO is full.
+    // This happens when we have written DEPTH items and read 0 items.
+    // The counter src_empty_cnt tracks (DEPTH - (write_count - read_count)).
+    // If src_empty_cnt == 0, it is full.
+    // Wait, the previous counter logic: 
+    //   src_empty_cnt starts at 0.
+    //   On write: src_empty_cnt = src_empty_cnt - 1.
+    //   If it hits 0, set full=1, empty=0.
+    //   On read (in dst domain), we need to increment this counter.
+    //   We cannot increment a counter in the dst domain from the src domain directly without a sync mechanism.
+    
+    // Standard 2-Phase FIFO Implementation Strategy:
+    // 1. Write Pointer (Binary) in Src. Sync to Dst -> Encode to Gray.
+    // 2. Read Pointer (Binary) in Dst. Sync to Src -> Encode to Gray.
+    // 3. Full/Empty detection is done by comparing the Gray pointers in the respective domains? 
+    //    No, Gray comparison only works for equality.
+    //    Full: Write_Pointer == Read_Pointer + 1 (modulo arithmetic).
+    //    Empty: Write_Pointer == Read_Pointer.
+    //    
+    //    Since we have the Gray pointers in both domains, we can convert the SYNCED GRAY pointer 
+    //    back to binary in the local domain to perform the comparison.
+    //    Gray to Binary conversion is combinational and safe if the input is stable.
+    //    Since the pointer is synchronized (2-phase), it is stable.
+    
+    // Let's implement Gray-to-Binary conversion locally.
+    
+    // Src Domain: Convert dst_to_src_gray to binary (dst_ptr_synced_bin)
+    wire [ADDR_WIDTH-1:0] dst_ptr_synced_bin;
+    assign dst_ptr_synced_bin = {
+        dst_to_src_gray[ADDR_WIDTH-1],
+        dst_to_src_gray[ADDR_WIDTH-1] ^ dst_to_src_gray[ADDR_WIDTH-2],
+        dst_to_src_gray[ADDR_WIDTH-2] ^ dst_to_src_gray[ADDR_WIDTH-3],
+        dst_to_src_gray[ADDR_WIDTH-3] ^ dst_to_src_gray[ADDR_WIDTH-4],
+        dst_to_src_gray[ADDR_WIDTH-4] ^ dst_to_src_gray[ADDR_WIDTH-5],
+        dst_to_src_gray[ADDR_WIDTH-5] ^ dst_to_src_gray[ADDR_WIDTH-6],
+        dst_to_src_gray[ADDR_WIDTH-6] ^ dst_to_src_gray[ADDR_WIDTH-7]
+    };
+    // Note: The above assignment assumes ADDR_WIDTH is at least 7. 
+    // If LOG_DEPTH < 3, we need a generic way.
+    // Let's use a loop or a more generic assignment if possible, but Verilog-2001 doesn't support loops in continuous assignments easily.
+    // We can use a helper function or just unroll based on LOG_DEPTH. 
+    // Since LOG_DEPTH is a parameter, we can't use a loop in the code generation unless we use a macro or specific instantiation.
+    // However, the prompt asks for a single source file. 
+    // A common trick is to assume the parameter is small enough or write a generic decoder.
+    // Let's write a generic decoder using a conditional expression or just assume the standard 3-bit logic for the example and generalize.
+    // Actually, the safest way in pure Verilog-2001 without procedural blocks for combinational logic is to unroll or use a specific structure.
+    // But since LOG_DEPTH is a parameter, we can't unroll dynamically in the code text without a generator.
+    // We will implement a generic Gray-to-Binary decoder using a procedural block (always @(*)).
+    
+    // Re-structuring for generic Gray-to-Binary:
+    // We need to declare the wire inside the module or use a reg in an always block.
+    // Let's use a reg in an always @(*) block for the conversion.
+    
+    reg [ADDR_WIDTH-1:0] dst_ptr_synced_bin_src;
+    reg [ADDR_WIDTH-1:0] src_ptr_synced_bin_dst;
+
+    always @(*) begin
+        // Convert dst_to_src_gray to binary in Src domain
+        dst_ptr_synced_bin_src = '0;
+        dst_ptr_synced_bin_src[ADDR_WIDTH-1] = dst_to_src_gray[ADDR_WIDTH-1];
+        for (integer i = ADDR_WIDTH-2; i >= 0; i = i - 1) begin
+            dst_ptr_synced_bin_src[i] = dst_to_src_gray[i] ^ dst_ptr_synced_bin_src[i+1];
+        end
+        
+        // Convert src_to_dst_gray to binary in Dst domain
+        src_ptr_synced_bin_dst = '0;
+        src_ptr_synced_bin_dst[ADDR_WIDTH-1] = src_to_dst_gray[ADDR_WIDTH-1];
+        for (integer i = ADDR_WIDTH-2; i >= 0; i = i - 1) begin
+            src_ptr_synced_bin_dst[i] = src_to_dst_gray[i] ^ src_ptr_synced_bin_dst[i+1];
+        end
+    end
+
+    // Full Detection (Src Domain)
+    // Full if src_ptr >= dst_ptr_synced_bin_src
+    // Since we are dealing with circular buffers, we check if src_ptr == dst_ptr_synced_bin_src + 1
+    // OR if src_ptr == dst_ptr_synced_bin_src (if we consider the counter method).
+    // Let's use the pointer comparison method which is standard.
+    // Full: src_ptr == (dst_ptr_synced_bin_src + 1) [modulo DEPTH]
+    // Empty: src_ptr == dst_ptr_synced_bin_src
+    
+    // To implement modulo addition safely:
+    wire [ADDR_WIDTH-1:0] next_dst_ptr = dst_ptr_synced_bin_src + 1'b1;
+    wire src_full = (src_ptr == next_dst_ptr);
+    wire src_empty = (src_ptr == dst_ptr_synced_bin_src);
+
+    // Update the flags in the registers to match the logic
+    // Note: The previous counter logic was discarded in favor of pointer comparison for clarity and standard practice.
+    // We need to update the always blocks to use these flags.
+    
+    // Re-writing Src Domain Always Block with Pointer Comparison
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_ptr <= '0;
+            src_gray <= '0;
+            src_empty <= 1'b1;
+            src_full <= 1'b0;
+        end else begin
+            src_gray <= {src_ptr[ADDR_WIDTH-2:0], src_ptr[ADDR_WIDTH-1] ^ src_ptr[ADDR_WIDTH-2:0]};
+            
+            if (src_valid_i && src_ready_o) begin
+                mem[src_ptr] <= src_data_i;
+                src_ptr <= src_ptr + 1'b1;
+                
+                // Update flags based on new pointer
+                if (src_ptr == next_dst_ptr) begin
+                    src_full <= 1'b1;
+                    src_empty <= 1'b0;
+                end else if (src_ptr == dst_ptr_synced_bin_src) begin
+                    src_full <= 1'b0;
+                    src_empty <= 1'b1;
+                end else begin
+                    src_full <= 1'b0;
+                    src_empty <= 1'b0;
+                end
+            end else begin
+                src_full <= 1'b0;
+                src_empty <= 1'b0;
+            end
+        end
+    end
+
+    // Re-writing Dst Domain Always Block with Pointer Comparison
+    // Full: dst_ptr == (src_ptr_synced_bin_dst - 1) [modulo DEPTH]
+    // Empty: dst_ptr == src_ptr_synced_bin_dst
+    
+    wire [ADDR_WIDTH-1:0] prev_src_ptr = src_ptr_synced_bin_dst - 1'b1;
+    wire dst_full = (dst_ptr == prev_src_ptr);
+    wire dst_empty = (dst_ptr == src_ptr_synced_bin_dst);
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_ptr <= '0;
+            dst_gray <= '0;
+            dst_full <= 1'b0;
+            dst_empty <= 1'b1;
+        end else begin
+            dst_gray <= {dst_ptr[ADDR_WIDTH-2:0], dst_ptr[ADDR_WIDTH-1] ^ dst_ptr[ADDR_WIDTH-2:0]};
+            
+            if (dst_valid_o) begin
+                dst_data_o <= mem[dst_ptr];
+                dst_ptr <= dst_ptr + 1'b1;
+                
+                // Update flags based on new pointer
+                if (dst_ptr == prev_src_ptr) begin
+                    dst_full <= 1'b0;
+                    dst_empty <= 1'b0;
+                end else if (dst_ptr == src_ptr_synced_bin_dst) begin
+                    dst_full <= 1'b1;
+                    dst_empty <= 1'b1;
+                end else begin
+                    dst_full <= 1'b1;
+                    dst_empty <= 1'b0;
+                end
+            end else begin
+                dst_full <= 1'b1;
+                dst_empty <= 1'b0;
+            end
+        end
+    end
+
+    // Final Output Assignments
+    assign src_ready_o = !src_full;
+    assign dst_valid_o = dst_empty && dst_ready_i;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,93 @@
+```systemverilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Internal signals
+  logic [ApbAddrWidth-1:0] addr_i;
+  logic [ApbDataWidth-1:0] pwrite_data_i;
+  logic pwrite_en_i;
+  logic pwrite_strb_i;
+  logic pwrite_sel_i;
+  logic pwrite_ack_i;
+  logic pwrite_we_i;
+  logic [ApbDataWidth-1:0] pwrite_data_o;
+  logic [ApbDataWidth-1:0] pwrite_strb_o;
+  logic [ApbDataWidth-1:0] pwrite_sel_o;
+  logic [ApbDataWidth-1:0] pwrite_ack_o;
+  logic [ApbDataWidth-1:0] pwrite_we_o;
+
+  // Register array
+  reg_data_t [NoApbRegs-1:0] reg_array;
+
+  // APB Interface Generation
+  assign addr_i = base_addr_i + AddrOffset;
+  assign pwrite_data_i = req_i.pwrite_data;
+  assign pwrite_en_i = req_i.pwrite_en;
+  assign pwrite_strb_i = req_i.pwrite_strb;
+  assign pwrite_sel_i = req_i.pwrite_sel;
+  assign pwrite_ack_i = req_i.pwrite_ack;
+  assign pwrite_we_i = req_i.pwrite_we;
+
+  assign pwrite_data_o = pwrite_data_i;
+  assign pwrite_strb_o = pwrite_strb_i;
+  assign pwrite_sel_o = pwrite_sel_i;
+  assign pwrite_ack_o = pwrite_ack_i;
+  assign pwrite_we_o = pwrite_we_i;
+
+  // APB Write Response Generation
+  assign resp_o.pwrite_ack = pwrite_ack_i;
+  assign resp_o.pwrite_strb = pwrite_strb_i;
+  assign resp_o.pwrite_sel = pwrite_sel_i;
+  assign resp_o.pwrite_data = pwrite_data_i;
+  assign resp_o.pwrite_we = pwrite_we_i;
+
+  // Reset Logic
+  logic reset_n;
+  assign reset_n = preset_ni;
+
+  // Register Initialization and Update
+  always @(posedge pclk_i or negedge reset_n) begin
+    if (!reset_n) begin
+      reg_array <= '{default: 0};
+      // Apply initial values
+      for (int i = 0; i < NoApbRegs; i++) begin
+        reg_array[i] <= reg_init_i[i];
+      end
+    end else begin
+      // Update registers on write
+      if (pwrite_en_i) begin
+        for (int i = 0; i < NoApbRegs; i++) begin
+          if (addr_i == i) begin
+            // Only update if not read-only
+            if (!ReadOnly[i]) begin
+              reg_array[i] <= pwrite_data_i;
+            end
+          end
+        end
+      end
+    end
+  end
+
+  // Output Assignment
+  assign reg_q_o = reg_array;
+
+endmodule
+```<|im_end|>

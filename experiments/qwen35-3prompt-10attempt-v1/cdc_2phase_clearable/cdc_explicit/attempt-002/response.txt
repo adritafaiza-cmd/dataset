@@ -1,0 +1,251 @@
+```systemverilog
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  localparam DATA_WIDTH = WIDTH;
+  localparam SYNC_STAGES = SYNC_STAGES;
+  localparam CLEAR_ON_ASYNC_RESET = CLEAR_ON_ASYNC_RESET;
+
+  // State encoding for the handshake controller
+  // IDLE: No data in flight
+  // DATA: Data is being transferred (src_valid asserted, dst_ready waiting)
+  // CLEAR_SRC: Source side requested clear, data dropped, waiting for dst to clear
+  // CLEAR_DST: Dest side requested clear, data dropped, waiting for src to clear
+  // CLEAR_DONE: Both sides clear requested, channel flushed, returning to IDLE
+  typedef enum logic [1:0] {
+    STATE_IDLE,
+    STATE_DATA,
+    STATE_CLEAR_SRC,
+    STATE_CLEAR_DST,
+    STATE_CLEAR_DONE
+  } state_t;
+
+  // Synchronizers for asynchronous signals
+  // We use a 2-stage synchronizer for all async inputs to ensure CDC compliance
+  logic [SYNC_STAGES-1:0] src_valid_synced;
+  logic [SYNC_STAGES-1:0] src_data_synced;
+  logic [SYNC_STAGES-1:0] src_clear_synced;
+  logic [SYNC_STAGES-1:0] dst_valid_synced;
+  logic [SYNC_STAGES-1:0] dst_ready_synced;
+  logic [SYNC_STAGES-1:0] dst_clear_synced;
+  logic [SYNC_STAGES-1:0] src_rst_synced;
+  logic [SYNC_STAGES-1:0] dst_rst_synced;
+
+  // Internal state machine
+  state_t state;
+  logic [DATA_WIDTH-1:0] internal_data;
+  logic internal_valid;
+  logic internal_ready;
+  logic clear_request_src;
+  logic clear_request_dst;
+  logic clear_in_progress;
+
+  // ------------------------------------------------------------------
+  // 1. Synchronizers
+  // ------------------------------------------------------------------
+  genvar i;
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_src_valid_sync
+      assign src_valid_synced[i] = src_valid_synced[i-1] ? src_valid_synced[i-1] : src_valid_i;
+    end
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_src_data_sync
+      assign src_data_synced[i] = src_data_synced[i-1] ? src_data_synced[i-1] : src_data_i;
+    end
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_src_clear_sync
+      assign src_clear_synced[i] = src_clear_synced[i-1] ? src_clear_synced[i-1] : src_clear_i;
+    end
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_dst_valid_sync
+      assign dst_valid_synced[i] = dst_valid_synced[i-1] ? dst_valid_synced[i-1] : dst_ready_i;
+    end
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_dst_ready_sync
+      assign dst_ready_synced[i] = dst_ready_synced[i-1] ? dst_ready_synced[i-1] : dst_ready_i;
+    end
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_dst_clear_sync
+      assign dst_clear_synced[i] = dst_clear_synced[i-1] ? dst_clear_synced[i-1] : dst_clear_i;
+    end
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_src_rst_sync
+      assign src_rst_synced[i] = src_rst_synced[i-1] ? src_rst_synced[i-1] : src_rst_ni;
+    end
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_dst_rst_sync
+      assign dst_rst_synced[i] = dst_rst_synced[i-1] ? dst_rst_synced[i-1] : dst_rst_ni;
+    end
+  endgenerate
+
+  // ------------------------------------------------------------------
+  // 2. State Machine Logic
+  // ------------------------------------------------------------------
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      state <= STATE_IDLE;
+      internal_data <= '0;
+      internal_valid <= 1'b0;
+      clear_request_src <= 1'b0;
+      clear_request_dst <= 1'b0;
+      clear_in_progress <= 1'b0;
+    end else begin
+      // Reset synchronization logic
+      logic rst_src_synced = src_rst_synced[SYNC_STAGES-1];
+      logic rst_dst_synced = dst_rst_synced[SYNC_STAGES-1];
+
+      // Determine if we need to force clear based on async reset
+      logic force_clear_src = CLEAR_ON_ASYNC_RESET && rst_src_synced;
+      logic force_clear_dst = CLEAR_ON_ASYNC_RESET && rst_dst_synced;
+
+      // Combine explicit clear requests with async reset forces
+      clear_request_src = src_clear_synced[SYNC_STAGES-1] || force_clear_src;
+      clear_request_dst = dst_clear_synced[SYNC_STAGES-1] || force_clear_dst;
+
+      case (state)
+        STATE_IDLE: begin
+          if (src_valid_synced[SYNC_STAGES-1] && !clear_request_src) begin
+            state <= STATE_DATA;
+            internal_data <= src_data_synced[SYNC_STAGES-1];
+            internal_valid <= 1'b1;
+          end else if (clear_request_src && clear_request_dst) begin
+            // Both sides requested clear simultaneously, go directly to done
+            state <= STATE_CLEAR_DONE;
+          end else if (clear_request_src) begin
+            state <= STATE_CLEAR_SRC;
+          end else if (clear_request_dst) begin
+            state <= STATE_CLEAR_DST;
+          end else begin
+            state <= STATE_IDLE;
+          end
+        end
+
+        STATE_DATA: begin
+          if (dst_ready_synced[SYNC_STAGES-1]) begin
+            // Data accepted, return to idle
+            state <= STATE_IDLE;
+            internal_valid <= 1'b0;
+          end else if (clear_request_src) begin
+            // Source wants to clear while data is in flight
+            state <= STATE_CLEAR_SRC;
+          end else if (clear_request_dst) begin
+            // Dest wants to clear while data is in flight
+            state <= STATE_CLEAR_DST;
+          end else begin
+            state <= STATE_DATA;
+          end
+        end
+
+        STATE_CLEAR_SRC: begin
+          // Source has requested clear. We are dropping the data.
+          // We wait for destination to acknowledge the clear request.
+          if (clear_request_dst) begin
+            state <= STATE_CLEAR_DONE;
+          end else if (dst_ready_synced[SYNC_STAGES-1]) begin
+            // If dest is ready, we can technically send a "clear" beat, 
+            // but the spec says "Reset and clear must not create a destination beat".
+            // So we just wait for the clear request from dest.
+            state <= STATE_CLEAR_SRC;
+          end else begin
+            state <= STATE_CLEAR_SRC;
+          end
+        end
+
+        STATE_CLEAR_DST: begin
+          // Dest has requested clear. We are dropping the data.
+          // We wait for source to acknowledge the clear request.
+          if (clear_request_src) begin
+            state <= STATE_CLEAR_DONE;
+          end else if (src_valid_synced[SYNC_STAGES-1]) begin
+            // If src is valid, we ignore it to prevent sending data during clear
+            state <= STATE_CLEAR_DST;
+          end else begin
+            state <= STATE_CLEAR_DST;
+          end
+        end
+
+        STATE_CLEAR_DONE: begin
+          // Both sides requested clear. Channel is flushed.
+          // Return to idle.
+          state <= STATE_IDLE;
+          internal_valid <= 1'b0;
+        end
+      endcase
+    end
+  end
+
+  // ------------------------------------------------------------------
+  // 3. Output Logic & CDC Crossing
+  // ------------------------------------------------------------------
+  // Internal handshake signals
+  assign internal_ready = (state == STATE_DATA) ? dst_ready_synced[SYNC_STAGES-1] : 1'b1;
+  assign internal_valid = (state == STATE_DATA) ? 1'b1 : 1'b0;
+
+  // Cross back to source domain for src_ready_o
+  // We need to synchronize dst_ready and internal_valid back to src_clk
+  logic [SYNC_STAGES-1:0] dst_ready_back;
+  logic [SYNC_STAGES-1:0] internal_valid_back;
+
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_dst_ready_back
+      assign dst_ready_back[i] = dst_ready_back[i-1] ? dst_ready_back[i-1] : dst_ready_synced[i-1];
+    end
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_internal_valid_back
+      assign internal_valid_back[i] = internal_valid_back[i-1] ? internal_valid_back[i-1] : internal_valid;
+    end
+  endgenerate
+
+  assign src_ready_o = dst_ready_back[SYNC_STAGES-1] && internal_valid_back[SYNC_STAGES-1];
+
+  // Cross back to source domain for clear pending status
+  // src_clear_pending_o is high while we are in clear states
+  logic [SYNC_STAGES-1:0] clear_pending_src_back;
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_clear_pending_src_back
+      assign clear_pending_src_back[i] = clear_pending_src_back[i-1] ? clear_pending_src_back[i-1] : 
+                                         (state == STATE_CLEAR_SRC || state == STATE_CLEAR_DONE);
+    end
+  endgenerate
+  assign src_clear_pending_o = clear_pending_src_back[SYNC_STAGES-1];
+
+  // Cross to destination domain for data and valid
+  logic [SYNC_STAGES-1:0] internal_data_back;
+  logic [SYNC_STAGES-1:0] internal_valid_out_back;
+
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_internal_data_back
+      assign internal_data_back[i] = internal_data_back[i-1] ? internal_data_back[i-1] : internal_data;
+    end
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_internal_valid_out_back
+      assign internal_valid_out_back[i] = internal_valid_out_back[i-1] ? internal_valid_out_back[i-1] : internal_valid;
+    end
+  endgenerate
+
+  assign dst_data_o = internal_data_back[SYNC_STAGES-1];
+  assign dst_valid_o = internal_valid_out_back[SYNC_STAGES-1];
+
+  // Cross back to destination domain for clear pending status
+  // dst_clear_pending_o is high while we are in clear states
+  logic [SYNC_STAGES-1:0] clear_pending_dst_back;
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_clear_pending_dst_back
+      assign clear_pending_dst_back[i] = clear_pending_dst_back[i-1] ? clear_pending_dst_back[i-1] : 
+                                         (state == STATE_CLEAR_DST || state == STATE_CLEAR_DONE);
+    end
+  endgenerate
+  assign dst_clear_pending_o = clear_pending_dst_back[SYNC_STAGES-1];
+
+endmodule
+```<|im_end|>
+<|endoftext|>

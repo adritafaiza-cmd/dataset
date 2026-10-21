@@ -1,0 +1,271 @@
+```systemverilog
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  wire src_rst_ni,
+  input  wire src_clk_i,
+  input  wire src_clear_i,
+  output wire src_clear_pending_o,
+  input  wire [WIDTH-1:0] src_data_i,
+  input  wire src_valid_i,
+  output wire src_ready_o,
+  input  wire dst_rst_ni,
+  input  wire dst_clk_i,
+  input  wire dst_clear_i,
+  output wire dst_clear_pending_o,
+  output wire [WIDTH-1:0] dst_data_o,
+  output wire dst_valid_o,
+  input  wire dst_ready_i
+);
+
+  // ---------------------------------------------------------------------------
+  // Source Domain: Capture Valid/Ready and Clear Request
+  // ---------------------------------------------------------------------------
+  logic [SYNC_STAGES-1:0] src_valid_reg;
+  logic [SYNC_STAGES-1:0] src_ready_reg;
+  logic [SYNC_STAGES-1:0] src_clear_reg;
+  logic src_valid_synced;
+  logic src_ready_synced;
+  logic src_clear_synced;
+  logic src_clear_pending;
+
+  // Synchronize src_valid
+  genvar i;
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_src_valid_sync
+      always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+          src_valid_reg[i] <= 1'b0;
+        else
+          src_valid_reg[i] <= src_valid_reg[i-1];
+      end
+    end
+  endgenerate
+  assign src_valid_synced = src_valid_reg[SYNC_STAGES-1];
+
+  // Synchronize src_ready
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_src_ready_sync
+      always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+          src_ready_reg[i] <= 1'b1;
+        else
+          src_ready_reg[i] <= src_ready_reg[i-1];
+      end
+    end
+  endgenerate
+  assign src_ready_synced = src_ready_reg[SYNC_STAGES-1];
+
+  // Synchronize src_clear
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_src_clear_sync
+      always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+          src_clear_reg[i] <= CLEAR_ON_ASYNC_RESET ? 1'b1 : 1'b0;
+        end else begin
+          src_clear_reg[i] <= src_clear_reg[i-1];
+        end
+      end
+    end
+  endgenerate
+  assign src_clear_synced = src_clear_reg[SYNC_STAGES-1];
+
+  // ---------------------------------------------------------------------------
+  // Destination Domain: Capture Valid/Ready and Clear Request
+  // ---------------------------------------------------------------------------
+  logic [SYNC_STAGES-1:0] dst_valid_reg;
+  logic [SYNC_STAGES-1:0] dst_ready_reg;
+  logic [SYNC_STAGES-1:0] dst_clear_reg;
+  logic dst_valid_synced;
+  logic dst_ready_synced;
+  logic dst_clear_synced;
+  logic dst_clear_pending;
+
+  // Synchronize dst_valid
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_dst_valid_sync
+      always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+          dst_valid_reg[i] <= CLEAR_ON_ASYNC_RESET ? 1'b1 : 1'b0;
+        end else begin
+          dst_valid_reg[i] <= dst_valid_reg[i-1];
+        end
+      end
+    end
+  endgenerate
+  assign dst_valid_synced = dst_valid_reg[SYNC_STAGES-1];
+
+  // Synchronize dst_ready
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_dst_ready_sync
+      always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+          dst_ready_reg[i] <= 1'b1;
+        else
+          dst_ready_reg[i] <= dst_ready_reg[i-1];
+      end
+    end
+  endgenerate
+  assign dst_ready_synced = dst_ready_reg[SYNC_STAGES-1];
+
+  // Synchronize dst_clear
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_dst_clear_sync
+      always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+          dst_clear_reg[i] <= CLEAR_ON_ASYNC_RESET ? 1'b1 : 1'b0;
+        end else begin
+          dst_clear_reg[i] <= dst_clear_reg[i-1];
+        end
+      end
+    end
+  endgenerate
+  assign dst_clear_synced = dst_clear_reg[SYNC_STAGES-1];
+
+  // ---------------------------------------------------------------------------
+  // CDC Crossing: 2-Phase Handshake with Clear Logic
+  // ---------------------------------------------------------------------------
+  // State Machine for the crossing logic
+  // States: IDLE, WAIT_SRC, WAIT_DST, CLEAR_SRC, CLEAR_DST, CLEAR_DONE
+  //
+  // Logic:
+  // 1. Normal Operation:
+  //    - If src_valid_synced && !src_clear_synced && dst_ready_synced && !dst_clear_synced:
+  //      Transfer data, set src_ready, clear src_valid.
+  //    - Else if src_valid_synced && !src_clear_synced && !dst_ready_synced && !dst_clear_synced:
+  //      Hold data, set src_ready=0.
+  //    - Else if !src_valid_synced && dst_ready_synced && !dst_clear_synced:
+  //      Accept new data (if available), set src_ready=1.
+  //
+  // 2. Clear Operation (Coordinated):
+  //    - If src_clear_synced && !dst_clear_synced:
+  //      Enter CLEAR_SRC state. Set src_clear_pending_o = 1.
+  //      Ignore new src_valid. Wait for dst_clear_synced.
+  //    - If dst_clear_synced && !src_clear_synced:
+  //      Enter CLEAR_DST state. Set dst_clear_pending_o = 1.
+  //      Ignore new dst_ready. Wait for src_clear_synced.
+  //    - If src_clear_synced && dst_clear_synced:
+  //      Both sides request clear.
+  //      If in IDLE or WAIT_SRC: Enter CLEAR_SRC (src leads).
+  //      If in WAIT_DST or CLEAR_DST: Enter CLEAR_DST (dst leads).
+  //      If in CLEAR_SRC: Stay in CLEAR_SRC until dst_clear_synced.
+  //      If in CLEAR_DST: Stay in CLEAR_DST until src_clear_synced.
+  //
+  // 3. Completion:
+  //    - Once both clear requests are acknowledged and state is CLEAR_DONE:
+  //      Reset to IDLE. Clear pending flags.
+
+  logic [2:0] state;
+  parameter IDLE = 3'b000;
+  parameter WAIT_SRC = 3'b001;
+  parameter WAIT_DST = 3'b010;
+  parameter CLEAR_SRC = 3'b100;
+  parameter CLEAR_DST = 3'b101;
+  parameter CLEAR_DONE = 3'b110;
+
+  logic [WIDTH-1:0] internal_data;
+
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      state <= IDLE;
+      internal_data <= '0;
+    end else begin
+      case (state)
+        IDLE: begin
+          if (src_valid_synced && !src_clear_synced && dst_ready_synced && !dst_clear_synced) begin
+            // Accept data
+            internal_data <= src_data_i;
+            state <= WAIT_DST;
+          end else if (src_valid_synced && !src_clear_synced && !dst_ready_synced && !dst_clear_synced) begin
+            // Hold data, wait for ready
+            state <= WAIT_SRC;
+          end else if (!src_valid_synced && dst_ready_synced && !dst_clear_synced) begin
+            // Ready to accept, but no data
+            state <= IDLE;
+          end else if (src_clear_synced && !dst_clear_synced) begin
+            // Source requests clear
+            state <= CLEAR_SRC;
+          end else if (dst_clear_synced && !src_clear_synced) begin
+            // Destination requests clear
+            state <= CLEAR_DST;
+          end else if (src_clear_synced && dst_clear_synced) begin
+            // Both request clear, source leads
+            state <= CLEAR_SRC;
+          end
+        end
+
+        WAIT_SRC: begin
+          if (src_valid_synced && !src_clear_synced && dst_ready_synced && !dst_clear_synced) begin
+            internal_data <= src_data_i;
+            state <= WAIT_DST;
+          end else if (src_valid_synced && !src_clear_synced && !dst_ready_synced && !dst_clear_synced) begin
+            // Still waiting for ready
+          end else if (!src_valid_synced && dst_ready_synced && !dst_clear_synced) begin
+            state <= IDLE;
+          end else if (src_clear_synced && !dst_clear_synced) begin
+            state <= CLEAR_SRC;
+          end else if (dst_clear_synced && !src_clear_synced) begin
+            state <= CLEAR_DST;
+          end else if (src_clear_synced && dst_clear_synced) begin
+            state <= CLEAR_SRC;
+          end
+        end
+
+        WAIT_DST: begin
+          if (dst_ready_synced && !dst_clear_synced) begin
+            // Data accepted
+            dst_data_o <= internal_data;
+            dst_valid_o <= 1'b1;
+            state <= IDLE;
+          end else if (!dst_ready_synced && !dst_clear_synced) begin
+            // Still waiting for ready
+          end else if (src_clear_synced && !dst_clear_synced) begin
+            state <= CLEAR_SRC;
+          end else if (dst_clear_synced && !src_clear_synced) begin
+            state <= CLEAR_DST;
+          end else if (src_clear_synced && dst_clear_synced) begin
+            state <= CLEAR_SRC;
+          end
+        end
+
+        CLEAR_SRC: begin
+          // Source is clearing. Wait for destination to clear.
+          if (dst_clear_synced) begin
+            state <= CLEAR_DONE;
+          end
+        end
+
+        CLEAR_DST: begin
+          // Destination is clearing. Wait for source to clear.
+          if (src_clear_synced) begin
+            state <= CLEAR_DONE;
+          end
+        end
+
+        CLEAR_DONE: begin
+          // Both sides have requested clear. Reset to IDLE.
+          state <= IDLE;
+        end
+
+        default: begin
+          state <= IDLE;
+        end
+      endcase
+    end
+  end
+
+  // ---------------------------------------------------------------------------
+  // Output Logic
+  // ---------------------------------------------------------------------------
+  assign src_ready_o = (state == WAIT_SRC) ? 1'b0 : 1'b1;
+  
+  assign dst_valid_o = (state == WAIT_DST) ? 1'b1 : 1'b0;
+  assign dst_data_o = (state == WAIT_DST) ? internal_data : '0;
+
+  assign src_clear_pending_o = (state == CLEAR_SRC) ? 1'b1 : 1'b0;
+  assign dst_clear_pending_o = (state == CLEAR_DST) ? 1'b1 : 1'b0;
+
+endmodule
+```<|im_end|>

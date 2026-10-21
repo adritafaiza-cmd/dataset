@@ -1,0 +1,100 @@
+```verilog
+module sync_wedge #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    // Synchronizer chain for the data bit
+    logic [STAGES-1:0] sync_data;
+    
+    // Synchronizer chain for the enable signal (optional but good practice)
+    logic [STAGES-1:0] sync_en;
+
+    // Edge detection flags
+    logic r_edge_tmp;
+    logic f_edge_tmp;
+
+    // Generate synchronizer stages for data
+    genvar i;
+    generate
+        for (i = 0; i < STAGES; i = i + 1) begin : sync_data_stages
+            if (i == 0)
+                always_ff @(posedge clk_i or negedge rst_ni) begin : u_sync_data_0
+                    if (!rst_ni)
+                        sync_data[i] <= 1'b0;
+                    else
+                        sync_data[i] <= serial_i;
+                end
+            else
+                always_ff @(posedge clk_i or negedge rst_ni) begin : u_sync_data_next
+                    if (!rst_ni)
+                        sync_data[i] <= 1'b0;
+                    else
+                        sync_data[i] <= sync_data[i-1];
+                end
+        end
+    endgenerate
+
+    // Generate synchronizer stages for enable
+    generate
+        for (i = 0; i < STAGES; i = i + 1) begin : sync_en_stages
+            if (i == 0)
+                always_ff @(posedge clk_i or negedge rst_ni) begin : u_sync_en_0
+                    if (!rst_ni)
+                        sync_en[i] <= 1'b0;
+                    else
+                        sync_en[i] <= en_i;
+                end
+            else
+                always_ff @(posedge clk_i or negedge rst_ni) begin : u_sync_en_next
+                    if (!rst_ni)
+                        sync_en[i] <= 1'b0;
+                    else
+                        sync_en[i] <= sync_en[i-1];
+                end
+        end
+    endgenerate
+
+    // Edge detection logic in the destination clock domain
+    // We use the last stage of the synchronizer for edge detection to ensure stability
+    always_ff @(posedge clk_i or negedge rst_ni) begin : u_edge_detect
+        if (!rst_ni) begin
+            r_edge_tmp <= 1'b0;
+            f_edge_tmp <= 1'b0;
+            serial_o   <= 1'b0;
+        end
+        else begin
+            // Update serial output with the synchronized data
+            serial_o <= sync_data[STAGES-1];
+
+            // Detect Rising Edge: Current is 1, Previous was 0
+            if (sync_en[STAGES-1] && sync_data[STAGES-1] && ~sync_data[STAGES-2]) begin
+                r_edge_tmp <= 1'b1;
+            end
+            else begin
+                r_edge_tmp <= 1'b0;
+            end
+
+            // Detect Falling Edge: Current is 0, Previous was 1
+            if (sync_en[STAGES-1] && ~sync_data[STAGES-1] && sync_data[STAGES-2]) begin
+                f_edge_tmp <= 1'b1;
+            end
+            else begin
+                f_edge_tmp <= 1'b0;
+            end
+        end
+    end
+
+    // Drive outputs
+    assign r_edge_o = r_edge_tmp;
+    assign f_edge_o = f_edge_tmp;
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,554 @@
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output reg [WIDTH-1:0] dst_data_o
+);
+
+    // Source domain state: 0 = empty, 1 = full
+    reg src_state;
+    // Destination domain state: 0 = empty, 1 = full
+    reg dst_state;
+    // Data storage for the buffer
+    reg [WIDTH-1:0] buffer_data;
+
+    // Synchronize src_valid to dst domain to detect when the buffer becomes empty
+    reg src_valid_synced;
+    reg src_valid_synced_2;
+
+    // Synchronize dst_ready to src domain to detect when the buffer becomes full
+    reg dst_ready_synced;
+    reg dst_ready_synced_2;
+
+    // ---------------------------------------------------------
+    // Source Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_state <= 1'b0;
+            src_valid_synced <= 1'b0;
+            src_valid_synced_2 <= 1'b0;
+            src_ready_o <= 1'b1;
+        end else begin
+            // Update synchronization signals
+            src_valid_synced <= src_valid_i;
+            src_valid_synced_2 <= src_valid_synced;
+
+            // Determine if buffer is empty based on destination domain feedback
+            // We need to know if dst_state is 0. Since dst_state is in dst domain,
+            // we must synchronize it to src domain.
+            // However, a simpler approach for 2-deep buffer with related clocks:
+            // We track the count of items in the buffer.
+            // Let's refine the state machine to be robust.
+
+            // Re-evaluating state logic for clarity and correctness:
+            // State 0: Buffer Empty
+            // State 1: Buffer Full (1 item)
+            // State 2: Buffer Full (2 items) - Max depth
+
+            // We need to know dst_state in src domain.
+            // Let's add a counter or state machine in src domain that tracks
+            // the number of items currently in the buffer by observing dst_valid/dst_ready.
+            // Actually, the standard way is to have the src domain drive the buffer
+            // and the dst domain drive the consumption, with cross-domain handshaking.
+
+            // Let's use a simple counter approach synchronized across domains.
+            // But since we are restricted to one module and standard practices:
+            // We will implement the state machine in both domains independently
+            // and use the cross-domain signals to update the state.
+
+            // To avoid race conditions, we assume the clocks are related (integer ratio).
+            // We will use a 2-bit counter in src domain to track buffer occupancy.
+            // But wait, the occupancy is determined by the interaction of src_valid
+            // and dst_ready.
+
+            // Correct approach for 2-deep buffer:
+            // Src Domain:
+            //   - If state < 2 and src_valid && src_ready (which is !full), accept data.
+            //   - src_ready = (state < 2) ? 1 : 0.
+            //   - On accept, state++.
+            //   - We need to know if dst has consumed the item.
+            //   - We can't know dst consumption directly in src without a signal.
+            //   - Signal: dst_valid_synced tells us dst has an item ready to send.
+            //   - Signal: dst_ready_synced tells us dst is ready to accept.
+            //   - Actually, the standard "Spill Buffer" pattern:
+            //     Src Domain tracks how many items are waiting to be sent to Dst.
+            //     Dst Domain tracks how many items are waiting to be sent to Src (none, usually).
+            //     Wait, the buffer holds data.
+            //     Src pushes -> Buffer.
+            //     Dst pulls -> Buffer.
+            //     Src needs to know if Buffer is full (2 items).
+            //     Dst needs to know if Buffer is empty (0 items).
+
+            // Let's implement a counter in Src domain that increments on push and decrements on pull.
+            // Push condition: src_valid && (counter < 2).
+            // Pull condition: (counter > 0) && dst_ready.
+            // But we need to know when dst_ready is true in Src domain.
+            // And we need to know when dst_valid is true in Dst domain (to know if we can pull? No, dst pulls automatically if ready).
+
+            // Refined Logic:
+            // Src Domain Counter (count_src): Number of items in buffer.
+            //   - Increment when src_valid && count_src < 2.
+            //   - Decrement when dst_ready is detected in Src domain AND count_src > 0.
+            // Dst Domain Counter (count_dst): Number of items in buffer.
+            //   - This is redundant if we trust the cross-domain sync, but let's stick to one source of truth per domain.
+            //   - Actually, the state must be consistent.
+            //   - Let's use a single 2-bit counter in Src domain and a single 2-bit counter in Dst domain.
+            //   - They should be equal at stable times, but might differ during transitions.
+            //   - To be safe, we implement the logic in both domains.
+
+            // Src Domain Logic:
+            //   - count_src: 0, 1, 2.
+            //   - src_ready_o = (count_src < 2).
+            //   - If src_valid_i && src_ready_o: count_src <= count_src + 1.
+            //   - If dst_ready_synced && count_src > 0: count_src <= count_src - 1.
+            
+            // Dst Domain Logic:
+            //   - count_dst: 0, 1, 2.
+            //   - dst_valid_o = (count_dst > 0).
+            //   - If dst_valid_o && dst_ready_i: count_dst <= count_dst - 1.
+            //   - If src_valid_synced && count_dst < 2: count_dst <= count_dst + 1.
+
+            // This creates a potential race if not careful, but with related clocks and proper synchronization, it works.
+            // We need to ensure the counters don't diverge.
+            // The divergence happens only during the clock cycle where both domains see a change.
+            // Since we use 2-deep, we have enough slack.
+
+            // Let's implement the Src Domain Counter logic here.
+            // We need to synchronize dst_ready to Src domain.
+            // We already have dst_ready_synced and dst_ready_synced_2.
+            // We use the delayed version to avoid metastability on the same cycle.
+
+            if (src_valid_i && (count_src < 2)) begin
+                count_src <= count_src + 1;
+            end else if (dst_ready_synced_2 && (count_src > 0)) begin
+                count_src <= count_src - 1;
+            end else begin
+                // Hold
+            end
+
+            // Output ready
+            src_ready_o = (count_src < 2);
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Destination Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_state <= 1'b0;
+            dst_valid_o <= 1'b0;
+            dst_data_o <= 0;
+        end else begin
+            // Synchronize src_valid to Dst domain
+            src_valid_synced <= src_valid_i;
+            src_valid_synced_2 <= src_valid_synced;
+
+            // Update state based on consumption and production
+            // Production: src_valid_synced_2 indicates a new item arrived in this cycle (from src perspective)
+            // Consumption: dst_ready_i indicates we can send an item
+            
+            // Note: We need to be careful with the order of operations.
+            // If src_valid and dst_ready happen in the same cycle (impossible due to clock domains, but logically possible in simulation if clocks are same),
+            // we need a defined behavior. Usually, we assume the buffer absorbs the mismatch.
+            // With related clocks, we assume no simultaneous edge.
+            
+            // Logic:
+            // If we have data (state > 0) and dst is ready, we send data and decrement state.
+            // If src has new data (src_valid_synced_2) and we have space (state < 2), we increment state.
+            
+            // To prevent overwriting data before it's sent, we check state first.
+            if (dst_state > 0 && dst_ready_i) begin
+                dst_state <= dst_state - 1;
+                dst_valid_o <= 1'b1;
+                dst_data_o <= buffer_data; // This needs to be updated when we push
+            end else if (src_valid_synced_2 && dst_state < 2) begin
+                dst_state <= dst_state + 1;
+                dst_valid_o <= 1'b0;
+                // We need to store the data.
+                // But wait, buffer_data is a single register. We need a FIFO structure.
+                // Since depth is 2, we can use a simple array or just overwrite if we manage the pointer.
+                // However, the prompt asks for a "spill buffer". A simple 2-element array is best.
+            end
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Data Storage (FIFO Logic)
+    // ---------------------------------------------------------
+    // We need a 2-deep FIFO.
+    // Since WIDTH is a parameter, we use a reg array.
+    // We need a write pointer and read pointer in the appropriate domains?
+    // Actually, for a 2-deep buffer, we can simplify:
+    // Src Domain manages the Write Pointer (WP).
+    // Dst Domain manages the Read Pointer (RP).
+    // But WP and RP must be synchronized.
+    
+    // Let's restructure to use explicit pointers for correctness.
+    // Src Domain:
+    //   wp_src: 0, 1, 2 (2 means full)
+    //   On write: wp_src = (wp_src == 2) ? 0 : wp_src + 1;
+    //   On read (triggered by dst_ready): wp_src = (wp_src == 0) ? 0 : wp_src - 1;
+    
+    // Dst Domain:
+    //   rp_dst: 0, 1, 2 (2 means empty? No, 2 means we have read 2 items)
+    //   Actually, let's use a single counter in each domain representing the number of items.
+    //   This is equivalent to the previous logic but we need to store the data correctly.
+    
+    // Data Storage:
+    // We need to store up to 2 items.
+    // Let's use a 2-element array in the module, but access it via pointers synchronized across domains.
+    // Or, simpler: Since depth is small (2), we can use a 2-bit counter in Src to track write index
+    // and a 2-bit counter in Dst to track read index.
+    
+    // Let's restart the data storage logic to be robust.
+    // We will use a 2-element array `data_mem [1:0] [WIDTH-1:0]`.
+    // Src Domain tracks `write_ptr` (0, 1, 2).
+    // Dst Domain tracks `read_ptr` (0, 1, 2).
+    // `write_ptr` is updated in Src domain.
+    // `read_ptr` is updated in Dst domain.
+    // We need to synchronize `write_ptr` to Dst domain to know what to read?
+    // No, Dst domain reads from `data_mem` based on `read_ptr`.
+    // But `data_mem` is written by Src.
+    // If `read_ptr` > `write_ptr`, it's empty.
+    // If `read_ptr` == `write_ptr`, it's full (if we use circular buffer logic with depth 2, full is when next write == read).
+    // Let's use a simple counter approach for the pointers.
+    
+    // Src Domain:
+    //   write_ptr_src: 0, 1, 2.
+    //   If src_valid && write_ptr_src < 2: write_ptr_src <= write_ptr_src + 1.
+    //   If dst_ready_synced_2 && write_ptr_src > 0: write_ptr_src <= write_ptr_src - 1.
+    //   Data is written to `data_mem[write_ptr_src - 1]` (if > 0).
+    
+    // Dst Domain:
+    //   read_ptr_dst: 0, 1, 2.
+    //   If read_ptr_dst < 2 && src_valid_synced_2: read_ptr_dst <= read_ptr_dst + 1.
+    //   If dst_ready_i && read_ptr_dst > 0: read_ptr_dst <= read_ptr_dst - 1.
+    //   Data is read from `data_mem[read_ptr_dst - 1]` (if > 0).
+    
+    // Wait, the pointers must be consistent.
+    // If Src writes at index 0, then index 1.
+    // Dst reads at index 0, then index 1.
+    // The pointers in Src and Dst should track the same logical position.
+    // We can synchronize the pointers.
+    
+    // Let's use a single 2-bit counter in Src domain for the write position.
+    // And a single 2-bit counter in Dst domain for the read position.
+    // We synchronize the Src counter to Dst domain to update the Dst counter?
+    // No, that's complex.
+    
+    // Simpler approach for 2-deep:
+    // Just use the state machine logic we started earlier, but fix the data storage.
+    // We need a way to store the data.
+    // Since the depth is 2, we can use a 2-element array.
+    // We need to know which element to write and which to read.
+    
+    // Let's define:
+    // `src_wp`: Write pointer in Src domain (0, 1, 2).
+    // `dst_rp`: Read pointer in Dst domain (0, 1, 2).
+    // We need to synchronize `src_wp` to Dst domain to know the current write position?
+    // Actually, Dst domain only needs to know if there is data.
+    // But to output the correct data, Dst needs to know which slot to read.
+    // Since the buffer is small, we can assume the data is written sequentially.
+    // If Dst reads once, it reads the oldest data.
+    // So Dst just needs to know the "head" of the queue.
+    // The "head" is determined by the number of items consumed.
+    
+    // Let's try this:
+    // Src Domain:
+    //   count: number of items in buffer.
+    //   On write: count++.
+    //   On read (triggered by dst_ready): count--.
+    //   Data is stored in a circular buffer.
+    //   We need a write index in Src domain.
+    //   write_idx = (write_idx + 1) % 2.
+    //   But we need to know the current write_idx in Dst domain to read the correct data?
+    //   No, Dst domain can maintain its own read_idx.
+    //   We just need to ensure that when Dst reads, it reads the data that was written.
+    //   Since the buffer is 2-deep, we can use a 2-element array.
+    //   Src writes to `data[write_idx]`.
+    //   Dst reads from `data[read_idx]`.
+    //   We need to synchronize `write_idx` to Dst domain?
+    //   Or, we can just use the count.
+    //   If count == 1, and we just wrote, the data is at `data[0]` (if we reset on empty).
+    //   This is getting complicated for a simple 2-deep buffer.
+    
+    // Alternative: Use a single counter in Src domain to track the number of items.
+    // And a single counter in Dst domain to track the number of items.
+    // They should be equal.
+    // Data storage:
+    // We can use a 2-element array.
+    // Src Domain:
+    //   write_ptr: 0, 1. (0 means empty, 1 means full? No, we need indices).
+    //   Let's use a 2-bit counter for the number of items in Src domain.
+    //   And a 2-bit counter for the number of items in Dst domain.
+    //   We synchronize the Src counter to Dst domain to update the Dst counter?
+    //   No, we can just use the Src counter to drive the write pointer in a shared array?
+    //   No, the array is in the module.
+    
+    // Let's use the standard "Spill Buffer" implementation pattern:
+    // 1. Src Domain has a counter `src_count` (0..2).
+    // 2. Dst Domain has a counter `dst_count` (0..2).
+    // 3. We synchronize `src_count` to Dst domain to get `dst_count`?
+    //    No, `dst_count` is derived from `src_count` and `dst_ready`.
+    //    Actually, `dst_count` should be the same as `src_count` at stable times.
+    //    We can just use `src_count` in Dst domain after synchronization.
+    
+    // Revised Plan:
+    // - Src Domain:
+    //   - `src_count`: 0, 1, 2.
+    //   - `src_wp`: 0, 1 (write index).
+    //   - Logic:
+    //     - If src_valid && src_count < 2:
+    //       - `src_count` <= `src_count` + 1;
+    //       - `src_wp` <= (`src_wp` + 1) % 2;
+    //       - Write `src_data_i` to `data[src_wp]`.
+    //     - If dst_ready_synced_2 && src_count > 0:
+    //       - `src_count` <= `src_count` - 1;
+    //       - `src_wp` <= `src_wp` - 1; (Wait, if we decrement count, we don't necessarily move wp back immediately in a circular buffer, but for depth 2, it's simple).
+    //       - Actually, if we use a circular buffer, `src_wp` moves forward on write.
+    //       - On read, we don't move `src_wp` in Src domain immediately?
+    //       - No, the read happens in Dst domain.
+    //       - So Src domain only manages writes.
+    //       - Dst domain manages reads.
+    //       - But we need to know where to read from in Dst domain.
+    //       - We can synchronize `src_wp` to Dst domain.
+    
+    // Let's implement this:
+    // - `src_wp` in Src domain.
+    // - `dst_wp` in Dst domain (synchronized from `src_wp`).
+    // - `data` array in the module.
+    
+    // Src Domain:
+    //   - `src_count`: 0, 1, 2.
+    //   - `src_wp`: 0, 1.
+    //   - On write: `src_count`++, `src_wp` = (`src_wp` + 1) % 2. Write data.
+    //   - On read (triggered by dst_ready): `src_count`--. (We don't change `src_wp` here, because the read is handled by Dst domain using `dst_wp`).
+    //   - Wait, if Dst domain reads, it uses `dst_wp`.
+    //   - `dst_wp` must be synchronized from `src_wp`.
+    //   - But `src_wp` changes on write.
+    //   - So `dst_wp` will lag behind `src_wp` by one cycle of synchronization.
+    //   - This is fine for a 2-deep buffer.
+    
+    // Dst Domain:
+    //   - `dst_count`: 0, 1, 2. (Can be derived from `src_count` sync or maintained independently).
+    //   - `dst_wp`: Synchronized `src_wp`.
+    //   - On read: If `dst_count` > 0 and `dst_ready_i`:
+    //       - `dst_count`--;
+    //       - `dst_valid_o` = 1;
+    //       - `dst_data_o` = `data[dst_wp]`.
+    //   - On write (triggered by src_valid):
+    //       - `dst_count`++;
+    //       - `dst_wp` = (`dst_wp` + 1) % 2;
+    //       - Wait, if we update `dst_wp` on write in Dst domain, we need `src_valid` in Dst domain.
+    //       - Yes, we have `src_valid_synced`.
+    
+    // Let's refine the pointers:
+    // - `src_wp` in Src domain: Tracks the next write index.
+    // - `dst_wp` in Dst domain: Tracks the next read index.
+    // - `data` array: 2 elements.
+    // - `src_count` in Src domain: Number of items.
+    // - `dst_count` in Dst domain: Number of items.
+    
+    // Src Domain Logic:
+    //   - `src_count`: 0, 1, 2.
+    //   - `src_wp`: 0, 1.
+    //   - If src_valid && src_count < 2:
+    //       - `src_count` <= `src_count` + 1;
+    //       - `src_wp` <= (`src_wp` + 1) % 2;
+    //       - `data[src_wp]` <= `src_data_i`;
+    //   - If dst_ready_synced_2 && src_count > 0:
+    //       - `src_count` <= `src_count` - 1;
+    //       - // We don't change src_wp here, because the read is handled by Dst domain.
+    //       - // But wait, if Dst domain reads, it uses `dst_wp`.
+    //       - // `dst_wp` is synchronized from `src_wp`.
+    //       - // So `dst_wp` will be the same as `src_wp` (with some delay).
+    //       - // This works.
+    
+    // Dst Domain Logic:
+    //   - `dst_count`: 0, 1, 2.
+    //   - `dst_wp`: Synchronized `src_wp`.
+    //   - If src_valid_synced_2 && dst_count < 2:
+    //       - `dst_count` <= `dst_count` + 1;
+    //       - `dst_wp` <= (`dst_wp` + 1) % 2;
+    //       - `data[dst_wp]` <= `src_data_i` (Wait, we can't write to data in Dst domain if it's not synchronized? No, the data is written in Src domain).
+    //       - Correction: The data is written in Src domain. Dst domain only reads.
+    //       - So Dst domain doesn't need to write to `data`.
+    //       - But we need to know the write index to read the correct data?
+    //       - No, `dst_wp` is the read index.
+    //       - `src_wp` is the write index.
+    //       - When Src writes, it updates `src_wp`.
+    //       - When Dst reads, it uses `dst_wp`.
+    //       - `dst_wp` should be synchronized from `src_wp`.
+    //       - But `src_wp` changes on write.
+    //       - So `dst_wp` will be the value of `src_wp` from the previous cycle (in Dst domain).
+    //       - This means `dst_wp` might be one step behind `src_wp`.
+    //       - This is acceptable for a 2-deep buffer.
+    
+    // Let's simplify:
+    // - Use a single counter in Src domain for the number of items.
+    // - Use a single counter in Dst domain for the number of items.
+    // - Synchronize the Src counter to Dst domain to get the current count.
+    // - Use a 2-element array for data.
+    // - Src domain writes to `data[write_idx]`.
+    // - Dst domain reads from `data[read_idx]`.
+    // - `write_idx` is in Src domain.
+    // - `read_idx` is in Dst domain.
+    // - `read_idx` is synchronized from `write_idx`.
+    // - Wait, if `write_idx` increments on write, and `read_idx` increments on write (in Dst domain), then `read_idx` will be the same as `write_idx` (with delay).
+    // - This means Dst domain will read the data that was just written?
+    // - No, `read_idx` is the index of the data to be read.
+    // - `write_idx` is the index of the next data to be written.
+    // - If `write_idx` = 0, and we write data, next write index is 1.
+    // - `read_idx` should be 0 to read the data we just wrote.
+    // - So `read_idx` should be synchronized from `write_idx`.
+    // - But `write_idx` changes on write.
+    // - So `read_idx` will be the old `write_idx`.
+    // - This works.
+    
+    // Implementation Details:
+    // - `src_wp`: 1-bit counter in Src domain.
+    // - `dst_wp`: 1-bit counter in Dst domain (synchronized from `src_wp`).
+    // - `data`: 2-element array.
+    // - `src_count`: 2-bit counter in Src domain.
+    // - `dst_count`: 2-bit counter in Dst domain (synchronized from `src_count`).
+    
+    // Src Domain:
+    //   - `src_count`: 0, 1, 2.
+    //   - `src_wp`: 0, 1.
+    //   - If src_valid && src_count < 2:
+    //       - `src_count` <= `src_count` + 1;
+    //       - `src_wp` <= (`src_wp` + 1) % 2;
+    //       - `data[src_wp]` <= `src_data_i`;
+    //   - If dst_ready_synced_2 && src_count > 0:
+    //       - `src_count` <= `src_count` - 1;
+    
+    // Dst Domain:
+    //   - `dst_count`: 0, 1, 2.
+    //   - `dst_wp`: 0, 1.
+    //   - Synchronize `src_count` to `dst_count`.
+    //   - Synchronize `src_wp` to `dst_wp`.
+    //   - If src_valid_synced_2 && dst_count < 2:
+    //       - `dst_count` <= `dst_count` + 1;
+    //       - `dst_wp` <= (`dst_wp` + 1) % 2;
+    //       - // Data is already written by Src domain.
+    //   - If dst_ready_i && dst_count > 0:
+    //       - `dst_count` <= `dst_count` - 1;
+    //       - `dst_valid_o` = 1;
+    //       - `dst_data_o` = `data[dst_wp]`;
+    
+    // Wait, there's a problem:
+    // If `src_wp` increments on write, and `dst_wp` increments on write (in Dst domain), then `dst_wp` will be the same as `src_wp` (with delay).
+    // But `dst_wp` is used to read the data.
+    // If `src_wp` = 0, we write to `data[0]`. Next `src_wp` = 1.
+    // `dst_wp` (synchronized) will be 0.
+    // Dst domain reads `data[0]`. Correct.
+    // Then if we write again, `src_wp` = 1, write to `data[1]`. Next `src_wp` = 0.
+    // `dst_wp` (synchronized) will be 1.
+    // Dst domain reads `data[1]`. Correct.
+    // This logic holds.
+    
+    // One more thing: `dst_wp` should be synchronized from `src_wp`.
+    // But `src_wp` changes on write.
+    // So `dst_wp` will be the value of `src_wp` from the previous cycle.
+    // This is correct.
+    
+    // Let's implement.
+    
+    // Src Domain State
+    reg [1:0] src_count;
+    reg src_wp;
+    
+    // Dst Domain State
+    reg [1:0] dst_count;
+    reg dst_wp;
+    
+    // Data Storage
+    reg [WIDTH-1:0] data [1:0];
+    
+    // Synchronization Signals
+    reg src_valid_synced;
+    reg src_valid_synced_2;
+    reg dst_ready_synced;
+    reg dst_ready_synced_2;
+    
+    // Synchronize src_wp to dst domain
+    reg src_wp_synced;
+    reg src_wp_synced_2;
+    
+    // Synchronize src_count to dst domain
+    reg src_count_synced;
+    reg src_count_synced_2;
+    
+    // ---------------------------------------------------------
+    // Src Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_count <= 2'b00;
+            src_wp <= 1'b0;
+            src_valid_synced <= 1'b0;
+            src_valid_synced_2 <= 1'b0;
+            src_ready_o <= 1'b1;
+        end else begin
+            src_valid_synced <= src_valid_i;
+            src_valid_synced_2 <= src_valid_synced;
+            
+            if (src_valid_i && (src_count < 2)) begin
+                src_count <= src_count + 1;
+                src_wp <= ~src_wp;
+                data[src_wp] <= src_data_i;
+            end else if (dst_ready_synced_2 && (src_count > 0)) begin
+                src_count <= src_count - 1;
+            end
+            
+            src_ready_o = (src_count < 2);
+        end
+    end
+    
+    // ---------------------------------------------------------
+    // Dst Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_count <= 2'b00;
+            dst_wp <= 1'b0;
+            dst_valid_o <= 1'b0;
+            dst_data_o <= 0;
+            src_wp_synced <= 1'b0;
+            src_wp_synced_2 <= 1'b0;
+            src_count_synced <= 2'b00;
+            src_count_synced_2 <= 2'b00;
+        end else begin
+            src_wp_synced <= src_wp;
+            src_wp_synced_2 <= src_wp_synced;
+            
+            src_count_synced <= src_count;
+            src_count_synced_2 <= src_count_synced;
+            
+            if (src_valid_synced_2 && (dst_count < 2)) begin
+                dst_count <= dst_count + 1;
+                dst_wp <= ~dst_wp;
+            end else if (dst_ready_i && (dst_count > 0)) begin
+                dst_count <= dst_count - 1;
+                dst_valid_o <= 1'b1;
+                dst_data_o <= data[dst_wp];
+            end else begin
+                dst_valid_o <= 1'b0;
+                dst_data_o <= 0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

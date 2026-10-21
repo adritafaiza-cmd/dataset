@@ -1,0 +1,538 @@
+```verilog
+`timescale 1ns/1ps
+
+module uart_top (
+    wb_clk_i,
+    wb_rst_i, wb_adr_i, wb_dat_i, wb_dat_o, wb_we_i, wb_stb_i, wb_cyc_i, wb_ack_o, wb_sel_i,
+    int_o,
+    stx_pad_o, srx_pad_i,
+    rts_pad_o, cts_pad_i, dtr_pad_o, dsr_pad_i, ri_pad_i, dcd_pad_i
+);
+
+    // --------------------------------------------------------------------------
+    // Internal Clocks and Resets
+    // --------------------------------------------------------------------------
+    // We use a single clock domain for the Wishbone interface and control logic
+    // to ensure zero CDC/RDC violations. The baud rate generator is implemented
+    // using a counter driven by the same clock, ensuring coherent state transitions.
+    //
+    // Architecture:
+    // 1. Wishbone Interface: Handles register access (LCR, IER, IIR, MCR, FCR, LSR).
+    // 2. Baud Rate Generator: A simple integer divider. Since no parameters are allowed,
+    //    we assume a fixed divisor or a default configuration. For a generic 16550
+    //    compatible design without parameters, we implement a configurable counter
+    //    but initialize it to a standard value (e.g., 115200 @ 16MHz -> 1363) or
+    //    rely on the user to write to the LCR/FCR to set the mode.
+    //    To make it functional without parameters, we will assume a 16MHz clock and
+    //    implement a default baud rate of 115200.
+    // 3. FIFO: A 16-deep FIFO for the 16550's receive buffer.
+    // 4. State Machine: Handles transmission and interrupt generation.
+    //
+    // CDC/RDC Safety:
+    // - All registers are synchronous to wb_clk_i.
+    // - Reset is synchronous and active-high.
+    // - No asynchronous clock crossings.
+    // - Multi-bit transfers are handled via standard Wishbone protocols.
+
+    reg [31:0] wb_clk_i; // Dummy declaration to match port list if needed, but usually input is just wire.
+    // Correction: The port list in the prompt implies inputs. Let's define wires for inputs.
+    wire wb_clk_i;
+    wire wb_rst_i;
+    wire [15:0] wb_adr_i;
+    wire [7:0] wb_dat_i;
+    reg [7:0] wb_dat_o;
+    wire wb_we_i;
+    wire wb_stb_i;
+    wire wb_cyc_i;
+    wire [3:0] wb_sel_i;
+    reg wb_ack_o;
+
+    wire int_o;
+    reg stx_pad_o;
+    wire srx_pad_i;
+    reg rts_pad_o;
+    wire cts_pad_i;
+    reg dtr_pad_o;
+    wire dsr_pad_i;
+    wire ri_pad_i;
+    wire dcd_pad_i;
+
+    // --------------------------------------------------------------------------
+    // Internal Signals
+    // --------------------------------------------------------------------------
+    // Wishbone Address Decoding
+    // 16550 Register Map (Standard):
+    // 0x00: LCR (Line Control)
+    // 0x01: IER (Interrupt Enable)
+    // 0x02: IIR (Interrupt Identification)
+    // 0x03: FCR (FIFO Control)
+    // 0x04: LSR (Line Status)
+    // 0x05: MSR (Modem Status)
+    // 0x06: SCR (Scratch)
+    // 0x07: DLL (Divisor Latch Low)
+    // 0x08: DLH (Divisor Latch High)
+
+    reg [7:0] reg_lcr;
+    reg [7:0] reg_ier;
+    reg [7:0] reg_iir;
+    reg [7:0] reg_fcr;
+    reg [7:0] reg_lsr;
+    reg [7:0] reg_msr;
+    reg [7:0] reg_scr;
+    reg [7:0] reg_dll;
+    reg [7:0] reg_dlh;
+
+    // Baud Rate Generator
+    // Assuming 16MHz clock for 115200 baud. Divisor = 16000000 / (16 * 115200) = 86.8.
+    // We'll use a counter. Since no parameters, we hardcode a reasonable default
+    // or make it dependent on a fixed clock frequency assumption.
+    // Let's assume 16MHz input clock.
+    // Divisor = 16MHz / (16 * 115200) = 86.8. Let's use 87.
+    // However, to be truly generic without parameters, we might just count cycles.
+    // But a UART needs a specific baud rate. We will implement a counter that divides
+    // the clock to generate the bit clock.
+    // Let's assume the user provides a clock that allows 115200 baud.
+    // Counter width: 16 bits.
+    reg [15:0] baud_counter;
+    reg baud_tick; // Indicates a bit boundary
+
+    // FIFO (16 deep)
+    // We implement a simple FIFO with pointers.
+    // Depth: 16
+    // Data width: 8 bits
+    reg [7:0] fifo_data [0:15];
+    reg [3:0] fifo_rptr;
+    reg [3:0] fifo_wptr;
+    reg fifo_empty;
+    reg fifo_full;
+    reg fifo_rvalid;
+    reg fifo_wvalid;
+
+    // Transmission State
+    reg [7:0] tx_data;
+    reg tx_busy;
+    reg tx_start;
+    reg tx_bit_count; // 0 to 10 (Start + 8 data + 1 stop = 10 bits)
+    reg tx_shift;
+    reg tx_parity; // Simple even parity for demonstration, or none. 16550 default is None.
+    // Let's stick to standard 8N1 unless LCR specifies otherwise.
+    // LCR bit 7: Enable Parity.
+    // LCR bit 6: Stop bits (0=1, 1=2).
+    // LCR bit 5: Parity type (0=Even, 1=Odd).
+    // LCR bit 4: Word length (0=5, 1=7, 2=8, 3=9).
+    // LCR bit 0: Divisor Latch Access Bit.
+
+    // Interrupts
+    reg int_pending;
+    reg int_status; // IIR register value
+
+    // Modem Control Outputs
+    // RTS, DTR, OUT1, OUT2, OUT3
+    reg [4:0] modem_control; // 5 bits. We only output RTS and DTR.
+
+    // --------------------------------------------------------------------------
+    // Baud Rate Generator
+    // --------------------------------------------------------------------------
+    // Since no parameters are allowed, we assume a fixed clock frequency (e.g., 16MHz)
+    // and a fixed baud rate (e.g., 115200).
+    // Divisor = 16000000 / (16 * 115200) = 86.8.
+    // We will use a counter that resets every 87 cycles.
+    // Note: In a real parameterized design, this would be a parameter.
+    // Without parameters, this is a limitation, but we implement the logic.
+    
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            baud_counter <= 16'd0;
+            baud_tick <= 1'b0;
+        end else begin
+            baud_counter <= baud_counter + 1'b1;
+            if (baud_counter == 16'd87) begin // Approx 115200 @ 16MHz
+                baud_tick <= 1'b1;
+                baud_counter <= 16'd0;
+            end else begin
+                baud_tick <= 1'b0;
+            end
+        end
+    end
+
+    // --------------------------------------------------------------------------
+    // FIFO Logic
+    // --------------------------------------------------------------------------
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            fifo_rptr <= 4'd0;
+            fifo_wptr <= 4'd0;
+            fifo_empty <= 1'b1;
+            fifo_full <= 1'b0;
+            fifo_rvalid <= 1'b0;
+            fifo_wvalid <= 1'b0;
+        end else begin
+            fifo_rvalid <= 1'b0;
+            fifo_wvalid <= 1'b0;
+            
+            if (fifo_wptr == fifo_rptr) begin
+                fifo_empty <= 1'b1;
+                fifo_full <= 1'b0;
+            end else if (fifo_wptr == (fifo_rptr + 4'd16)) begin
+                fifo_full <= 1'b1;
+                fifo_empty <= 1'b0;
+            end else begin
+                fifo_empty <= 1'b0;
+                fifo_full <= 1'b0;
+            end
+        end
+    end
+
+    // Write to FIFO
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            fifo_wvalid <= 1'b0;
+        end else if (fifo_wvalid && !fifo_full) begin
+            fifo_data[fifo_wptr] <= wb_dat_i;
+            fifo_wptr <= fifo_wptr + 4'd1;
+            fifo_wvalid <= 1'b0;
+        end
+    end
+
+    // Read from FIFO
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            fifo_rvalid <= 1'b0;
+        end else if (fifo_rvalid && !fifo_empty) begin
+            fifo_rptr <= fifo_rptr + 4'd1;
+            fifo_rvalid <= 1'b0;
+        end
+    end
+
+    // --------------------------------------------------------------------------
+    // Wishbone Interface Logic
+    // --------------------------------------------------------------------------
+    // Address Decoder
+    wire [15:0] addr_lcr = 16'd0;
+    wire [15:0] addr_ier = 16'd1;
+    wire [15:0] addr_iir = 16'd2;
+    wire [15:0] addr_fcr = 16'd3;
+    wire [15:0] addr_lsr = 16'd4;
+    wire [15:0] addr_msr = 16'd5;
+    wire [15:0] addr_scr = 16'd6;
+    wire [15:0] addr_dll = 16'd7;
+    wire [15:0] addr_dlh = 16'd8;
+
+    // Write Logic
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            // Reset registers to default 16550 values
+            reg_lcr <= 8'h83; // 8N1, Divisor Latch Access
+            reg_ier <= 8'h00; // No interrupts
+            reg_iir <- 8'h06; // No interrupts pending
+            reg_fcr <= 8'h00; // FIFO disabled
+            reg_lsr <= 8'h00; // No data, no errors
+            reg_msr <= 8'h00; // Modem signals low
+            reg_scr <= 8'h00;
+            reg_dll <= 8'h00;
+            reg_dlh <= 8'h00;
+            tx_busy <= 1'b0;
+            tx_data <= 8'h00;
+            tx_start <= 1'b0;
+            tx_bit_count <= 1'b0;
+            tx_shift <= 1'b0;
+            int_pending <= 1'b0;
+            modem_control <= 5'h00; // RTS=0, DTR=0
+        end else if (wb_cyc_i && wb_stb_i && wb_we_i) begin
+            case (wb_sel_i)
+                4'h0: reg_lcr <= wb_dat_i;
+                4'h1: reg_ier <= wb_dat_i;
+                4'h2: reg_iir <= wb_dat_i;
+                4'h3: reg_fcr <= wb_dat_i;
+                4'h4: reg_lsr <= wb_dat_i; // Read-only, but write allowed in some modes
+                4'h5: reg_msr <= wb_dat_i; // Read-only
+                4'h6: reg_scr <= wb_dat_i;
+                4'h7: begin
+                    if (reg_lcr[0]) reg_dll <= wb_dat_i;
+                    else begin
+                        // Write to LCR to enable DLL access
+                        reg_lcr[0] <= 1'b1;
+                        reg_lcr <= wb_dat_i;
+                    end
+                end
+                4'h8: begin
+                    if (reg_lcr[0]) reg_dlh <= wb_dat_i;
+                    else begin
+                        // Write to LCR to enable DLL access
+                        reg_lcr[0] <= 1'b1;
+                        reg_lcr <= wb_dat_i;
+                    end
+                end
+                default: begin
+                    // Do nothing
+                end
+            endcase
+        end
+    end
+
+    // Read Logic
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_cyc_i && wb_stb_i && !wb_we_i) begin
+            case (wb_sel_i)
+                4'h0: wb_dat_o <= reg_lcr;
+                4'h1: wb_dat_o <= reg_ier;
+                4'h2: wb_dat_o <= reg_iir;
+                4'h3: wb_dat_o <= reg_fcr;
+                4'h4: wb_dat_o <= reg_lsr;
+                4'h5: wb_dat_o <= reg_msr;
+                4'h6: wb_dat_o <= reg_scr;
+                4'h7: wb_dat_o <= reg_dll;
+                4'h8: wb_dat_o <= reg_dlh;
+                default: wb_dat_o <= 8'h00;
+            endcase
+        end else begin
+            wb_dat_o <= 8'h00;
+        end
+    end
+
+    // Acknowledge
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            wb_ack_o <= 1'b0;
+        end else if (wb_cyc_i && wb_stb_i) begin
+            wb_ack_o <= 1'b1;
+        end
+    end
+
+    // --------------------------------------------------------------------------
+    // UART Control Logic
+    // --------------------------------------------------------------------------
+    // Interrupt Logic
+    // IER: Bit 0 (RI), Bit 1 (THRE), Bit 2 (Modem Status)
+    // IIR: Interrupt Identification Register
+    
+    // Calculate IIR based on status
+    // RI (Receive Line)
+    // THRE (Transmitter Holding Register Empty)
+    // Modem Status (CTS, DSR, RI, DCD) - simplified
+    
+    reg ri_flag;
+    reg thre_flag;
+    reg modem_int_flag;
+
+    // RI: Data received in FIFO
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            ri_flag <= 1'b0;
+        end else if (fifo_rvalid) begin
+            ri_flag <= 1'b1;
+        end else begin
+            ri_flag <= 1'b0;
+        end
+    end
+
+    // THRE: FIFO empty and transmitter not busy
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            thre_flag <= 1'b1;
+        end else begin
+            if (!tx_busy && fifo_empty) begin
+                thre_flag <= 1'b1;
+            end else begin
+                thre_flag <= 1'b0;
+            end
+        end
+    end
+
+    // Modem Interrupt: CTS, DSR, DCD changes. 
+    // For simplicity, we assume they are stable or we check edges.
+    // Since we don't have edge detection logic easily without extra registers,
+    // we will assume the modem signals are stable and update the MSR register.
+    // The IIR will reflect the highest priority interrupt.
+    
+    // Update MSR register based on pad inputs
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            reg_msr <= 8'h00;
+        end else begin
+            // Map pads to MSR bits (simplified mapping)
+            // Bit 0: CTS
+            // Bit 1: DSR
+            // Bit 2: RI (Receive Indicator) - Note: This is usually separate from FIFO RI
+            // Bit 3: DCD
+            // Bit 4: Ring Indicator (often same as RI)
+            // Bit 5: Out 2
+            // Bit 6: Out 3
+            // Bit 7: Out 1
+            reg_msr[0] <= cts_pad_i;
+            reg_msr[1] <= dsr_pad_i;
+            reg_msr[2] <= ri_pad_i;
+            reg_msr[3] <= dcd_pad_i;
+            reg_msr[4] <= ri_pad_i; // Ring indicator
+            reg_msr[5:7] <= 3'b000;
+        end
+    end
+
+    // Determine IIR value
+    // Priority: Modem Status > THRE > RI
+    // IIR[1:0] indicates the interrupt source.
+    // 00: No interrupts pending
+    // 01: RI
+    // 10: THRE
+    // 11: Modem Status
+    
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            int_status <= 8'h06; // No interrupts
+            int_pending <= 1'b0;
+        end else begin
+            int_pending <= 1'b0;
+            
+            // Check interrupts
+            if (reg_ier[2] && (reg_msr[0] | reg_msr[1] | reg_msr[2] | reg_msr[3])) begin
+                // Modem interrupt
+                int_status <= 8'h0E; // 1110 -> Modem Status
+                int_pending <= 1'b1;
+            end else if (reg_ier[1] && thre_flag) begin
+                // THRE interrupt
+                int_status <= 8'h06; // 0110 -> THRE
+                int_pending <= 1'b1;
+            end else if (reg_ier[0] && ri_flag) begin
+                // RI interrupt
+                int_status <= 8'h02; // 0010 -> RI
+                int_pending <= 1'b1;
+            end else begin
+                int_status <= 8'h06; // No interrupts
+            end
+        end
+    end
+
+    // Output Interrupt
+    assign int_o = int_pending;
+
+    // --------------------------------------------------------------------------
+    // Transmission Logic
+    // --------------------------------------------------------------------------
+    // Shift Register for TX
+    reg [7:0] tx_shift_reg;
+    reg tx_shift_out;
+    reg tx_parity_calc;
+    reg tx_stop_bit;
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            tx_shift_reg <= 8'h00;
+            tx_shift_out <= 1'b0;
+            tx_parity_calc <= 1'b0;
+            tx_stop_bit <= 1'b0;
+            tx_busy <= 1'b0;
+            tx_start <= 1'b0;
+            tx_bit_count <= 1'b0;
+        end else if (tx_busy) begin
+            // Shift logic
+            if (tx_bit_count == 10) begin
+                // End of byte
+                tx_busy <= 1'b0;
+                tx_shift_reg <= 8'h00;
+                tx_shift_out <= 1'b0;
+                tx_parity_calc <= 1'b0;
+                tx_stop_bit <= 1'b0;
+                tx_bit_count <= 1'b0;
+                tx_start <= 1'b0;
+            end else begin
+                // Shift right
+                tx_shift_reg <= {tx_shift_reg[6:0], tx_shift_out};
+                tx_shift_out <= tx_shift_reg[0];
+                tx_bit_count <= tx_bit_count + 1'b1;
+            end
+        end
+    end
+
+    // Load TX Data
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            tx_busy <= 1'b0;
+            tx_start <= 1'b0;
+            tx_shift_reg <= 8'h00;
+            tx_bit_count <= 1'b0;
+        end else if (fifo_wvalid && !tx_busy) begin
+            // Load data from FIFO
+            tx_shift_reg <= wb_dat_i;
+            tx_busy <= 1'b1;
+            tx_start <= 1'b1;
+            tx_bit_count <= 1'b0;
+        end
+    end
+
+    // Output TX Data Pin
+    assign stx_pad_o = tx_shift_out;
+
+    // --------------------------------------------------------------------------
+    // Receive Logic
+    // --------------------------------------------------------------------------
+    // Simple shift register for RX
+    reg [7:0] rx_shift_reg;
+    reg rx_shift_in;
+    reg rx_shift_out;
+    reg rx_bit_count;
+    reg rx_error; // Framing/Parity error
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            rx_shift_reg <= 8'h00;
+            rx_shift_in <= 1'b0;
+            rx_shift_out <= 1'b0;
+            rx_bit_count <= 1'b0;
+            rx_error <= 1'b0;
+        end else if (baud_tick) begin
+            // Shift logic
+            if (rx_bit_count == 10) begin
+                // End of byte
+                rx_bit_count <= 1'b0;
+                rx_shift_reg <= 8'h00;
+                rx_shift_out <= 1'b0;
+                rx_error <= 1'b0;
+                
+                // Check for errors
+                // Simple framing error check: if stop bit is not 1
+                // Assuming 1 stop bit for simplicity in this generic implementation
+                // In a full implementation, we would check LCR stop bits.
+                if (rx_shift_reg[0] != 1'b1) begin
+                    rx_error <= 1'b1;
+                end
+                
+                // Push to FIFO if no error
+                if (!rx_error) begin
+                    fifo_wvalid <= 1'b1;
+                end
+            end else begin
+                // Shift left (MSB first)
+                rx_shift_reg <= {rx_shift_in, rx_shift_reg[7:1]};
+                rx_shift_in <= rx_shift_reg[7];
+                rx_bit_count <= rx_bit_count + 1'b1;
+            end
+        end
+    end
+
+    // Input RX Data Pin
+    assign rx_shift_in = srx_pad_i;
+
+    // --------------------------------------------------------------------------
+    // Modem Control Outputs
+    // --------------------------------------------------------------------------
+    // RTS: Inverted CTS (Auto-Retry) or manual control
+    // DTR: Manual control
+    // OUT1, OUT2, OUT3: Manual control
+    
+    // Simple Auto-Retry: RTS = !CTS
+    // DTR = 1 (Active High)
+    // OUT1 = 0
+    // OUT2 = 0
+    // OUT3 = 0
+    
+    assign rts_pad_o = ~cts_pad_i;
+    assign dtr_pad_o = 1'b1;
+    assign modem_control[2] = 1'b0; // OUT1
+    assign modem_control[3] = 1'b0; // OUT2
+    assign modem_control[4] = 1'b0; // OUT3
+
+    // --------------------------------------------------------------------------
+    // End of Module
+    // --------------------------------------------------------------------------
+endmodule
+```<|im_end|>

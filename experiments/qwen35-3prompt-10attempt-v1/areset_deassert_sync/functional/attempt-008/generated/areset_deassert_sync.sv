@@ -1,0 +1,36 @@
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    reg [CHAINS-1:0] rst_pipe;
+
+    always @(posedge clk or posedge async_rst_i) begin
+        if (RST_POL) begin
+            // Active-High Reset Logic
+            if (async_rst_i) begin
+                // Immediate assertion on the first stage
+                rst_pipe[0] <= 1'b1;
+            end else begin
+                // Shift register for deassertion synchronization
+                rst_pipe[0] <= rst_pipe[CHAINS-1];
+                rst_pipe[CHAINS-1] <= 1'b0;
+            end
+        end else begin
+            // Active-Low Reset Logic
+            if (!async_rst_i) begin
+                rst_pipe[0] <= 1'b1;
+            end else begin
+                rst_pipe[0] <= rst_pipe[CHAINS-1];
+                rst_pipe[CHAINS-1] <= 1'b0;
+            end
+        end
+    end
+
+    assign sync_rst_o = rst_pipe[0];
+
+endmodule<|im_end|>

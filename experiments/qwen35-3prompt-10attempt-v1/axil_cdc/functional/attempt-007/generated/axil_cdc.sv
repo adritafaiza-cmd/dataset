@@ -1,0 +1,358 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ------------------------------------------------------------------------
+    // Internal Signals
+    // ------------------------------------------------------------------------
+    wire [ADDR_WIDTH-1:0] s_awaddr, s_araddr;
+    wire [2:0]            s_awprot, s_arprot;
+    wire                  s_awvalid, s_arvalid;
+    wire                  s_wvalid;
+    wire [DATA_WIDTH-1:0] s_wdata;
+    wire [STRB_WIDTH-1:0] s_wstrb;
+    wire                  s_bvalid;
+    wire [1:0]            s_bresp;
+    wire                  s_rvalid;
+    wire [DATA_WIDTH-1:0] s_rdata;
+    wire [1:0]            s_rresp;
+
+    wire [ADDR_WIDTH-1:0] m_awaddr, m_araddr;
+    wire [2:0]            m_awprot, m_arprot;
+    wire                  m_awvalid, m_arvalid;
+    wire                  m_wvalid;
+    wire [DATA_WIDTH-1:0] m_wdata;
+    wire [STRB_WIDTH-1:0] m_wstrb;
+    wire                  m_bvalid;
+    wire [1:0]            m_bresp;
+    wire                  m_rvalid;
+    wire [DATA_WIDTH-1:0] m_rdata;
+    wire [1:0]            m_rresp;
+
+    // CDC Registers for Write Channel (Slave -> Master)
+    reg [ADDR_WIDTH-1:0] s2m_awaddr;
+    reg [2:0]            s2m_awprot;
+    reg                  s2m_awvalid;
+    reg                  s2m_wvalid;
+    reg [DATA_WIDTH-1:0] s2m_wdata;
+    reg [STRB_WIDTH-1:0] s2m_wstrb;
+    reg                  s2m_bvalid;
+    reg [1:0]            s2m_bresp;
+    reg                  s2m_rvalid;
+    reg [DATA_WIDTH-1:0] s2m_rdata;
+    reg [1:0]            s2m_rresp;
+
+    // CDC Registers for Read Channel (Slave -> Master)
+    reg [ADDR_WIDTH-1:0] s2m_araddr;
+    reg [2:0]            s2m_arprot;
+    reg                  s2m_arvalid;
+    reg                  s2m_rvalid;
+    reg [DATA_WIDTH-1:0] s2m_rdata;
+    reg [1:0]            s2m_rresp;
+
+    // CDC Registers for Write Channel (Master -> Slave)
+    reg [ADDR_WIDTH-1:0] m2s_awaddr;
+    reg [2:0]            m2s_awprot;
+    reg                  m2s_awvalid;
+    reg                  m2s_wvalid;
+    reg [DATA_WIDTH-1:0] m2s_wdata;
+    reg [STRB_WIDTH-1:0] m2s_wstrb;
+    reg                  m2s_bvalid;
+    reg [1:0]            m2s_bresp;
+
+    // CDC Registers for Read Channel (Master -> Slave)
+    reg [ADDR_WIDTH-1:0] m2s_araddr;
+    reg [2:0]            m2s_arprot;
+    reg                  m2s_arvalid;
+    reg                  m2s_rvalid;
+    reg [DATA_WIDTH-1:0] m2s_rdata;
+    reg [1:0]            m2s_rresp;
+
+    // ------------------------------------------------------------------------
+    // CDC Logic: Write Channel (Slave -> Master)
+    // ------------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s2m_awaddr    <= '0;
+            s2m_awprot    <= '0;
+            s2m_awvalid   <= 1'b0;
+            s2m_wvalid    <= 1'b0;
+            s2m_wdata     <= '0;
+            s2m_wstrb     <= '0;
+            s2m_bvalid    <= 1'b0;
+            s2m_bresp     <= '0;
+            s2m_rvalid    <= 1'b0;
+            s2m_rdata     <= '0;
+            s2m_rresp     <= '0;
+        end
+        else begin
+            // Address and Protocols
+            if (s_axil_awvalid && s_axil_awready) begin
+                s2m_awaddr    <= s_axil_awaddr;
+                s2m_awprot    <= s_axil_awprot;
+                s2m_awvalid   <= 1'b1;
+            end
+            else if (m_axil_awready) begin
+                s2m_awvalid   <= 1'b0;
+            end
+
+            // Write Data
+            if (s_axil_wvalid && s_axil_wready) begin
+                s2m_wvalid    <= 1'b1;
+                s2m_wdata     <= s_axil_wdata;
+                s2m_wstrb     <= s_axil_wstrb;
+            end
+            else if (m_axil_wready) begin
+                s2m_wvalid    <= 1'b0;
+            end
+
+            // Write Response
+            if (m_axil_bvalid && m_axil_bready) begin
+                s2m_bvalid    <= 1'b1;
+                s2m_bresp     <= m_axil_bresp;
+            end
+            else if (s_axil_bready) begin
+                s2m_bvalid    <= 1'b0;
+            end
+
+            // Read Response (Forwarding)
+            if (m_axil_rvalid && m_axil_rready) begin
+                s2m_rvalid    <= 1'b1;
+                s2m_rdata     <= m_axil_rdata;
+                s2m_rresp     <= m_axil_rresp;
+            end
+            else if (s_axil_rready) begin
+                s2m_rvalid    <= 1'b0;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------------
+    // CDC Logic: Read Channel (Slave -> Master)
+    // ------------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s2m_araddr    <= '0;
+            s2m_arprot    <= '0;
+            s2m_arvalid   <= 1'b0;
+            s2m_rvalid    <= 1'b0;
+            s2m_rdata     <= '0;
+            s2m_rresp     <= '0;
+        end
+        else begin
+            // Address and Protocols
+            if (s_axil_arvalid && s_axil_arready) begin
+                s2m_araddr    <= s_axil_araddr;
+                s2m_arprot    <= s_axil_arprot;
+                s2m_arvalid   <= 1'b1;
+            end
+            else if (m_axil_arready) begin
+                s2m_arvalid   <= 1'b0;
+            end
+
+            // Read Response
+            if (m_axil_rvalid && m_axil_rready) begin
+                s2m_rvalid    <= 1'b1;
+                s2m_rdata     <= m_axil_rdata;
+                s2m_rresp     <= m_axil_rresp;
+            end
+            else if (s_axil_rready) begin
+                s2m_rvalid    <= 1'b0;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------------
+    // CDC Logic: Write Channel (Master -> Slave)
+    // ------------------------------------------------------------------------
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m2s_awaddr    <= '0;
+            m2s_awprot    <= '0;
+            m2s_awvalid   <= 1'b0;
+            m2s_wvalid    <= 1'b0;
+            m2s_wdata     <= '0;
+            m2s_wstrb     <= '0;
+            m2s_bvalid    <= 1'b0;
+            m2s_bresp     <= '0;
+        end
+        else begin
+            // Address and Protocols
+            if (m_axil_awvalid && m_axil_awready) begin
+                m2s_awaddr    <= m_axil_awaddr;
+                m2s_awprot    <= m_axil_awprot;
+                m2s_awvalid   <= 1'b1;
+            end
+            else if (s_axil_awready) begin
+                m2s_awvalid   <= 1'b0;
+            end
+
+            // Write Data
+            if (m_axil_wvalid && m_axil_wready) begin
+                m2s_wvalid    <= 1'b1;
+                m2s_wdata     <= m_axil_wdata;
+                m2s_wstrb     <= m_axil_wstrb;
+            end
+            else if (s_axil_wready) begin
+                m2s_wvalid    <= 1'b0;
+            end
+
+            // Write Response
+            if (s_axil_bvalid && s_axil_bready) begin
+                m2s_bvalid    <= 1'b1;
+                m2s_bresp     <= s_axil_bresp;
+            end
+            else if (m_axil_bready) begin
+                m2s_bvalid    <= 1'b0;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------------
+    // CDC Logic: Read Channel (Master -> Slave)
+    // ------------------------------------------------------------------------
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m2s_araddr    <= '0;
+            m2s_arprot    <= '0;
+            m2s_arvalid   <= 1'b0;
+            m2s_rvalid    <= 1'b0;
+            m2s_rdata     <= '0;
+            m2s_rresp     <= '0;
+        end
+        else begin
+            // Address and Protocols
+            if (m_axil_arvalid && m_axil_arready) begin
+                m2s_araddr    <= m_axil_araddr;
+                m2s_arprot    <= m_axil_arprot;
+                m2s_arvalid   <= 1'b1;
+            end
+            else if (s_axil_arready) begin
+                m2s_arvalid   <= 1'b0;
+            end
+
+            // Read Response
+            if (s_axil_rvalid && s_axil_rready) begin
+                m2s_rvalid    <= 1'b1;
+                m2s_rdata     <= s_axil_rdata;
+                m2s_rresp     <= s_axil_rresp;
+            end
+            else if (m_axil_rready) begin
+                m2s_rvalid    <= 1'b0;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------------
+    // Output Assignments
+    // ------------------------------------------------------------------------
+    assign s_axil_awready = m_axil_awready;
+    assign s_axil_wready  = m_axil_wready;
+    assign s_axil_bresp   = m2s_bresp;
+    assign s_axil_bvalid  = m2s_bvalid;
+    assign s_axil_arready = m_axil_arready;
+    assign s_axil_rdata   = m2s_rdata;
+    assign s_axil_rresp   = m2s_rresp;
+    assign s_axil_rvalid  = m2s_rvalid;
+
+    assign m_axil_awaddr  = s2m_awaddr;
+    assign m_axil_awprot  = s2m_awprot;
+    assign m_axil_awvalid = s2m_awvalid;
+    assign m_axil_wdata   = s2m_wdata;
+    assign m_axil_wstrb   = s2m_wstrb;
+    assign m_axil_wvalid  = s2m_wvalid;
+    assign m_axil_bready  = s2m_bready; // Note: Input port in spec, but logic drives it? 
+    // Correction based on spec: m_axil_bready is an OUTPUT port in the module definition provided.
+    // Wait, looking at the provided module header:
+    // input  wire                   m_axil_bresp,
+    // input  wire                   m_axil_bvalid,
+    // output wire                   m_axil_bready,
+    // So m_axil_bready is an output. The CDC logic above sets s2m_bvalid.
+    // The handshake happens when s2m_bvalid is high and m_axil_bready is high.
+    // We need to drive m_axil_bready based on s2m_bvalid and m_axil_bready?
+    // No, standard CDC: If we have data ready (s2m_bvalid), we assert our ready (m_axil_bready).
+    // But wait, the spec says "Forward each accepted transaction exactly once".
+    // If m_axil_bready is low, we cannot forward. We must wait.
+    // So m_axil_bready should be asserted when s2m_bvalid is high AND we are not in reset.
+    // However, the CDC register s2m_bvalid holds the data.
+    // The output m_axil_bready should be driven by s2m_bvalid.
+    // Let's re-verify the port direction in the prompt.
+    // Prompt: output wire                   m_axil_bready,
+    // Yes, it is an output.
+    // Logic: m_axil_bready = s2m_bvalid;
+    
+    assign m_axil_araddr  = s2m_araddr;
+    assign m_axil_arprot  = s2m_arprot;
+    assign m_axil_arvalid = s2m_arvalid;
+    assign m_axil_rdata   = s2m_rdata;
+    assign m_axil_rresp   = s2m_rresp;
+    assign m_axil_rvalid  = s2m_rvalid;
+
+    // Drive m_axil_bready based on the CDC register holding the response
+    assign m_axil_bready  = s2m_bvalid;
+
+    // Drive s_axil_bready based on the CDC register holding the response from master
+    assign s_axil_bready  = m2s_bvalid;
+
+    // Drive m_axil_rready based on the CDC register holding the response
+    assign m_axil_rready  = s2m_rvalid;
+
+    // Drive s_axil_rready based on the CDC register holding the response from master
+    assign s_axil_rready  = m2s_rvalid;
+
+endmodule
+```<|im_end|>

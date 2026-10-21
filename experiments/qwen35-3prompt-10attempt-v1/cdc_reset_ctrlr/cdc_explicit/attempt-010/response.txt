@@ -1,0 +1,237 @@
+```verilog
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  wire a_clk_i,
+    input  wire a_rst_ni,
+    input  wire a_clear_i,
+    output reg  a_clear_o,
+    input  wire a_clear_ack_i,
+    output reg  a_isolate_o,
+    input  wire a_isolate_ack_i,
+    input  wire b_clk_i,
+    input  wire b_rst_ni,
+    input  wire b_clear_i,
+    output reg  b_clear_o,
+    input  wire b_clear_ack_i,
+    output reg  b_isolate_o,
+    input  wire b_isolate_ack_i
+);
+
+    localparam STATE_IDLE = 2'b00;
+    localparam STATE_ISOLATING = 2'b01;
+    localparam STATE_CLEARING = 2'b10;
+    localparam STATE_DONE = 2'b11;
+
+    // State machine for the control logic (synchronous to a_clk_i)
+    reg [1:0] state_a;
+    reg [1:0] state_b;
+    
+    // Handshake signals for the state machine
+    reg a_req_clear;
+    reg a_req_isolate;
+    reg a_req_clear_ack;
+    reg a_req_isolate_ack;
+    
+    reg b_req_clear;
+    reg b_req_isolate;
+    reg b_req_clear_ack;
+    reg b_req_isolate_ack;
+
+    // Synchronizers for inputs crossing from b to a
+    reg [SYNC_STAGES-1:0] b_sync_clear;
+    reg [SYNC_STAGES-1:0] b_sync_isolate;
+    reg [SYNC_STAGES-1:0] b_sync_clear_ack;
+    reg [SYNC_STAGES-1:0] b_sync_isolate_ack;
+
+    // Synchronizers for inputs crossing from a to b
+    reg [SYNC_STAGES-1:0] a_sync_clear;
+    reg [SYNC_STAGES-1:0] a_sync_isolate;
+    reg [SYNC_STAGES-1:0] a_sync_clear_ack;
+    reg [SYNC_STAGES-1:0] a_sync_isolate_ack;
+
+    // State machine logic for Domain A
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            state_a <= STATE_IDLE;
+            a_clear_o <= 1'b0;
+            a_isolate_o <= 1'b0;
+        end else begin
+            case (state_a)
+                STATE_IDLE: begin
+                    if (a_clear_i) begin
+                        // Request isolation first
+                        a_req_isolate <= 1'b1;
+                        a_req_clear <= 1'b0;
+                    end
+                end
+                STATE_ISOLATING: begin
+                    // Wait for peer isolation ack and local isolation ack
+                    if (a_req_isolate && a_isolate_ack_i && b_sync_isolate_ack[0]) begin
+                        // Move to clearing state
+                        a_req_isolate <= 1'b0;
+                        a_req_clear <= 1'b1;
+                    end
+                end
+                STATE_CLEARING: begin
+                    // Wait for peer clear ack and local clear ack
+                    if (a_req_clear && a_clear_ack_i && b_sync_clear_ack[0]) begin
+                        // Move to done state
+                        a_req_clear <= 1'b0;
+                        a_req_isolate <= 1'b0;
+                        a_clear_o <= 1'b0;
+                        a_isolate_o <= 1'b0;
+                        state_a <= STATE_IDLE;
+                    end
+                end
+                STATE_DONE: begin
+                    // Stay idle
+                end
+            endcase
+        end
+    end
+
+    // State machine logic for Domain B
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            state_b <= STATE_IDLE;
+            b_clear_o <= 1'b0;
+            b_isolate_o <= 1'b0;
+        end else begin
+            case (state_b)
+                STATE_IDLE: begin
+                    if (b_clear_i) begin
+                        // Request isolation first
+                        b_req_isolate <= 1'b1;
+                        b_req_clear <= 1'b0;
+                    end
+                end
+                STATE_ISOLATING: begin
+                    // Wait for peer isolation ack and local isolation ack
+                    if (b_req_isolate && b_isolate_ack_i && a_sync_isolate_ack[0]) begin
+                        // Move to clearing state
+                        b_req_isolate <= 1'b0;
+                        b_req_clear <= 1'b1;
+                    end
+                end
+                STATE_CLEARING: begin
+                    // Wait for peer clear ack and local clear ack
+                    if (b_req_clear && b_clear_ack_i && a_sync_clear_ack[0]) begin
+                        // Move to done state
+                        b_req_clear <= 1'b0;
+                        b_req_isolate <= 1'b0;
+                        b_clear_o <= 1'b0;
+                        b_isolate_o <= 1'b0;
+                        state_b <= STATE_IDLE;
+                    end
+                end
+                STATE_DONE: begin
+                    // Stay idle
+                end
+            endcase
+        end
+    end
+
+    // Output logic for Domain A
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            a_clear_o <= 1'b0;
+            a_isolate_o <= 1'b0;
+        end else begin
+            if (state_a == STATE_ISOLATING) begin
+                a_isolate_o <= 1'b1;
+            end else if (state_a == STATE_CLEARING) begin
+                a_clear_o <= 1'b1;
+                a_isolate_o <= 1'b1;
+            end else begin
+                a_clear_o <= 1'b0;
+                a_isolate_o <= 1'b0;
+            end
+        end
+    end
+
+    // Output logic for Domain B
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            b_clear_o <= 1'b0;
+            b_isolate_o <= 1'b0;
+        end else begin
+            if (state_b == STATE_ISOLATING) begin
+                b_isolate_o <= 1'b1;
+            end else if (state_b == STATE_CLEARING) begin
+                b_clear_o <= 1'b1;
+                b_isolate_o <= 1'b1;
+            end else begin
+                b_clear_o <= 1'b0;
+                b_isolate_o <= 1'b0;
+            end
+        end
+    end
+
+    // Synchronizers: b -> a
+    genvar i;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : sync_b_to_a
+            reg sync_reg;
+            if (i == 0)
+                sync_reg = b_clear_i;
+            else
+                sync_reg = sync_reg_prev[i-1];
+            
+            always @(posedge a_clk_i or negedge a_rst_ni) begin
+                if (!a_rst_ni)
+                    sync_reg <= 1'b0;
+                else
+                    sync_reg <= sync_reg_prev[i-1];
+            end
+        end
+    endgenerate
+
+    // Re-implementing the sync chain properly with registers
+    reg [SYNC_STAGES-1:0] b_sync_clear_reg;
+    reg [SYNC_STAGES-1:0] b_sync_isolate_reg;
+    reg [SYNC_STAGES-1:0] b_sync_clear_ack_reg;
+    reg [SYNC_STAGES-1:0] b_sync_isolate_ack_reg;
+
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            b_sync_clear_reg <= {SYNC_STAGES{1'b0}};
+            b_sync_isolate_reg <= {SYNC_STAGES{1'b0}};
+            b_sync_clear_ack_reg <= {SYNC_STAGES{1'b0}};
+            b_sync_isolate_ack_reg <= {SYNC_STAGES{1'b0}};
+        end else begin
+            b_sync_clear_reg <= {b_sync_clear_reg[SYNC_STAGES-1:1], b_clear_i};
+            b_sync_isolate_reg <= {b_sync_isolate_reg[SYNC_STAGES-1:1], b_isolate_o}; // Wait for output
+            b_sync_clear_ack_reg <= {b_sync_clear_ack_reg[SYNC_STAGES-1:1], b_clear_ack_i};
+            b_sync_isolate_ack_reg <= {b_sync_isolate_ack_reg[SYNC_STAGES-1:1], b_isolate_ack_i};
+        end
+    end
+
+    // Synchronizers: a -> b
+    reg [SYNC_STAGES-1:0] a_sync_clear_reg;
+    reg [SYNC_STAGES-1:0] a_sync_isolate_reg;
+    reg [SYNC_STAGES-1:0] a_sync_clear_ack_reg;
+    reg [SYNC_STAGES-1:0] a_sync_isolate_ack_reg;
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            a_sync_clear_reg <= {SYNC_STAGES{1'b0}};
+            a_sync_isolate_reg <= {SYNC_STAGES{1'b0}};
+            a_sync_clear_ack_reg <= {SYNC_STAGES{1'b0}};
+            a_sync_isolate_ack_reg <= {SYNC_STAGES{1'b0}};
+        end else begin
+            a_sync_clear_reg <= {a_sync_clear_reg[SYNC_STAGES-1:1], a_clear_i};
+            a_sync_isolate_reg <= {a_sync_isolate_reg[SYNC_STAGES-1:1], a_isolate_o}; // Wait for output
+            a_sync_clear_ack_reg <= {a_sync_clear_ack_reg[SYNC_STAGES-1:1], a_clear_ack_i};
+            a_sync_isolate_ack_reg <= {a_sync_isolate_ack_reg[SYNC_STAGES-1:1], a_isolate_ack_i};
+        end
+    end
+
+    // Note: The state machines use the last stage of the synchronizer to detect the signal
+    // from the other domain.
+    // b_sync_clear[0] is the first stage, b_sync_clear[SYNC_STAGES-1] is the last.
+    // We use the last stage for the handshake condition.
+
+endmodule
+```<|im_end|>
+<|endoftext|>

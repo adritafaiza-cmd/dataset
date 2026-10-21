@@ -1,0 +1,312 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // Internal state registers
+    reg [N-1:0] shift_reg;
+    reg [N-1:0] shift_reg_next;
+    reg [N-1:0] do_data;
+    reg do_valid_next;
+    reg spi_sck_next;
+    reg spi_ssel_next;
+    reg spi_mosi_next;
+    reg di_req_next;
+    reg wr_ack_next;
+    reg do_valid_curr; // For capturing MISO during the shift cycle
+
+    // State machine for SPI timing
+    // States: IDLE, SELECT, SHIFT, DESELECT
+    localparam IDLE = 2'b00;
+    localparam SELECT = 2'b01;
+    localparam SHIFT = 2'b10;
+    localparam DESELECT = 2'b11;
+
+    reg [1:0] state;
+    reg [N-1:0] tx_data;
+    reg tx_valid;
+    reg tx_ready;
+    reg [N-1:0] rx_data;
+    reg rx_valid;
+    reg rx_ready;
+
+    // ========================================================================
+    // PCLK Domain: Data Interface Handshake
+    // ========================================================================
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            tx_data <= 0;
+            tx_valid <= 0;
+            tx_ready <= 0;
+            rx_data <= 0;
+            rx_valid <= 0;
+            rx_ready <= 0;
+            di_req_o <= 0;
+            wr_ack_o <= 0;
+            do_valid_o <= 0;
+            do_o <= 0;
+        end
+        else begin
+            // Write Request Logic
+            if (wren_i && tx_ready) begin
+                tx_data <= di_i;
+                tx_valid <= 1;
+                di_req_o <= 1;
+                wr_ack_o <= 0; // Acknowledge will happen after shift completes
+            end
+            else if (tx_valid && !tx_ready) begin
+                // Wait for shift to complete
+            end
+            else begin
+                tx_valid <= 0;
+                di_req_o <= 0;
+                wr_ack_o <= 1; // Acknowledge write once data is latched and shifting starts
+            end
+
+            // Read Data Logic
+            if (rx_valid && !rx_ready) begin
+                // Wait for shift to complete
+            end
+            else begin
+                rx_ready <= 1;
+                do_valid_o <= rx_valid;
+                do_o <= rx_data;
+            end
+        end
+    end
+
+    // ========================================================================
+    // SCLK Domain: SPI Timing and Shifting
+    // ========================================================================
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state <= IDLE;
+            shift_reg <= 0;
+            shift_reg_next <= 0;
+            do_data <= 0;
+            do_valid_next <= 0;
+            spi_sck_next <= 0;
+            spi_ssel_next <= 0;
+            spi_mosi_next <= 0;
+            di_req_next <= 0;
+            wr_ack_next <= 0;
+        end
+        else begin
+            // State Machine Logic
+            case (state)
+                IDLE: begin
+                    if (tx_valid) begin
+                        state <= SELECT;
+                        shift_reg <= tx_data;
+                        tx_valid <= 0;
+                        tx_ready <= 1;
+                        wr_ack_next <= 0; // Will be set in next cycle or handled via handshake
+                    end
+                    else begin
+                        state <= IDLE;
+                    end
+                end
+
+                SELECT: begin
+                    // Drive SSEL low, prepare to shift
+                    spi_ssel_next <= 1'b0;
+                    spi_sck_next <= 1'b0;
+                    spi_mosi_next <= 1'b0;
+                    shift_reg_next <= shift_reg;
+                    do_data <= shift_reg;
+                    do_valid_next <= 0;
+                    di_req_next <= 0;
+                    wr_ack_next <= 1; // Acknowledge write completion
+                    state <= SHIFT;
+                end
+
+                SHIFT: begin
+                    spi_ssel_next <= 1'b0;
+                    spi_sck_next <= 1'b1;
+                    spi_mosi_next <= shift_reg[N-1]; // MSB first
+                    do_data <= {spi_miso_i, do_data[N-1:N-1]}; // Shift in MISO
+                    do_valid_next <= 1;
+                    di_req_next <= 0;
+                    wr_ack_next <= 1;
+
+                    // Check if shift is complete
+                    if (SPI_2X_CLK_DIV == 2) begin
+                        // Standard SPI: 1 bit per clock edge (rising edge of sclk)
+                        // We shift on every rising edge.
+                        // To shift N bits, we need N clock cycles.
+                        // However, the requirement says "Shift the word out... with spi_sck_o".
+                        // Usually, we shift out N bits.
+                        // Let's assume standard SPI: 1 bit per rising edge of SCLK.
+                        // We need to count N clocks.
+                        // Since we are in a simple FSM without a counter in the case statement,
+                        // we can use a counter or check if we need to de-select.
+                        // Given the simplicity, let's assume we shift N bits then de-select.
+                        // But we need a counter. Let's add a counter variable.
+                        // Wait, the prompt asks for a specific behavior.
+                        // "Shift the word out on spi_mosi_o with spi_sck_o and spi_ssel_o."
+                        // "Capture spi_miso_i and present it on do_o with do_valid_o."
+                        // "di_req_o requests the next word."
+                        // "After reset, selects are inactive and outputs are idle."
+                        
+                        // To implement the shift count, we need a counter.
+                        // Let's refactor the logic to include a counter.
+                        state <= SHIFT; // Stay in shift for N cycles
+                    end
+                    else begin
+                        // If SPI_2X_CLK_DIV is used, it might imply shifting 2 bits per clock or similar.
+                        // But the parameter name suggests a divider.
+                        // Let's assume standard behavior: 1 bit per clock cycle for simplicity unless specified otherwise.
+                        // If the parameter implies speed, we might need to adjust the counter logic.
+                        // For now, we assume 1 bit per rising edge of sclk.
+                        state <= SHIFT;
+                    end
+                end
+
+                DESELECT: begin
+                    spi_ssel_next <= 1'b1;
+                    spi_sck_next <= 1'b0;
+                    spi_mosi_next <= 1'b0;
+                    do_valid_next <= 0;
+                    state <= IDLE;
+                end
+            endcase
+
+            // Counter Logic for Shifting
+            // We need to know when to transition from SHIFT to DESELECT.
+            // Since the state machine above doesn't have a counter, we need to add one.
+            // Let's restructure the SCLK logic to include a counter.
+            
+            // Re-evaluating the SCLK logic structure to include a counter
+            // The previous case statement was incomplete without a counter.
+            // Let's rewrite the SCLK block properly.
+        end
+    end
+
+    // Corrected SCLK Domain Logic with Counter
+    reg [N-1:0] shift_count;
+    reg [N-1:0] shift_count_next;
+    reg shift_done;
+    reg shift_done_next;
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            shift_count <= 0;
+            shift_done <= 0;
+            shift_count_next <= 0;
+            shift_done_next <= 0;
+            spi_ssel_o <= 1'b1;
+            spi_sck_o <= 1'b0;
+            spi_mosi_o <= 1'b0;
+            di_req_o <= 0;
+            wr_ack_o <= 0;
+            do_valid_o <= 0;
+            do_o <= 0;
+        end
+        else begin
+            // State Machine
+            if (shift_done) begin
+                // IDLE state logic
+                if (tx_valid) begin
+                    shift_count <= 0;
+                    shift_done <= 0;
+                    shift_count_next <= 0;
+                    shift_done_next <= 0;
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o <= 1'b0;
+                    spi_mosi_o <= 1'b0;
+                    di_req_o <= 1;
+                    wr_ack_o <= 0;
+                    do_valid_o <= 0;
+                    do_o <= 0;
+                end
+                else begin
+                    // Idle
+                    spi_ssel_o <= 1'b1;
+                    spi_sck_o <= 1'b0;
+                    spi_mosi_o <= 1'b0;
+                    di_req_o <= 0;
+                    wr_ack_o <= 0;
+                    do_valid_o <= 0;
+                    do_o <= 0;
+                end
+            end
+            else begin
+                // SELECT state (first cycle of shift)
+                if (shift_count == 0) begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o <= 1'b0;
+                    spi_mosi_o <= 1'b0;
+                    di_req_o <= 0;
+                    wr_ack_o <= 1; // Acknowledge write start
+                    do_valid_o <= 0;
+                    do_o <= 0;
+                    shift_count_next <= 1;
+                    shift_done_next <= 0;
+                end
+                else begin
+                    // SHIFT state
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o <= 1'b1;
+                    spi_mosi_o <= shift_reg[N-1];
+                    do_valid_o <= 1;
+                    do_o <= {spi_miso_i, do_o[N-1:N-1]}; // Shift in MISO
+                    di_req_o <= 0;
+                    wr_ack_o <= 1;
+                    
+                    shift_count_next <= shift_count + 1;
+                    
+                    // Check if shift is complete
+                    if (shift_count == N-1) begin
+                        shift_done_next <= 1;
+                    end
+                    else begin
+                        shift_done_next <= 0;
+                    end
+                end
+            end
+        end
+    end
+
+    // Data Shifting Logic
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            shift_reg <= 0;
+        end
+        else begin
+            // Shift register updates on the rising edge of sclk
+            // Only update if we are in the SHIFT phase (shift_count < N)
+            if (shift_count < N) begin
+                shift_reg <= {spi_miso_i, shift_reg[N-1:1]};
+            end
+            else begin
+                shift_reg <= shift_reg;
+            end
+        end
+    end
+
+    // Output Assignments
+    assign spi_ssel_o = shift_done ? 1'b1 : (shift_count == 0 ? 1'b0 : 1'b0);
+    assign spi_sck_o = shift_done ? 1'b0 : (shift_count == 0 ? 1'b0 : 1'b1);
+    assign spi_mosi_o = shift_done ? 1'b0 : (shift_count == 0 ? 1'b0 : shift_reg[N-1]);
+    assign di_req_o = shift_done && tx_valid;
+    assign wr_ack_o = shift_done;
+    assign do_valid_o = shift_done;
+    assign do_o = shift_reg;
+
+endmodule
+```<|im_end|>

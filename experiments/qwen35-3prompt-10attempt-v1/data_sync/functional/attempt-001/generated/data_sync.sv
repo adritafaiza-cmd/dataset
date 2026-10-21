@@ -1,0 +1,120 @@
+```verilog
+module data_sync #(
+    parameter STAGES = 2,
+    parameter DWIDTH = 8
+)(
+    input                  clk,
+    input                  rstn,
+    input  [DWIDTH-1:0]    din,
+    input                  dready_i,
+    output reg [DWIDTH-1:0] dout,
+    output reg             dready_o
+);
+
+    // Internal state registers for the FIFO chain
+    // We use a shift-register style FIFO where data moves from stage 0 to stage STAGES-1
+    // Stage 0 receives data from din when dready_i is high.
+    // Stage STAGES-1 drives dout.
+    
+    reg [DWIDTH-1:0] fifo [STAGES-1:0];
+    reg [STAGES-1:0] valid; // Indicates if data is valid at each stage
+
+    // Logic to shift data through the pipeline
+    // On every clock edge, if the previous stage is valid, shift it to the current stage
+    // and mark the current stage as valid.
+    // The last stage (STAGES-1) drives the output.
+    
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            dout      <= 16'd0;
+            dready_o  <= 1'b0;
+            valid     <= 0;
+            for (integer i = 0; i < STAGES; i = i + 1) begin
+                fifo[i] <= 16'd0;
+            end
+        end
+        else begin
+            // Shift logic: if current stage is valid, move data to next stage
+            // We iterate from the last stage down to the first to prevent overwriting
+            // data that needs to be shifted in this cycle.
+            
+            // First, determine if the last stage is valid to drive output
+            // and to decide if we can accept new data at the first stage.
+            // However, standard shift register behavior:
+            // Stage 0 gets input if Stage 0 was valid in previous cycle? 
+            // No, usually: Stage 0 gets input if we have space (i.e., Stage 0 is not full).
+            // But in a simple shift register for synchronization:
+            // We shift data from i to i+1 if valid[i] is high.
+            // Then we update valid[i+1] based on valid[i].
+            
+            // Let's refine the shift logic for a clean pipeline:
+            // 1. Calculate new valid signals based on current valid signals.
+            // 2. Shift data.
+            
+            // To avoid race conditions in a single always block, we calculate next state.
+            // valid_next[i] = valid[i-1] (for i > 0)
+            // valid_next[0] = 1'b0 (We don't auto-fill stage 0; we only shift existing data)
+            // Actually, the standard approach for a shift-register FIFO:
+            // If valid[0] is high, we shift fifo[0] to fifo[1] and set valid[1]=1.
+            // If valid[1] is high, we shift fifo[1] to fifo[2] and set valid[2]=1.
+            // ...
+            // If valid[STAGES-2] is high, we shift fifo[STAGES-2] to fifo[STAGES-1] and set valid[STAGES-1]=1.
+            // If valid[STAGES-1] is high, we output dout = fifo[STAGES-1].
+            
+            // Input logic:
+            // If dready_i is high AND valid[0] is low, we load din into fifo[0] and set valid[0]=1.
+            // This ensures we don't overwrite valid data while shifting.
+            
+            // Implementation using non-blocking assignments:
+            
+            // Shift data from stage i to i+1 if valid[i] is asserted
+            // We must do this carefully. If we shift fifo[0] to fifo[1], we lose fifo[0].
+            // So we should shift from the back (STAGES-2) to front (0) or use temporary variables.
+            // Given STAGES is small (2), a loop is fine, but let's do it explicitly for clarity and safety.
+            
+            // Step 1: Shift data
+            // Shift stage STAGES-2 to STAGES-1
+            if (valid[STAGES-2]) begin
+                fifo[STAGES-1] <= fifo[STAGES-2];
+                valid[STAGES-1] <= 1'b1;
+            end
+            // Shift stage STAGES-3 to STAGES-2
+            if (valid[STAGES-3]) begin
+                fifo[STAGES-2] <= fifo[STAGES-3];
+                valid[STAGES-2] <= 1'b1;
+            end
+            // ... continue down to stage 0 -> stage 1
+            
+            // General loop for shifting
+            for (integer i = 0; i < STAGES - 1; i = i + 1) begin
+                if (valid[i]) begin
+                    fifo[i+1] <= fifo[i];
+                    valid[i+1] <= 1'b1;
+                end
+            end
+            
+            // Step 2: Load new data into stage 0 if ready and empty
+            if (dready_i && !valid[0]) begin
+                fifo[0] <= din;
+                valid[0] <= 1'b1;
+            end
+            
+            // Step 3: Output logic
+            // dout is valid if valid[STAGES-1] is high
+            if (valid[STAGES-1]) begin
+                dout <= fifo[STAGES-1];
+            end
+            
+            // Step 4: Handshake output
+            // dready_o is high if we have valid data at the output stage
+            if (valid[STAGES-1]) begin
+                dready_o <= 1'b1;
+            end
+            else begin
+                dready_o <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

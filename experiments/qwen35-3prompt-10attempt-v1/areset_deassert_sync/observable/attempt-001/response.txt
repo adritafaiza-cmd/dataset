@@ -1,0 +1,86 @@
+```verilog
+`timescale 1ns/1ps
+
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  wire        clk,
+    input  wire        async_rst_i,
+    output reg         sync_rst_o
+);
+
+    localparam DEASSERT_DEPTH = CHAINS;
+
+    // Internal state to track the deassertion process
+    // We use a counter-like approach where we count down from DEASSERT_DEPTH
+    // only when the reset is being released (going from asserted to deasserted).
+    
+    reg [DEASSERT_DEPTH-1:0] deassert_count;
+    reg                      rst_asserted;
+
+    // Determine the current asserted state based on polarity
+    // If RST_POL is 1, active high means async_rst_i == 1
+    // If RST_POL is 0, active low means async_rst_i == 0
+    wire rst_active = (RST_POL == 1'b1) ? async_rst_i : (~async_rst_i);
+
+    // Logic to detect the transition from asserted to deasserted
+    // We need to ensure the source reset has been stable in the deasserted state
+    // before we start counting down.
+    reg rst_was_active;
+    reg rst_is_releasing;
+
+    always @(posedge clk) begin
+        // Detect if reset was active in the previous cycle
+        rst_was_active <= rst_active;
+        
+        // Detect if reset is currently active
+        rst_is_releasing <= (rst_active && !rst_was_active);
+    end
+
+    // Logic to manage the deassertion counter
+    // When rst_is_releasing is high, we start counting down.
+    // Once count reaches 0, we allow the reset to be deasserted.
+    always @(posedge clk) begin
+        if (rst_is_releasing) begin
+            // Start counting down from DEASSERT_DEPTH
+            if (deassert_count == DEASSERT_DEPTH) begin
+                deassert_count <= DEASSERT_DEPTH - 1;
+            end else begin
+                deassert_count <= deassert_count - 1;
+            end
+        end else begin
+            // If not releasing, hold the current count
+            // This ensures we don't accidentally reset the counter if the signal glitches back
+            // However, for a clean release, we typically only count down once per transition.
+            // If the signal goes active again before count reaches 0, we should reset the counter.
+            if (rst_active) begin
+                deassert_count <= DEASSERT_DEPTH;
+            end
+        end
+    end
+
+    // Output logic
+    // If the counter has reached 0 (or never started if CHAINS=0), the reset is released.
+    // Otherwise, the reset remains asserted.
+    always @(posedge clk) begin
+        if (RST_POL == 1'b1) begin
+            // Active High Reset
+            if (deassert_count == 0) begin
+                sync_rst_o <= 1'b0;
+            end else begin
+                sync_rst_o <= 1'b1;
+            end
+        end else begin
+            // Active Low Reset
+            if (deassert_count == 0) begin
+                sync_rst_o <= 1'b1;
+            end else begin
+                sync_rst_o <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

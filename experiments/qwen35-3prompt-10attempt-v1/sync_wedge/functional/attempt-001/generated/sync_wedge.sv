@@ -1,0 +1,53 @@
+module sync_wedge #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+    wire sync_valid;
+
+    // Synchronizer chain
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+            sync_reg <= {STAGES{1'b0}};
+        else
+            sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+    end
+
+    // Valid signal indicates the last stage has settled
+    assign sync_valid = (sync_reg[STAGES-1] == serial_i);
+
+    // Edge detection logic on the synchronized data
+    reg prev_sync;
+    reg curr_sync;
+    wire rising_edge;
+    wire falling_edge;
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            prev_sync <= 1'b0;
+            curr_sync <= 1'b0;
+        end else begin
+            prev_sync <= curr_sync;
+            curr_sync <= sync_reg[STAGES-1];
+        end
+    end
+
+    assign rising_edge = (prev_sync == 1'b0) && (curr_sync == 1'b1);
+    assign falling_edge = (prev_sync == 1'b1) && (curr_sync == 1'b0);
+
+    // Output edge pulses (single cycle)
+    assign r_edge_o = (en_i && rising_edge);
+    assign f_edge_o = (en_i && falling_edge);
+
+    // Synchronized data output
+    assign serial_o = sync_reg[STAGES-1];
+
+endmodule<|im_end|>

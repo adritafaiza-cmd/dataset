@@ -1,0 +1,120 @@
+```verilog
+module apbslave #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH,
+	localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+) (
+	input	wire			PCLK, PRESETn,
+	input	wire			PSEL,
+	input	wire			PENABLE,
+	output	reg			PREADY,
+	input	wire		[AW-1:0]	PADDR,
+	input	wire			PWRITE,
+	input	wire		[DW-1:0]	PWDATA,
+	input	wire		[DW/8-1:0]	PWSTRB,
+	input	wire		[2:0]		PPROT,
+	output	reg		[DW-1:0]	PRDATA,
+	output	wire			PSLVERR
+);
+
+	localparam	NUM_BYTES = DW/8;
+	localparam	NUM_WORDS = 1; // Assuming single word access for simplicity in this generic model
+	localparam	ADDR_MASK = ~((1<<AW)-1);
+
+	reg	[AW-1:0]	ADDR_REG;
+	reg	[DW-1:0]	DATA_REG;
+	reg			STATE; // IDLE, SETUP, ACCESS
+	reg			TRANS_DONE;
+	reg			VALID;
+	reg			PROT_MATCH;
+
+	// State Machine
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			STATE <= IDLE;
+			PREADY <= 1'b1;
+			PRDATA <= 0;
+			PSLVERR <= 1'b0;
+			ADDR_REG <= 0;
+			DATA_REG <= 0;
+			TRANS_DONE <= 1'b0;
+			VALID <= 1'b0;
+			PROT_MATCH <= 1'b1;
+		end
+		else begin
+			case (STATE)
+				IDLE: begin
+					if (PSEL && PENABLE) begin
+						STATE <= SETUP;
+						ADDR_REG <= PADDR;
+						PROT_MATCH <= 1'b1; // Assume valid for now
+						VALID <= 1'b1;
+						PREADY <= 1'b0;
+					end
+					else begin
+						PREADY <= 1'b1;
+					end
+				end
+
+				SETUP: begin
+					if (PSEL && PENABLE) begin
+						STATE <= ACCESS;
+						PREADY <= 1'b0;
+					end
+					else begin
+						PREADY <= 1'b1;
+					end
+				end
+
+				ACCESS: begin
+					if (PSEL && PENABLE) begin
+						// Handle Write
+						if (PWRITE) begin
+							// Byte strobe handling
+							for (integer i = 0; i < NUM_BYTES; i = i + 1) begin
+								if (PWSTRB[i]) begin
+									DATA_REG[i*8 +: 8] <= PWDATA[i*8 +: 8];
+								end
+							end
+						end
+						// Handle Read (Data is loaded from register on read cycle)
+						else begin
+							// Data is already in DATA_REG from previous setup or initial state
+							// In a real implementation, you might have a separate read data register
+							// Here we assume DATA_REG holds the value to be read
+						end
+
+						TRANS_DONE <= 1'b1;
+						VALID <= 1'b0;
+						PREADY <= 1'b1;
+						STATE <= IDLE;
+					end
+					else begin
+						PREADY <= 1'b1;
+					end
+				end
+			endcase
+		end
+	end
+
+	// Output Logic
+	assign PSLVERR = (STATE == ACCESS && !PWRITE && !VALID) ? 1'b0 : 1'b0; // Simplified error logic
+	// In a robust design, PSLVERR would be asserted if PSEL goes low during ACCESS without TRANS_DONE
+	// or if address is invalid. For this basic model, we assume valid addresses.
+	// Correcting PSLVERR logic based on standard APB: Error if PSEL is low during ACCESS phase and TRANS_DONE is not set
+	// However, since we transition to IDLE immediately after TRANS_DONE, PSLVERR is typically 0 unless protocol violation.
+	// Let's assert error if PSEL is low while we are in ACCESS state and TRANS_DONE is not yet set (violation of setup time)
+	// But the FSM above handles the clock edge. A simpler approach for this specific request:
+	// Assert error if PSEL is low during the ACCESS phase (which shouldn't happen in correct usage)
+	// Or simply 0 for this basic implementation as no specific error conditions are modeled beyond protocol.
+	// Let's stick to 0 for this basic model as per "ordinary setup and access phases" requirement without complex error injection.
+	assign PSLVERR = 1'b0; 
+
+	// Read Data Output
+	assign PRDATA = DATA_REG;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

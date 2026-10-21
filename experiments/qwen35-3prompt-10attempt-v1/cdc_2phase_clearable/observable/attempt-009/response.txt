@@ -1,0 +1,440 @@
+```verilog
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // ------------------------------------------------------------------
+  // Source Side (src_clk_i)
+  // ------------------------------------------------------------------
+  // State Machine: IDLE, WAIT_CLEAR, TRANSFER, CLEAR_ACK
+  // 
+  // Logic:
+  // 1. Normal Handshake: src_valid & dst_ready -> transfer data, src_ready=1.
+  // 2. Clear Logic: 
+  //    - If src_clear_i is asserted, enter WAIT_CLEAR.
+  //    - In WAIT_CLEAR, wait for dst_clear_pending (crossed clear request).
+  //    - Once dst_clear_pending is seen, assert src_clear_pending to dst.
+  //    - After handshake (src_clear_pending & dst_clear), go to CLEAR_ACK.
+  //    - In CLEAR_ACK, force valid=0, ready=0 until clear handshake completes.
+  //    - Once clear handshake done, return to IDLE.
+  // 3. Data Buffering: Hold data in 'hold_data' during WAIT_CLEAR and CLEAR_ACK.
+
+  reg [WIDTH-1:0] hold_data;
+  reg src_valid_next;
+  reg src_ready_next;
+  reg src_clear_pending_next;
+  reg [2:0] src_state; // 0:IDLE, 1:WAIT_CLEAR, 2:TRANSFER, 3:CLEAR_ACK
+
+  // Crossed signals from Destination
+  wire dst_clear_pending_crossed;
+  wire dst_clear_crossed; // Used to detect the edge of dst_clear_i for state transition if needed, 
+                          // but primarily we react to dst_clear_pending_crossed.
+
+  // Crossed signals to Destination (Clear Pending)
+  wire src_clear_pending_crossed;
+
+  // ------------------------------------------------------------------
+  // CDC: src_clear_pending_o -> dst (Async)
+  // ------------------------------------------------------------------
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      src_clear_pending_crossed <= 1'b0;
+    else
+      src_clear_pending_crossed <= src_clear_pending_next;
+  end
+
+  // ------------------------------------------------------------------
+  // CDC: dst_clear_i -> src (Async)
+  // We need to detect the rising edge of dst_clear_i to trigger the clear sequence
+  // if we are in IDLE or WAIT_CLEAR.
+  // ------------------------------------------------------------------
+  reg dst_clear_edge;
+  reg dst_clear_edge_d1;
+  
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_clear_edge <= 1'b0;
+    else
+      dst_clear_edge <= dst_clear_i;
+  end
+
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_clear_edge_d1 <= 1'b0;
+    else
+      dst_clear_edge_d1 <= dst_clear_edge;
+  end
+
+  wire dst_clear_rising = dst_clear_edge && !dst_clear_edge_d1;
+
+  // ------------------------------------------------------------------
+  // Source State Logic
+  // ------------------------------------------------------------------
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      src_state <= 3'd0; // IDLE
+    else
+      src_state <= src_state_next;
+  end
+
+  assign src_clear_pending_next = (src_state == 3'd1) ? 1'b1 : (src_state == 3'd3) ? 1'b1 : 1'b0;
+
+  always_comb begin
+    src_valid_next = 1'b0;
+    src_ready_next = 1'b0;
+    src_state_next = src_state;
+    hold_data = (src_state == 3'd2) ? src_data_i : (src_state == 3'd1) ? hold_data : 1'b0;
+
+    case (src_state)
+      3'd0: begin // IDLE
+        if (src_clear_rising) begin
+          src_state_next = 3'd1; // Go to WAIT_CLEAR
+        end else if (src_valid_i && dst_ready_i) begin
+          src_valid_next = 1'b1;
+          src_ready_next = 1'b1;
+          src_state_next = 3'd2; // Go to TRANSFER
+        end
+      end
+
+      3'd1: begin // WAIT_CLEAR
+        // Wait for dst_clear_pending_crossed
+        if (dst_clear_pending_crossed) begin
+          src_clear_pending_next = 1'b1;
+          src_state_next = 3'd3; // Go to CLEAR_ACK
+        end
+        // Else stay in WAIT_CLEAR, holding data
+      end
+
+      3'd2: begin // TRANSFER
+        if (src_valid_i && dst_ready_i) begin
+          src_valid_next = 1'b1;
+          src_ready_next = 1'b1;
+          src_state_next = 3'd0; // Back to IDLE
+        end
+      end
+
+      3'd3: begin // CLEAR_ACK
+        // We have asserted src_clear_pending. Wait for dst_clear_pending_crossed (which is the ack).
+        // Note: dst_clear_pending_crossed is the signal from dst side indicating they received our clear request.
+        // However, the requirement says: "Each clear step reaches the other clock one handshake later."
+        // Sequence:
+        // 1. Src sees dst_clear -> Src asserts src_clear_pending.
+        // 2. Dst sees src_clear_pending -> Dst asserts dst_clear_pending (already done in dst logic).
+        // 3. Src sees dst_clear_pending -> Src deasserts src_clear_pending and returns to IDLE.
+        
+        if (dst_clear_pending_crossed) begin
+          src_clear_pending_next = 1'b0;
+          src_state_next = 3'd0; // Back to IDLE
+        end
+        // Else stay in CLEAR_ACK, holding data (which is the one being cleared)
+      end
+
+      default: begin
+        src_valid_next = 1'b0;
+        src_ready_next = 1'b0;
+        src_state_next = 3'd0;
+      end
+    endcase
+  end
+
+  assign src_ready_o = src_ready_next;
+  assign src_clear_pending_o = src_clear_pending_next;
+  assign dst_data_o = (src_state == 3'd2) ? src_data_i : 1'b0; // Only output during transfer
+  assign dst_valid_o = (src_state == 3'd2) ? src_valid_i : 1'b0;
+
+  // ------------------------------------------------------------------
+  // Destination Side (dst_clk_i)
+  // ------------------------------------------------------------------
+  // State Machine: IDLE, WAIT_CLEAR, TRANSFER, CLEAR_ACK
+  // 
+  // Logic:
+  // 1. Normal Handshake: dst_valid & src_ready -> accept data, dst_ready=1.
+  // 2. Clear Logic:
+  //    - If dst_clear_i is asserted, enter WAIT_CLEAR.
+  //    - In WAIT_CLEAR, wait for src_clear_pending (crossed clear request).
+  //    - Once src_clear_pending is seen, assert dst_clear_pending to src.
+  //    - After handshake (dst_clear_pending & src_clear_pending), go to CLEAR_ACK.
+  //    - In CLEAR_ACK, force valid=0, ready=0 until clear handshake completes.
+  //    - Once clear handshake done, return to IDLE.
+  // 3. Data Buffering: Hold data in 'hold_data' during WAIT_CLEAR and CLEAR_ACK.
+
+  reg [WIDTH-1:0] hold_data_dst;
+  reg dst_valid_next;
+  reg dst_ready_next;
+  reg dst_clear_pending_next;
+  reg [2:0] dst_state; // 0:IDLE, 1:WAIT_CLEAR, 2:TRANSFER, 3:CLEAR_ACK
+
+  // Crossed signals from Source
+  wire src_clear_pending_crossed; // Already defined above
+
+  // Crossed signals to Source (Clear Pending)
+  wire dst_clear_pending_crossed;
+
+  // ------------------------------------------------------------------
+  // CDC: dst_clear_pending_o -> src (Async)
+  // ------------------------------------------------------------------
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      dst_clear_pending_crossed <= 1'b0;
+    else
+      dst_clear_pending_crossed <= dst_clear_pending_next;
+  end
+
+  // ------------------------------------------------------------------
+  // CDC: src_clear_pending_i -> dst (Async)
+  // We need to detect the rising edge of src_clear_pending_i to trigger the clear sequence
+  // ------------------------------------------------------------------
+  reg src_clear_edge;
+  reg src_clear_edge_d1;
+  
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_clear_edge <= 1'b0;
+    else
+      src_clear_edge <= src_clear_pending_crossed;
+  end
+
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_clear_edge_d1 <= 1'b0;
+    else
+      src_clear_edge_d1 <= src_clear_edge;
+  end
+
+  wire src_clear_rising = src_clear_edge && !src_clear_edge_d1;
+
+  // ------------------------------------------------------------------
+  // Destination State Logic
+  // ------------------------------------------------------------------
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      dst_state <= 3'd0; // IDLE
+    else
+      dst_state <= dst_state_next;
+  end
+
+  assign dst_clear_pending_next = (dst_state == 3'd1) ? 1'b1 : (dst_state == 3'd3) ? 1'b1 : 1'b0;
+
+  always_comb begin
+    dst_valid_next = 1'b0;
+    dst_ready_next = 1'b0;
+    dst_state_next = dst_state;
+    hold_data_dst = (dst_state == 3'd2) ? src_data_i : (dst_state == 3'd1) ? hold_data_dst : 1'b0;
+
+    case (dst_state)
+      3'd0: begin // IDLE
+        if (dst_clear_rising) begin
+          dst_state_next = 3'd1; // Go to WAIT_CLEAR
+        end else if (dst_valid_i && src_ready_i) begin
+          dst_valid_next = 1'b1;
+          dst_ready_next = 1'b1;
+          dst_state_next = 3'd2; // Go to TRANSFER
+        end
+      end
+
+      3'd1: begin // WAIT_CLEAR
+        // Wait for src_clear_pending_crossed
+        if (src_clear_pending_crossed) begin
+          dst_clear_pending_next = 1'b1;
+          dst_state_next = 3'd3; // Go to CLEAR_ACK
+        end
+        // Else stay in WAIT_CLEAR, holding data
+      end
+
+      3'd2: begin // TRANSFER
+        if (dst_valid_i && src_ready_i) begin
+          dst_valid_next = 1'b1;
+          dst_ready_next = 1'b1;
+          dst_state_next = 3'd0; // Back to IDLE
+        end
+      end
+
+      3'd3: begin // CLEAR_ACK
+        // We have asserted dst_clear_pending. Wait for src_clear_pending_crossed (which is the ack).
+        // Sequence:
+        // 1. Dst sees src_clear -> Dst asserts dst_clear_pending.
+        // 2. Src sees dst_clear_pending -> Src asserts src_clear_pending (already done in src logic).
+        // 3. Dst sees src_clear_pending -> Dst deasserts dst_clear_pending and returns to IDLE.
+        
+        if (src_clear_pending_crossed) begin
+          dst_clear_pending_next = 1'b0;
+          dst_state_next = 3'd0; // Back to IDLE
+        end
+        // Else stay in CLEAR_ACK, holding data (which is the one being cleared)
+      end
+
+      default: begin
+        dst_valid_next = 1'b0;
+        dst_ready_next = 1'b0;
+        dst_state_next = 3'd0;
+      end
+    endcase
+  end
+
+  assign dst_data_o = (dst_state == 3'd2) ? src_data_i : 1'b0; // Only output during transfer
+  assign dst_valid_o = (dst_state == 3'd2) ? dst_valid_i : 1'b0;
+  assign dst_ready_o = dst_ready_next;
+  assign dst_clear_pending_o = dst_clear_pending_next;
+
+  // ------------------------------------------------------------------
+  // Reset Synchronization (Optional based on CLEAR_ON_ASYNC_RESET)
+  // If CLEAR_ON_ASYNC_RESET is 1, we treat async reset as a clear request.
+  // Since the module interface doesn't have a direct "async reset" input other than rst_ni,
+  // and rst_ni is synchronous to its own clock, we rely on the state machine logic.
+  // However, if the requirement implies that an async reset pulse should trigger clear,
+  // we would need to detect the reset pulse. But typically, rst_ni is the only reset.
+  // The prompt says "The resets are active-low".
+  // The state machine initializes to IDLE on reset.
+  // If CLEAR_ON_ASYNC_RESET is intended to mean "If reset is asserted, force clear logic",
+  // we can add logic to force state to WAIT_CLEAR or similar if reset is detected as a pulse.
+  // Given the standard interpretation of rst_ni, it's synchronous. 
+  // If the user meant "If the reset signal changes asynchronously", we would need a pulse detector.
+  // Assuming standard synchronous reset behavior for rst_ni, the state machine handles it.
+  // If CLEAR_ON_ASYNC_RESET is meant to force a clear sequence upon reset assertion:
+  // We can modify the state machine to go to WAIT_CLEAR immediately if rst_ni is low.
+  // But the prompt says "Clear isolates both ends...". 
+  // Let's interpret CLEAR_ON_ASYNC_RESET as: If the reset signal is asserted (low), 
+  // it should behave like a clear request.
+  // Since rst_ni is per-clock domain, we can't easily detect an "async" pulse across domains without extra logic.
+  // However, if we assume the reset is a global signal or we just want to ensure clean state:
+  // The current design resets to IDLE. 
+  // To strictly follow "CLEAR_ON_ASYNC_RESET", we might need to detect if rst_ni was low and then force clear.
+  // But without a global reset signal, this is ambiguous. 
+  // Standard practice: rst_ni is the reset. If CLEAR_ON_ASYNC_RESET is 1, perhaps it means 
+  // "Ensure that if a reset occurs, the channel is cleared". 
+  // Since we don't have a cross-domain reset signal, we will assume the state machine 
+  // initialization is sufficient, OR we can add logic to force WAIT_CLEAR if rst_ni is low 
+  // at the start of the clock cycle (treating the reset assertion as a clear trigger).
+  
+  // Let's refine the state machine to handle CLEAR_ON_ASYNC_RESET:
+  // If CLEAR_ON_ASYNC_RESET is 1, and rst_ni is low, we force the state to WAIT_CLEAR 
+  // (effectively treating the reset as a clear request).
+  // This ensures that if a reset happens, the channel is flushed.
+  
+  // Re-evaluating the state machine logic for CLEAR_ON_ASYNC_RESET:
+  // In the 'always_comb' for src_state_next and dst_state_next:
+  // If CLEAR_ON_ASYNC_RESET is 1 and rst_ni is low, force state to WAIT_CLEAR.
+  // This way, the reset acts as a clear request.
+
+  // Update Source State Logic
+  always_comb begin
+    src_valid_next = 1'b0;
+    src_ready_next = 1'b0;
+    src_state_next = src_state;
+    hold_data = (src_state == 3'd2) ? src_data_i : (src_state == 3'd1) ? hold_data : 1'b0;
+
+    if (CLEAR_ON_ASYNC_RESET && !src_rst_ni) begin
+      src_state_next = 3'd1; // Force WAIT_CLEAR on reset
+    end
+    else case (src_state)
+      3'd0: begin // IDLE
+        if (src_clear_rising) begin
+          src_state_next = 3'd1; // Go to WAIT_CLEAR
+        end else if (src_valid_i && dst_ready_i) begin
+          src_valid_next = 1'b1;
+          src_ready_next = 1'b1;
+          src_state_next = 3'd2; // Go to TRANSFER
+        end
+      end
+
+      3'd1: begin // WAIT_CLEAR
+        if (dst_clear_pending_crossed) begin
+          src_clear_pending_next = 1'b1;
+          src_state_next = 3'd3; // Go to CLEAR_ACK
+        end
+      end
+
+      3'd2: begin // TRANSFER
+        if (src_valid_i && dst_ready_i) begin
+          src_valid_next = 1'b1;
+          src_ready_next = 1'b1;
+          src_state_next = 3'd0; // Back to IDLE
+        end
+      end
+
+      3'd3: begin // CLEAR_ACK
+        if (dst_clear_pending_crossed) begin
+          src_clear_pending_next = 1'b0;
+          src_state_next = 3'd0; // Back to IDLE
+        end
+      end
+
+      default: begin
+        src_valid_next = 1'b0;
+        src_ready_next = 1'b0;
+        src_state_next = 3'd0;
+      end
+    endcase
+  end
+
+  // Update Destination State Logic
+  always_comb begin
+    dst_valid_next = 1'b0;
+    dst_ready_next = 1'b0;
+    dst_state_next = dst_state;
+    hold_data_dst = (dst_state == 3'd2) ? src_data_i : (dst_state == 3'd1) ? hold_data_dst : 1'b0;
+
+    if (CLEAR_ON_ASYNC_RESET && !dst_rst_ni) begin
+      dst_state_next = 3'd1; // Force WAIT_CLEAR on reset
+    end
+    else case (dst_state)
+      3'd0: begin // IDLE
+        if (dst_clear_rising) begin
+          dst_state_next = 3'd1; // Go to WAIT_CLEAR
+        end else if (dst_valid_i && src_ready_i) begin
+          dst_valid_next = 1'b1;
+          dst_ready_next = 1'b1;
+          dst_state_next = 3'd2; // Go to TRANSFER
+        end
+      end
+
+      3'd1: begin // WAIT_CLEAR
+        if (src_clear_pending_crossed) begin
+          dst_clear_pending_next = 1'b1;
+          dst_state_next = 3'd3; // Go to CLEAR_ACK
+        end
+      end
+
+      3'd2: begin // TRANSFER
+        if (dst_valid_i && src_ready_i) begin
+          dst_valid_next = 1'b1;
+          dst_ready_next = 1'b1;
+          dst_state_next = 3'd0; // Back to IDLE
+        end
+      end
+
+      3'd3: begin // CLEAR_ACK
+        if (src_clear_pending_crossed) begin
+          dst_clear_pending_next = 1'b0;
+          dst_state_next = 3'd0; // Back to IDLE
+        end
+      end
+
+      default: begin
+        dst_valid_next = 1'b0;
+        dst_ready_next = 1'b0;
+        dst_state_next = 3'd0;
+      end
+    endcase
+  end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

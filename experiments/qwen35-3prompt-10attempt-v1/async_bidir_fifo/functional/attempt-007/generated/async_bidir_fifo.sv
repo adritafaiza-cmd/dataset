@@ -1,0 +1,365 @@
+```verilog
+`timescale 1ns/1ps
+
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam INT_ASIZE = ASIZE;
+  localparam INT_DEPTH = 1 << ASIZE;
+  localparam INT_MASK  = (1 << ASIZE) - 1;
+
+  // Internal pointers and counters
+  reg [INT_ASIZE-1:0] a_write_ptr;
+  reg [INT_ASIZE-1:0] a_read_ptr;
+  reg [INT_ASIZE-1:0] b_write_ptr;
+  reg [INT_ASIZE-1:0] b_read_ptr;
+
+  // Cross-clock pointers (snapshots)
+  wire [INT_ASIZE-1:0] a_write_ptr_b;
+  wire [INT_ASIZE-1:0] a_read_ptr_b;
+  wire [INT_ASIZE-1:0] b_write_ptr_a;
+  wire [INT_ASIZE-1:0] b_read_ptr_a;
+
+  // FIFO Data Memory
+  reg [DSIZE-1:0] mem [0:INT_DEPTH-1];
+
+  // Write pointers for full detection (local)
+  reg [INT_ASIZE-1:0] a_write_ptr_local;
+  reg [INT_ASIZE-1:0] b_write_ptr_local;
+
+  // Read pointers for empty detection (local)
+  reg [INT_ASIZE-1:0] a_read_ptr_local;
+  reg [INT_ASIZE-1:0] b_read_ptr_local;
+
+  // State flags for almost full/empty
+  reg a_almost_full;
+  reg a_almost_empty;
+  reg b_almost_full;
+  reg b_almost_empty;
+
+  // Cross-clock pointer registers
+  reg [INT_ASIZE-1:0] a_write_ptr_reg;
+  reg [INT_ASIZE-1:0] a_read_ptr_reg;
+  reg [INT_ASIZE-1:0] b_write_ptr_reg;
+  reg [INT_ASIZE-1:0] b_read_ptr_reg;
+
+  // Almost full/empty flags for cross-clock
+  reg a_almost_full_reg;
+  reg a_almost_empty_reg;
+  reg b_almost_full_reg;
+  reg b_almost_empty_reg;
+
+  // Write enable signals derived from dir
+  wire a_write_en = (a_dir == 1'b1) && a_winc;
+  wire b_write_en = (b_dir == 1'b1) && b_winc;
+
+  // Read enable signals derived from dir
+  wire a_read_en = (a_dir == 1'b0) && a_rinc;
+  wire b_read_en = (b_dir == 1'b0) && b_rinc;
+
+  // --- A-Side Logic (Clock: a_clk) ---
+
+  // Update local write pointer
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_write_ptr_local <= 0;
+    else if (a_write_en)
+      a_write_ptr_local <= a_write_ptr_local + 1;
+  end
+
+  // Update local read pointer
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_read_ptr_local <= 0;
+    else if (a_read_en)
+      a_read_ptr_local <= a_read_ptr_local + 1;
+  end
+
+  // Write data to memory
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      mem <= '{default: 0};
+    else if (a_write_en)
+      mem[a_write_ptr_local] <= a_wdata;
+  end
+
+  // Read data from memory (combinational)
+  always @* begin
+    a_rdata = 0;
+    if (a_read_ptr_local < INT_DEPTH)
+      a_rdata = mem[a_read_ptr_local];
+  end
+
+  // Full detection (local)
+  always @* begin
+    a_full = 1'b0;
+    if (a_write_ptr_local == a_read_ptr_local + INT_ASIZE)
+      a_full = 1'b1;
+  end
+
+  // Almost Full detection (local)
+  always @* begin
+    a_almost_full = 1'b0;
+    if (a_write_ptr_local == a_read_ptr_local + INT_ASIZE - 1)
+      a_almost_full = 1'b1;
+  end
+
+  // Empty detection (local)
+  always @* begin
+    a_empty = 1'b0;
+    if (a_write_ptr_local == a_read_ptr_local)
+      a_empty = 1'b1;
+  end
+
+  // Almost Empty detection (local)
+  always @* begin
+    a_almost_empty = 1'b0;
+    if (a_write_ptr_local == a_read_ptr_local + 1)
+      a_almost_empty = 1'b1;
+  end
+
+  // Cross-clock pointer updates for A-side (sampled by B-side)
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_write_ptr_reg <= 0;
+      a_read_ptr_reg <= 0;
+      a_almost_full_reg <= 0;
+      a_almost_empty_reg <= 0;
+    end
+    else begin
+      a_write_ptr_reg <= a_write_ptr_local;
+      a_read_ptr_reg <= a_read_ptr_local;
+      a_almost_full_reg <= a_almost_full;
+      a_almost_empty_reg <= a_almost_empty;
+    end
+  end
+
+  // --- B-Side Logic (Clock: b_clk) ---
+
+  // Update local write pointer
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_write_ptr_local <= 0;
+    else if (b_write_en)
+      b_write_ptr_local <= b_write_ptr_local + 1;
+  end
+
+  // Update local read pointer
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_read_ptr_local <= 0;
+    else if (b_read_en)
+      b_read_ptr_local <= b_read_ptr_local + 1;
+  end
+
+  // Write data to memory
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      mem <= '{default: 0};
+    else if (b_write_en)
+      mem[b_write_ptr_local] <= b_wdata;
+  end
+
+  // Read data from memory (combinational)
+  always @* begin
+    b_rdata = 0;
+    if (b_read_ptr_local < INT_DEPTH)
+      b_rdata = mem[b_read_ptr_local];
+  end
+
+  // Full detection (local)
+  always @* begin
+    b_full = 1'b0;
+    if (b_write_ptr_local == b_read_ptr_local + INT_ASIZE)
+      b_full = 1'b1;
+  end
+
+  // Almost Full detection (local)
+  always @* begin
+    b_almost_full = 1'b0;
+    if (b_write_ptr_local == b_read_ptr_local + INT_ASIZE - 1)
+      b_almost_full = 1'b1;
+  end
+
+  // Empty detection (local)
+  always @* begin
+    b_empty = 1'b0;
+    if (b_write_ptr_local == b_read_ptr_local)
+      b_empty = 1'b1;
+  end
+
+  // Almost Empty detection (local)
+  always @* begin
+    b_almost_empty = 1'b0;
+    if (b_write_ptr_local == b_read_ptr_local + 1)
+      b_almost_empty = 1'b1;
+  end
+
+  // Cross-clock pointer updates for B-side (sampled by A-side)
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_write_ptr_reg <= 0;
+      b_read_ptr_reg <= 0;
+      b_almost_full_reg <= 0;
+      b_almost_empty_reg <= 0;
+    end
+    else begin
+      b_write_ptr_reg <= b_write_ptr_local;
+      b_read_ptr_reg <= b_read_ptr_local;
+      b_almost_full_reg <= b_almost_full;
+      b_almost_empty_reg <= b_almost_empty;
+    end
+  end
+
+  // --- Cross-Clock Logic (Gray Encoding) ---
+
+  // Generate Gray encoded pointers for cross-clock transfer
+  wire [INT_ASIZE-1:0] a_write_ptr_gray;
+  wire [INT_ASIZE-1:0] a_read_ptr_gray;
+  wire [INT_ASIZE-1:0] b_write_ptr_gray;
+  wire [INT_ASIZE-1:0] b_read_ptr_gray;
+
+  assign a_write_ptr_gray = a_write_ptr_reg ^ {a_write_ptr_reg[INT_ASIZE-2:0], a_write_ptr_reg[INT_ASIZE-1]};
+  assign a_read_ptr_gray = a_read_ptr_reg ^ {a_read_ptr_reg[INT_ASIZE-2:0], a_read_ptr_reg[INT_ASIZE-1]};
+  assign b_write_ptr_gray = b_write_ptr_reg ^ {b_write_ptr_reg[INT_ASIZE-2:0], b_write_ptr_reg[INT_ASIZE-1]};
+  assign b_read_ptr_gray = b_read_ptr_reg ^ {b_read_ptr_reg[INT_ASIZE-2:0], b_read_ptr_reg[INT_ASIZE-1]};
+
+  // Decode Gray pointers back to binary on the other side
+  reg [INT_ASIZE-1:0] a_write_ptr_b_dec;
+  reg [INT_ASIZE-1:0] a_read_ptr_b_dec;
+  reg [INT_ASIZE-1:0] b_write_ptr_a_dec;
+  reg [INT_ASIZE-1:0] b_read_ptr_a_dec;
+
+  // Gray to Binary Decoder
+  always @* begin
+    a_write_ptr_b_dec = 0;
+    a_read_ptr_b_dec = 0;
+    b_write_ptr_a_dec = 0;
+    b_read_ptr_a_dec = 0;
+
+    // Decode a_write_ptr_gray
+    a_write_ptr_b_dec = a_write_ptr_gray;
+    for (int i = INT_ASIZE-2; i >= 0; i = i - 1) begin
+      a_write_ptr_b_dec[i] = a_write_ptr_b_dec[i+1] ^ a_write_ptr_gray[i];
+    end
+
+    // Decode a_read_ptr_gray
+    a_read_ptr_b_dec = a_read_ptr_gray;
+    for (int i = INT_ASIZE-2; i >= 0; i = i - 1) begin
+      a_read_ptr_b_dec[i] = a_read_ptr_b_dec[i+1] ^ a_read_ptr_gray[i];
+    end
+
+    // Decode b_write_ptr_gray
+    b_write_ptr_a_dec = b_write_ptr_gray;
+    for (int i = INT_ASIZE-2; i >= 0; i = i - 1) begin
+      b_write_ptr_a_dec[i] = b_write_ptr_a_dec[i+1] ^ b_write_ptr_gray[i];
+    end
+
+    // Decode b_read_ptr_gray
+    b_read_ptr_a_dec = b_read_ptr_gray;
+    for (int i = INT_ASIZE-2; i >= 0; i = i - 1) begin
+      b_read_ptr_a_dec[i] = b_read_ptr_a_dec[i+1] ^ b_read_ptr_gray[i];
+    end
+  end
+
+  // --- Almost Full/Empty Flags for Cross-Clock ---
+
+  // Almost Full/Empty flags for cross-clock
+  wire a_almost_full_b = a_almost_full_reg;
+  wire a_almost_empty_b = a_almost_empty_reg;
+  wire b_almost_full_a = b_almost_full_reg;
+  wire b_almost_empty_a = b_almost_empty_reg;
+
+  // Register almost full/empty flags on the other side
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_full_reg <= 0;
+      a_empty_reg <= 0;
+    end
+    else begin
+      a_full_reg <= a_almost_full_b;
+      a_empty_reg <= a_almost_empty_b;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_full_reg <= 0;
+      b_empty_reg <= 0;
+    end
+    else begin
+      b_full_reg <= b_almost_full_a;
+      b_empty_reg <= b_almost_empty_a;
+    end
+  end
+
+  // Output almost full/empty flags
+  assign a_afull = a_almost_full_reg;
+  assign a_aempty = a_almost_empty_reg;
+  assign b_afull = b_almost_full_reg;
+  assign b_aempty = b_almost_empty_reg;
+
+  // Full/Empty flags for cross-clock
+  wire a_full_b = a_full;
+  wire a_empty_b = a_empty;
+  wire b_full_a = b_full;
+  wire b_empty_a = b_empty;
+
+  // Register full/empty flags on the other side
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_full_reg <= 0;
+      a_empty_reg <= 0;
+    end
+    else begin
+      a_full_reg <= a_full_b;
+      a_empty_reg <= a_empty_b;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_full_reg <= 0;
+      b_empty_reg <= 0;
+    end
+    else begin
+      b_full_reg <= b_full_a;
+      b_empty_reg <= b_empty_a;
+    end
+  end
+
+  // Output full/empty flags
+  assign a_full = a_full_reg;
+  assign a_empty = a_empty_reg;
+  assign b_full = b_full_reg;
+  assign b_empty = b_empty_reg;
+
+endmodule
+```<|im_end|>

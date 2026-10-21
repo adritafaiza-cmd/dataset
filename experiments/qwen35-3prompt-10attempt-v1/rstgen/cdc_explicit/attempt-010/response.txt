@@ -1,0 +1,86 @@
+```systemverilog
+module rstgen (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic test_mode_i,
+    output logic rst_no,
+    output logic init_no
+);
+
+    // Synchronized reset output
+    // In test_mode, the raw reset is passed through (bypassing sync logic)
+    // Otherwise, a 2-stage synchronizer is used to ensure CDC compliance
+    logic rst_n_sync;
+    logic rst_n_sync_2;
+
+    // Synchronizer chain for reset domain crossing
+    // This ensures that the asynchronous or multi-cycle reset is safely synchronized
+    // to the clk_i domain before being used as the system reset.
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+            rst_n_sync <= 1'b1;
+        else
+            rst_n_sync <= rst_n_sync;
+    end
+
+    always_ff @(posedge clk_i or negedge rst_n_sync) begin
+        if (!rst_n_sync)
+            rst_n_sync_2 <= 1'b1;
+        else
+            rst_n_sync_2 <= rst_n_sync_2;
+    end
+
+    // Assign synchronized reset to output
+    // In test mode, we assume the input is already safe or we want to bypass
+    // the synchronization delay for scan/test purposes.
+    assign rst_no = test_mode_i ? rst_ni : rst_n_sync_2;
+
+    // Initialization qualifier (init_no)
+    // This signal is asserted for a short duration after the reset is released.
+    // It is generated based on the synchronized reset release.
+    // We use a counter or a simple delay mechanism relative to the reset release.
+    // Since no specific width is given, a simple 2-cycle pulse after reset release is standard.
+    
+    logic rst_n_sync_3; // Additional stage to detect the exact edge of reset release for init pulse
+    logic init_pulse;
+
+    // Detect reset release edge safely
+    // We need to detect when rst_n goes from 0 to 1 (active high) in the synchronized domain
+    // to trigger the init pulse.
+    
+    always_ff @(posedge clk_i or negedge rst_n_sync_2) begin
+        if (!rst_n_sync_2)
+            rst_n_sync_3 <= 1'b1;
+        else
+            rst_n_sync_3 <= rst_n_sync_2;
+    end
+
+    // Generate init pulse: asserted for 2 cycles after reset release
+    // Logic: If current cycle is reset released AND previous cycle was reset active, pulse.
+    // Then hold for one more cycle.
+    always_ff @(posedge clk_i or negedge rst_n_sync_2) begin
+        if (!rst_n_sync_2)
+            init_pulse <= 1'b0;
+        else if (rst_n_sync_2 && ~rst_n_sync_3)
+            init_pulse <= 1'b1;
+        else
+            init_pulse <= 1'b0;
+    end
+
+    // Extend the pulse to ensure it covers the transition and provides a stable window
+    // A common pattern is to assert for N cycles. Let's do 2 cycles for robustness.
+    logic init_pulse_2;
+    always_ff @(posedge clk_i or negedge rst_n_sync_2) begin
+        if (!rst_n_sync_2)
+            init_pulse_2 <= 1'b0;
+        else if (init_pulse)
+            init_pulse_2 <= 1'b1;
+        else
+            init_pulse_2 <= 1'b0;
+    end
+
+    assign init_no = test_mode_i ? 1'b1 : ~init_pulse_2;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

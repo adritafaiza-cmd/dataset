@@ -1,0 +1,142 @@
+```verilog
+module axis_register #
+(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI Stream input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI Stream output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser
+);
+
+    // Generate enable signals for sidebands based on parameters
+    wire keep_enable = KEEP_ENABLE;
+    wire last_enable = LAST_ENABLE;
+    wire id_enable = ID_ENABLE;
+    wire dest_enable = DEST_ENABLE;
+    wire user_enable = USER_ENABLE;
+
+    // Internal storage registers
+    reg [DATA_WIDTH-1:0] reg_tdata;
+    reg [KEEP_WIDTH-1:0] reg_tkeep;
+    reg reg_tlast;
+    reg [ID_WIDTH-1:0] reg_tid;
+    reg [DEST_WIDTH-1:0] reg_tdest;
+    reg [USER_WIDTH-1:0] reg_tuser;
+    reg reg_valid;
+
+    // Logic to determine if we can accept new data
+    // For REG_TYPE 2 (Skid Buffer), we must not drop a beat when output stalls.
+    // This means we only accept if we are not full. Since it's a single register slice,
+    // "Full" is equivalent to "Valid is already high".
+    // However, the requirement "must not drop a beat when the output stalls" implies
+    // that if m_axis_tready is low, we should hold the data.
+    // In a single-register implementation, if valid is high and m_axis_tready is low,
+    // we simply do not update the register on the next clock edge.
+    
+    // Logic to determine if we can drive data out
+    // We drive data out if valid is high and m_axis_tready is high.
+    wire can_drive = reg_valid && m_axis_tready;
+
+    // State Machine / Logic for Valid
+    // Reset: valid = 0
+    // Set: s_axis_tvalid && !rst
+    // Clear: can_drive (valid goes low after data is consumed)
+    // Hold: otherwise
+    always @(posedge clk or posedge rst) begin
+        if (rst)
+            reg_valid <= 1'b0;
+        else if (s_axis_tvalid && !reg_valid)
+            reg_valid <= 1'b1;
+        else if (can_drive)
+            reg_valid <= 1'b0;
+        else
+            reg_valid <= reg_valid;
+    end
+
+    // Data Capture Logic
+    // Capture data only when valid transitions from 0 to 1 (on the same clock edge)
+    // This ensures we capture the beat associated with the valid pulse.
+    // For REG_TYPE 2, if valid is already 1 and we get a new valid, we ignore it (buffer full).
+    // If valid is 0 and we get valid, we capture.
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            reg_tdata <= 1'b0;
+            reg_tkeep <= 1'b0;
+            reg_tlast <= 1'b0;
+            reg_tid <= 1'b0;
+            reg_tdest <= 1'b0;
+            reg_tuser <= 1'b0;
+        end
+        else if (s_axis_tvalid && !reg_valid) begin
+            // Capture the incoming beat
+            reg_tdata <= s_axis_tdata;
+            reg_tkeep <= s_axis_tkeep;
+            reg_tlast <= s_axis_tlast;
+            reg_tid <= s_axis_tid;
+            reg_tdest <= s_axis_tdest;
+            reg_tuser <= s_axis_tuser;
+        end
+        else begin
+            // Hold values
+            reg_tdata <= reg_tdata;
+            reg_tkeep <= reg_tkeep;
+            reg_tlast <= reg_tlast;
+            reg_tid <= reg_tid;
+            reg_tdest <= reg_tdest;
+            reg_tuser <= reg_tuser;
+        end
+    end
+
+    // Output Logic
+    // Drive outputs only when valid is high and m_axis_tready is high
+    assign m_axis_tvalid = reg_valid && m_axis_tready;
+    
+    assign m_axis_tdata = reg_valid ? reg_tdata : 1'b0;
+    assign m_axis_tkeep = reg_valid ? reg_tkeep : 1'b0;
+    assign m_axis_tlast = reg_valid ? reg_tlast : 1'b0;
+    assign m_axis_tid = reg_valid ? reg_tid : 1'b0;
+    assign m_axis_tdest = reg_valid ? reg_tdest : 1'b0;
+    assign m_axis_tuser = reg_valid ? reg_tuser : 1'b0;
+
+    // Input Handshake
+    // We are ready if we are not valid (empty) OR if we are valid but the downstream is ready
+    // For REG_TYPE 2 (Skid Buffer), we must not drop a beat.
+    // If we are full (valid=1) and downstream is not ready (m_axis_tready=0), we must assert s_axis_tready=0.
+    // If we are empty (valid=0), we can accept data, so s_axis_tready=1.
+    // If we are full (valid=1) and downstream is ready (m_axis_tready=1), we can accept data, so s_axis_tready=1.
+    assign s_axis_tready = (!reg_valid) || m_axis_tready;
+
+endmodule
+```<|im_end|>

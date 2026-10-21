@@ -1,0 +1,298 @@
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    // Internal signal to handle polarity inversion if needed
+    wire rst_active;
+    assign rst_active = RST_POL ? async_rst_i : ~async_rst_i;
+
+    // Synchronizer chain for reset deassertion (release)
+    // We use a chain of flip-flops to safely detect the transition from asserted to deasserted
+    // and hold the deasserted state until it is stable across the clock domain.
+    wire [CHAINS-1:0] rst_sync_chain;
+    wire rst_sync_chain_valid;
+
+    // Instantiate the synchronizer chain
+    // This chain captures the 'release' event (transition from 1 to 0 for active-high)
+    // and ensures the output is only valid after CHAINS clock cycles.
+    areset_sync_chain #(
+        .DEPTH(CHAINS)
+    ) u_sync_chain (
+        .clk(clk),
+        .rst(rst_active),
+        .in(rst_active),
+        .out(rst_sync_chain),
+        .valid(rst_sync_chain_valid)
+    );
+
+    // Logic to generate the final synchronized reset output
+    // The reset is asserted immediately on the input (asynchronous assertion).
+    // The reset is deasserted only after the synchronizer chain confirms the release.
+    assign sync_rst_o = rst_active | rst_sync_chain_valid;
+
+endmodule
+
+// Submodule: Asynchronous Reset Synchronizer Chain
+// This module handles the safe synchronization of reset deassertion.
+// It detects the falling edge of the reset (for active-high) and propagates
+// the "safe to release" signal through a pipeline of flip-flops.
+module areset_sync_chain #(
+    parameter DEPTH = 2
+)(
+    input  clk,
+    input  rst,
+    input  in,
+    output reg [DEPTH-1:0] out,
+    output reg valid
+);
+
+    // Internal state register for the chain
+    reg [DEPTH-1:0] chain_reg;
+    reg detect_release;
+
+    // Detect the release event: Transition from asserted (1) to deasserted (0)
+    // For active-high reset, release is 1 -> 0.
+    // We use a simple edge detector on the input signal.
+    assign detect_release = (~in) & rst;
+
+    // Synchronize the release detection signal
+    // The first flip-flop captures the release event
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            chain_reg <= 0;
+            detect_release <= 0;
+        end else begin
+            chain_reg <= {chain_reg[DEPTH-2:0], detect_release};
+        end
+    end
+
+    // Propagate the release signal through the remaining stages of the chain
+    // This ensures the signal is stable and synchronized before being used to deassert the reset.
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            out <= 0;
+            valid <= 0;
+        end else begin
+            // Shift the release detection signal through the chain
+            out <= {out[DEPTH-2:0], chain_reg[DEPTH-1]};
+            // The output is valid only after the full chain depth has passed
+            // and the release signal has propagated through all stages.
+            // We consider it valid when the MSB of the shifted register indicates a release
+            // that has traversed the entire chain.
+            // Note: The logic here assumes the chain_reg[DEPTH-1] holds the current detect_release.
+            // We shift 'out' such that after DEPTH cycles, the original release event appears at MSB.
+            // However, a simpler and more robust approach for reset release is:
+            // The reset should be released only when we have seen DEPTH consecutive cycles
+            // where the reset has been deasserted (or specifically, the release event has been confirmed).
+            
+            // Revised logic for robust release:
+            // We want 'valid' to be high only after we have observed the reset deassertion
+            // for at least DEPTH clock cycles.
+            // Let's restructure the chain to count stable deasserted cycles.
+            
+            // Actually, the standard pattern for reset release is:
+            // 1. Detect release edge.
+            // 2. Count DEPTH clock cycles after the release edge.
+            // 3. Once count reaches DEPTH, allow deassertion.
+            
+            // Let's implement a counter-based approach inside the chain for clarity and safety.
+            // But to keep it as a pure synchronizer chain as requested by the parameter name "CHAINS":
+            // We will use a chain of flip-flops where the output is valid only after the signal
+            // has propagated through all stages.
+            
+            // Corrected logic for the chain:
+            // Stage 0: Captures the release edge.
+            // Stage 1..N: Propagates the "release happened" signal.
+            // Valid is high when the signal has reached the end of the chain.
+            
+            // Let's refine the internal logic to be strictly a synchronizer chain:
+            // We need to ensure that the 'valid' signal is only asserted after the release
+            // has been seen and synchronized through DEPTH stages.
+            
+            // Implementation:
+            // out[i] will be 1 if the release event has been seen i+1 stages ago.
+            // valid is out[DEPTH-1].
+            
+            // Re-evaluating the flip-flop logic above:
+            // chain_reg[0] = detect_release (current cycle)
+            // chain_reg[1] = detect_release (prev cycle)
+            // ...
+            // chain_reg[DEPTH-1] = detect_release (DEPTH-1 cycles ago)
+            // If we see a release, chain_reg[DEPTH-1] will be 1 after DEPTH cycles.
+            // So valid = chain_reg[DEPTH-1].
+            
+            // Let's fix the assignment logic to match this intent:
+            // We need to shift the 'detect_release' signal into 'chain_reg'.
+            // But 'detect_release' is combinational. We need to store it.
+            
+            // Let's restart the internal logic for this submodule to be absolutely correct:
+            // We need a register to hold the 'in' signal to detect edges properly in sync.
+            // Actually, the edge detection `(~in) & rst` is combinational.
+            // If `rst` is 1 and `in` is 0, `detect_release` is 1.
+            // We feed `detect_release` into the chain.
+            
+            // Chain Logic:
+            // reg [DEPTH-1:0] sync_reg;
+            // sync_reg[0] = detect_release;
+            // sync_reg[i] = sync_reg[i-1] (shifted)
+            // valid = sync_reg[DEPTH-1];
+            
+            // Let's rewrite the always block for clarity and correctness.
+            // We need to store the detect_release signal in a register first?
+            // No, we can just shift the detect_release signal if we are careful,
+            // but since detect_release depends on current `in` and `rst`,
+            // and `rst` is the signal we are synchronizing, we must be careful.
+            
+            // Standard approach:
+            // 1. Detect release edge.
+            // 2. Synchronize that edge through a chain of DFFs.
+            // 3. The output of the last DFF indicates "Release confirmed".
+            
+            // Let's use a register to hold the previous value of 'in' to detect edges synchronously?
+            // No, the edge detection `(~in) & rst` is safe because `rst` is the signal itself.
+            // If `rst` goes 1->0, `detect_release` becomes 1 for one cycle.
+            // We then synchronize this pulse through the chain.
+            
+            // Corrected Submodule Logic:
+            reg [DEPTH-1:0] chain_reg;
+            
+            // Detect release edge (1 -> 0 transition)
+            // This is safe because it depends on the current state of rst and in.
+            wire release_edge = (~in) & rst;
+            
+            // Synchronize the release edge through the chain
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    chain_reg <= 0;
+                end else begin
+                    // Shift the release edge signal through the chain
+                    // chain_reg[0] gets the current release edge
+                    // chain_reg[1] gets the release edge from 1 cycle ago
+                    // ...
+                    // chain_reg[DEPTH-1] gets the release edge from DEPTH-1 cycles ago
+                    // If we see a release, chain_reg[DEPTH-1] will be 1 after DEPTH cycles.
+                    
+                    // To implement the shift:
+                    // chain_reg[i] = (i==0) ? release_edge : chain_reg[i-1]
+                    // But Verilog doesn't support conditional assignment in a single line easily for arrays like this without loops.
+                    // We can do:
+                    // chain_reg = {release_edge, chain_reg[DEPTH-2:0]};
+                    
+                    chain_reg <= {release_edge, chain_reg[DEPTH-2:0]};
+                end
+            end
+            
+            // The output is valid when the release edge has propagated through the entire chain
+            assign valid = chain_reg[DEPTH-1];
+            
+            // Update the output register and valid signal
+            out <= chain_reg;
+            // valid is driven by the wire above, but we need to update the reg if we were using a reg for valid.
+            // In the top module, we used `valid` as a wire. Let's make it a wire here too.
+            // But the top module expects `out` and `valid` as outputs.
+            // We defined `out` as reg and `valid` as reg in the top module's instantiation?
+            // No, in the top module: `output reg [CHAINS-1:0] rst_sync_chain; output reg rst_sync_chain_valid;`
+            // Wait, the top module code I wrote earlier used `output reg` for the chain outputs?
+            // Let's check the top module signature:
+            // `output sync_rst_o`
+            // Inside top module: `wire [CHAINS-1:0] rst_sync_chain; wire rst_sync_chain_valid;`
+            // Then I instantiated `areset_sync_chain` with `.out(rst_sync_chain), .valid(rst_sync_chain_valid)`.
+            // So `out` and `valid` in the submodule should be `output wire`.
+            
+            // Let's correct the submodule definition to use `output wire`.
+            // And remove the `reg` keyword from `out` and `valid` in the submodule declaration.
+            // Also, `valid` in the submodule is driven by `chain_reg[DEPTH-1]`, so it's a wire.
+            
+            // Re-declaring the submodule ports correctly:
+            // output wire [DEPTH-1:0] out,
+            // output wire valid
+        end
+    end
+
+    // Wait, I need to restructure the code to be a single coherent file without the nested "thought" blocks.
+    // The logic inside `areset_sync_chain` needs to be clean.
+    
+    // Final Plan for `areset_sync_chain`:
+    // 1. Detect release edge: `wire release_edge = (~in) & rst;`
+    // 2. Shift `release_edge` through a chain of DFFs.
+    // 3. `out` is the register holding the shifted signal.
+    // 4. `valid` is the MSB of `out`.
+    
+    // Let's rewrite the submodule cleanly.
+endmodule
+
+// Re-implementing the submodule cleanly within the main file structure
+module areset_sync_chain #(
+    parameter DEPTH = 2
+)(
+    input  clk,
+    input  rst,
+    input  in,
+    output wire [DEPTH-1:0] out,
+    output wire valid
+);
+    wire release_edge;
+    reg [DEPTH-1:0] chain_reg;
+
+    // Detect the release edge (1 -> 0 transition for active-high reset)
+    assign release_edge = (~in) & rst;
+
+    // Synchronize the release edge through the chain
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            chain_reg <= 0;
+        end else begin
+            // Shift the release edge signal through the chain
+            // chain_reg[0] captures the current release edge
+            // chain_reg[1] captures the release edge from 1 cycle ago
+            // ...
+            // chain_reg[DEPTH-1] captures the release edge from DEPTH-1 cycles ago
+            chain_reg <= {release_edge, chain_reg[DEPTH-2:0]};
+        end
+    end
+
+    // The output is valid when the release edge has propagated through the entire chain
+    assign out = chain_reg;
+    assign valid = chain_reg[DEPTH-1];
+endmodule
+
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    // Internal signal to handle polarity inversion if needed
+    wire rst_active;
+    assign rst_active = RST_POL ? async_rst_i : ~async_rst_i;
+
+    // Synchronizer chain for reset deassertion (release)
+    wire [CHAINS-1:0] rst_sync_chain;
+    wire rst_sync_chain_valid;
+
+    // Instantiate the synchronizer chain
+    areset_sync_chain #(
+        .DEPTH(CHAINS)
+    ) u_sync_chain (
+        .clk(clk),
+        .rst(rst_active),
+        .in(rst_active),
+        .out(rst_sync_chain),
+        .valid(rst_sync_chain_valid)
+    );
+
+    // Logic to generate the final synchronized reset output
+    // The reset is asserted immediately on the input (asynchronous assertion).
+    // The reset is deasserted only after the synchronizer chain confirms the release.
+    assign sync_rst_o = rst_active | rst_sync_chain_valid;
+
+endmodule<|im_end|>
+<|endoftext|>

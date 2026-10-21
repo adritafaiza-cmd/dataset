@@ -1,0 +1,70 @@
+module sync #(
+    parameter int unsigned STAGES = 2,
+    parameter bit ResetValue = 1'b0
+) (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic serial_i,
+    output logic serial_o
+);
+
+    // Internal clock for the destination domain (same as clk_i)
+    logic clk_int;
+    assign clk_int = clk_i;
+
+    // Internal reset for the destination domain
+    // We use a simple synchronizer for the reset signal to ensure RDC safety
+    // before distributing it to the pipeline stages.
+    logic rst_n_int;
+    logic rst_n_sync_1;
+    logic rst_n_sync_2;
+
+    // Reset Synchronizer (2-stage)
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+            rst_n_sync_1 <= 1'b1;
+        else
+            rst_n_sync_1 <= rst_ni;
+    end
+
+    always_ff @(posedge clk_i or negedge rst_n_sync_1) begin
+        if (!rst_n_sync_1)
+            rst_n_sync_2 <= 1'b1;
+        else
+            rst_n_sync_2 <= rst_n_sync_1;
+    end
+
+    // Assign the synchronized reset to the pipeline
+    assign rst_n_int = rst_n_sync_2;
+
+    // Pipeline stages for data synchronization
+    // Using a register chain where each stage captures the previous output
+    // on the destination clock.
+    genvar i;
+    logic [STAGES-1:0] stage_reg;
+
+    // Initialize the first stage
+    always_ff @(posedge clk_int or negedge rst_n_int) begin
+        if (!rst_n_int)
+            stage_reg[0] <= ResetValue;
+        else
+            stage_reg[0] <= serial_i;
+    end
+
+    // Generate remaining stages
+    generate
+        for (i = 1; i < STAGES; i = i + 1) begin : stage_gen
+            always_ff @(posedge clk_int or negedge rst_n_int) begin
+                if (!rst_n_int)
+                    stage_reg[i] <= ResetValue;
+                else
+                    stage_reg[i] <= stage_reg[i-1];
+            end
+        end
+    endgenerate
+
+    // Output is the last stage of the pipeline
+    assign serial_o = stage_reg[STAGES-1];
+
+endmodule<|im_end|>
+<|endoftext|>

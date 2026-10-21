@@ -1,0 +1,118 @@
+```systemverilog
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  // Synchronous register to hold the event state in the TX domain
+  logic edge_state_tx;
+  
+  // Synchronous register to hold the event state in the RX domain
+  logic edge_state_rx;
+
+  // ---------------------------------------------------------
+  // TX Domain Logic
+  // ---------------------------------------------------------
+  // Capture the incoming edge event on the TX clock.
+  // We use a simple D flip-flop approach. 
+  // On active low reset, the state is cleared (0).
+  // When edge_i transitions to 1, we set the state.
+  // We assume edge_i is a single-cycle pulse or level that indicates an event.
+  // To ensure we capture the event exactly once per occurrence without duplication:
+  // We only set the state if the input is high and the current state is low.
+  
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      edge_state_tx <= 1'b0;
+    end else begin
+      // Capture the event if it is asserted and we haven't captured it yet
+      if (edge_i && !edge_state_tx) begin
+        edge_state_tx <= 1'b1;
+      end
+      // If edge_i goes low, we keep the state high until reset or next event
+      // This ensures the event is "carried" across the domain.
+    end
+  end
+
+  // ---------------------------------------------------------
+  // RX Domain Logic (CDC)
+  // ---------------------------------------------------------
+  // We need to detect the transition of edge_state_tx from 0 to 1.
+  // Since edge_state_tx is asynchronous to clk_rx_i, we cannot sample it directly
+  // without risk of metastability or losing the pulse if it's too short.
+  //
+  // Strategy:
+  // 1. Sample edge_state_tx twice on consecutive clock cycles of clk_rx_i.
+  // 2. Detect the rising edge (0 -> 1) in the RX domain.
+  // 3. Once detected, set edge_o high.
+  // 4. To prevent duplication (holding the output high for multiple cycles),
+  //    we need to know when the TX event has been "consumed" or simply latch it.
+  //    However, the requirement is "carry an input event... without duplicating".
+  //    Usually, this implies a one-shot behavior: Event arrives -> Output goes high -> Output goes low.
+  //    OR, it implies the state persists until reset.
+  //
+  // Re-reading requirement: "Carry an input event to the receiving side as one event, 
+  // without duplicating it or leaving a stale event after reset."
+  // Interpretation: The output should reflect the occurrence of the event exactly once.
+  // If the TX state remains high (indicating an ongoing condition), the RX output should 
+  // only pulse once when the transition happens.
+  
+  logic edge_state_tx_sampled_1;
+  logic edge_state_tx_sampled_2;
+  logic edge_detected_rx;
+  logic edge_o_internal;
+
+  // Sample the TX state twice
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      edge_state_tx_sampled_1 <= 1'b0;
+      edge_state_tx_sampled_2 <= 1'b0;
+      edge_detected_rx        <= 1'b0;
+    end else begin
+      edge_state_tx_sampled_1 <= edge_state_tx;
+      edge_state_tx_sampled_2 <= edge_state_tx_sampled_1;
+    end
+  end
+
+  // Detect the rising edge of the TX state in the RX domain
+  // This happens when sampled_1 is 0 and sampled_2 is 1
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      edge_detected_rx <= 1'b0;
+    end else begin
+      edge_detected_rx <= (edge_state_tx_sampled_1 == 1'b0) && (edge_state_tx_sampled_2 == 1'b1);
+    end
+  end
+
+  // Generate the output pulse
+  // We want the output to go high on detection and stay high for one cycle (or until reset)
+  // to represent "one event".
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      edge_o_internal <= 1'b0;
+    end else begin
+      // If we just detected the edge, set output high.
+      // If we detected it previously, keep it high? 
+      // Requirement: "without duplicating". 
+      // If the TX state stays high (e.g., a flag), we don't want the RX output to stay high forever.
+      // We want a single pulse.
+      
+      if (edge_detected_rx) begin
+        edge_o_internal <= 1'b1;
+      end else begin
+        // If no new edge detected, reset the output to 0 to ensure it's a single event pulse
+        // unless the requirement implies a level-sensitive carry. 
+        // "Carry an input event... as one event" strongly suggests a pulse.
+        edge_o_internal <= 1'b0;
+      end
+    end
+  end
+
+  assign edge_o = edge_o_internal;
+
+endmodule
+```<|im_end|>

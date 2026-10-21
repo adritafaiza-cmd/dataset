@@ -1,0 +1,221 @@
+```verilog
+module data_sync #(
+    parameter STAGES = 2,
+    parameter DWIDTH = 8
+)(
+    input                  clk,
+    input                  rstn,
+    input  [DWIDTH-1:0]    din,
+    input                  dready_i,
+    output reg [DWIDTH-1:0] dout,
+    output reg             dready_o
+);
+
+    // Internal state for the FIFO buffer
+    // We use a simple shift-register style synchronizer chain.
+    // Since dready_i is in the input clock domain, we cannot directly use it 
+    // to gate the output of the last stage without risking metastability or 
+    // incorrect data capture if the domains are asynchronous.
+    // 
+    // Standard approach for async FIFOs:
+    // 1. Use a pointer (write_addr) in the input domain to track when data is written.
+    // 2. Use a pointer (read_addr) in the output domain to track when data is read.
+    // 3. Use a full flag in the input domain and an empty flag in the output domain.
+    //
+    // However, the prompt specifies "din and dready_i enter the clk domain". 
+    // This implies we are synchronizing data from an external domain INTO the 'clk' domain.
+    // The 'dready_i' signal indicates when the external domain is ready to accept data.
+    // The 'dready_o' indicates when the internal domain is ready to provide data.
+    //
+    // Implementation Strategy:
+    // - We will implement a synchronous FIFO where the Write Enable is gated by dready_i.
+    // - The Read Enable is gated by dready_o (which we generate internally).
+    // - Since we need to indicate when the output is ready (dready_o), we must track 
+    //   the read pointer in the output domain.
+    // - To keep it simple and robust for a generic "synchronizer" request without 
+    //   explicit cross-domain pointers provided in the interface, we assume a 
+    //   standard async FIFO implementation where the address pointers are internal.
+    //
+    // Wait, re-reading the prompt: "Bring each new input value into the local clock domain coherently".
+    // This usually implies a simple pipeline of flip-flops if the timing allows, 
+    // but "dready_i" suggests a handshake protocol.
+    // If dready_i is in the input domain, we must synchronize it to the output domain 
+    // to know when to write, OR we must use a pointer-based FIFO.
+    //
+    // Given the constraints and typical usage of such modules:
+    // We will implement a pointer-based FIFO.
+    // - write_ptr: tracks position in input domain (synchronized to clk).
+    // - read_ptr: tracks position in output domain (synchronized to clk).
+    // - full: generated in input domain.
+    // - empty: generated in output domain.
+    //
+    // Since the interface does not provide separate write/read clocks, we assume 
+    // 'clk' is the destination clock domain. 'din' and 'dready_i' are asynchronous inputs.
+    // We need to synchronize 'dready_i' to the 'clk' domain to enable writing.
+    // We need to generate 'dready_o' based on the FIFO status in the 'clk' domain.
+    
+    // Synchronizers for dready_i (Input Domain -> Output Domain)
+    // We need to know when the external side is ready to accept data.
+    // We use a 2-stage synchronizer for the enable signal.
+    wire dready_i_sync_1;
+    wire dready_i_sync_2;
+    
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            dready_i_sync_1 <= 1'b0;
+            dready_i_sync_2 <= 1'b0;
+        end else begin
+            dready_i_sync_1 <= dready_i;
+            dready_i_sync_2 <= dready_i_sync_1;
+        end
+    end
+    
+    // Address pointers
+    reg [STAGES + 1:0] write_ptr;
+    reg [STAGES + 1:0] read_ptr;
+    
+    // Flags
+    reg full;
+    reg empty;
+    
+    // Full flag generation (in input domain logic, but we need to sync it or generate it safely)
+    // Actually, full is a state in the input domain. We need to generate it based on write_ptr == read_ptr + 1.
+    // However, since read_ptr is in the output domain, we cannot directly compare them without synchronization.
+    // Standard async FIFO: 
+    // - full is generated in the input domain using the write_ptr and the synchronized read_ptr? 
+    //   No, usually full is generated in the input domain using a pointer that is incremented in the input domain.
+    //   But the read_ptr is in the output domain.
+    //   To avoid cross-domain comparison issues, we typically:
+    //   1. Increment write_ptr in input domain.
+    //   2. Increment read_ptr in output domain.
+    //   3. Generate full in input domain (using a pointer that is only incremented when not full).
+    //      But we don't have the read_ptr in the input domain.
+    //   Alternative: Use a pointer in the input domain for write, and a pointer in the output domain for read.
+    //   The 'full' signal is generated in the input domain. It is true if write_ptr == read_ptr + 1.
+    //   Since read_ptr is in the output domain, we must synchronize read_ptr to the input domain to check this?
+    //   No, that's complex.
+    //   Simpler approach for this specific prompt context:
+    //   Assume the standard "Gray code" pointer implementation where we have:
+    //   - write_ptr (in input domain)
+    //   - read_ptr (in output domain)
+    //   - full (in input domain)
+    //   - empty (in output domain)
+    //   
+    //   To generate 'full' in the input domain, we need to know the read_ptr. 
+    //   We can synchronize the read_ptr to the input domain to generate 'full'.
+    //   To generate 'empty' in the output domain, we need to know the write_ptr.
+    //   We can synchronize the write_ptr to the output domain to generate 'empty'.
+    
+    // Let's refine the architecture to be robust:
+    // We will maintain the pointers in their respective domains.
+    // We will synchronize the read_ptr to the input domain to generate 'full'.
+    // We will synchronize the write_ptr to the output domain to generate 'empty'.
+    
+    // Synchronize read_ptr to input domain for 'full' generation
+    reg [STAGES + 1:0] read_ptr_sync;
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn)
+            read_ptr_sync <= 0;
+        else
+            read_ptr_sync <= read_ptr;
+    end
+    
+    // Synchronize write_ptr to output domain for 'empty' generation
+    reg [STAGES + 1:0] write_ptr_sync;
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn)
+            write_ptr_sync <= 0;
+        else
+            write_ptr_sync <= write_ptr;
+    end
+    
+    // Generate full (in input domain logic, but we need to update write_ptr based on it)
+    // Actually, the write_ptr update logic must be in the input domain.
+    // The 'full' signal is determined by comparing write_ptr and read_ptr.
+    // Since read_ptr is in the output domain, we use the synchronized version (read_ptr_sync) 
+    // to determine 'full' in the input domain.
+    
+    // Generate empty (in output domain logic)
+    // The 'empty' signal is determined by comparing read_ptr and write_ptr.
+    // Since write_ptr is in the input domain, we use the synchronized version (write_ptr_sync)
+    // to determine 'empty' in the output domain.
+    
+    // Note: Using simple equality for full/empty with STAGES=2 (3 bits) might have race conditions 
+    // if not using Gray code, but for a simple "synchronizer" module with fixed small depth, 
+    // and assuming the pointers are updated sequentially, direct comparison is often acceptable 
+    // if the depth is small and the timing is controlled. However, for a "professional" implementation,
+    // we should ideally use Gray code pointers to avoid metastability on the full/empty flags.
+    // Given the constraints of a single file and simplicity, we will use standard binary pointers 
+    // but ensure the logic is sound. For STAGES=2, depth=4.
+    
+    // Logic for Full (Input Domain)
+    // Full if write_ptr == read_ptr + 1
+    // We need to handle the wrap-around carefully.
+    // Since read_ptr_sync is in the input domain, we can compare directly.
+    wire full_flag;
+    assign full_flag = (write_ptr == (read_ptr_sync + 1));
+    
+    // Logic for Empty (Output Domain)
+    // Empty if read_ptr == write_ptr
+    wire empty_flag;
+    assign empty_flag = (read_ptr == write_ptr_sync);
+    
+    // Update Write Pointer (Input Domain)
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            write_ptr <= 0;
+        end else begin
+            if (dready_i_sync_2 && !full_flag) begin
+                write_ptr <= write_ptr + 1;
+            end
+        end
+    end
+    
+    // Update Read Pointer (Output Domain)
+    // We need to know if the FIFO is not empty to read.
+    // dready_o should be asserted when the FIFO is not empty AND the external consumer is ready?
+    // The prompt says "indicate when it is ready". Usually, dready_o is asserted when data is available.
+    // The actual consumption is driven by the external logic pulling data when dready_o is high.
+    // So dready_o = !empty_flag.
+    
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            read_ptr <= 0;
+        end else begin
+            if (!empty_flag) begin
+                read_ptr <= read_ptr + 1;
+            end
+        end
+    end
+    
+    // Data Storage
+    // We need a buffer to hold the data.
+    // Since we are using pointers, we can use a RAM or a shift register.
+    // Given STAGES is small (2), a shift register (FIFO implemented as a chain of registers) is efficient.
+    // However, with pointers, a RAM is more flexible. Let's use a RAM-like structure with a depth of 2^STAGES.
+    // But wait, if STAGES=2, depth=4.
+    // We can use a simple array or a dedicated FIFO memory.
+    // To keep it synthesizable and standard, we'll use a memory block.
+    
+    reg [DWIDTH-1:0] fifo_mem [0: (1<<STAGES)-1];
+    
+    // Write Data
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            fifo_mem <= 0;
+        end else if (dready_i_sync_2 && !full_flag) begin
+            fifo_mem[write_ptr] <= din;
+        end
+    end
+    
+    // Read Data
+    // dout is assigned from the memory at read_ptr
+    assign dout = fifo_mem[read_ptr];
+    
+    // Output Ready
+    // dready_o is asserted when the FIFO is not empty.
+    assign dready_o = !empty_flag;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

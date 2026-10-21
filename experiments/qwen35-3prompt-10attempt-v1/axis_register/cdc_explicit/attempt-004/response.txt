@@ -1,0 +1,248 @@
+```verilog
+module axis_register #
+(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI Stream input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI Stream output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser
+);
+
+    // Local parameters for width checks to avoid synthesis warnings
+    localparam int WIDTH_DATA = DATA_WIDTH;
+    localparam int WIDTH_KEEP = KEEP_ENABLE ? KEEP_WIDTH : 1;
+    localparam int WIDTH_LAST = LAST_ENABLE ? 1 : 0;
+    localparam int WIDTH_ID = ID_ENABLE ? ID_WIDTH : 1;
+    localparam int WIDTH_DEST = DEST_ENABLE ? DEST_WIDTH : 1;
+    localparam int WIDTH_USER = USER_ENABLE ? USER_WIDTH : 1;
+
+    // Internal state registers
+    reg [WIDTH_DATA-1:0]  reg_tdata;
+    reg [WIDTH_KEEP-1:0]  reg_tkeep;
+    reg                   reg_tlast;
+    reg [WIDTH_ID-1:0]    reg_tid;
+    reg [WIDTH_DEST-1:0]  reg_tdest;
+    reg [WIDTH_USER-1:0]  reg_tuser;
+    reg                   reg_valid;
+
+    // Output registers
+    reg [WIDTH_DATA-1:0]  out_tdata;
+    reg [WIDTH_KEEP-1:0]  out_tkeep;
+    reg                   out_tlast;
+    reg [WIDTH_ID-1:0]    out_tid;
+    reg [WIDTH_DEST-1:0]  out_tdest;
+    reg [WIDTH_USER-1:0]  out_tuser;
+    reg                   out_valid;
+
+    // Skid buffer depth (for REG_TYPE 2)
+    // We need at least 1 beat to allow stalling. 
+    // A depth of 2 allows the input to stall for 1 cycle while output drains.
+    localparam int SKID_DEPTH = 2;
+
+    // Input FIFO for Skid Buffer (REG_TYPE 2)
+    // Stores {valid, tdata, tkeep, tlast, tid, tdest, tuser}
+    reg [1:0]              fifo_valid;
+    reg [WIDTH_DATA-1:0]   fifo_tdata;
+    reg [WIDTH_KEEP-1:0]   fifo_tkeep;
+    reg                    fifo_tlast;
+    reg [WIDTH_ID-1:0]     fifo_tid;
+    reg [WIDTH_DEST-1:0]   fifo_tdest;
+    reg [WIDTH_USER-1:0]   fifo_tuser;
+
+    // Output FIFO for Skid Buffer (REG_TYPE 2)
+    // Stores {valid, tdata, tkeep, tlast, tid, tdest, tuser}
+    reg [1:0]              fifo_out_valid;
+    reg [WIDTH_DATA-1:0]   fifo_out_tdata;
+    reg [WIDTH_KEEP-1:0]   fifo_out_tkeep;
+    reg                    fifo_out_tlast;
+    reg [WIDTH_ID-1:0]     fifo_out_tid;
+    reg [WIDTH_DEST-1:0]   fifo_out_tdest;
+    reg [WIDTH_USER-1:0]   fifo_out_tuser;
+
+    // Wire for internal ready signals
+    wire                   in_ready;
+    wire                   out_ready;
+
+    assign in_ready = (REG_TYPE == 2) ? m_axis_tready : m_axis_tready;
+    assign out_ready = (REG_TYPE == 2) ? m_axis_tready : 1'b1;
+
+    // --- Logic for REG_TYPE 0 (Wire) ---
+    // Pass-through immediately. No storage.
+    if (REG_TYPE == 0) begin
+        assign s_axis_tready = m_axis_tready;
+        assign m_axis_tdata = s_axis_tdata;
+        assign m_axis_tkeep = s_axis_tkeep;
+        assign m_axis_tvalid = s_axis_tvalid;
+        assign m_axis_tlast = s_axis_tlast;
+        assign m_axis_tid = s_axis_tid;
+        assign m_axis_tdest = s_axis_tdest;
+        assign m_axis_tuser = s_axis_tuser;
+    end
+
+    // --- Logic for REG_TYPE 1 (Simple Buffer) ---
+    // Single cycle storage.
+    else if (REG_TYPE == 1) begin
+        // Input stage
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                reg_tdata <= 0;
+                reg_tkeep <= 0;
+                reg_tlast <= 0;
+                reg_tid <= 0;
+                reg_tdest <= 0;
+                reg_tuser <= 0;
+                reg_valid <= 0;
+            end else begin
+                if (s_axis_tvalid && in_ready) begin
+                    reg_tdata <= s_axis_tdata;
+                    reg_tkeep <= s_axis_tkeep;
+                    reg_tlast <= s_axis_tlast;
+                    reg_tid <= s_axis_tid;
+                    reg_tdest <= s_axis_tdest;
+                    reg_tuser <= s_axis_tuser;
+                    reg_valid <= 1'b1;
+                end else begin
+                    reg_valid <= 1'b0;
+                end
+            end
+        end
+
+        // Output stage
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                out_tdata <= 0;
+                out_tkeep <= 0;
+                out_tlast <= 0;
+                out_tid <= 0;
+                out_tdest <= 0;
+                out_tuser <= 0;
+                out_valid <= 0;
+            end else begin
+                if (reg_valid && out_ready) begin
+                    out_tdata <= reg_tdata;
+                    out_tkeep <= reg_tkeep;
+                    out_tlast <= reg_tlast;
+                    out_tid <= reg_tid;
+                    out_tdest <= reg_tdest;
+                    out_tuser <= reg_tuser;
+                    out_valid <= 1'b1;
+                end else begin
+                    out_valid <= 1'b0;
+                end
+            end
+        end
+
+        assign s_axis_tready = (reg_valid) ? out_ready : 1'b1;
+        assign m_axis_tdata = out_tdata;
+        assign m_axis_tkeep = out_tkeep;
+        assign m_axis_tvalid = out_valid;
+        assign m_axis_tlast = out_tlast;
+        assign m_axis_tid = out_tid;
+        assign m_axis_tdest = out_tdest;
+        assign m_axis_tuser = out_tuser;
+    end
+
+    // --- Logic for REG_TYPE 2 (Skid Buffer) ---
+    // Must not drop a beat when output stalls.
+    else begin
+        // Input Stage: Write to FIFO
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                fifo_valid <= 0;
+                fifo_tdata <= 0;
+                fifo_tkeep <= 0;
+                fifo_tlast <= 0;
+                fifo_tid <= 0;
+                fifo_tdest <= 0;
+                fifo_tuser <= 0;
+            end else begin
+                if (s_axis_tvalid && in_ready) begin
+                    fifo_valid <= 1'b1;
+                    fifo_tdata <= s_axis_tdata;
+                    fifo_tkeep <= s_axis_tkeep;
+                    fifo_tlast <= s_axis_tlast;
+                    fifo_tid <= s_axis_tid;
+                    fifo_tdest <= s_axis_tdest;
+                    fifo_tuser <= s_axis_tuser;
+                end else begin
+                    fifo_valid <= 1'b0;
+                end
+            end
+        end
+
+        // Output Stage: Read from FIFO
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                fifo_out_valid <= 0;
+                fifo_out_tdata <= 0;
+                fifo_out_tkeep <= 0;
+                fifo_out_tlast <= 0;
+                fifo_out_tid <= 0;
+                fifo_out_tdest <= 0;
+                fifo_out_tuser <= 0;
+            end else begin
+                if (fifo_out_valid && out_ready) begin
+                    fifo_out_valid <= 1'b0;
+                    fifo_out_tdata <= 0;
+                    fifo_out_tkeep <= 0;
+                    fifo_out_tlast <= 0;
+                    fifo_out_tid <= 0;
+                    fifo_out_tdest <= 0;
+                    fifo_out_tuser <= 0;
+                end else begin
+                    fifo_out_valid <= 1'b1;
+                    fifo_out_tdata <= fifo_tdata;
+                    fifo_out_tkeep <= fifo_tkeep;
+                    fifo_out_tlast <= fifo_tlast;
+                    fifo_out_tid <= fifo_tid;
+                    fifo_out_tdest <= fifo_tdest;
+                    fifo_out_tuser <= fifo_tuser;
+                end
+            end
+        end
+
+        assign s_axis_tready = (fifo_valid) ? out_ready : 1'b1;
+        assign m_axis_tdata = fifo_out_tdata;
+        assign m_axis_tkeep = fifo_out_tkeep;
+        assign m_axis_tvalid = fifo_out_valid;
+        assign m_axis_tlast = fifo_out_tlast;
+        assign m_axis_tid = fifo_out_tid;
+        assign m_axis_tdest = fifo_out_tdest;
+        assign m_axis_tuser = fifo_out_tuser;
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

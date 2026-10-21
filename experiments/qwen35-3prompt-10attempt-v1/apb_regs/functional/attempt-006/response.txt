@@ -1,0 +1,254 @@
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Internal logic types
+  localparam int unsigned ADDR_WIDTH = ApbAddrWidth;
+  localparam int unsigned DATA_WIDTH = RegDataWidth;
+  
+  // APB Protocol Signals
+  logic pwrite1;
+  logic pwrite0;
+  logic pwrite;
+  logic pvalid;
+  logic pready;
+  logic paddr;
+  logic pprot;
+  logic psize;
+  logic pburst;
+  logic ptrans;
+  logic pslaveselect;
+  logic pwrite1_o;
+  logic pwrite0_o;
+  logic pwrite_o;
+  logic pvalid_o;
+  logic pready_o;
+  logic paddr_o;
+  logic pprot_o;
+  logic psize_o;
+  logic pburst_o;
+  logic ptrans_o;
+  logic pslaveselect_o;
+  
+  // Internal register for data
+  reg_data_t [NoApbRegs-1:0] reg_q;
+  
+  // Generate APB interface wires
+  generate
+    if (ApbAddrWidth > 0) begin : gen_addr
+      assign paddr_o = base_addr_i;
+    end else begin : gen_addr_empty
+      assign paddr_o = '0;
+    end
+    
+    assign pprot_o = '0;
+    assign psize_o = '0;
+    assign pburst_o = '0;
+    assign ptrans_o = '0;
+    assign pslaveselect_o = '0;
+  endgenerate
+  
+  // APB Master Interface (Internal to this module, simulating the APB bus)
+  // Since req_i is a generic type, we assume it contains the necessary APB control signals.
+  // We map req_i fields to internal APB signals.
+  // Note: In a real scenario, req_t would be a struct or packed array matching the APB spec.
+  // Here we assume req_i has fields: pwrite, pvalid, paddr, pprot, psize, pburst, ptrans, pslaveselect.
+  
+  assign pwrite = req_i.pwrite;
+  assign pvalid = req_i.pvalid;
+  assign paddr = req_i.paddr;
+  assign pprot = req_i.pprot;
+  assign psize = req_i.psize;
+  assign pburst = req_i.pburst;
+  assign ptrans = req_i.ptrans;
+  assign pslaveselect = req_i.pslaveselect;
+  
+  assign req_i.pwrite1_o = pwrite1_o;
+  assign req_i.pwrite0_o = pwrite0_o;
+  assign req_i.pwrite_o = pwrite_o;
+  assign req_i.pvalid_o = pvalid_o;
+  assign req_i.pready_o = pready_o;
+  assign req_i.paddr_o = paddr_o;
+  assign req_i.pprot_o = pprot_o;
+  assign req_i.psize_o = psize_o;
+  assign req_i.pburst_o = pburst_o;
+  assign req_i.ptrans_o = ptrans_o;
+  assign req_i.pslaveselect_o = pslaveselect_o;
+  
+  // APB Slave Interface (Internal to this module, simulating the APB bus)
+  // Since resp_t is a generic type, we assume it contains the necessary APB response signals.
+  // We map internal APB signals to resp_t fields.
+  // Note: In a real scenario, resp_t would be a struct or packed array matching the APB spec.
+  // Here we assume resp_t has fields: pwrite1, pwrite0, pwrite, pvalid, pready, paddr, pprot, psize, pburst, ptrans, pslaveselect.
+  
+  assign resp_o.pwrite1 = pwrite1;
+  assign resp_o.pwrite0 = pwrite0;
+  assign resp_o.pwrite = pwrite;
+  assign resp_o.pvalid = pvalid;
+  assign resp_o.pready = pready;
+  assign resp_o.paddr = paddr;
+  assign resp_o.pprot = pprot;
+  assign resp_o.psize = psize;
+  assign resp_o.pburst = pburst;
+  assign resp_o.ptrans = ptrans;
+  assign resp_o.pslaveselect = pslaveselect;
+  
+  // APB Slave Logic
+  // This block implements the APB protocol for the slave side.
+  // It handles the handshake and data transfer.
+  
+  logic [ApbAddrWidth-1:0] addr;
+  logic [RegDataWidth-1:0] wr_data;
+  logic [RegDataWidth-1:0] rd_data;
+  logic [NoApbRegs-1:0] write_mask;
+  logic [NoApbRegs-1:0] read_mask;
+  logic write_enable;
+  logic read_enable;
+  logic slave_ready;
+  logic slave_valid;
+  
+  assign addr = paddr;
+  assign wr_data = req_i.pwrite ? req_i.reg_data_i : '0; // Assuming req_i has reg_data_i for write
+  assign rd_data = reg_q[addr_to_reg_idx(addr)];
+  assign write_mask = addr_to_reg_mask(addr);
+  assign read_mask = addr_to_reg_mask(addr);
+  assign write_enable = pwrite && pvalid && pready;
+  assign read_enable = !pwrite && pvalid && pready;
+  assign slave_ready = pready;
+  assign slave_valid = pvalid;
+  
+  // APB Slave State Machine
+  logic [1:0] state;
+  logic next_state;
+  logic [ApbAddrWidth-1:0] next_addr;
+  logic [RegDataWidth-1:0] next_wr_data;
+  logic [RegDataWidth-1:0] next_rd_data;
+  logic [NoApbRegs-1:0] next_write_mask;
+  logic [NoApbRegs-1:0] next_read_mask;
+  logic next_write_enable;
+  logic next_read_enable;
+  logic next_slave_ready;
+  logic next_slave_valid;
+  
+  always @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      state <= 2'd0;
+      addr <= '0;
+      wr_data <= '0;
+      rd_data <= '0;
+      write_mask <= '0;
+      read_mask <= '0;
+      write_enable <= 1'b0;
+      read_enable <= 1'b0;
+      slave_ready <= 1'b0;
+      slave_valid <= 1'b0;
+    end else begin
+      state <= next_state;
+      addr <= next_addr;
+      wr_data <= next_wr_data;
+      rd_data <= next_rd_data;
+      write_mask <= next_write_mask;
+      read_mask <= next_read_mask;
+      write_enable <= next_write_enable;
+      read_enable <= next_read_enable;
+      slave_ready <= next_slave_ready;
+      slave_valid <= next_slave_valid;
+    end
+  end
+  
+  always @(*) begin
+    next_state = state;
+    next_addr = addr;
+    next_wr_data = wr_data;
+    next_rd_data = rd_data;
+    next_write_mask = write_mask;
+    next_read_mask = read_mask;
+    next_write_enable = write_enable;
+    next_read_enable = read_enable;
+    next_slave_ready = slave_ready;
+    next_slave_valid = slave_valid;
+    
+    case (state)
+      2'd0: begin // Idle
+        if (pvalid) begin
+          next_state = 2'd1;
+          next_addr = paddr;
+          next_wr_data = req_i.reg_data_i;
+          next_write_mask = addr_to_reg_mask(paddr);
+          next_read_mask = addr_to_reg_mask(paddr);
+          next_write_enable = pwrite;
+          next_read_enable = !pwrite;
+          next_slave_ready = 1'b1;
+          next_slave_valid = 1'b1;
+        end else begin
+          next_slave_ready = 1'b1;
+          next_slave_valid = 1'b0;
+        end
+      end
+      
+      2'd1: begin // Active
+        if (pready) begin
+          if (pwrite) begin
+            // Write operation
+            if (write_mask[addr_to_reg_idx(paddr)]) begin
+              if (!ReadOnly[addr_to_reg_idx(paddr)]) begin
+                reg_q[addr_to_reg_idx(paddr)] = req_i.reg_data_i;
+              end
+            end
+          end else begin
+            // Read operation
+            if (read_mask[addr_to_reg_idx(paddr)]) begin
+              rd_data = reg_q[addr_to_reg_idx(paddr)];
+            end
+          end
+          next_state = 2'd0;
+          next_slave_ready = 1'b1;
+          next_slave_valid = 1'b0;
+        end else begin
+          next_slave_ready = 1'b0;
+          next_slave_valid = 1'b1;
+        end
+      end
+    endcase
+  end
+  
+  // Helper functions for address mapping
+  function integer addr_to_reg_idx;
+    input [ApbAddrWidth-1:0] addr;
+    begin
+      addr_to_reg_idx = (addr - base_addr_i) / AddrOffset;
+      if (addr_to_reg_idx < 0 || addr_to_reg_idx >= NoApbRegs) begin
+        addr_to_reg_idx = -1;
+      end
+    end
+  endfunction
+  
+  function [NoApbRegs-1:0] addr_to_reg_mask;
+    input [ApbAddrWidth-1:0] addr;
+    begin
+      addr_to_reg_mask = '0;
+      if (addr_to_reg_idx(addr) >= 0 && addr_to_reg_idx(addr) < NoApbRegs) begin
+        addr_to_reg_mask[addr_to_reg_idx(addr)] = 1'b1;
+      end
+    end
+  endfunction
+  
+endmodule<|im_end|>
+<|endoftext|>

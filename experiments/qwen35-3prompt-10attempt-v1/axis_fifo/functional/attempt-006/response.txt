@@ -1,0 +1,548 @@
+```verilog
+`timescale 1ns/1ps
+
+module axis_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   pause_req,
+    output wire                   pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] status_depth,
+    output wire [$clog2(DEPTH):0] status_depth_commit,
+    output wire                   status_overflow,
+    output wire                   status_bad_frame,
+    output wire                   status_good_frame
+);
+
+    localparam LOG2_DEPTH = $clog2(DEPTH);
+    localparam MAX_DEPTH = (1 << LOG2_DEPTH);
+
+    // Internal signals for pipeline stages
+    wire [LOG2_DEPTH:0] wr_addr, wr_addr_next, rd_addr, rd_addr_next;
+    wire [LOG2_DEPTH:0] wr_addr_commit, rd_addr_commit;
+    wire [DATA_WIDTH-1:0] tdata_in, tdata_out;
+    wire [KEEP_WIDTH-1:0] tkeep_in, tkeep_out;
+    wire tlast_in, tlast_out;
+    wire [ID_WIDTH-1:0] tid_in, tid_out;
+    wire [DEST_WIDTH-1:0] tdest_in, tdest_out;
+    wire [USER_WIDTH-1:0] tuser_in, tuser_out;
+    wire tvalid_in, tvalid_out;
+    wire tready_in, tready_out;
+    wire tlast_commit;
+    wire [LOG2_DEPTH:0] depth_reg, depth_commit_reg;
+    wire tuser_bad_frame;
+    wire tuser_frame_pause;
+    wire tuser_drop;
+    wire tuser_mark;
+    wire tuser_pause_ack;
+    wire tuser_pause_req;
+
+    // --- RAM Pipeline Logic ---
+    // Stage 1: Write Address Generation & Data Capture
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            wr_addr <= 0;
+            depth_reg <= 0;
+        end else begin
+            wr_addr <= wr_addr_next;
+            depth_reg <= depth_reg + 1;
+        end
+    end
+
+    // Stage 2: Read Address Generation & Data Output
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rd_addr <= 0;
+            depth_commit_reg <= 0;
+        end else begin
+            rd_addr <= rd_addr_next;
+            depth_commit_reg <= depth_commit_reg + 1;
+        end
+    end
+
+    // Address Increment Logic
+    always @(*) begin
+        wr_addr_next = wr_addr + 1;
+        rd_addr_next = rd_addr + 1;
+        wr_addr_commit = wr_addr;
+        rd_addr_commit = rd_addr;
+    end
+
+    // --- Data Path Logic ---
+
+    // Input Data Capture
+    assign tdata_in = s_axis_tdata;
+    assign tkeep_in = s_axis_tkeep;
+    assign tlast_in = s_axis_tlast;
+    assign tid_in = s_axis_tid;
+    assign tdest_in = s_axis_tdest;
+    assign tuser_in = s_axis_tuser;
+    assign tvalid_in = s_axis_tvalid;
+
+    // Output Data Selection
+    assign m_axis_tdata = tdata_out;
+    assign m_axis_tkeep = tkeep_out;
+    assign m_axis_tlast = tlast_out;
+    assign m_axis_tid = tid_out;
+    assign m_axis_tdest = tdest_out;
+    assign m_axis_tuser = tuser_out;
+
+    // --- Control Logic & State Machine ---
+
+    // Calculate current depth
+    wire [LOG2_DEPTH:0] current_depth = depth_reg - depth_commit_reg;
+    assign status_depth = current_depth;
+    assign status_depth_commit = depth_commit_reg;
+
+    // Bad Frame Detection Logic
+    // A frame is bad if tlast is asserted but data width doesn't match expected frame size
+    // For simplicity in this generic implementation, we assume a frame is defined by tlast.
+    // If FRAME_FIFO is enabled, we check for oversized frames (multiple tlasts in one burst).
+    // If not, we just check for tlast validity.
+    
+    // Simplified Bad Frame Logic:
+    // 1. If tlast is asserted, it's the end of a frame.
+    // 2. If FRAME_FIFO is enabled, we track if we saw a tlast before the current one in the same burst.
+    //    Since this is a single clock FIFO, "oversize" usually means multiple tlasts in one write burst.
+    //    We will flag a frame as bad if tlast is asserted AND we are not at the start of a new frame logic.
+    //    However, without a complex state machine for frame boundaries, we rely on the USER_BAD_FRAME_MASK logic.
+    //    Let's implement a simple check: If tlast is high, mark the frame.
+    //    If FRAME_FIFO is 1, we might need to detect if tlast was already seen in the current burst.
+    //    Given the constraints, we will assume standard AXI behavior where tlast marks the end.
+    //    We will set status_bad_frame if tlast is asserted but we are in a "bad" state or if specific mask logic applies.
+    
+    // Implementation of Bad Frame Detection based on parameters:
+    // If DROP_OVERSIZE_FRAME or FRAME_PAUSE is enabled, we need to detect if tlast is asserted incorrectly.
+    // A common definition: A frame is bad if tlast is asserted but it's not the last word of the burst (oversized).
+    // Since we don't have burst length info easily without a counter, we assume standard behavior:
+    // tlast is valid only on the last beat. If tlast is asserted, we accept it as the end.
+    // "Bad Frame" here likely refers to the USER_BAD_FRAME_MASK logic or specific frame integrity.
+    // We will set status_bad_frame if tlast is asserted AND (DROP_OVERSIZE_FRAME or FRAME_PAUSE) is active,
+    // implying we are checking frame boundaries.
+    
+    // Let's implement a simple frame boundary detector for FRAME_FIFO mode.
+    // We need to know if the previous word in the burst had tlast.
+    // Since this is a FIFO, we can't easily look back at the previous write unless we store it.
+    // We will store the previous tlast in the RAM.
+    
+    wire [LOG2_DEPTH:0] prev_tlast_addr;
+    wire prev_tlast;
+    
+    // Store tlast in RAM to detect consecutive tlasts (oversize)
+    // RAM Address for tlast storage is same as data address
+    // We use a separate RAM or reuse the data RAM? 
+    // To keep it simple and single source, we assume the data RAM holds the payload.
+    // We can store tlast in the same RAM if we align, but tlast is 1 bit.
+    // Let's assume we store tlast in the same memory location as the data for simplicity in this generic model,
+    // or we assume the user handles frame logic via tuser.
+    // Given the prompt asks for a "Professional" implementation, let's use a small internal RAM for tlast history if needed,
+    // but to avoid complexity, we will assume standard AXI: tlast is only valid on the last beat.
+    // If FRAME_FIFO is enabled, we assume the user expects us to detect if tlast is asserted prematurely.
+    // We will implement a simple check: if tlast is asserted, we accept it.
+    // status_bad_frame will be driven by the USER_BAD_FRAME_MASK logic if tuser indicates a bad frame.
+    
+    // Re-evaluating "Bad Frame":
+    // Often in Vivado IP, "Bad Frame" is detected if tlast is asserted but the frame is not complete or oversized.
+    // Without burst length, we assume tlast is the truth.
+    // We will set status_bad_frame = 1 if tlast is asserted AND we are in a mode that checks frame integrity (FRAME_FIFO).
+    // But strictly, if tlast is asserted, the frame is complete.
+    // Let's assume "Bad Frame" means: tlast is asserted, but we are not supposed to accept it (e.g., oversized).
+    // We will implement a simple counter for burst length if FRAME_FIFO is enabled.
+    
+    // Burst Length Counter
+    wire [LOG2_DEPTH:0] burst_len;
+    wire [LOG2_DEPTH:0] burst_len_reg;
+    wire burst_len_reset;
+    
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            burst_len_reg <= 0;
+        end else begin
+            if (tvalid_in && s_axis_tkeep[0]) begin // First beat of burst
+                burst_len_reg <= 1;
+            end else if (tvalid_in) begin
+                burst_len_reg <= burst_len_reg + 1;
+            end else begin
+                burst_len_reg <= burst_len_reg;
+            end
+        end
+    end
+    
+    // Detect Oversize: If tlast is asserted and burst_len > 1, it's an oversize frame (multiple tlasts).
+    // Or if tlast is asserted and it's not the last beat (which is impossible if burst_len counts correctly).
+    // Actually, if tlast is asserted on beat N, and burst_len is N, it's valid.
+    // If tlast is asserted on beat N, and burst_len > N, it's invalid (oversize).
+    // But burst_len increments on every valid beat. So if tlast is asserted, burst_len should be equal to current beat index + 1.
+    // We can't easily know the current beat index without a counter.
+    // Let's simplify: status_bad_frame is driven by tuser_bad_frame logic primarily.
+    // We will set status_bad_frame = 1 if tlast is asserted AND FRAME_FIFO is enabled AND we detect a potential issue.
+    // For this implementation, we will assume tlast is always valid if asserted, unless tuser indicates otherwise.
+    
+    // Let's focus on the tuser logic for bad frames as per parameters USER_BAD_FRAME_VALUE/MASK.
+    wire tuser_bad = (tuser_in & USER_BAD_FRAME_MASK) == USER_BAD_FRAME_VALUE;
+    
+    // Assign status_bad_frame
+    assign status_bad_frame = (FRAME_FIFO && tlast_in && burst_len_reg > 1) || tuser_bad;
+    // Note: The condition `burst_len_reg > 1` when `tlast_in` is asserted implies multiple tlasts in one burst if we assume tlast is only at the end.
+    // However, without knowing the start of the burst, this is tricky. 
+    // We will assume the standard behavior: if tlast is asserted, it's the end.
+    // If FRAME_FIFO is enabled, we might need to check if tlast was asserted previously in the same burst.
+    // We will store the previous tlast in a register.
+    
+    wire prev_tlast_reg;
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            prev_tlast_reg <= 0;
+        end else begin
+            prev_tlast_reg <= tlast_in;
+        end
+    end
+    
+    // Refined Bad Frame Logic for FRAME_FIFO
+    // If FRAME_FIFO is enabled, a frame is bad if tlast is asserted AND prev_tlast_reg was also asserted (multiple tlasts).
+    wire bad_frame_frame_fifo = (FRAME_FIFO && tlast_in && prev_tlast_reg);
+    assign status_bad_frame = bad_frame_frame_fifo || tuser_bad;
+
+    // --- FIFO Control Logic ---
+
+    // Write Enable
+    wire we = (tvalid_in && tready_out) && !tuser_drop;
+
+    // Read Enable
+    wire re = (m_axis_tready && m_axis_tvalid) && !tuser_drop;
+
+    // Depth Check
+    wire full = (current_depth == MAX_DEPTH);
+    wire empty = (current_depth == 0);
+    assign status_overflow = full;
+    assign s_axis_tready = (!full && !we) || (!empty && !re); // Simplified handshake
+    // Correct Handshake:
+    // s_axis_tready = 1 if not full OR if full and we are allowed to drop/mark.
+    // But standard AXI: ready is 1 if we can accept data.
+    // If full and DROP_WHEN_FULL is 0, we assert ready=0.
+    // If full and MARK_WHEN_FULL is 1, we assert ready=1 but mark the frame.
+    
+    wire can_write = (!full) || (full && (DROP_WHEN_FULL || MARK_WHEN_FULL));
+    wire can_read = (!empty) || (empty && (DROP_WHEN_FULL || MARK_WHEN_FULL)); // Empty read is usually blocked unless drop
+    
+    // Pause Logic
+    wire pause_active = (PAUSE_ENABLE && pause_req);
+    wire pause_frame_active = (FRAME_PAUSE && pause_req);
+    
+    // Pause Ack Generation
+    // We can pause if we are not full and not in a bad state, or if we are full and can drop.
+    // If we are full, we cannot pause (unless we drop).
+    wire can_pause = (!full) || (full && (DROP_WHEN_FULL || MARK_WHEN_FULL));
+    assign pause_ack = (can_pause && !pause_active) || (pause_active && !can_pause); // Toggle on change? No, usually active high.
+    // Standard: pause_ack is high when we are paused.
+    // Let's define pause_ack as the signal we send back to say "I am paused".
+    // If pause_req is high, we set pause_ack high if we can handle it.
+    assign pause_ack = (pause_req && can_pause);
+
+    // --- RAM Operations ---
+    
+    // Write Data
+    // We need to store tdata, tkeep, tlast, tid, tdest, tuser.
+    // Since we can't instantiate multiple RAMs easily in a single file without instantiation,
+    // we will assume a single RAM for data and store sidebands in the same RAM if possible,
+    // OR we assume the user has separate RAMs.
+    // To make this a complete single-file module, we will instantiate a generic RAM for data.
+    // For sidebands (tkeep, tlast, etc.), we can store them in the same RAM if we pack them,
+    // or assume they are stored separately.
+    // Given the complexity, we will assume a single RAM for tdata and store tlast in a separate small RAM or register.
+    // Actually, to keep it clean, we will assume the RAM stores the full word including sidebands if width allows,
+    // or we just store tdata and tlast separately.
+    // Let's use a single RAM for tdata and a separate RAM for tlast if needed, but to minimize instantiation:
+    // We will assume the RAM stores tdata. tlast is stored in a separate small RAM or we just use the data RAM to store tlast in the LSB if width permits?
+    // No, let's assume standard practice: Data RAM for data, Sideband RAM for control.
+    // To avoid multiple RAM instantiations which might be vendor specific, we will implement a simple RAM array using registers if DEPTH is small,
+    // but DEPTH is a parameter.
+    // We will use a generic RAM instantiation for data and a small one for tlast.
+    
+    // However, the prompt says "Do not include... vendor primitives".
+    // So we must implement the RAM logic ourselves using registers.
+    // This is feasible for a single file.
+    
+    // RAM Implementation
+    // We need to store: tdata, tkeep, tlast, tid, tdest, tuser.
+    // Let's create a struct-like approach using parallel wires.
+    
+    // Write Address
+    wire [LOG2_DEPTH:0] wr_addr_final = (RAM_PIPELINE) ? wr_addr_next : wr_addr;
+    wire [LOG2_DEPTH:0] rd_addr_final = (RAM_PIPELINE) ? rd_addr_next : rd_addr;
+    
+    // Read Data
+    // We need to read from the RAM.
+    // Since we are implementing RAM in Verilog, we need a memory array.
+    // We will define the memory as a reg array inside the module.
+    
+    reg [DATA_WIDTH-1:0] mem_data [0:DEPTH-1];
+    reg [KEEP_WIDTH-1:0] mem_keep [0:DEPTH-1];
+    reg tlast_mem [0:DEPTH-1];
+    reg [ID_WIDTH-1:0] mem_tid [0:DEPTH-1];
+    reg [DEST_WIDTH-1:0] mem_tdest [0:DEPTH-1];
+    reg [USER_WIDTH-1:0] mem_tuser [0:DEPTH-1];
+
+    // Write Logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            for (integer i = 0; i < DEPTH; i = i + 1) begin
+                mem_data[i] <= 0;
+                mem_keep[i] <= 0;
+                tlast_mem[i] <= 0;
+                mem_tid[i] <= 0;
+                mem_tdest[i] <= 0;
+                mem_tuser[i] <= 0;
+            end
+        end else if (we) begin
+            // Only write if not dropping
+            if (!tuser_drop) begin
+                mem_data[wr_addr_final] <= tdata_in;
+                mem_keep[wr_addr_final] <= tkeep_in;
+                tlast_mem[wr_addr_final] <= tlast_in;
+                mem_tid[wr_addr_final] <= tid_in;
+                mem_tdest[wr_addr_final] <= tdest_in;
+                mem_tuser[wr_addr_final] <= tuser_in;
+            end
+        end
+    end
+
+    // Read Logic
+    always @(*) begin
+        tdata_out = mem_data[rd_addr_final];
+        tkeep_out = mem_keep[rd_addr_final];
+        tlast_out = tlast_mem[rd_addr_final];
+        tid_out = mem_tid[rd_addr_final];
+        tdest_out = mem_tdest[rd_addr_final];
+        tuser_out = mem_tuser[rd_addr_final];
+    end
+
+    // --- Handshake & Frame Logic Refinement ---
+
+    // Determine if we should drop the current frame
+    wire drop_frame = (tuser_drop || (DROP_BAD_FRAME && status_bad_frame));
+    
+    // Update tuser_bad_frame logic for output
+    // If we drop a frame, we might want to mark it as bad in the output if we didn't drop it?
+    // No, if we drop, we don't output.
+    // If we mark, we output with a flag.
+    
+    // Frame Marking Logic
+    wire mark_frame = (MARK_WHEN_FULL && full && !drop_frame);
+    
+    // If we are marking, we set tuser to indicate a marked frame.
+    // But we need to know if the current frame is the one being marked.
+    // We can set a flag in tuser if the frame is marked.
+    // Since we can't modify tuser after reading, we need to set it before writing?
+    // No, we set it when reading.
+    // If we are marking, we set the LSB of tuser_out to 1 (assuming USER_WIDTH >= 1).
+    
+    wire tuser_marked = (USER_ENABLE && mark_frame);
+    
+    // Combine tuser logic
+    wire [USER_WIDTH-1:0] tuser_out_final;
+    if (USER_ENABLE) begin
+        tuser_out_final = tuser_out;
+        if (tuser_marked) begin
+            // Set the bit indicated by USER_BAD_FRAME_MASK? Or just LSB?
+            // Let's assume LSB for marking.
+            tuser_out_final = tuser_out | (1'b1 << 0); 
+        end
+    end else begin
+        tuser_out_final = 0;
+    end
+
+    // Final Output Assignments
+    assign m_axis_tuser = tuser_out_final;
+    
+    // Frame Pause Logic
+    // If FRAME_PAUSE is enabled and we are pausing, we might need to mark the frame as paused.
+    // Similar to marking.
+    wire tuser_paused = (USER_ENABLE && pause_frame_active);
+    
+    // If paused, we might want to set a flag.
+    // But pause_ack handles the handshake.
+    
+    // --- Handshake Logic Finalization ---
+    
+    // s_axis_tready
+    // Ready if not full, or if full and we can drop/mark.
+    // If we are full and cannot drop/mark, ready = 0.
+    wire ready_in = (!full) || (full && (DROP_WHEN_FULL || MARK_WHEN_FULL));
+    assign s_axis_tready = ready_in;
+
+    // m_axis_tvalid
+    // Valid if not empty, and we are not dropping the frame, and we are not paused (if pause blocks output).
+    // If pause_req is high, we might still output if we are just pausing the input?
+    // Usually, pause_req means "I need to pause". We acknowledge and stop outputting.
+    wire valid_out = (!empty) && !drop_frame && !pause_active;
+    assign m_axis_tvalid = valid_out;
+
+    // m_axis_tready
+    // Ready if we can accept data.
+    // If we are full, we can't accept unless we drop/mark.
+    // If we are empty, we can accept.
+    wire ready_out = (!empty) || (empty && (DROP_WHEN_FULL || MARK_WHEN_FULL));
+    assign m_axis_tready = ready_out;
+
+    // --- Status Outputs ---
+    assign status_good_frame = (!status_bad_frame && !drop_frame);
+    
+    // tuser_bad_frame logic for output status
+    // If we are outputting a frame that was marked as bad, we should indicate it.
+    // But status_bad_frame is already an output wire.
+    
+    // --- Drop Logic ---
+    // If we decide to drop, we set tuser_drop.
+    // tuser_drop is determined by:
+    // 1. DROP_BAD_FRAME is enabled and status_bad_frame is high.
+    // 2. DROP_OVERSIZE_FRAME is enabled and we detected an oversize frame.
+    //    (We need to detect oversize: tlast asserted and prev_tlast was asserted).
+    wire oversize_detected = (FRAME_FIFO && tlast_in && prev_tlast_reg);
+    wire drop_current = (DROP_BAD_FRAME && status_bad_frame) || (DROP_OVERSIZE_FRAME && oversize_detected);
+    
+    // If we are dropping, we set tuser_drop.
+    // But we need to know if the current frame is the one to drop.
+    // We can set a flag in tuser before writing? No, we write after reading.
+    // We can set tuser_drop based on the current frame's properties.
+    // If the current frame is bad/oversize, we drop it.
+    // We need to know if the current frame is bad before we write it?
+    // No, we write it, then check if we should drop it on read?
+    // If we drop on read, we don't output it.
+    // So tuser_drop should be set based on the frame being read.
+    // But the decision to drop is made at write time?
+    // If we drop on write, we don't write to RAM.
+    // If we drop on read, we write to RAM but don't output.
+    // The parameter DROP_WHEN_FULL suggests dropping on write when full.
+    // DROP_BAD_FRAME suggests dropping bad frames.
+    // Let's assume:
+    // - If full and DROP_WHEN_FULL: Drop on write (don't write to RAM).
+    // - If bad frame and DROP_BAD_FRAME: Drop on write (don't write to RAM).
+    // - If oversize and DROP_OVERSIZE_FRAME: Drop on write.
+    // - If MARK_WHEN_FULL: Write to RAM, but mark it.
+    
+    // Revised Drop Logic:
+    wire drop_on_write = (DROP_WHEN_FULL && full) || (DROP_BAD_FRAME && status_bad_frame) || (DROP_OVERSIZE_FRAME && oversize_detected);
+    
+    // If we drop on write, we don't write to RAM.
+    // If we don't drop on write, we write to RAM.
+    // Then on read, we check if we should drop (if we didn't drop on write).
+    // But if we dropped on write, we don't have the data in RAM.
+    // So the read logic should check if the data in RAM is marked for dropping?
+    // No, if we drop on write, we don't store it.
+    // So the read logic only sees valid data.
+    // The only case where we store but don't output is MARK_WHEN_FULL or if we drop on read.
+    // Let's assume DROP_BAD_FRAME and DROP_OVERSIZE_FRAME imply dropping on write if possible, else drop on read.
+    // To simplify:
+    // If drop_on_write is true, we don't write.
+    // If drop_on_write is false, we write.
+    // On read, if the frame is bad (status_bad_frame) and we didn't drop on write, we drop on read.
+    // But status_bad_frame is calculated based on input.
+    // We can store a "drop_flag" in the RAM along with the data.
+    
+    reg drop_flag [0:DEPTH-1];
+    
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            for (integer i = 0; i < DEPTH; i = i + 1) begin
+                drop_flag[i] <= 0;
+            end
+        end else if (we && !tuser_drop) begin
+            if (!drop_on_write) begin
+                drop_flag[wr_addr_final] <= 1;
+            end
+        end
+    end
+    
+    // Read Drop Logic
+    wire drop_on_read = (drop_flag[rd_addr_final]);
+    
+    // Final tuser_drop for read path
+    wire tuser_drop_final = drop_on_read;
+    
+    // Update m_axis_tvalid
+    assign m_axis_tvalid = valid_out && !tuser_drop_final;
+    
+    // Update m_axis_tuser to indicate drop if needed?
+    // If we drop, we don't output.
+    // If we mark, we output with a flag.
+    
+    // Final tuser logic
+    wire [USER_WIDTH-1:0] tuser_out_final_v2;
+    if (USER_ENABLE) begin
+        tuser_out_final_v2 = tuser_out;
+        if (tuser_marked) begin
+            tuser_out_final_v2 = tuser_out | (1'b1 << 0);
+        end
+    end else begin
+        tuser_out_final_v2 = 0;
+    end
+    assign m_axis_tuser = tuser_out_final_v2;
+
+    // --- Summary of Status ---
+    // status_bad_frame: Indicates if the current frame is bad.
+    // status_good_frame: Indicates if the current frame is good.
+    // status_overflow: Indicates if the FIFO is full.
+    
+    // One final check: If we are dropping a frame, should we set status_bad_frame?
+    // status_bad_frame is an output wire, it reflects the state of the current frame being processed.
+    // If we drop it, it's still a bad frame.
+    
+    // Assign status_bad_frame = bad_frame_frame_fifo || tuser_bad;
+    // This is already done.
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,298 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam LOG_PORTS = $clog2(PORTS);
+    localparam NUM_BITS = PORTS;
+    
+    // State encoding for Round Robin
+    localparam STATE_IDLE = 2'b00;
+    localparam STATE_GRANTING = 2'b01;
+    localparam STATE_WAITING_ACK = 2'b10;
+    localparam STATE_WAITING_DROP = 2'b11;
+
+    // Internal state registers with synchronous reset
+    reg [1:0] state_reg;
+    reg [LOG_PORTS-1:0] rr_index_reg;
+    reg [LOG_PORTS-1:0] rr_next_index_reg;
+    reg [NUM_BITS-1:0] rr_mask_reg;
+    reg [NUM_BITS-1:0] rr_next_mask_reg;
+    reg [NUM_BITS-1:0] rr_active_mask_reg;
+    
+    // Output registers for CDC safety
+    reg [NUM_BITS-1:0] grant_reg;
+    reg grant_valid_reg;
+    reg [$clog2(PORTS)-1:0] grant_encoded_reg;
+
+    // Combinational logic for next state and outputs
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state_reg <= STATE_IDLE;
+            rr_index_reg <= 0;
+            rr_next_index_reg <= 0;
+            rr_mask_reg <= {PORTS{1'b0}};
+            rr_next_mask_reg <= {PORTS{1'b0}};
+            rr_active_mask_reg <= {PORTS{1'b0}};
+            grant_reg <= {PORTS{1'b0}};
+            grant_valid_reg <= 1'b0;
+            grant_encoded_reg <= 0;
+        end
+        else begin
+            state_reg <= state_next;
+            rr_index_reg <= rr_next_index_reg;
+            rr_mask_reg <= rr_next_mask_reg;
+            rr_active_mask_reg <= rr_active_mask_reg; // Update active mask based on current request
+            
+            // Update active mask: if request changes, update the mask of active ports
+            // We do this here to ensure the mask reflects the current cycle's request status
+            // before calculating the next grant.
+            // However, for Round Robin, we need to know who is active *now* to decide rotation.
+            // Let's refine the logic flow below.
+            
+            grant_reg <= grant_calc;
+            grant_valid_reg <= grant_valid_calc;
+            grant_encoded_reg <= grant_encoded_calc;
+        end
+    end
+
+    // Combinational logic for state transitions and calculations
+    always @(*) begin
+        state_next = state_reg;
+        rr_next_index_reg = rr_index_reg;
+        rr_next_mask_reg = rr_mask_reg;
+        rr_active_mask_reg = request; // Update active mask immediately for this cycle's decision
+        
+        grant_calc = {PORTS{1'b0}};
+        grant_valid_calc = 1'b0;
+        grant_encoded_calc = 0;
+
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            // Round Robin Logic
+            if (state_reg == STATE_IDLE) begin
+                // Find first active port starting from rr_index
+                rr_next_mask_reg = 1'b0;
+                for (int i = 0; i < PORTS; i = i + 1) begin
+                    if (request[i]) begin
+                        rr_next_mask_reg = rr_next_mask_reg | (1 << i);
+                        rr_next_index_reg = i;
+                        grant_calc = 1 << i;
+                        grant_valid_calc = 1'b1;
+                        grant_encoded_calc = i;
+                        break;
+                    end
+                end
+                
+                if (rr_next_mask_reg == 1'b0) begin
+                    // No requests, stay idle or reset index? 
+                    // Usually reset index to 0 or keep current. Let's keep current for continuity.
+                    state_next = STATE_IDLE;
+                end
+                else begin
+                    // Transition to granting state
+                    state_next = STATE_GRANTING;
+                end
+            end
+            else if (state_reg == STATE_GRANTING) begin
+                // Grant is already given. Check if we need to wait for ACK or release.
+                if (ARB_BLOCK_ACK) begin
+                    // Wait for acknowledge
+                    if (acknowledge[rr_index_reg]) begin
+                        // ACK received, rotate to next
+                        state_next = STATE_IDLE;
+                        // Calculate next index
+                        rr_next_index_reg = rr_index_reg;
+                        rr_next_mask_reg = 1'b0;
+                        for (int i = 0; i < PORTS; i = i + 1) begin
+                            if (request[i]) begin
+                                rr_next_mask_reg = rr_next_mask_reg | (1 << i);
+                                rr_next_index_reg = i;
+                                break;
+                            end
+                        end
+                        // If no one else is requesting, next index might point to nothing, handled in IDLE
+                    end
+                    else begin
+                        // No ACK yet, stay in GRANTING
+                        state_next = STATE_GRANTING;
+                    end
+                end
+                else begin
+                    // ARB_BLOCK = 0, release immediately if request drops
+                    if (!request[rr_index_reg]) begin
+                        state_next = STATE_IDLE;
+                        // Find next active
+                        rr_next_index_reg = rr_index_reg;
+                        rr_next_mask_reg = 1'b0;
+                        for (int i = 0; i < PORTS; i = i + 1) begin
+                            if (request[i]) begin
+                                rr_next_mask_reg = rr_next_mask_reg | (1 << i);
+                                rr_next_index_reg = i;
+                                break;
+                            end
+                        end
+                    end
+                    else begin
+                        // Request still high, stay granting
+                        state_next = STATE_GRANTING;
+                    end
+                end
+            end
+            else if (state_reg == STATE_WAITING_ACK) begin
+                // This state is effectively merged with GRANTING in the logic above 
+                // unless we need to distinguish "waiting for ack" vs "waiting for drop".
+                // The logic above handles ARB_BLOCK_ACK=1 by staying in GRANTING until ACK.
+                // If ARB_BLOCK_ACK=0, we stay in GRANTING until request drops.
+                // So STATE_WAITING_ACK and STATE_WAITING_DROP are not strictly needed if logic is inline.
+                // But to be explicit per state machine design:
+                state_next = STATE_GRANTING; 
+                // Logic duplicated from GRANTING for clarity in state machine
+                if (ARB_BLOCK_ACK) begin
+                    if (acknowledge[rr_index_reg]) begin
+                        state_next = STATE_IDLE;
+                        rr_next_index_reg = rr_index_reg;
+                        rr_next_mask_reg = 1'b0;
+                        for (int i = 0; i < PORTS; i = i + 1) begin
+                            if (request[i]) begin
+                                rr_next_mask_reg = rr_next_mask_reg | (1 << i);
+                                rr_next_index_reg = i;
+                                break;
+                            end
+                        end
+                    end
+                end
+                else begin
+                    if (!request[rr_index_reg]) begin
+                        state_next = STATE_IDLE;
+                        rr_next_index_reg = rr_index_reg;
+                        rr_next_mask_reg = 1'b0;
+                        for (int i = 0; i < PORTS; i = i + 1) begin
+                            if (request[i]) begin
+                                rr_next_mask_reg = rr_next_mask_reg | (1 << i);
+                                rr_next_index_reg = i;
+                                break;
+                            end
+                        end
+                    end
+                end
+            end
+            else if (state_reg == STATE_WAITING_DROP) begin
+                // Similar to above
+                state_next = STATE_GRANTING;
+                if (!request[rr_index_reg]) begin
+                    state_next = STATE_IDLE;
+                    rr_next_index_reg = rr_index_reg;
+                    rr_next_mask_reg = 1'b0;
+                    for (int i = 0; i < PORTS; i = i + 1) begin
+                        if (request[i]) begin
+                            rr_next_mask_reg = rr_next_mask_reg | (1 << i);
+                            rr_next_index_reg = i;
+                            break;
+                        end
+                    end
+                end
+            end
+        end
+        else begin
+            // Fixed Priority Logic
+            // Determine priority direction based on ARB_LSB_HIGH_PRIORITY
+            int priority_start;
+            if (ARB_LSB_HIGH_PRIORITY) begin
+                priority_start = 0; // LSB is highest priority (index 0)
+            end
+            else begin
+                priority_start = PORTS - 1; // MSB is highest priority (index PORTS-1)
+            end
+            
+            int grant_idx = -1;
+            int i;
+            
+            // Scan for active request
+            for (i = priority_start; i >= 0; i--) begin
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    if (i < 0) i = PORTS - 1; // Wrap around if scanning down from 0? No, linear scan.
+                    // If LSB high, we scan 0, 1, 2...
+                    // If MSB high, we scan PORTS-1, PORTS-2...
+                end
+            end
+            
+            // Re-implement loop correctly
+            if (ARB_LSB_HIGH_PRIORITY) begin
+                for (i = 0; i < PORTS; i = i + 1) begin
+                    if (request[i]) begin
+                        grant_idx = i;
+                        break;
+                    end
+                end
+            end
+            else begin
+                for (i = PORTS - 1; i >= 0; i = i - 1) begin
+                    if (request[i]) begin
+                        grant_idx = i;
+                        break;
+                    end
+                end
+            end
+            
+            if (grant_idx != -1) begin
+                grant_calc = 1 << grant_idx;
+                grant_valid_calc = 1'b1;
+                grant_encoded_calc = grant_idx;
+                
+                if (ARB_BLOCK) begin
+                    if (ARB_BLOCK_ACK) begin
+                        // Wait for ACK
+                        if (acknowledge[grant_idx]) begin
+                            // Release grant
+                            grant_calc = {PORTS{1'b0}};
+                            grant_valid_calc = 1'b0;
+                        end
+                    end
+                    else begin
+                        // Release on request drop
+                        if (!request[grant_idx]) begin
+                            grant_calc = {PORTS{1'b0}};
+                            grant_valid_calc = 1'b0;
+                        end
+                    end
+                end
+                else begin
+                    // Non-blocking
+                    grant_calc = {PORTS{1'b0}};
+                    grant_valid_calc = 1'b0;
+                end
+            end
+            else begin
+                grant_calc = {PORTS{1'b0}};
+                grant_valid_calc = 1'b0;
+            end
+        end
+    end
+
+    // CDC Safe Output Assignment
+    // The combinational logic calculates the values.
+    // The sequential block updates the registers on the clock edge.
+    // This ensures no combinational path from input to output without a register,
+    // satisfying CDC requirements for multi-bit data and reset.
+    
+    assign grant = grant_reg;
+    assign grant_valid = grant_valid_reg;
+    assign grant_encoded = grant_encoded_reg;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

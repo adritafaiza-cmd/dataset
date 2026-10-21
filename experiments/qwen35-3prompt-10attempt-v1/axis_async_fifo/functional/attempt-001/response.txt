@@ -1,0 +1,579 @@
+```verilog
+`timescale 1ns/1ps
+
+module axis_async_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    /*
+     * AXI input
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   s_pause_req,
+    output wire                   s_pause_ack,
+    input  wire                   m_pause_req,
+    output wire                   m_pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] s_status_depth,
+    output wire [$clog2(DEPTH):0] s_status_depth_commit,
+    output wire                   s_status_overflow,
+    output wire                   s_status_bad_frame,
+    output wire                   s_status_good_frame,
+    output wire [$clog2(DEPTH):0] m_status_depth,
+    output wire [$clog2(DEPTH):0] m_status_depth_commit,
+    output wire                   m_status_overflow,
+    output wire                   m_status_bad_frame,
+    output wire                   m_status_good_frame
+);
+
+    localparam LOG2_DEPTH = $clog2(DEPTH);
+    localparam KEEP_WIDTH_LOG = $clog2(KEEP_WIDTH);
+    localparam ID_WIDTH_LOG = $clog2(ID_WIDTH);
+    localparam DEST_WIDTH_LOG = $clog2(DEST_WIDTH);
+    localparam USER_WIDTH_LOG = $clog2(USER_WIDTH);
+
+    // Internal FIFO Depth (Power of 2 for pointer logic)
+    localparam INTERNAL_DEPTH = (DEPTH > 1) ? DEPTH : 1;
+    localparam INTERNAL_LOG2_DEPTH = $clog2(INTERNAL_DEPTH);
+
+    // Internal pointers
+    reg [INTERNAL_LOG2_DEPTH-1:0] s_ptr;
+    reg [INTERNAL_LOG2_DEPTH-1:0] m_ptr;
+    reg [INTERNAL_LOG2_DEPTH-1:0] s_ptr_commit;
+    reg [INTERNAL_LOG2_DEPTH-1:0] m_ptr_commit;
+
+    // FIFO Data Memory
+    reg [DATA_WIDTH-1:0] mem_data [0:INTERNAL_DEPTH-1];
+    reg [KEEP_WIDTH-1:0] mem_keep [0:INTERNAL_DEPTH-1];
+    reg [ID_WIDTH-1:0] mem_id [0:INTERNAL_DEPTH-1];
+    reg [DEST_WIDTH-1:0] mem_dest [0:INTERNAL_DEPTH-1];
+    reg [USER_WIDTH-1:0] mem_user [0:INTERNAL_DEPTH-1];
+    reg mem_last [0:INTERNAL_DEPTH-1];
+
+    // Control Signals
+    reg s_wr_en;
+    reg s_wr_grant;
+    reg s_pause;
+    reg m_rd_en;
+    reg m_rd_grant;
+    reg m_pause;
+    reg s_bad_frame;
+    reg m_bad_frame;
+    reg s_oversize_frame;
+    reg m_oversize_frame;
+    reg s_mark_full;
+    reg m_mark_full;
+
+    // Status Registers
+    reg [$clog2(DEPTH):0] s_depth_reg;
+    reg [$clog2(DEPTH):0] s_depth_commit_reg;
+    reg [$clog2(DEPTH):0] m_depth_reg;
+    reg [$clog2(DEPTH):0] m_depth_commit_reg;
+    reg s_overflow_reg;
+    reg m_overflow_reg;
+    reg s_bad_frame_reg;
+    reg m_bad_frame_reg;
+    reg s_good_frame_reg;
+    reg m_good_frame_reg;
+
+    // ---------------------------------------------------------
+    // Synchronizers for asynchronous signals
+    // ---------------------------------------------------------
+    wire s_valid_synced;
+    wire s_last_synced;
+    wire s_keep_synced;
+    wire s_id_synced;
+    wire s_dest_synced;
+    wire s_user_synced;
+    wire s_pause_req_synced;
+    wire m_ready_synced;
+    wire m_pause_req_synced;
+
+    // Synchronizer chain (3 stages)
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_valid_synced <= 1'b0;
+        else
+            s_valid_synced <= s_axis_tvalid;
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_last_synced <= 1'b0;
+        else
+            s_last_synced <= s_axis_tlast;
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_keep_synced <= {KEEP_WIDTH{1'b0}};
+        else
+            s_keep_synced <= s_axis_tkeep;
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_id_synced <= {ID_WIDTH{1'b0}};
+        else
+            s_id_synced <= s_axis_tid;
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_dest_synced <= {DEST_WIDTH{1'b0}};
+        else
+            s_dest_synced <= s_axis_tdest;
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_user_synced <= {USER_WIDTH{1'b0}};
+        else
+            s_user_synced <= s_axis_tuser;
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_pause_req_synced <= 1'b0;
+        else
+            s_pause_req_synced <= s_pause_req;
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_ready_synced <= 1'b0;
+        else
+            m_ready_synced <= m_axis_tready;
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_pause_req_synced <= 1'b0;
+        else
+            m_pause_req_synced <= m_pause_req;
+    end
+
+    // ---------------------------------------------------------
+    // Write Logic (Source Side)
+    // ---------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_ptr <= 1'b0;
+            s_wr_grant <= 1'b0;
+            s_pause <= 1'b0;
+            s_bad_frame <= 1'b0;
+            s_oversize_frame <= 1'b0;
+            s_mark_full <= 1'b0;
+            s_depth_reg <= 1'b0;
+            s_depth_commit_reg <= 1'b0;
+            s_overflow_reg <= 1'b0;
+            s_bad_frame_reg <= 1'b0;
+            s_good_frame_reg <= 1'b0;
+        end
+        else begin
+            // Update pointers and depth
+            s_ptr <= s_ptr;
+            s_depth_reg <= s_ptr;
+            s_depth_commit_reg <= s_ptr_commit;
+
+            // Check for overflow
+            if (s_ptr == (INTERNAL_DEPTH-1)) begin
+                s_overflow_reg <= 1'b1;
+            end else begin
+                s_overflow_reg <= 1'b0;
+            end
+
+            // Handle Pause Request
+            if (s_pause_req_synced) begin
+                s_pause <= 1'b1;
+            end else if (s_pause) begin
+                s_pause <= 1'b0;
+            end
+
+            // Handle Bad Frame Detection
+            if (s_user_synced & USER_BAD_FRAME_MASK) begin
+                if (s_user_synced != USER_BAD_FRAME_VALUE) begin
+                    s_bad_frame <= 1'b1;
+                end else begin
+                    s_bad_frame <= 1'b0;
+                end
+            end
+
+            // Handle Oversize Frame
+            if (s_last_synced) begin
+                if (s_ptr == (INTERNAL_DEPTH-1)) begin
+                    s_oversize_frame <= 1'b1;
+                end else begin
+                    s_oversize_frame <= 1'b0;
+                end
+            end
+
+            // Handle Mark When Full
+            if (s_ptr == (INTERNAL_DEPTH-1)) begin
+                s_mark_full <= 1'b1;
+            end else begin
+                s_mark_full <= 1'b0;
+            end
+
+            // Write Enable Logic
+            s_wr_en <= s_valid_synced & m_ready_synced & ~s_pause & ~s_bad_frame & ~s_oversize_frame & ~s_mark_full;
+            
+            // Grant Logic (for pipeline stages if needed, simplified here to direct)
+            s_wr_grant <= s_wr_en;
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Read Logic (Master Side)
+    // ---------------------------------------------------------
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_ptr <= 1'b0;
+            m_rd_grant <= 1'b0;
+            m_pause <= 1'b0;
+            m_bad_frame <= 1'b0;
+            m_oversize_frame <= 1'b0;
+            m_mark_full <= 1'b0;
+            m_depth_reg <= 1'b0;
+            m_depth_commit_reg <= 1'b0;
+            m_overflow_reg <= 1'b0;
+            m_bad_frame_reg <= 1'b0;
+            m_good_frame_reg <= 1'b0;
+        end
+        else begin
+            // Update pointers and depth
+            m_ptr <= m_ptr;
+            m_depth_reg <= m_ptr;
+            m_depth_commit_reg <= m_ptr_commit;
+
+            // Check for empty
+            if (m_ptr == 0) begin
+                m_overflow_reg <= 1'b0; // Not overflow, but empty
+            end else begin
+                m_overflow_reg <= 1'b0;
+            end
+
+            // Handle Pause Request
+            if (m_pause_req_synced) begin
+                m_pause <= 1'b1;
+            end else if (m_pause) begin
+                m_pause <= 1'b0;
+            end
+
+            // Handle Bad Frame Detection
+            if (m_user_synced & USER_BAD_FRAME_MASK) begin
+                if (m_user_synced != USER_BAD_FRAME_VALUE) begin
+                    m_bad_frame <= 1'b1;
+                end else begin
+                    m_bad_frame <= 1'b0;
+                end
+            end
+
+            // Handle Oversize Frame
+            if (m_last_synced) begin
+                if (m_ptr == 0) begin
+                    m_oversize_frame <= 1'b1;
+                end else begin
+                    m_oversize_frame <= 1'b0;
+                end
+            end
+
+            // Handle Mark When Full
+            if (m_ptr == (INTERNAL_DEPTH-1)) begin
+                m_mark_full <= 1'b1;
+            end else begin
+                m_mark_full <= 1'b0;
+            end
+
+            // Read Enable Logic
+            m_rd_en <= m_valid_synced & ~m_pause & ~m_bad_frame & ~m_oversize_frame & ~m_mark_full;
+            
+            // Grant Logic
+            m_rd_grant <= m_rd_en;
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Output Logic
+    // ---------------------------------------------------------
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_axis_tdata <= {DATA_WIDTH{1'b0}};
+            m_axis_tkeep <= {KEEP_WIDTH{1'b0}};
+            m_axis_tvalid <= 1'b0;
+            m_axis_tlast <= 1'b0;
+            m_axis_tid <= {ID_WIDTH{1'b0}};
+            m_axis_tdest <= {DEST_WIDTH{1'b0}};
+            m_axis_tuser <= {USER_WIDTH{1'b0}};
+            m_axis_tready <= 1'b1; // Default ready, overridden by handshake
+        end
+        else begin
+            // Data output
+            if (m_rd_grant) begin
+                m_axis_tdata <= mem_data[m_ptr];
+                m_axis_tkeep <= mem_keep[m_ptr];
+                m_axis_tlast <= mem_last[m_ptr];
+                m_axis_tid <= mem_id[m_ptr];
+                m_axis_tdest <= mem_dest[m_ptr];
+                m_axis_tuser <= mem_user[m_ptr];
+                m_axis_tvalid <= 1'b1;
+            end else begin
+                m_axis_tdata <= {DATA_WIDTH{1'b0}};
+                m_axis_tkeep <= {KEEP_WIDTH{1'b0}};
+                m_axis_tlast <= 1'b0;
+                m_axis_tid <= {ID_WIDTH{1'b0}};
+                m_axis_tdest <= {DEST_WIDTH{1'b0}};
+                m_axis_tuser <= {USER_WIDTH{1'b0}};
+                m_axis_tvalid <= 1'b0;
+            end
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Handshake Logic
+    // ---------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_axis_tready <= 1'b0;
+            s_pause_ack <= 1'b0;
+        end
+        else begin
+            // Ready if not full, not paused, and not bad frame
+            if (s_ptr != (INTERNAL_DEPTH-1) && ~s_pause && ~s_bad_frame && ~s_oversize_frame && ~s_mark_full) begin
+                s_axis_tready <= 1'b1;
+            end else begin
+                s_axis_tready <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_axis_tready <= 1'b0;
+            m_pause_ack <= 1'b0;
+        end
+        else begin
+            // Ready if not empty, not paused, and not bad frame
+            if (m_ptr != 0 && ~m_pause && ~m_bad_frame && ~m_oversize_frame && ~m_mark_full) begin
+                m_axis_tready <= 1'b1;
+            end else begin
+                m_axis_tready <= 1'b0;
+            end
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Status Output Logic
+    // ---------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_status_depth <= 1'b0;
+            s_status_depth_commit <= 1'b0;
+            s_status_overflow <= 1'b0;
+            s_status_bad_frame <= 1'b0;
+            s_status_good_frame <= 1'b0;
+        end
+        else begin
+            s_status_depth <= s_depth_reg;
+            s_status_depth_commit <= s_depth_commit_reg;
+            s_status_overflow <= s_overflow_reg;
+            s_status_bad_frame <= s_bad_frame_reg;
+            s_status_good_frame <= s_good_frame_reg;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_status_depth <= 1'b0;
+            m_status_depth_commit <= 1'b0;
+            m_status_overflow <= 1'b0;
+            m_status_bad_frame <= 1'b0;
+            m_status_good_frame <= 1'b0;
+        end
+        else begin
+            m_status_depth <= m_depth_reg;
+            m_status_depth_commit <= m_depth_commit_reg;
+            m_status_overflow <= m_overflow_reg;
+            m_status_bad_frame <= m_bad_frame_reg;
+            m_status_good_frame <= m_good_frame_reg;
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Write Pointer Update & Data Storage
+    // ---------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_ptr_commit <= 1'b0;
+        end
+        else begin
+            if (s_wr_grant) begin
+                s_ptr_commit <= s_ptr;
+            end
+        end
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            // Initialize memory
+            for (integer i = 0; i < INTERNAL_DEPTH; i = i + 1) begin
+                mem_data[i] <= {DATA_WIDTH{1'b0}};
+                mem_keep[i] <= {KEEP_WIDTH{1'b0}};
+                mem_last[i] <= 1'b0;
+                mem_id[i] <= {ID_WIDTH{1'b0}};
+                mem_dest[i] <= {DEST_WIDTH{1'b0}};
+                mem_user[i] <= {USER_WIDTH{1'b0}};
+            end
+        end
+        else begin
+            if (s_wr_grant) begin
+                mem_data[s_ptr] <= s_axis_tdata;
+                mem_keep[s_ptr] <= s_axis_tkeep;
+                mem_last[s_ptr] <= s_axis_tlast;
+                mem_id[s_ptr] <= s_axis_tid;
+                mem_dest[s_ptr] <= s_axis_tdest;
+                mem_user[s_ptr] <= s_axis_tuser;
+                
+                // Update pointers
+                s_ptr <= s_ptr + 1'b1;
+            end
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Read Pointer Update & Data Consumption
+    // ---------------------------------------------------------
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_ptr_commit <= 1'b0;
+        end
+        else begin
+            if (m_rd_grant) begin
+                m_ptr_commit <= m_ptr;
+            end
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            // Memory is read-only from master side, no update needed here
+        end
+        else begin
+            if (m_rd_grant) begin
+                m_ptr <= m_ptr + 1'b1;
+            end
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Good Frame Detection
+    // ---------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_good_frame_reg <= 1'b0;
+        end
+        else begin
+            // Good frame if not bad and not oversize
+            if (~s_bad_frame && ~s_oversize_frame) begin
+                s_good_frame_reg <= 1'b1;
+            end else begin
+                s_good_frame_reg <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_good_frame_reg <= 1'b0;
+        end
+        else begin
+            // Good frame if not bad and not oversize
+            if (~m_bad_frame && ~m_oversize_frame) begin
+                m_good_frame_reg <= 1'b1;
+            end else begin
+                m_good_frame_reg <= 1'b0;
+            end
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Pause Ack Logic
+    // ---------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_pause_ack <= 1'b0;
+        end
+        else begin
+            if (s_pause_req_synced) begin
+                s_pause_ack <= 1'b1;
+            end else begin
+                s_pause_ack <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_pause_ack <= 1'b0;
+        end
+        else begin
+            if (m_pause_req_synced) begin
+                m_pause_ack <= 1'b1;
+            end else begin
+                m_pause_ack <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,415 @@
+```verilog
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam VALID_WIDTH = 1;
+    localparam DATA_WIDTH_LOG = $clog2(DATA_WIDTH);
+
+    // Synchronous FIFO for Request (Source -> Destination)
+    // Stores: Valid, Sel, Enable, Write, Addr, WData, Strb, Pprot
+    wire [VALID_WIDTH-1:0] req_valid;
+    wire [1-1:0] req_sel;
+    wire [1-1:0] req_enable;
+    wire [1-1:0] req_write;
+    wire [ADDR_WIDTH-1:0] req_addr;
+    wire [DATA_WIDTH-1:0] req_wdata;
+    wire [DATA_WIDTH/8-1:0] req_strb;
+    wire [2:0] req_pprot;
+
+    wire [VALID_WIDTH-1:0] req_full;
+    wire [VALID_WIDTH-1:0] req_empty;
+
+    // Synchronous FIFO for Response (Destination -> Source)
+    // Stores: Valid, Prdata, Pslverr
+    wire [VALID_WIDTH-1:0] rsp_valid;
+    wire [DATA_WIDTH-1:0] rsp_prdata;
+    wire rsp_pslverr;
+
+    wire [VALID_WIDTH-1:0] rsp_full;
+    wire [VALID_WIDTH-1:0] rsp_empty;
+
+    // CDC Registers for Reset Synchronization
+    // We use a 2-stage synchronizer for all async signals crossing domains
+    // to ensure safe reset release and signal capture.
+
+    // --- Source Side Logic (Running on src_pclk_i) ---
+
+    // 1. Reset Synchronization for Source Inputs
+    wire src_preset_ni_synced;
+    wire src_preset_ni_synced_2;
+    wire src_preset_ni_synced_3;
+    wire src_preset_ni_synced_4;
+
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_preset_ni_synced <= 1'b0;
+            src_preset_ni_synced_2 <= 1'b0;
+            src_preset_ni_synced_3 <= 1'b0;
+            src_preset_ni_synced_4 <= 1'b0;
+        end else begin
+            src_preset_ni_synced <= src_preset_ni;
+            src_preset_ni_synced_2 <= src_preset_ni_synced;
+            src_preset_ni_synced_3 <= src_preset_ni_synced_2;
+            src_preset_ni_synced_4 <= src_preset_ni_synced_3;
+        end
+    end
+
+    // 2. Request Capture Logic
+    // Capture the APB transaction when valid and not reset.
+    // Valid condition: sel & enable & !write (for read) OR sel & enable & write (for write)
+    // Actually, APB valid is simply sel & enable.
+    // We capture the full transaction vector.
+    
+    wire src_req_valid;
+    assign src_req_valid = src_psel_i & src_penable_i;
+
+    wire [1-1:0] src_req_sel;
+    wire [1-1:0] src_req_enable;
+    wire [1-1:0] src_req_write;
+    wire [ADDR_WIDTH-1:0] src_req_addr;
+    wire [DATA_WIDTH-1:0] src_req_wdata;
+    wire [DATA_WIDTH/8-1:0] src_req_strb;
+    wire [2:0] src_req_pprot;
+
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_req_sel <= 1'b0;
+            src_req_enable <= 1'b0;
+            src_req_write <= 1'b0;
+            src_req_addr <= 0;
+            src_req_wdata <= 0;
+            src_req_strb <= 0;
+            src_req_pprot <= 0;
+        end else if (src_req_valid && !req_full[0]) begin
+            src_req_sel <= src_psel_i;
+            src_req_enable <= src_penable_i;
+            src_req_write <= src_pwrite_i;
+            src_req_addr <= src_paddr_i;
+            src_req_wdata <= src_pwdata_i;
+            src_req_strb <= src_pstrb_i;
+            src_req_pprot <= src_pprot_i;
+        end
+    end
+
+    // 3. Response Output Logic
+    // Read data and error come from the response FIFO.
+    // If FIFO is empty, output default values (0 for data, 0 for error).
+    // Note: APB spec says prdata is valid when pready is asserted.
+    // If no response is ready, we hold previous value or 0. 
+    // Since we only have one outstanding transaction, if empty, it means no response yet.
+    // We drive 0 to be safe, but strictly speaking, the slave hasn't responded.
+    // However, the bridge must drive something. 0 is standard idle.
+    
+    assign src_prdata_o = rsp_valid[0] ? rsp_prdata : 0;
+    assign src_pslverr_o = rsp_valid[0] ? rsp_pslverr : 0;
+    
+    // src_pready_o is asserted only when we have a valid response ready
+    // AND the request was valid. 
+    // Actually, the bridge acts as a slave to the source. 
+    // It accepts a request, then asserts pready when the destination is ready.
+    // So src_pready_o should be 1 when we have a valid response in the FIFO.
+    assign src_pready_o = rsp_valid[0];
+
+    // --- Destination Side Logic (Running on dst_pclk_i) ---
+
+    // 1. Reset Synchronization for Destination Inputs
+    wire dst_preset_ni_synced;
+    wire dst_preset_ni_synced_2;
+    wire dst_preset_ni_synced_3;
+    wire dst_preset_ni_synced_4;
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_preset_ni_synced <= 1'b0;
+            dst_preset_ni_synced_2 <= 1'b0;
+            dst_preset_ni_synced_3 <= 1'b0;
+            dst_preset_ni_synced_4 <= 1'b0;
+        end else begin
+            dst_preset_ni_synced <= dst_preset_ni;
+            dst_preset_ni_synced_2 <= dst_preset_ni_synced;
+            dst_preset_ni_synced_3 <= dst_preset_ni_synced_2;
+            dst_preset_ni_synced_4 <= dst_preset_ni_synced_3;
+        end
+    end
+
+    // 2. Response Capture Logic
+    // Capture the response from the destination slave.
+    // Valid condition: dst_pready_i is asserted.
+    // We capture prdata and pslverr.
+    
+    wire dst_rsp_valid;
+    assign dst_rsp_valid = dst_pready_i;
+
+    wire [DATA_WIDTH-1:0] dst_rsp_prdata;
+    wire dst_rsp_pslverr;
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_rsp_prdata <= 0;
+            dst_rsp_pslverr <= 0;
+        end else if (dst_rsp_valid && !rsp_full[0]) begin
+            dst_rsp_prdata <= dst_prdata_i;
+            dst_rsp_pslverr <= dst_pslverr_i;
+        end
+    end
+
+    // 3. Request Output Logic
+    // Drive the APB signals to the destination.
+    // These must be stable until dst_pready_i completes.
+    // We drive them from the request FIFO.
+    
+    assign dst_psel_o = req_valid[0] ? req_sel[0] : 1'b0;
+    assign dst_penable_o = req_valid[0] ? req_enable[0] : 1'b0;
+    assign dst_pwrite_o = req_valid[0] ? req_write[0] : 1'b0;
+    assign dst_paddr_o = req_valid[0] ? req_addr[0] : 0;
+    assign dst_pwdata_o = req_valid[0] ? req_wdata[0] : 0;
+    assign dst_pstrb_o = req_valid[0] ? req_strb[0] : 0;
+    assign dst_pprot_o = req_valid[0] ? req_pprot[0] : 0;
+
+    // --- FIFO Instantiation ---
+
+    // Request FIFO (Source -> Dest)
+    // Depth = 2^LOG_DEPTH
+    // Data width = 1 (valid) + 1 (sel) + 1 (enable) + 1 (write) + ADDR_WIDTH + DATA_WIDTH + STRB_WIDTH + 3 (prot)
+    // Total bits = 1 + 1 + 1 + 1 + ADDR_WIDTH + DATA_WIDTH + (DATA_WIDTH/8) + 3
+    // Simplified: We can pack them into a single wide bus or separate wires.
+    // Using separate wires for clarity and standard FIFO instantiation pattern.
+    
+    // Calculate total width for packed FIFO if needed, but let's use a generic FIFO interface
+    // assuming a standard synchronous FIFO module exists. 
+    // Since I cannot import external modules, I will implement a simple synchronous FIFO 
+    // using shift registers or a counter-based approach if LOG_DEPTH is small, 
+    // OR define a generic FIFO structure. 
+    // Given the constraint "Do not include... reference implementation", I must implement the FIFO logic myself 
+    // or assume a standard primitive. To be safe and self-contained, I will implement a 
+    // simple synchronous FIFO using a counter and shift register logic for small depths, 
+    // or a generic pointer-based implementation.
+    // However, writing a full generic FIFO from scratch in one file is verbose.
+    // The prompt asks for "the implementation". I will implement a standard synchronous FIFO 
+    // using a pointer and a depth counter, which is the standard way to do this in SystemVerilog/Verilog 
+    // without external libraries.
+    
+    // Let's define the FIFO data width
+    localparam REQ_FIFO_WIDTH = 1 + 1 + 1 + 1 + ADDR_WIDTH + DATA_WIDTH + (DATA_WIDTH/8) + 3;
+    localparam RSP_FIFO_WIDTH = 1 + DATA_WIDTH + 1;
+
+    // Request FIFO Signals
+    wire [DEPTH-1:0] req_fifo_data;
+    wire [LOG_DEPTH-1:0] req_fifo_rptr;
+    wire [LOG_DEPTH-1:0] req_fifo_wptr;
+    wire req_fifo_wr_en;
+    wire req_fifo_rd_en;
+    wire req_fifo_empty;
+    wire req_fifo_full;
+
+    // Response FIFO Signals
+    wire [DEPTH-1:0] rsp_fifo_data;
+    wire [LOG_DEPTH-1:0] rsp_fifo_rptr;
+    wire [LOG_DEPTH-1:0] rsp_fifo_wptr;
+    wire rsp_fifo_wr_en;
+    wire rsp_fifo_rd_en;
+    wire rsp_fifo_empty;
+    wire rsp_fifo_full;
+
+    // --- FIFO Implementation (Synchronous, Pointer-based) ---
+    // This is a standard implementation to avoid external dependencies.
+    
+    // Request FIFO
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            req_fifo_wptr <= 0;
+            req_fifo_rptr <= 0;
+            req_fifo_data <= 0;
+        end else begin
+            req_fifo_wptr <= req_fifo_wptr + req_fifo_wr_en;
+            req_fifo_rptr <= req_fifo_rptr + req_fifo_rd_en;
+            req_fifo_data <= req_fifo_wr_en ? {req_valid, req_sel, req_enable, req_write, 
+                                              req_addr, req_wdata, req_strb, req_pprot} : req_fifo_data;
+        end
+    end
+
+    assign req_fifo_wr_en = src_req_valid && !req_fifo_full;
+    assign req_fifo_rd_en = !req_fifo_empty;
+    assign req_valid = req_fifo_rd_en ? req_fifo_data[0] : 1'b0;
+    assign req_sel = req_fifo_rd_en ? req_fifo_data[1] : 1'b0;
+    assign req_enable = req_fifo_rd_en ? req_fifo_data[2] : 1'b0;
+    assign req_write = req_fifo_rd_en ? req_fifo_data[3] : 1'b0;
+    assign req_addr = req_fifo_rd_en ? req_fifo_data[4+ADDR_WIDTH:4] : 0; // Adjusted indexing below
+    // Re-mapping indices for clarity in assignment:
+    // Bit 0: Valid
+    // Bit 1: Sel
+    // Bit 2: Enable
+    // Bit 3: Write
+    // Bits 4 to 3+ADDR_WIDTH: Addr
+    // Bits 4+ADDR_WIDTH to 3+ADDR_WIDTH+DATA_WIDTH: WData
+    // ... This manual bit slicing is error prone. 
+    // Better to use a packed struct or just assume the FIFO stores the bits sequentially.
+    // Let's redefine the FIFO write data to be a packed vector for the logic above.
+    
+    // Re-doing Request FIFO logic with packed vector for correctness
+    wire [REQ_FIFO_WIDTH-1:0] req_fifo_wr_data;
+    assign req_fifo_wr_data = {src_req_valid, src_req_sel, src_req_enable, src_req_write, 
+                               src_req_addr, src_req_wdata, src_req_strb, src_req_pprot};
+    
+    // Update FIFO always block
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            req_fifo_wptr <= 0;
+            req_fifo_rptr <= 0;
+            req_fifo_data <= 0;
+        end else begin
+            req_fifo_wptr <= req_fifo_wptr + req_fifo_wr_en;
+            req_fifo_rptr <= req_fifo_rptr + req_fifo_rd_en;
+            req_fifo_data <= req_fifo_wr_en ? req_fifo_wr_data : req_fifo_data;
+        end
+    end
+
+    // Extract from FIFO
+    assign req_valid = req_fifo_rd_en ? req_fifo_data[0] : 1'b0;
+    assign req_sel = req_fifo_rd_en ? req_fifo_data[1] : 1'b0;
+    assign req_enable = req_fifo_rd_en ? req_fifo_data[2] : 1'b0;
+    assign req_write = req_fifo_rd_en ? req_fifo_data[3] : 1'b0;
+    // Address starts at bit 4
+    assign req_addr = req_fifo_rd_en ? req_fifo_data[4+ADDR_WIDTH-1:4] : 0;
+    // WData starts after address
+    assign req_wdata = req_fifo_rd_en ? req_fifo_data[4+ADDR_WIDTH+DATA_WIDTH-1:4+ADDR_WIDTH] : 0;
+    // Strb starts after wdata
+    assign req_strb = req_fifo_rd_en ? req_fifo_data[4+ADDR_WIDTH+DATA_WIDTH+(DATA_WIDTH/8)-1:4+ADDR_WIDTH+DATA_WIDTH] : 0;
+    // Pprot starts after strb
+    assign req_pprot = req_fifo_rd_en ? req_fifo_data[4+ADDR_WIDTH+DATA_WIDTH+(DATA_WIDTH/8)+3-1:4+ADDR_WIDTH+DATA_WIDTH+(DATA_WIDTH/8)] : 0;
+
+    // Response FIFO
+    localparam RSP_FIFO_WIDTH = 1 + DATA_WIDTH + 1;
+    wire [RSP_FIFO_WIDTH-1:0] rsp_fifo_wr_data;
+    assign rsp_fifo_wr_data = {dst_rsp_valid, dst_rsp_prdata, dst_rsp_pslverr};
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            rsp_fifo_wptr <= 0;
+            rsp_fifo_rptr <= 0;
+            rsp_fifo_data <= 0;
+        end else begin
+            rsp_fifo_wptr <= rsp_fifo_wptr + rsp_fifo_wr_en;
+            rsp_fifo_rptr <= rsp_fifo_rptr + rsp_fifo_rd_en;
+            rsp_fifo_data <= rsp_fifo_wr_en ? rsp_fifo_wr_data : rsp_fifo_data;
+        end
+    end
+
+    assign rsp_valid = rsp_fifo_rd_en ? rsp_fifo_data[0] : 1'b0;
+    assign rsp_prdata = rsp_fifo_rd_en ? rsp_fifo_data[1+DATA_WIDTH-1:1] : 0;
+    assign rsp_pslverr = rsp_fifo_rd_en ? rsp_fifo_data[1+DATA_WIDTH] : 0;
+
+    // --- FIFO Logic Helpers (Pointer Arithmetic) ---
+    // Full condition: wptr == rptr (if we assume 1 entry lost or use separate full flag)
+    // Standard implementation: Full if (wptr == rptr) and we are about to overwrite? 
+    // Or simply check if (wptr == rptr) implies full if we don't allow overflow.
+    // Let's use a simple equality check for full/empty with the assumption that we don't overflow.
+    // For a single beat FIFO (LOG_DEPTH=1), we need to handle the wrap around carefully.
+    // If LOG_DEPTH > 1, we need a counter or a separate full bit.
+    // To be robust, let's implement a simple full/empty logic using a counter if LOG_DEPTH > 1,
+    // or just pointer equality if LOG_DEPTH is small but we need to distinguish full/empty.
+    // Actually, for a generic FIFO, we usually need a separate full bit or a counter.
+    // Let's use a counter for depth tracking to be safe.
+    
+    // Re-implementing FIFO with counter for robustness
+    wire [LOG_DEPTH-1:0] req_count;
+    wire [LOG_DEPTH-1:0] rsp_count;
+
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            req_count <= 0;
+        end else begin
+            req_count <= req_count + req_fifo_wr_en - req_fifo_rd_en;
+        end
+    end
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            rsp_count <= 0;
+        end else begin
+            rsp_count <= rsp_count + rsp_fifo_wr_en - rsp_fifo_rd_en;
+        end
+    end
+
+    assign req_fifo_full = (req_count == DEPTH);
+    assign req_fifo_empty = (req_count == 0);
+    assign rsp_fifo_full = (rsp_count == DEPTH);
+    assign rsp_fifo_empty = (rsp_count == 0);
+
+    // Note: The pointer logic above (req_fifo_wptr, etc.) is technically redundant if we use a counter 
+    // for full/empty, but we need the pointers to access the data in the FIFO array.
+    // So we keep the pointers and the counter.
+    
+    // Data array declarations
+    reg [REQ_FIFO_WIDTH-1:0] req_fifo_mem [0:DEPTH-1];
+    reg [RSP_FIFO_WIDTH-1:0] rsp_fifo_mem [0:DEPTH-1];
+
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            req_fifo_mem <= 0;
+        end else if (req_fifo_wr_en) begin
+            req_fifo_mem[req_fifo_wptr] <= req_fifo_wr_data;
+        end
+    end
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            rsp_fifo_mem <= 0;
+        end else if (rsp_fifo_wr_en) begin
+            rsp_fifo_mem[rsp_fifo_wptr] <= rsp_fifo_wr_data;
+        end
+    end
+
+    // Read pointers logic
+    // We need to ensure the read pointer is synchronized with the write pointer logic
+    // The pointers increment on write/read edges.
+    // The logic above handles the increment.
+    
+    // One detail: When the FIFO is empty, the read pointer should not increment if we don't read.
+    // The logic `req_fifo_rd_en = !req_fifo_empty` handles this.
+    
+    // Final check on CDC:
+    // 1. Reset: Handled by 4-stage synchronizers for reset signals.
+    // 2. Clock Crossing: Handled by Synchronous FIFOs.
+    // 3. Data Integrity: FIFOs ensure data is captured in one clock cycle and held until read.
+    // 4. Handshake: 
+    //    - Source drives request. If FIFO full, source waits (pready=0).
+    //    - Bridge captures request.
+    //    - Bridge drives request to Dest. Dest asserts pready.
+    //    - Bridge captures response.
+    //    - Bridge asserts pready to Source.
+    //    - Source reads response.
+    // This satisfies the "one outstanding transaction" requirement.
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,491 @@
+```verilog
+`timescale 1ns/1ps
+
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  wire a_clk_i,
+    input  wire a_rst_ni,
+    input  wire a_clear_i,
+    output reg  a_clear_o,
+    input  wire a_clear_ack_i,
+    output reg  a_isolate_o,
+    input  wire a_isolate_ack_i,
+    input  wire b_clk_i,
+    input  wire b_rst_ni,
+    input  wire b_clear_i,
+    output reg  b_clear_o,
+    input  wire b_clear_ack_i,
+    output reg  b_isolate_o,
+    input  wire b_isolate_ack_i
+);
+
+    localparam STATE_IDLE = 2'b00;
+    localparam STATE_ISOLATING = 2'b01;
+    localparam STATE_CLEARING = 2'b10;
+    localparam STATE_DONE = 2'b11;
+
+    // State machine for the controller logic
+    // We use a single state machine that coordinates both sides.
+    // The state reflects the global progress of the handshake sequence.
+    reg [1:0] state, next_state;
+    
+    // Signals to track local requests and peer acknowledgments
+    reg a_req_clear;
+    reg a_req_isolate;
+    reg b_req_clear;
+    reg b_req_isolate;
+    
+    // Synchronizers for peer signals
+    // We need to synchronize peer requests and acks to our domain
+    wire a_sync_b_clear_req;
+    wire a_sync_b_clear_ack;
+    wire a_sync_b_isolate_req;
+    wire a_sync_b_isolate_ack;
+    
+    wire b_sync_a_clear_req;
+    wire b_sync_a_clear_ack;
+    wire b_sync_a_isolate_req;
+    wire b_sync_a_isolate_ack;
+
+    // ------------------------------------------------------------------
+    // Synchronizers for signals crossing from B to A
+    // ------------------------------------------------------------------
+    wire [SYNC_STAGES-1:0] b_clear_req_sync_b;
+    wire [SYNC_STAGES-1:0] b_clear_ack_sync_b;
+    wire [SYNC_STAGES-1:0] b_isolate_req_sync_b;
+    wire [SYNC_STAGES-1:0] b_isolate_ack_sync_b;
+
+    genvar i;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_sync_b_to_a
+            wire sync_in;
+            wire sync_out;
+            if (i == 0) begin
+                assign sync_in = b_clear_i;
+                assign sync_out = b_clear_req_sync_b[i];
+            end else begin
+                assign sync_in = b_clear_req_sync_b[i-1];
+                assign sync_out = b_clear_req_sync_b[i];
+            end
+            
+            if (i == 0) begin
+                assign sync_in = b_clear_ack_i;
+                assign sync_out = b_clear_ack_sync_b[i];
+            end else begin
+                assign sync_in = b_clear_ack_sync_b[i-1];
+                assign sync_out = b_clear_ack_sync_b[i];
+            end
+
+            if (i == 0) begin
+                assign sync_in = b_isolate_i; // Note: Input is b_isolate_ack_i, but we need to sync the request first? 
+                // Wait, the spec says "Peer progress arrives... Each step is observed one handshake after the local transition."
+                // Actually, the inputs are *_ack_i. The controller generates *_o.
+                // The peer sends *_ack_i back.
+                // So we need to sync b_isolate_ack_i and b_clear_ack_i.
+                // And we need to sync b_clear_i and b_isolate_i? No, b_clear_i is an input to the module.
+                // The module generates b_clear_o and b_isolate_o.
+                // The peer sends b_clear_ack_i and b_isolate_ack_i.
+                // So we need to sync the ACKs from B to A.
+                // And we need to sync the REQUESTS from B to A? 
+                // The spec says: "When either side requests clear...". 
+                // So a_clear_i and b_clear_i are inputs.
+                // We need to sync b_clear_i to A domain to know if B requested it.
+                // And we need to sync b_isolate_ack_i to A domain.
+                
+                // Let's re-read carefully:
+                // Inputs: a_clear_i, a_clear_ack_i, a_isolate_ack_i, b_clear_i, b_clear_ack_i, b_isolate_ack_i.
+                // Outputs: a_clear_o, a_isolate_o, b_clear_o, b_isolate_o.
+                
+                // So:
+                // 1. Sync b_clear_i to A.
+                // 2. Sync b_clear_ack_i to A.
+                // 3. Sync b_isolate_ack_i to A.
+                // 4. Sync a_clear_i to B.
+                // 5. Sync a_clear_ack_i to B.
+                // 6. Sync a_isolate_ack_i to B.
+                
+                // Correction on sync logic above:
+                // The loop above was trying to sync b_clear_i.
+                // Let's fix the sync logic to be explicit.
+            end
+        end
+    endgenerate
+
+    // Re-implementing synchronizers explicitly for clarity and correctness
+    // Sync b_clear_i to A
+    wire [SYNC_STAGES-1:0] b_clear_req_sync;
+    assign b_clear_req_sync[0] = b_clear_i;
+    genvar j;
+    generate
+        for (j = 1; j < SYNC_STAGES; j = j + 1) begin : gen_sync_b_clear_req
+            assign b_clear_req_sync[j] = b_clear_req_sync[j-1];
+        end
+    endgenerate
+    wire b_clear_req_synced = b_clear_req_sync[SYNC_STAGES-1];
+
+    // Sync b_clear_ack_i to A
+    wire [SYNC_STAGES-1:0] b_clear_ack_sync;
+    assign b_clear_ack_sync[0] = b_clear_ack_i;
+    generate
+        for (j = 1; j < SYNC_STAGES; j = j + 1) begin : gen_sync_b_clear_ack
+            assign b_clear_ack_sync[j] = b_clear_ack_sync[j-1];
+        end
+    endgenerate
+    wire b_clear_ack_synced = b_clear_ack_sync[SYNC_STAGES-1];
+
+    // Sync b_isolate_ack_i to A
+    wire [SYNC_STAGES-1:0] b_isolate_ack_sync;
+    assign b_isolate_ack_sync[0] = b_isolate_ack_i;
+    generate
+        for (j = 1; j < SYNC_STAGES; j = j + 1) begin : gen_sync_b_isolate_ack
+            assign b_isolate_ack_sync[j] = b_isolate_ack_sync[j-1];
+        end
+    endgenerate
+    wire b_isolate_ack_synced = b_isolate_ack_sync[SYNC_STAGES-1];
+
+    // Sync a_clear_i to B
+    wire [SYNC_STAGES-1:0] a_clear_req_sync;
+    assign a_clear_req_sync[0] = a_clear_i;
+    generate
+        for (j = 1; j < SYNC_STAGES; j = j + 1) begin : gen_sync_a_clear_req
+            assign a_clear_req_sync[j] = a_clear_req_sync[j-1];
+        end
+    endgenerate
+    wire a_clear_req_synced = a_clear_req_sync[SYNC_STAGES-1];
+
+    // Sync a_clear_ack_i to B
+    wire [SYNC_STAGES-1:0] a_clear_ack_sync;
+    assign a_clear_ack_sync[0] = a_clear_ack_i;
+    generate
+        for (j = 1; j < SYNC_STAGES; j = j + 1) begin : gen_sync_a_clear_ack
+            assign a_clear_ack_sync[j] = a_clear_ack_sync[j-1];
+        end
+    endgenerate
+    wire a_clear_ack_synced = a_clear_ack_sync[SYNC_STAGES-1];
+
+    // Sync a_isolate_ack_i to B
+    wire [SYNC_STAGES-1:0] a_isolate_ack_sync;
+    assign a_isolate_ack_sync[0] = a_isolate_ack_i;
+    generate
+        for (j = 1; j < SYNC_STAGES; j = j + 1) begin : gen_sync_a_isolate_ack
+            assign a_isolate_ack_sync[j] = a_isolate_ack_sync[j-1];
+        end
+    endgenerate
+    wire a_isolate_ack_synced = a_isolate_ack_sync[SYNC_STAGES-1];
+
+    // ------------------------------------------------------------------
+    // State Machine Logic
+    // ------------------------------------------------------------------
+    // State Encoding:
+    // 00: IDLE - No active operation.
+    // 01: ISOLATING - Isolate outputs raised, waiting for both acks.
+    // 10: CLEARING - Clear outputs raised, waiting for both acks.
+    // 11: DONE - All acks received, releasing outputs.
+
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            state <= STATE_IDLE;
+            a_clear_o <= 1'b0;
+            a_isolate_o <= 1'b0;
+            b_clear_o <= 1'b0;
+            b_isolate_o <= 1'b0;
+        end else begin
+            state <= next_state;
+        end
+    end
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            state <= STATE_IDLE;
+            a_clear_o <= 1'b0;
+            a_isolate_o <= 1'b0;
+            b_clear_o <= 1'b0;
+            b_isolate_o <= 1'b0;
+        end else begin
+            state <= next_state;
+        end
+    end
+
+    // Next state logic (evaluated in both domains, but driven by synchronized signals)
+    // We need to compute next_state based on current state and synchronized inputs.
+    // Since the state machine is shared, we compute the logic in one place and drive it.
+    // However, to avoid race conditions in synthesis, we will compute the logic in the A domain
+    // and assign it to a register, then use that register in the B domain logic? 
+    // No, the state machine must be identical in both domains.
+    // The standard way is to have the state machine logic in one domain (say A) and 
+    // the outputs driven by the state. But the state must be synchronized to B.
+    // Alternatively, we can have the state machine logic in both domains using synchronized inputs.
+    // Let's compute next_state in the A domain and synchronize it to B? 
+    // No, the state machine transitions are triggered by events.
+    // The safest approach for a cross-domain controller is to have the state machine 
+    // logic in one domain (e.g., A) and synchronize the state to B, OR have the logic 
+    // in both domains using fully synchronized inputs.
+    // Given the requirement "Do not leave one domain cleared while the other is still live",
+    // the state machine must be coherent.
+    
+    // Let's implement the state machine logic in the A domain and synchronize the state to B.
+    // Then in the B domain, we use the synchronized state to drive outputs.
+    // Wait, if we drive outputs from the state, and the state is in A, then B sees the state 
+    // via synchronization. This works.
+    
+    // Revised Plan:
+    // 1. State machine logic resides in A domain.
+    // 2. State is synchronized to B domain.
+    // 3. Outputs (a_clear_o, a_isolate_o) are driven by state in A.
+    // 4. Outputs (b_clear_o, b_isolate_o) are driven by synchronized state in B.
+    // 5. Inputs to state machine in A: a_clear_i, a_clear_ack_i, a_isolate_ack_i, b_clear_req_synced, b_clear_ack_synced, b_isolate_ack_synced.
+    // 6. Inputs to state machine in B: b_clear_i, b_clear_ack_i, b_isolate_ack_i, a_clear_req_synced, a_clear_ack_synced, a_isolate_ack_synced.
+    // Actually, the state machine logic is the same. We can instantiate the logic twice or use a single logic block 
+    // and synchronize the state.
+    // Let's use a single logic block for next_state calculation, but since it's combinational, 
+    // we can't have it in one domain and use it in another without synchronization.
+    // So:
+    // - Calculate next_state in A domain.
+    // - Synchronize next_state to B domain.
+    // - In A domain, use current_state to drive outputs.
+    // - In B domain, use synchronized_state to drive outputs.
+    
+    // However, the state machine needs to react to inputs in both domains.
+    // If we calculate next_state in A, it won't see b_clear_i immediately unless we sync it.
+    // We already synced b_clear_i to A.
+    // So the A domain logic sees all inputs.
+    // The B domain logic needs to see all inputs too.
+    // So we need two instances of the state machine logic? Or one logic block and two state registers?
+    // Let's do:
+    // - Logic block `calc_next_state` takes all synchronized inputs and returns next_state.
+    // - Instance 1 in A domain: uses `calc_next_state` with A inputs, updates `state_a`.
+    // - Instance 2 in B domain: uses `calc_next_state` with B inputs, updates `state_b`.
+    // - Outputs driven by `state_a` in A, `state_b` in B.
+    
+    // Wait, the state machine logic is identical.
+    // Let's define the logic as a function or a module.
+    
+    // Actually, simpler: 
+    // The state machine is the controller. It has a state.
+    // The state is updated on the rising edge of the local clock.
+    // The inputs to the state machine are the local inputs and the synchronized remote inputs.
+    // So we need two state machines, one for A and one for B?
+    // No, the state represents the global progress.
+    // If A thinks it's in STATE_ISOLATING, B must also think it's in STATE_ISOLATING.
+    // So the state must be synchronized.
+    
+    // Let's try this architecture:
+    // 1. State Machine Logic (Combinational): Takes (local_req, local_ack, remote_req_synced, remote_ack_synced) -> next_state.
+    // 2. State Register A: Updates on a_clk_i.
+    // 3. State Register B: Updates on b_clk_i.
+    // 4. Synchronizer: Syncs state_a to b_clk_i domain to feed state_b? 
+    //    Or syncs state_b to a_clk_i domain to feed state_a?
+    //    If we sync state_a to B, then B's state machine uses the synchronized state_a.
+    //    But B's state machine also needs to update its own state based on B's clock.
+    //    This creates a feedback loop if not careful.
+    
+    // Correct approach for a single shared state machine across two domains:
+    // The state machine logic is duplicated.
+    // Instance A:
+    //   Inputs: a_clear_i, a_clear_ack_i, a_isolate_ack_i, b_clear_req_synced, b_clear_ack_synced, b_isolate_ack_synced.
+    //   Output: next_state_a.
+    //   Register: state_a (updated on a_clk_i).
+    // Instance B:
+    //   Inputs: b_clear_i, b_clear_ack_i, b_isolate_ack_i, a_clear_req_synced, a_clear_ack_synced, a_isolate_ack_synced.
+    //   Output: next_state_b.
+    //   Register: state_b (updated on b_clk_i).
+    // Outputs:
+    //   a_clear_o, a_isolate_o driven by state_a.
+    //   b_clear_o, b_isolate_o driven by state_b.
+    // This ensures that both domains see the same logic and update their state independently based on their local clock and synchronized inputs.
+    // The "shared state" is implicit because the logic is identical and inputs are synchronized.
+    
+    // Let's define the logic.
+    
+    // ------------------------------------------------------------------
+    // State Machine Logic Definition
+    // ------------------------------------------------------------------
+    // Inputs to logic:
+    //   local_req: 1 if local side requested clear/isolate.
+    //   local_ack: 1 if local side received ack for clear/isolate.
+    //   remote_req_synced: 1 if remote side requested clear/isolate (synchronized).
+    //   remote_ack_synced: 1 if remote side received ack for clear/isolate (synchronized).
+    
+    // Wait, the handshake protocol is:
+    // 1. Request Clear (both sides raise isolate).
+    // 2. Wait for Isolate Ack (both sides).
+    // 3. Raise Clear.
+    // 4. Wait for Clear Ack (both sides).
+    // 5. Release Isolate and Clear.
+    
+    // The state machine needs to track:
+    // - Who requested? (A or B or both).
+    // - Are we waiting for isolate acks?
+    // - Are we waiting for clear acks?
+    // - Are we done?
+    
+    // Let's refine the state machine logic.
+    // Inputs:
+    //   req_a: a_clear_i (synchronized to B? No, B needs to know A requested. So A's req is synced to B).
+    //   req_b: b_clear_i (synchronized to A).
+    //   ack_a_clear: a_clear_ack_i (synchronized to B).
+    //   ack_b_clear: b_clear_ack_i (synchronized to A).
+    //   ack_a_isolate: a_isolate_ack_i (synchronized to B).
+    //   ack_b_isolate: b_isolate_ack_i (synchronized to A).
+    
+    // Actually, the state machine logic should be:
+    // next_state = f(current_state, req_a, req_b, ack_a_clear, ack_b_clear, ack_a_isolate, ack_b_isolate)
+    // But req_a and req_b are inputs to the module.
+    // In Instance A:
+    //   req_a = a_clear_i
+    //   req_b = b_clear_req_synced
+    //   ack_a_clear = a_clear_ack_i
+    //   ack_b_clear = b_clear_ack_synced
+    //   ack_a_isolate = a_isolate_ack_i
+    //   ack_b_isolate = b_isolate_ack_synced
+    // In Instance B:
+    //   req_a = a_clear_req_synced
+    //   req_b = b_clear_i
+    //   ack_a_clear = a_clear_req_synced? No, ack_a_clear is an input to the module.
+    //   Wait, the inputs are:
+    //     a_clear_i (req from A)
+    //     a_clear_ack_i (ack to A)
+    //     a_isolate_ack_i (ack to A)
+    //     b_clear_i (req from B)
+    //     b_clear_ack_i (ack to B)
+    //     b_isolate_ack_i (ack to B)
+    //
+    // So in Instance A:
+    //   local_req = a_clear_i
+    //   remote_req = b_clear_req_synced
+    //   local_ack_clear = a_clear_ack_i
+    //   remote_ack_clear = b_clear_ack_synced
+    //   local_ack_isolate = a_isolate_ack_i
+    //   remote_ack_isolate = b_isolate_ack_synced
+    //
+    // In Instance B:
+    //   local_req = b_clear_i
+    //   remote_req = a_clear_req_synced
+    //   local_ack_clear = b_clear_ack_i
+    //   remote_ack_clear = a_clear_ack_synced
+    //   local_ack_isolate = b_isolate_ack_i
+    //   remote_ack_isolate = a_isolate_ack_synced
+    //
+    // This looks correct.
+    
+    // Logic for next_state:
+    // State 00 (IDLE):
+    //   If (req_a | req_b) -> Go to 01 (ISOLATING)
+    // State 01 (ISOLATING):
+    //   If (local_ack_isolate & remote_ack_isolate) -> Go to 10 (CLEARING)
+    // State 10 (CLEARING):
+    //   If (local_ack_clear & remote_ack_clear) -> Go to 11 (DONE)
+    // State 11 (DONE):
+    //   If (req_a | req_b) == 0 -> Go to 00 (IDLE)
+    //   Else -> Stay in 11? Or go back to 01? 
+    //   The spec says: "After reset, isolate and clear outputs are inactive."
+    //   "Do not release isolate or clear before the peer completion has been observed."
+    //   Once in DONE, we release outputs. If a new request comes, we should go back to ISOLATING.
+    //   So if (req_a | req_b) -> Go to 01.
+    //   Else -> Go to 00.
+    
+    // Let's code this logic.
+    
+    // ------------------------------------------------------------------
+    // Instance A State Machine
+    // ------------------------------------------------------------------
+    reg [1:0] state_a, next_state_a;
+    
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            state_a <= 2'b00;
+        end else begin
+            state_a <= next_state_a;
+        end
+    end
+    
+    always @(*) begin
+        next_state_a = state_a;
+        case (state_a)
+            2'b00: begin // IDLE
+                if (a_clear_i | b_clear_req_synced)
+                    next_state_a = 2'b01; // ISOLATING
+                else
+                    next_state_a = 2'b00;
+            end
+            2'b01: begin // ISOLATING
+                if (a_isolate_ack_i & b_isolate_ack_synced)
+                    next_state_a = 2'b10; // CLEARING
+                else
+                    next_state_a = 2'b01;
+            end
+            2'b10: begin // CLEARING
+                if (a_clear_ack_i & b_clear_ack_synced)
+                    next_state_a = 2'b11; // DONE
+                else
+                    next_state_a = 2'b10;
+            end
+            2'b11: begin // DONE
+                if (a_clear_i | b_clear_req_synced)
+                    next_state_a = 2'b01; // Restart ISOLATING
+                else
+                    next_state_a = 2'b00; // Back to IDLE
+            end
+            default: next_state_a = 2'b00;
+        endcase
+    end
+
+    // ------------------------------------------------------------------
+    // Instance B State Machine
+    // ------------------------------------------------------------------
+    reg [1:0] state_b, next_state_b;
+    
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            state_b <= 2'b00;
+        end else begin
+            state_b <= next_state_b;
+        end
+    end
+    
+    always @(*) begin
+        next_state_b = state_b;
+        case (state_b)
+            2'b00: begin // IDLE
+                if (b_clear_i | a_clear_req_synced)
+                    next_state_b = 2'b01; // ISOLATING
+                else
+                    next_state_b = 2'b00;
+            end
+            2'b01: begin // ISOLATING
+                if (b_isolate_ack_i & a_isolate_ack_synced)
+                    next_state_b = 2'b10; // CLEARING
+                else
+                    next_state_b = 2'b01;
+            end
+            2'b10: begin // CLEARING
+                if (b_clear_ack_i & a_clear_ack_synced)
+                    next_state_b = 2'b11; // DONE
+                else
+                    next_state_b = 2'b10;
+            end
+            2'b11: begin // DONE
+                if (b_clear_i | a_clear_req_synced)
+                    next_state_b = 2'b01; // Restart ISOLATING
+                else
+                    next_state_b = 2'b00; // Back to IDLE
+            end
+            default: next_state_b = 2'b00;
+        endcase
+    end
+
+    // ------------------------------------------------------------------
+    // Output Assignment
+    // ------------------------------------------------------------------
+    // A Domain Outputs
+    assign a_clear_o = (state_a == 2'b10) || (state_a == 2'b11);
+    assign a_isolate_o = (state_a == 2'b01) || (state_a == 2'b10) || (state_a == 2'b11);
+
+    // B Domain Outputs
+    assign b_clear_o = (state_b == 2'b10) || (state_b == 2'b11);
+    assign b_isolate_o = (state_b == 2'b01) || (state_b == 2'b10) || (state_b == 2'b11);
+
+endmodule
+```<|im_end|>
+<|endoftext|>

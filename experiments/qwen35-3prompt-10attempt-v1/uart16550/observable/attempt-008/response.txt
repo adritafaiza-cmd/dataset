@@ -1,0 +1,466 @@
+```verilog
+`timescale 1ns / 1ps
+
+module uart_top (
+    wb_clk_i,
+    wb_rst_i, wb_adr_i, wb_dat_i, wb_dat_o, wb_we_i, wb_stb_i, wb_cyc_i, wb_ack_o, wb_sel_i,
+    int_o,
+    stx_pad_o, srx_pad_i,
+    rts_pad_o, cts_pad_i, dtr_pad_o, dsr_pad_i, ri_pad_i, dcd_pad_i
+);
+
+    // -----------------------------------------------------------------------
+    // Internal Signals
+    // -----------------------------------------------------------------------
+    reg [15:0]   wb_dat_o_reg;
+    reg          wb_ack_o_reg;
+    reg          int_o_reg;
+    reg          stx_pad_o_reg;
+    reg          rts_pad_o_reg;
+    reg          dtr_pad_o_reg;
+    
+    wire         wb_ack_o;
+    wire         int_o;
+    wire         stx_pad_o;
+    wire         rts_pad_o;
+    wire         dtr_pad_o;
+    
+    // UART State Machine States
+    parameter IDLE = 3'b000;
+    parameter TX_START = 3'b001;
+    parameter TX_DATA = 3'b010;
+    parameter TX_STOP = 3'b011;
+    
+    reg [2:0]    uart_state;
+    reg [7:0]    tx_data_reg;
+    reg          tx_busy_reg;
+    reg          rx_data_reg;
+    reg          rx_ready_reg;
+    reg          tx_enable_reg;
+    reg          rx_enable_reg;
+    
+    // Timing
+    reg [31:0]   baud_divider;
+    reg [31:0]   baud_counter;
+    reg          baud_overflow;
+    reg          bit_clock_valid;
+    reg          bit_clock_edge;
+    
+    // Modem Control/Status Registers (Internal)
+    reg [7:0]    mcr_reg; // Modem Control Register
+    reg [7:0]    msr_reg; // Modem Status Register
+    reg [7:0]    lcr_reg; // Line Control Register
+    reg [7:0]    isr_reg; // Interrupt Status Register
+    reg [7:0]    ier_reg; // Interrupt Enable Register
+    reg [7:0]    fcr_reg; // FIFO Control Register
+    reg [7:0]    lsr_reg; // Line Status Register
+    
+    // FIFOs (Simple implementation, 16 depth)
+    reg [15:0]   fifo_rx_ptr;
+    reg [15:0]   fifo_rx_tail;
+    reg [15:0]   fifo_tx_ptr;
+    reg [15:0]   fifo_tx_head;
+    reg [7:0]    fifo_rx_data [15:0];
+    reg [7:0]    fifo_tx_data [15:0];
+    reg          fifo_rx_empty;
+    reg          fifo_tx_empty;
+    reg          fifo_rx_full;
+    reg          fifo_tx_full;
+    
+    // -----------------------------------------------------------------------
+    // Wishbone Interface Logic
+    // -----------------------------------------------------------------------
+    assign wb_ack_o = wb_ack_o_reg;
+    assign wb_dat_o = wb_dat_o_reg;
+    assign int_o = int_o_reg;
+    assign stx_pad_o = stx_pad_o_reg;
+    assign rts_pad_o = rts_pad_o_reg;
+    assign dtr_pad_o = dtr_pad_o_reg;
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            wb_ack_o_reg <= 1'b0;
+            wb_dat_o_reg <= 8'h00;
+        end else begin
+            wb_ack_o_reg <= wb_ack_o;
+            wb_dat_o_reg <= wb_dat_o;
+        end
+    end
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            int_o_reg <= 1'b0;
+        end else begin
+            int_o_reg <= int_o;
+        end
+    end
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            stx_pad_o_reg <= 1'b1;
+            rts_pad_o_reg <= 1'b1;
+            dtr_pad_o_reg <= 1'b1;
+        end else begin
+            stx_pad_o_reg <= stx_pad_o;
+            rts_pad_o_reg <= rts_pad_o;
+            dtr_pad_o_reg <= dtr_pad_o;
+        end
+    end
+
+    // Wishbone Address Decoder and Read/Write Logic
+    always @(*) begin
+        wb_ack_o = 1'b0;
+        wb_dat_o = 8'h00;
+        
+        if (wb_stb_i && wb_cyc_i) begin
+            case (wb_adr_i[15:0])
+                // MCR Register (Address 0x00)
+                16'h00: begin
+                    if (wb_we_i) begin
+                        mcr_reg <= wb_dat_i;
+                    end
+                    wb_dat_o = mcr_reg;
+                    wb_ack_o = 1'b1;
+                end
+                
+                // MSR Register (Address 0x04)
+                16'h04: begin
+                    wb_dat_o = msr_reg;
+                    wb_ack_o = 1'b1;
+                end
+                
+                // LCR Register (Address 0x08)
+                16'h08: begin
+                    if (wb_we_i) begin
+                        lcr_reg <= wb_dat_i;
+                    end
+                    wb_dat_o = lcr_reg;
+                    wb_ack_o = 1'b1;
+                end
+                
+                // ISR Register (Address 0x0C)
+                16'h0C: begin
+                    wb_dat_o = isr_reg;
+                    wb_ack_o = 1'b1;
+                end
+                
+                // IER Register (Address 0x10)
+                16'h10: begin
+                    if (wb_we_i) begin
+                        ier_reg <= wb_dat_i;
+                    end
+                    wb_dat_o = ier_reg;
+                    wb_ack_o = 1'b1;
+                end
+                
+                // FCR Register (Address 0x14)
+                16'h14: begin
+                    if (wb_we_i) begin
+                        fcr_reg <= wb_dat_i;
+                    end
+                    wb_dat_o = fcr_reg;
+                    wb_ack_o = 1'b1;
+                end
+                
+                // THR Register (Address 0x18) - Transmit Holding Register
+                16'h18: begin
+                    if (wb_we_i) begin
+                        if (tx_busy_reg == 1'b0) begin
+                            tx_data_reg <= wb_dat_i;
+                            tx_busy_reg <= 1'b1;
+                            uart_state <= TX_START;
+                        end
+                    end
+                    wb_dat_o = tx_data_reg;
+                    wb_ack_o = 1'b1;
+                end
+                
+                // RHR Register (Address 0x1C) - Receive Holding Register
+                16'h1C: begin
+                    if (rx_ready_reg) begin
+                        if (fifo_rx_empty) begin
+                            // If FIFO empty, read from shift register directly
+                            rx_data_reg <= srx_pad_i;
+                            fifo_rx_data[fifo_rx_ptr] <= srx_pad_i;
+                            fifo_rx_ptr <= fifo_rx_ptr + 1'b1;
+                            if (fifo_rx_ptr == 16'h0F) fifo_rx_ptr <= 16'h00;
+                            rx_ready_reg <= 1'b0;
+                        end else begin
+                            // Read from FIFO
+                            rx_data_reg <= fifo_rx_data[fifo_rx_tail];
+                            fifo_rx_tail <= fifo_rx_tail + 1'b1;
+                            if (fifo_rx_tail == 16'h0F) fifo_rx_tail <= 16'h00;
+                            rx_ready_reg <= 1'b0;
+                        end
+                    end
+                    wb_dat_o = rx_data_reg;
+                    wb_ack_o = 1'b1;
+                end
+                
+                default: begin
+                    wb_ack_o = 1'b1;
+                end
+            endcase
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // UART State Machine
+    // -----------------------------------------------------------------------
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            uart_state <= IDLE;
+            tx_busy_reg <= 1'b0;
+            tx_data_reg <= 8'h00;
+            rx_data_reg <= 8'h00;
+            rx_ready_reg <= 1'b0;
+            baud_counter <= 32'h00;
+            baud_overflow <= 1'b0;
+            bit_clock_valid <= 1'b0;
+            bit_clock_edge <= 1'b0;
+        end else begin
+            case (uart_state)
+                IDLE: begin
+                    if (tx_busy_reg == 1'b0) begin
+                        uart_state <= IDLE;
+                    end
+                end
+                
+                TX_START: begin
+                    stx_pad_o <= 1'b0;
+                    uart_state <= TX_DATA;
+                end
+                
+                TX_DATA: begin
+                    if (bit_clock_valid) begin
+                        if (bit_clock_edge) begin
+                            if (tx_data_reg[0]) begin
+                                stx_pad_o <= 1'b1;
+                            end else begin
+                                stx_pad_o <= 1'b0;
+                            end
+                            tx_data_reg <= {tx_data_reg[6:0], 1'b0};
+                        end
+                    end
+                    if (tx_data_reg == 8'h00) begin
+                        uart_state <= TX_STOP;
+                    end
+                end
+                
+                TX_STOP: begin
+                    if (bit_clock_valid) begin
+                        if (bit_clock_edge) begin
+                            stx_pad_o <= 1'b1;
+                        end
+                    end
+                    if (stx_pad_o == 1'b1) begin
+                        uart_state <= IDLE;
+                        tx_busy_reg <= 1'b0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Baud Rate Generator
+    // -----------------------------------------------------------------------
+    // Assume 16-bit baud divisor from LCR register bits [3:0]
+    // Divisor = LCR[3:0] + 1
+    // If divisor is 0, use default 1 (1/16 of clock)
+    
+    always @(*) begin
+        if (lcr_reg[3:0] == 4'h0) begin
+            baud_divider = 32'hFFFF; // Default high baud rate
+        end else begin
+            baud_divider = lcr_reg[3:0] + 4'h1;
+        end
+    end
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            baud_counter <= 32'h00;
+            baud_overflow <= 1'b0;
+            bit_clock_valid <= 1'b0;
+            bit_clock_edge <= 1'b0;
+        end else begin
+            baud_counter <= baud_counter + 1'b1;
+            if (baud_counter >= baud_divider) begin
+                baud_counter <= 32'h00;
+                baud_overflow <= 1'b1;
+                bit_clock_valid <= 1'b1;
+            end else begin
+                baud_overflow <= 1'b0;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Modem Control Logic
+    // -----------------------------------------------------------------------
+    // RTS is active low
+    always @(*) begin
+        rts_pad_o = 1'b1;
+        if (mcr_reg[7]) begin // RTS bit
+            rts_pad_o = 1'b0;
+        end
+    end
+
+    // DTR is active low
+    always @(*) begin
+        dtr_pad_o = 1'b1;
+        if (mcr_reg[6]) begin // DTR bit
+            dtr_pad_o = 1'b0;
+        end
+    end
+
+    // STX is active low
+    always @(*) begin
+        stx_pad_o = 1'b1;
+        if (mcr_reg[5]) begin // STX bit
+            stx_pad_o = 1'b0;
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Receive Logic
+    // -----------------------------------------------------------------------
+    // RXD is active low
+    always @(*) begin
+        rx_ready_reg = 1'b0;
+        if (srx_pad_i == 1'b0) begin
+            rx_ready_reg = 1'b1;
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Interrupt Logic
+    // -----------------------------------------------------------------------
+    // Interrupts are active low
+    always @(*) begin
+        int_o = 1'b1;
+        
+        // Check enabled interrupts
+        if (ier_reg[0] && (mcr_reg[0] || mcr_reg[1] || mcr_reg[2] || mcr_reg[3])) begin
+            // TX Empty Interrupt
+            if (tx_busy_reg == 1'b0) begin
+                int_o = 1'b0;
+            end
+        end
+        
+        if (ier_reg[1] && (mcr_reg[0] || mcr_reg[1] || mcr_reg[2] || mcr_reg[3])) begin
+            // RX Data Available Interrupt
+            if (rx_ready_reg) begin
+                int_o = 1'b0;
+            end
+        end
+        
+        if (ier_reg[2] && (mcr_reg[0] || mcr_reg[1] || mcr_reg[2] || mcr_reg[3])) begin
+            // Modem Status Interrupt
+            if (msr_reg[0] || msr_reg[1] || msr_reg[2] || msr_reg[3]) begin
+                int_o = 1'b0;
+            end
+        end
+        
+        if (ier_reg[3] && (mcr_reg[0] || mcr_reg[1] || mcr_reg[2] || mcr_reg[3])) begin
+            // Error Interrupt
+            if (lsr_reg[4] || lsr_reg[5] || lsr_reg[6] || lsr_reg[7]) begin
+                int_o = 1'b0;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Modem Status Register Updates
+    // -----------------------------------------------------------------------
+    // CTS is active low
+    always @(*) begin
+        cts_pad_i = 1'b1; // Default high
+    end
+
+    // DSR is active low
+    always @(*) begin
+        dsr_pad_i = 1'b1; // Default high
+    end
+
+    // RI is active low
+    always @(*) begin
+        ri_pad_i = 1'b1; // Default high
+    end
+
+    // DCD is active low
+    always @(*) begin
+        dcd_pad_i = 1'b1; // Default high
+    end
+
+    always @(*) begin
+        mcr_reg[0] = rts_pad_o; // RTS output
+        mcr_reg[1] = dtr_pad_o; // DTR output
+        mcr_reg[2] = stx_pad_o; // STX output
+        mcr_reg[3] = 1'b0;      // Auto-RTS (not implemented)
+        mcr_reg[4] = 1'b0;      // Loopback (not implemented)
+        mcr_reg[5] = 1'b0;      // Out 1 (not implemented)
+        mcr_reg[6] = 1'b0;      // Out 2 (not implemented)
+        mcr_reg[7] = 1'b0;      // Out 3 (not implemented)
+    end
+
+    always @(*) begin
+        msr_reg = 8'h00;
+        msr_reg[0] = cts_pad_i; // CTS
+        msr_reg[1] = dsr_pad_i; // DSR
+        msr_reg[2] = ri_pad_i;  // RI
+        msr_reg[3] = dcd_pad_i; // DCD
+        msr_reg[4] = 1'b0;      // THRE (Transmitter Holding Register Empty)
+        msr_reg[5] = 1'b0;      // TEC (Transmitter Empty Counter)
+        msr_reg[6] = 1'b0;      // RE (Receiver Enable)
+        msr_reg[7] = 1'b0;      // FE (Framing Error)
+    end
+
+    always @(*) begin
+        lsr_reg = 8'h00;
+        lsr_reg[0] = 1'b0;      // BI (Break Indicator)
+        lsr_reg[1] = 1'b0;      // OE (Overrun Error)
+        lsr_reg[2] = 1'b0;      // PE (Parity Error)
+        lsr_reg[3] = 1'b0;      // FE (Framing Error)
+        lsr_reg[4] = 1'b0;      // BI (Break Indicator)
+        lsr_reg[5] = 1'b0;      // TI (Transmitter Idle)
+        lsr_reg[6] = 1'b0;      // RI (Receiver Ready)
+        lsr_reg[7] = 1'b0;      // FE (Framing Error)
+    end
+
+    always @(*) begin
+        isr_reg = 8'h00;
+        // ISR is read-only, reflects current interrupt status
+        // This is a simplified implementation
+        // In a full implementation, this would be updated based on interrupt flags
+    end
+
+    // -----------------------------------------------------------------------
+    // FIFO Logic
+    // -----------------------------------------------------------------------
+    always @(*) begin
+        fifo_rx_empty = 1'b1;
+        fifo_tx_empty = 1'b1;
+        fifo_rx_full = 1'b0;
+        fifo_tx_full = 1'b0;
+        
+        if (fifo_rx_ptr == fifo_rx_tail) begin
+            fifo_rx_empty = 1'b1;
+        end
+        
+        if (fifo_tx_ptr == fifo_tx_head) begin
+            fifo_tx_empty = 1'b1;
+        end
+        
+        if (fifo_rx_ptr + 16'h10 <= fifo_rx_tail) begin
+            fifo_rx_full = 1'b1;
+        end
+        
+        if (fifo_tx_ptr + 16'h10 <= fifo_tx_head) begin
+            fifo_tx_full = 1'b1;
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

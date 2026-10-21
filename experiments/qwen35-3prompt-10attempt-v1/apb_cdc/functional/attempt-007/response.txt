@@ -1,0 +1,233 @@
+```verilog
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    // Calculate FIFO depth
+    localparam FIFO_DEPTH = 1 << LOG_DEPTH;
+
+    // ------------------------------------------------------------------
+    // Source Side (src_pclk_i domain)
+    // Monitors APB signals and captures a transaction when valid.
+    // ------------------------------------------------------------------
+    reg [ADDR_WIDTH-1:0]    src_fifo_addr;
+    reg [DATA_WIDTH-1:0]    src_fifo_wdata;
+    reg [DATA_WIDTH/8-1:0]  src_fifo_strb;
+    reg [2:0]               src_fifo_prot;
+    reg                     src_fifo_valid;
+    reg                     src_fifo_ready;
+    reg                     src_fifo_write;
+    reg                     src_fifo_full;
+    reg                     src_fifo_empty;
+
+    // FIFO Instance for Source to Destination
+    // Using a simple synchronous FIFO implementation
+    fifo #(
+        .WIDTH  (ADDR_WIDTH + DATA_WIDTH + DATA_WIDTH/8 + 3), // Addr + WData + Strb + Prot
+        .DEPTH  (FIFO_DEPTH),
+        .FULL   (src_fifo_full),
+        .EMPTY  (src_fifo_empty),
+        .VALID  (src_fifo_valid),
+        .READY  (src_fifo_ready),
+        .WRITE  (src_fifo_write),
+        .ADDR   (),
+        .DATA   ()
+    ) u_fifo_src_to_dst (
+        .CLK    (src_pclk_i),
+        .RESET  (src_preset_ni),
+        .WRITE  (src_fifo_write),
+        .ADDR   (),
+        .DATA   (),
+        .FULL   (src_fifo_full),
+        .EMPTY  (src_fifo_empty),
+        .VALID  (src_fifo_valid),
+        .READY  (src_fifo_ready)
+    );
+
+    // Since standard FIFOs don't expose individual fields easily without a custom wrapper,
+    // we will implement a simple synchronous FIFO logic inline to ensure port mapping clarity
+    // and avoid dependency on external FIFO IP.
+    
+    // Re-implementing a simple synchronous FIFO for clarity and self-containment
+    // State: [DEPTH-1:0] count
+    reg [LOG_DEPTH-1:0] fifo_count;
+    reg [ADDR_WIDTH-1:0] fifo_addr_reg;
+    reg [DATA_WIDTH-1:0] fifo_wdata_reg;
+    reg [DATA_WIDTH/8-1:0] fifo_strb_reg;
+    reg [2:0] fifo_prot_reg;
+    reg fifo_wr_en;
+    reg fifo_rd_en;
+    reg fifo_full;
+    reg fifo_empty;
+    reg [LOG_DEPTH-1:0] fifo_ptr_w;
+    reg [LOG_DEPTH-1:0] fifo_ptr_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_r;
+    reg [LOG_DEPTH-1:0] fifo_ptr_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next

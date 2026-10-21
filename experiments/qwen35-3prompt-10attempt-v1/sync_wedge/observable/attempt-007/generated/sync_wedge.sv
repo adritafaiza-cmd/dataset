@@ -1,0 +1,115 @@
+```verilog
+module sync_wedge #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    // Synchronizer chain for the data bit
+    logic [STAGES-1:0] sync_data;
+
+    // Synchronizer chain for the enable signal (optional but good practice)
+    logic [STAGES-1:0] sync_en;
+
+    // Edge detection flags
+    logic r_edge_tmp;
+    logic f_edge_tmp;
+
+    // --- Synchronizer Logic ---
+    genvar i;
+    generate
+        for (i = 0; i < STAGES; i = i + 1) begin : sync_stage
+            if (i == 0) begin : first_stage
+                always_ff @(posedge clk_i or negedge rst_ni) begin
+                    if (!rst_ni)
+                        sync_data[i] <= 1'b0;
+                    else
+                        sync_data[i] <= serial_i;
+                end
+            end else begin : subsequent_stage
+                always_ff @(posedge clk_i or negedge rst_ni) begin
+                    if (!rst_ni)
+                        sync_data[i] <= 1'b0;
+                    else
+                        sync_data[i] <= sync_data[i-1];
+                end
+            end
+        end
+    endgenerate
+
+    for (i = 0; i < STAGES; i = i + 1) begin : sync_en_stage
+        if (i == 0) begin : first_en_stage
+            always_ff @(posedge clk_i or negedge rst_ni) begin
+                if (!rst_ni)
+                    sync_en[i] <= 1'b0;
+                else
+                    sync_en[i] <= en_i;
+            end
+        end else begin : subsequent_en_stage
+            always_ff @(posedge clk_i or negedge rst_ni) begin
+                if (!rst_ni)
+                    sync_en[i] <= 1'b0;
+                else
+                    sync_en[i] <= sync_en[i-1];
+            end
+        end
+    endgenerate
+
+    // --- Edge Detection Logic ---
+    // We use the last stage of the synchronizer for edge detection to ensure stability
+    // We compare current stage with previous stage to detect transitions
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            r_edge_tmp <= 1'b0;
+            f_edge_tmp <= 1'b0;
+        end else begin
+            // Rising Edge: Current is 1, Previous was 0
+            if (sync_data[STAGES-1] && !sync_data[STAGES-2])
+                r_edge_tmp <= 1'b1;
+            else
+                r_edge_tmp <= 1'b0;
+
+            // Falling Edge: Current is 0, Previous was 1
+            if (!sync_data[STAGES-1] && sync_data[STAGES-2])
+                f_edge_tmp <= 1'b1;
+            else
+                f_edge_tmp <= 1'b0;
+        end
+    end
+
+    // --- Output Logic ---
+    // Drive outputs only when enabled and synchronized
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            serial_o <= 1'b0;
+            r_edge_o <= 1'b0;
+            f_edge_o <= 1'b0;
+        end else begin
+            // Synchronize the edge flags with the local clock domain
+            // Note: The edge flags themselves are already in the local domain from the block above
+            // We just gate them with the synchronized enable signal
+            
+            // For serial_o, we output the final synchronized data bit
+            serial_o <= sync_data[STAGES-1];
+            
+            // For edge outputs, we gate the detected edges with the synchronized enable
+            // This ensures we don't report edges that occurred while the system was disabled
+            // and that the reporting is stable in the local domain.
+            if (sync_en[STAGES-1]) begin
+                r_edge_o <= r_edge_tmp;
+                f_edge_o <= f_edge_tmp;
+            end else begin
+                r_edge_o <= 1'b0;
+                f_edge_o <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

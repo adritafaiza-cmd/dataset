@@ -1,0 +1,278 @@
+```verilog
+module data_sync #(
+    parameter STAGES = 2,
+    parameter DWIDTH = 8
+)(
+    input                  clk,
+    input                  rstn,
+    input  [DWIDTH-1:0]    din,
+    input                  dready_i,
+    output reg [DWIDTH-1:0] dout,
+    output reg             dready_o
+);
+
+    // Generate FIFO depth based on STAGES parameter
+    // STAGES = 2 implies a depth of 2^2 = 4
+    localparam FIFO_DEPTH = 1 << STAGES;
+
+    // Internal clock for the FIFO logic (same as input clk for this domain crossing)
+    // The FIFO itself handles the storage across the boundary if we were crossing domains.
+    // However, the prompt specifies a single clock 'clk'. 
+    // In a single-clock domain, a simple register chain is sufficient for synchronization 
+    // IF the data is stable. But the requirement mentions "clock-domain and reset-domain crossings".
+    // This implies the 'din' might be coming from a different domain in the larger system context,
+    // or we are building a FIFO that can be used for CDC. 
+    // Given the single 'clk' input, we assume the data source is asynchronous to the consumer 
+    // or we are implementing a standard FIFO-based synchronizer where the write clock is 
+    // implicitly the source domain and read clock is 'clk'. 
+    // Since only one clock is provided to the module, we must assume the 'din' is valid 
+    // relative to 'clk' but we need to ensure reset stability and handshake safety.
+    // 
+    // Re-evaluating the "CDC requirement": "safe for clock-domain and reset-domain crossings".
+    // If only one clock is provided, the data crossing must be handled by ensuring the 
+    // data is stable before being read. A multi-stage register chain (Gray code or simple 
+    // pipeline) is often used for simple CDC, but for multi-bit data without a separate 
+    // write clock, a FIFO is the standard robust solution where the write enable is 
+    // controlled by the source domain (dready_i) and read by the destination.
+    // 
+    // Architecture Decision:
+    // We will implement a synchronous FIFO. 
+    // Write Clock: Implicitly assumed to be the domain of 'din' (which we treat as stable 
+    // when dready_i is high). However, since we only have 'clk', we must assume the 
+    // producer drives 'din' on 'clk' edges or we are synchronizing a signal that is 
+    // already stable. 
+    // 
+    // Actually, the most standard interpretation for a "data synchronizer" with a single 
+    // clock input in a CDC context is that the data arrives asynchronously or we are 
+    // building the FIFO logic where the write clock is external. But here, we only have 
+    // 'clk'. 
+    // 
+    // Let's assume the standard pattern: 
+    // 1. The data 'din' is valid when dready_i is asserted. 
+    // 2. We need to store this data safely. 
+    // 3. We need to output it when dready_o is asserted.
+    // 
+    // If the source and destination share 'clk', a simple pipeline of STAGES registers 
+    // is sufficient for CDC (to handle reset metastability and setup/hold). 
+    // The "multi-bit" requirement is satisfied by the register width.
+    // The "handshake" requirement (dready_i -> dready_o) implies a flow control mechanism.
+    // 
+    // Implementation Strategy:
+    // Use a shift-register style pipeline of STAGES.
+    // Stage 0 captures din.
+    // Stage 1 captures Stage 0.
+    // ...
+    // Stage N captures Stage N-1.
+    // dout comes from the last stage.
+    // dready_o is asserted when the pipeline is full (or ready to accept new data).
+    // 
+    // Reset Safety:
+    // All registers must be reset simultaneously to avoid partial data corruption.
+    // The reset release must be synchronized. Since we have only one clock, 
+    // a simple synchronous reset with a delay or a dedicated reset synchronizer 
+    // (if the reset was asynchronous) is needed. The prompt says rstn is active-low.
+    // We will assume rstn is synchronous or we add a small synchronizer if it's 
+    // asynchronous. Given "reset-domain crossings", we should treat rstn as potentially 
+    // asynchronous to the clock domain it resets.
+    // 
+    // Revised Architecture for Robustness:
+    // 1. Reset Synchronizer: Ensure rstn is stable before affecting logic.
+    // 2. Pipeline: STAGES of registers to synchronize data and reset.
+    // 3. Handshake: 
+    //    - dready_i indicates the source is ready to push.
+    //    - We capture data only when dready_i is high.
+    //    - dready_o indicates the destination is ready to pull.
+    //    - We pulse dready_o when new valid data arrives at the output stage.
+    
+    // Reset Synchronizer (2-stage) to handle potential RDC issues
+    reg rstn_sync1;
+    reg rstn_sync2;
+    
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            rstn_sync1 <= 1'b1;
+            rstn_sync2 <= 1'b1;
+        end else begin
+            rstn_sync1 <= rstn;
+            rstn_sync2 <= rstn_sync1;
+        end
+    end
+
+    // Pipeline Registers
+    // We use a shift register approach.
+    // data_reg[0] captures din.
+    // data_reg[STAGES-1] is the output.
+    // We need to ensure we don't overwrite data before it's read if the pipeline is full.
+    // However, with a single clock and simple pipeline, we just shift.
+    // To implement the handshake correctly:
+    // - When dready_i is high, we load data into the first stage.
+    // - The data propagates through STAGES.
+    // - When data reaches the last stage, we assert dready_o for one cycle.
+    
+    reg [DWIDTH-1:0] pipeline [0:STAGES-1];
+    
+    // Counter to track valid data position? 
+    // Actually, a simple shift register works if we assume the producer sends data 
+    // only when dready_i is high and the consumer pulls when dready_o is high.
+    // But we need to know when the last stage has valid data to assert dready_o.
+    // Since it's a shift register, the last stage is always valid once data has passed through.
+    // We need a "valid" flag for the pipeline.
+    
+    reg valid;
+    
+    // Logic for the pipeline stages
+    // Stage 0: Captures din if dready_i is high.
+    // Stages 1 to STAGES-1: Shift data from previous stage.
+    
+    // We need to handle the case where dready_i is low (no new data).
+    // The pipeline should hold the last valid data.
+    
+    // Let's refine the logic:
+    // valid indicates if there is data in the pipeline.
+    // Initially 0.
+    // If valid is 0 and dready_i is 1, we load din into stage 0, set valid=1.
+    // If valid is 1, we shift everything.
+    // When valid becomes 1 (first data arrives), we assert dready_o.
+    // When valid is 1, we keep dready_o high? No, "pulse dready_o".
+    // So dready_o is high only when new data arrives at the output stage.
+    
+    // To implement "pulse", we need to detect the transition of valid from 0 to 1.
+    
+    reg valid_next;
+    reg [DWIDTH-1:0] din_next;
+    
+    // Calculate next state
+    if (!rstn_sync2) begin
+        valid_next = 1'b0;
+        din_next = 1'b0; // Don't care, but safe to clear
+    end else begin
+        if (valid == 1'b0 && dready_i == 1'b1) begin
+            // Load new data
+            valid_next = 1'b1;
+            din_next = din;
+        end else if (valid == 1'b1) begin
+            // Shift data
+            valid_next = 1'b1;
+            din_next = pipeline[STAGES-2]; // Shift from previous stage
+        end else begin
+            // No data, no new data
+            valid_next = 1'b0;
+            din_next = 1'b0;
+        end
+    end
+    
+    // Update pipeline registers
+    // We need to assign pipeline[0] to pipeline[STAGES-1] sequentially.
+    // In Verilog, we can use a loop or unroll.
+    
+    // To avoid race conditions in assignment, we calculate the new values first.
+    // But since it's a combinational block feeding sequential, we can do it directly.
+    
+    // Let's restructure to be cleaner:
+    // Use a single always block for the pipeline logic.
+    
+    always @(posedge clk or negedge rstn_sync2) begin
+        if (!rstn_sync2) begin
+            valid <= 1'b0;
+            for (integer i = 0; i < STAGES; i = i + 1) begin
+                pipeline[i] <= 1'b0;
+            end
+        end else begin
+            if (valid == 1'b0 && dready_i == 1'b1) begin
+                // Load
+                pipeline[0] <= din;
+                valid <= 1'b1;
+            end else if (valid == 1'b1) begin
+                // Shift
+                for (integer i = 0; i < STAGES - 1; i = i + 1) begin
+                    pipeline[i] <= pipeline[i+1];
+                end
+                // Last stage gets the shifted data from the second to last
+                // Wait, the logic above shifts 0<-1, 1<-2... 
+                // We need to capture the input to the first stage correctly.
+                // Let's trace:
+                // If we shift: p[0] <= p[1], p[1] <= p[2]...
+                // Then where does the new data come from?
+                // It should come from the logic that decides what goes into p[0].
+                
+                // Correct Shift Logic:
+                // p[STAGES-1] is the output.
+                // p[0] receives the new data if valid==0 && dready_i.
+                // Otherwise p[0] receives p[1].
+                // p[1] receives p[2], etc.
+                
+                // Let's rewrite the always block for clarity and safety.
+            end
+        end
+    end
+    
+    // Re-implementing the pipeline logic cleanly
+    always @(posedge clk or negedge rstn_sync2) begin
+        if (!rstn_sync2) begin
+            valid <= 1'b0;
+            for (integer i = 0; i < STAGES; i = i + 1) begin
+                pipeline[i] <= 1'b0;
+            end
+        end else begin
+            // Determine what goes into the first stage (pipeline[0])
+            reg [DWIDTH-1:0] stage0_input;
+            
+            if (valid == 1'b0 && dready_i == 1'b1) begin
+                stage0_input = din;
+                valid <= 1'b1;
+            end else if (valid == 1'b1) begin
+                stage0_input = pipeline[1];
+                // valid remains 1
+            end else begin
+                stage0_input = 1'b0;
+                valid <= 1'b0;
+            end
+            
+            // Shift registers
+            // pipeline[STAGES-1] is the output
+            // pipeline[i] takes value from pipeline[i+1]
+            // pipeline[0] takes value from stage0_input
+            
+            // We must assign pipeline[STAGES-1] first to avoid overwriting if we were using a single variable,
+            // but here we are assigning from other variables.
+            // However, to be safe against synthesis tools, let's assign in order.
+            
+            // Note: If STAGES=1, the loop below won't run, and pipeline[0] is assigned stage0_input. Correct.
+            
+            // Assign from back to front to ensure correct data flow in case of concurrent updates?
+            // Actually, since we are reading from pipeline[i+1] and writing to pipeline[i],
+            // and pipeline[i+1] is not being written in this same cycle (it's read-only for this stage),
+            // order doesn't strictly matter for correctness, but back-to-front is good practice.
+            
+            for (integer i = STAGES - 1; i >= 1; i = i - 1) begin
+                pipeline[i] <= pipeline[i+1];
+            end
+            pipeline[0] <= stage0_input;
+        end
+    end
+    
+    // Output logic
+    // dout is the last stage
+    assign dout = pipeline[STAGES-1];
+    
+    // dready_o pulse logic
+    // Pulse when valid transitions from 0 to 1.
+    reg valid_prev;
+    
+    always @(posedge clk or negedge rstn_sync2) begin
+        if (!rstn_sync2) begin
+            valid_prev <= 1'b0;
+            dready_o <= 1'b0;
+        end else begin
+            valid_prev <= valid;
+            if (valid == 1'b1 && valid_prev == 1'b0) begin
+                dready_o <= 1'b1;
+            end else begin
+                dready_o <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

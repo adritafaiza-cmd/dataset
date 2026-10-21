@@ -1,0 +1,204 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Sender side registers
+  reg src_valid_reg;
+  reg src_ready_reg;
+  reg [WIDTH-1:0] src_data_reg;
+  reg src_valid_ack;
+
+  // Receiver side registers
+  reg dst_valid_reg;
+  reg dst_ready_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_valid_ack;
+
+  // Handshake state for sender
+  reg src_handshake_state; // 0: Idle, 1: Waiting for Ready, 2: Waiting for Ack
+  reg src_data_valid;
+
+  // Handshake state for receiver
+  reg dst_handshake_state; // 0: Idle, 1: Waiting for Valid, 2: Waiting for Ack
+  reg dst_data_valid;
+
+  // Reset message handling
+  reg [WIDTH-1:0] reset_msg_reg;
+  reg reset_msg_sent;
+
+  // Clock domain crossing logic for sender
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_ready_reg <= 1'b1;
+      src_data_reg <= '0;
+      src_valid_ack <= 1'b0;
+      src_handshake_state <= 0;
+      src_data_valid <= 0;
+      reset_msg_reg <= RESET_MSG;
+      reset_msg_sent <= 0;
+    end else begin
+      // Update handshake state
+      case (src_handshake_state)
+        0: begin
+          if (src_valid_i) begin
+            src_data_reg <= src_data_i;
+            src_valid_reg <= 1'b1;
+            src_handshake_state <= 1;
+          end
+        end
+        1: begin
+          if (src_ready_reg) begin
+            src_valid_ack <= 1'b1;
+            src_handshake_state <= 2;
+          end
+        end
+        2: begin
+          if (src_valid_ack) begin
+            src_valid_reg <= 1'b0;
+            src_ready_reg <= 1'b1;
+            src_handshake_state <= 0;
+            src_valid_ack <= 1'b0;
+          end
+        end
+      endcase
+
+      // Update ready signal
+      src_ready_reg <= (src_handshake_state == 0) ? 1'b1 : 1'b0;
+
+      // Handle reset message
+      if (SEND_RESET_MSG && !src_valid_i && src_handshake_state == 0) begin
+        reset_msg_reg <= RESET_MSG;
+        reset_msg_sent <= 1'b1;
+      end else if (SEND_RESET_MSG && src_valid_i && src_handshake_state == 0) begin
+        reset_msg_sent <= 0;
+      end
+    end
+  end
+
+  // Clock domain crossing logic for receiver
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_ready_reg <= 1'b1;
+      dst_data_reg <= '0;
+      dst_valid_ack <= 1'b0;
+      dst_handshake_state <= 0;
+      dst_data_valid <= 0;
+      reset_msg_reg <= RESET_MSG;
+      reset_msg_sent <= 0;
+    end else begin
+      // Update handshake state
+      case (dst_handshake_state)
+        0: begin
+          if (src_valid_reg) begin
+            dst_data_reg <= src_data_reg;
+            dst_valid_reg <= 1'b1;
+            dst_handshake_state <= 1;
+          end
+        end
+        1: begin
+          if (dst_ready_reg) begin
+            dst_valid_ack <= 1'b1;
+            dst_handshake_state <= 2;
+          end
+        end
+        2: begin
+          if (dst_valid_ack) begin
+            dst_valid_reg <= 1'b0;
+            dst_ready_reg <= 1'b1;
+            dst_handshake_state <= 0;
+            dst_valid_ack <= 1'b0;
+          end
+        end
+      endcase
+
+      // Update ready signal
+      dst_ready_reg <= (dst_handshake_state == 0) ? 1'b1 : 1'b0;
+
+      // Handle reset message
+      if (SEND_RESET_MSG && !dst_valid_reg && dst_handshake_state == 0) begin
+        reset_msg_reg <= RESET_MSG;
+        reset_msg_sent <= 1'b1;
+      end else if (SEND_RESET_MSG && dst_valid_reg && dst_handshake_state == 0) begin
+        reset_msg_sent <= 0;
+      end
+    end
+  end
+
+  // Output assignments
+  assign src_ready_o = src_ready_reg;
+  assign dst_data_o = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+  // Decoupled logic
+  if (DECOUPLED) begin
+    // Sender side decoupled logic
+    always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+      if (!src_rst_ni) begin
+        src_data_valid <= 1'b0;
+      end else begin
+        if (src_valid_i && src_ready_o) begin
+          src_data_valid <= 1'b1;
+        end else if (src_valid_ack) begin
+          src_data_valid <= 1'b0;
+        end
+      end
+    end
+
+    // Receiver side decoupled logic
+    always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+      if (!dst_rst_ni) begin
+        dst_data_valid <= 1'b0;
+      end else begin
+        if (dst_valid_reg && dst_ready_i) begin
+          dst_data_valid <= 1'b1;
+        end else if (dst_valid_ack) begin
+          dst_data_valid <= 1'b0;
+        end
+      end
+    end
+
+    // Update handshake states based on decoupled logic
+    always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+      if (!src_rst_ni) begin
+        src_handshake_state <= 0;
+      end else begin
+        if (src_valid_i && src_ready_o) begin
+          src_handshake_state <= 1;
+        end else if (src_valid_ack) begin
+          src_handshake_state <= 0;
+        end
+      end
+    end
+
+    always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+      if (!dst_rst_ni) begin
+        dst_handshake_state <= 0;
+      end else begin
+        if (dst_valid_reg && dst_ready_i) begin
+          dst_handshake_state <= 1;
+        end else if (dst_valid_ack) begin
+          dst_handshake_state <= 0;
+        end
+      end
+    end
+  end
+
+endmodule
+```<|im_end|>

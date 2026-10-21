@@ -1,0 +1,251 @@
+```systemverilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam ADDR_MASK = (1 << ADDR_WIDTH) - 1;
+    localparam FIFO_DEPTH = 1 << ADDR_WIDTH;
+
+    // Generate Gray code stages for CDC
+    localparam NUM_STAGES = SYNC_STAGES;
+    localparam STAGE_WIDTH = ADDR_WIDTH + 1; // Address + Valid flag
+
+    // Internal signals
+    wire [ADDR_WIDTH:0] wptr_raw;
+    wire [ADDR_WIDTH:0] rptr_raw;
+    wire [ADDR_WIDTH:0] wptr_synced;
+    wire [ADDR_WIDTH:0] rptr_synced;
+    wire wptr_valid;
+    wire rptr_valid;
+    wire [ADDR_WIDTH:0] wptr_gray;
+    wire [ADDR_WIDTH:0] rptr_gray;
+    wire [ADDR_WIDTH:0] wptr_gray_synced;
+    wire [ADDR_WIDTH:0] rptr_gray_synced;
+    wire wptr_valid_synced;
+    wire rptr_valid_synced;
+    wire [ADDR_WIDTH:0] wptr_gray_synced_2;
+    wire [ADDR_WIDTH:0] rptr_gray_synced_2;
+    wire wptr_valid_synced_2;
+    wire rptr_valid_synced_2;
+
+    // Write Pointer Generation (Write Domain)
+    always_ff @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            wptr_raw <= 0;
+        else if (winc)
+            wptr_raw <= wptr_raw + 1'b1;
+    end
+
+    // Read Pointer Generation (Read Domain)
+    always_ff @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rptr_raw <= 0;
+        else if (rinc)
+            rptr_raw <= rptr_raw + 1'b1;
+    end
+
+    // --- Write Pointer Sync to Read Domain ---
+    // Stage 1: Address + Valid
+    always_ff @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            wptr_gray <= {wptr_raw[ADDR_WIDTH-1:0], 1'b0};
+        else
+            wptr_gray <= wptr_raw;
+    end
+
+    // Stage 2: Valid Flag
+    always_ff @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            wptr_valid <= 1'b0;
+        else
+            wptr_valid <= wptr_gray[ADDR_WIDTH];
+    end
+
+    // Stage 3: Address (Gray to Binary conversion happens implicitly by using the raw pointer logic 
+    // but we need to sync the pointer value itself. Since we are using a simple counter, 
+    // we sync the pointer value through a chain of registers to ensure stability).
+    // However, for a standard Gray code implementation, we usually sync the pointer value 
+    // and the valid flag separately. Let's use a standard 2-stage sync for the pointer value 
+    // and 2-stage for the valid flag, then combine.
+    
+    // Re-architecting for robust CDC:
+    // 1. Write Domain: Counter (wptr_raw)
+    // 2. Sync wptr_raw to Read Domain (2 stages) -> wptr_synced
+    // 3. Sync wptr_valid (wptr_raw[ADDR_WIDTH] if we used Gray, but here we use raw counter comparison)
+    //    Actually, comparing raw counters across domains is unsafe if not synchronized.
+    //    Standard approach: Sync the pointer value (wptr_raw) to read domain.
+    //    Then compare wptr_synced with rptr_raw in read domain.
+    //    But wptr_raw is not Gray. Comparing raw binary pointers across domains is prone to metastability 
+    //    during the transition.
+    //    Correct approach: Use Gray code for the pointer itself.
+    
+    // Let's restart the pointer logic with proper Gray code generation in Write Domain.
+    
+    // Write Domain: Gray Code Generator
+    // wptr_gray[ADDR_WIDTH] is the MSB (Valid bit for the pointer chain)
+    // wptr_gray[ADDR_WIDTH-1:0] is the address
+    always_ff @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            wptr_gray <= {ADDR_WIDTH{1'b0}};
+        else if (winc)
+            wptr_gray <= wptr_gray ^ {ADDR_WIDTH{wptr_gray[ADDR_WIDTH-1:0]}};
+    end
+
+    // Read Domain: Sync wptr_gray (2 stages)
+    // Stage 1
+    always_ff @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            wptr_gray_synced <= {ADDR_WIDTH{1'b0}};
+        else
+            wptr_gray_synced <= wptr_gray;
+    end
+    // Stage 2
+    always_ff @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            wptr_gray_synced_2 <= {ADDR_WIDTH{1'b0}};
+        else
+            wptr_gray_synced_2 <= wptr_gray_synced;
+    end
+
+    // Read Domain: Sync wptr_valid (MSB of wptr_gray)
+    // Stage 1
+    always_ff @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            wptr_valid <= 1'b0;
+        else
+            wptr_valid <= wptr_gray_synced[ADDR_WIDTH-1]; // MSB of the synced pointer
+    end
+    // Stage 2
+    always_ff @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            wptr_valid_synced <= 1'b0;
+        else
+            wptr_valid_synced <= wptr_valid;
+    end
+
+    // --- Read Pointer Sync to Write Domain ---
+    // Read Domain: Gray Code Generator
+    always_ff @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rptr_gray <= {ADDR_WIDTH{1'b0}};
+        else if (rinc)
+            rptr_gray <= rptr_gray ^ {ADDR_WIDTH{rptr_gray[ADDR_WIDTH-1:0]}};
+    end
+
+    // Write Domain: Sync rptr_gray (2 stages)
+    // Stage 1
+    always_ff @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            rptr_gray_synced <= {ADDR_WIDTH{1'b0}};
+        else
+            rptr_gray_synced <= rptr_gray;
+    end
+    // Stage 2
+    always_ff @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            rptr_gray_synced_2 <= {ADDR_WIDTH{1'b0}};
+        else
+            rptr_gray_synced_2 <= rptr_gray_synced;
+    end
+
+    // Write Domain: Sync rptr_valid (MSB of rptr_gray)
+    // Stage 1
+    always_ff @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            rptr_valid <= 1'b0;
+        else
+            rptr_valid <= rptr_gray_synced[ADDR_WIDTH-1];
+    end
+    // Stage 2
+    always_ff @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            rptr_valid_synced <= 1'b0;
+        else
+            rptr_valid_synced <= rptr_valid;
+    end
+
+    // --- Data Storage ---
+    // Data is stored in the write domain.
+    // We need to store data at wptr_gray[ADDR_WIDTH-1:0].
+    // Since wptr_gray changes on write, we can use the raw pointer to index.
+    // However, to avoid race conditions, we store data when winc is high.
+    
+    reg [DATA_WIDTH-1:0] mem [0:ADDR_MASK];
+    
+    // Write Data Logic
+    always_ff @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            mem <= '{default: 0};
+        else if (winc)
+            mem[wptr_gray[ADDR_WIDTH-1:0]] <= wdata;
+    end
+
+    // --- Full/Empty Logic (Read Domain) ---
+    // Full: wptr == rptr AND wptr_valid == 1 (meaning write pointer has advanced past read pointer)
+    // Empty: wptr == rptr AND wptr_valid == 0 (meaning write pointer hasn't advanced past read pointer)
+    
+    // Calculate Full
+    // wptr_gray_synced_2 is the stable write pointer in read domain
+    // rptr_gray_synced_2 is the stable read pointer in read domain
+    // wptr_valid_synced_2 is the stable valid flag
+    
+    assign wfull = (wptr_gray_synced_2 == rptr_gray_synced_2) && wptr_valid_synced_2;
+    
+    // Calculate Empty
+    // rempty is high when wptr == rptr and wptr_valid is low
+    assign rempty = (wptr_gray_synced_2 == rptr_gray_synced_2) && (!wptr_valid_synced_2);
+
+    // --- Read Data Logic (Write Domain) ---
+    // Read data is sampled in the write domain when rinc is high.
+    // We read from mem[rptr_gray[ADDR_WIDTH-1:0]].
+    // We need to ensure rptr_gray is stable in write domain before reading.
+    // rptr_gray_synced_2 is stable in write domain.
+    
+    reg [DATA_WIDTH-1:0] rdata_reg;
+    reg rinc_synced;
+    
+    // Sync rinc to write domain (2 stages)
+    always_ff @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            rinc_synced <= 1'b0;
+        else
+            rinc_synced <= rinc;
+    end
+    always_ff @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            rinc_synced <= 1'b0;
+        else
+            rinc_synced <= rinc_synced;
+    end
+
+    // Read Data Logic
+    always_ff @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            rdata_reg <= 0;
+        else if (rinc_synced)
+            rdata_reg <= mem[rptr_gray_synced_2[ADDR_WIDTH-1:0]];
+    end
+
+    // Output assignments
+    assign waddr = wptr_gray[ADDR_WIDTH-1:0];
+    assign raddr = rptr_gray[ADDR_WIDTH-1:0];
+    assign rdata = rdata_reg;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

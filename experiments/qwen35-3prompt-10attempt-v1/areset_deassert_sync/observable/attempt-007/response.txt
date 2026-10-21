@@ -1,0 +1,237 @@
+```verilog
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  wire        clk,
+    input  wire        async_rst_i,
+    output reg         sync_rst_o
+);
+
+    localparam DEASSERT_CHAINS = CHAINS;
+
+    // Internal state to track the deassertion process
+    // We use a counter-like approach where we count down from DEASSERT_CHAINS
+    // only when the reset is being released (going from asserted to deasserted).
+    // This ensures the release happens synchronously with the destination clock.
+    
+    reg [DEASSERT_CHAINS-1:0] deassert_cnt;
+    reg                       rst_asserted;
+
+    // Determine the current asserted state based on polarity
+    // If RST_POL is 1, active high means async_rst_i == 1
+    // If RST_POL is 0, active low means async_rst_i == 0
+    wire rst_is_active = (RST_POL == 1'b1) ? async_rst_i : (~async_rst_i);
+
+    // State logic for the counter
+    // We only start counting down when:
+    // 1. The reset is currently active (rst_is_active)
+    // 2. The reset was NOT active in the previous cycle (transition detected)
+    // 3. The counter is currently zero (meaning we are in the process of releasing)
+    //
+    // Actually, a simpler and more robust approach for "release synchronizer":
+    // 1. Detect the transition from Active -> Inactive.
+    // 2. Start a counter of depth CHAINS.
+    // 3. While counter > 0, keep sync_rst_o asserted.
+    // 4. When counter reaches 0, release sync_rst_o.
+    
+    // Let's refine the logic to handle the "Assert promptly" requirement.
+    // The output should follow the input immediately upon assertion (if already in sync or just asserted).
+    // The complexity is only on the release side.
+    
+    // We need to detect the edge where the reset goes from Active to Inactive.
+    // Since we are in the same clock domain, we can sample the previous state.
+    
+    reg rst_prev_active;
+    
+    // Detect transition: Active -> Inactive
+    // If RST_POL=1: 1 -> 0
+    // If RST_POL=0: 0 -> 1
+    wire rst_transition_deassert = (rst_is_active && ~rst_prev_active);
+
+    // Counter logic
+    // If we are in the deassertion sequence (transition detected), load CHAINS.
+    // Otherwise, if counter is not zero, decrement.
+    // If counter is zero, stay zero (unless we need to reload, but we only reload on transition).
+    
+    always @(posedge clk) begin
+        // Update previous state
+        rst_prev_active <= rst_is_active;
+
+        if (rst_transition_deassert) begin
+            // Start the deassertion chain
+            deassert_cnt <= DEASSERT_CHAINS;
+        end else if (deassert_cnt > 0) begin
+            // Count down
+            deassert_cnt <= deassert_cnt - 1'b1;
+        end else begin
+            // Counter is zero, stay zero
+            deassert_cnt <= 0;
+        end
+    end
+
+    // Output logic
+    // If the counter is non-zero, the reset must still be asserted.
+    // If the counter is zero, the reset can be deasserted.
+    // However, we must also respect the current input state.
+    // If the input is still active (e.g., glitch or long pulse), we might need to hold.
+    // But the requirement is specifically about the *release* synchronization.
+    // Once the chain finishes, we trust the input is stable enough or we just follow the input.
+    // To be safe and strictly synchronous on release:
+    // sync_rst_o = (deassert_cnt == 0) ? ~rst_is_active : rst_is_active;
+    // Wait, if deassert_cnt > 0, we force assertion regardless of input? 
+    // Yes, to ensure clean release. If the input drops early, we hold high until chain finishes.
+    // If the input stays high, we hold high until chain finishes.
+    
+    // Let's re-evaluate: 
+    // Goal: Assert promptly. Release cleanly.
+    // If async_rst_i goes High (active), sync_rst_o should go High immediately.
+    // If async_rst_i goes Low (inactive), sync_rst_o should stay High for CHAINS cycles, then go Low.
+    
+    // Logic:
+    // If deassert_cnt == 0:
+    //    sync_rst_o = rst_is_active; // Follow input immediately
+    // Else:
+    //    sync_rst_o = 1'b1;          // Force asserted until chain completes
+    
+    // Wait, what if RST_POL is 0 (Active Low)?
+    // If async_rst_i is 0 (Active), we want sync_rst_o = 0.
+    // If async_rst_i goes 1 (Inactive), we want sync_rst_o to stay 0 for CHAINS cycles.
+    
+    // Revised Logic:
+    // If deassert_cnt == 0:
+    //    sync_rst_o = rst_is_active;
+    // Else:
+    //    sync_rst_o = rst_is_active; // Actually, if we are in the chain, we are waiting for the release.
+    //    If the input is still active, we stay active.
+    //    If the input became inactive, we stay active (forced) until chain ends.
+    //    So effectively: sync_rst_o = rst_is_active OR (deassert_cnt > 0);
+    
+    // Let's trace:
+    // Case 1: Active High (RST_POL=1). Input 0->1.
+    //    rst_is_active becomes 1. deassert_cnt is 0.
+    //    sync_rst_o = 1 OR 0 = 1. (Prompt assertion)
+    // Case 2: Input 1->0.
+    //    rst_is_active becomes 0. rst_transition_deassert = 1.
+    //    Next cycle: deassert_cnt = CHAINS.
+    //    sync_rst_o = 0 OR 1 = 1. (Held high)
+    //    ... CHAINS cycles later ...
+    //    deassert_cnt = 0.
+    //    sync_rst_o = 0 OR 0 = 0. (Clean release)
+    
+    // Case 3: Active Low (RST_POL=0). Input 1->0 (Active).
+    //    rst_is_active becomes 1. deassert_cnt = 0.
+    //    sync_rst_o = 1 OR 0 = 1? No, we want 0.
+    //    My logic `sync_rst_o = rst_is_active OR (deassert_cnt > 0)` assumes Active High semantics for the OR.
+    
+    // Correct Logic for Polarity:
+    // We want sync_rst_o to be 1 (asserted) if:
+    // 1. The input is currently asserted (rst_is_active).
+    // 2. OR we are in the middle of the deassertion chain (deassert_cnt > 0).
+    
+    // If rst_is_active is 1, we want output 1.
+    // If rst_is_active is 0, but deassert_cnt > 0, we want output 1.
+    // If rst_is_active is 0 and deassert_cnt == 0, we want output 0.
+    
+    // So: sync_rst_o = rst_is_active | (deassert_cnt > 0);
+    
+    // Let's re-verify Active Low (RST_POL=0):
+    // Input 1 (Inactive) -> 0 (Active).
+    // rst_is_active = 1. deassert_cnt = 0.
+    // sync_rst_o = 1 | 0 = 1? No, we want 0 (asserted).
+    // Ah, "Asserted" means the reset signal is active.
+    // If RST_POL=0, Active state is 0.
+    // So if rst_is_active is 1, the reset is asserted. Output should be 0?
+    // No, the module output `sync_rst_o` is the reset signal for the destination.
+    // If the destination reset is active-low, `sync_rst_o` should be 0 when asserted.
+    // If the destination reset is active-high, `sync_rst_o` should be 1 when asserted.
+    
+    // The parameter RST_POL defines the polarity of the *input* `async_rst_i`.
+    // Does it define the polarity of the *output* `sync_rst_o`?
+    // Usually, a synchronizer preserves the polarity. If input is active-low, output is active-low.
+    // If input is active-high, output is active-high.
+    
+    // Let's assume the output polarity matches the input polarity.
+    // If RST_POL=1 (Active High):
+    //   Asserted = 1. Deasserted = 0.
+    //   Logic: sync_rst_o = 1 if (rst_is_active OR deassert_cnt > 0).
+    //   If input 0->1: rst_is_active=1. sync_rst_o=1. Correct.
+    //   If input 1->0: rst_is_active=0. deassert_cnt>0. sync_rst_o=1. Correct (held).
+    //   If deassert_cnt=0: sync_rst_o=0. Correct.
+    
+    // If RST_POL=0 (Active Low):
+    //   Asserted = 0. Deasserted = 1.
+    //   rst_is_active = ~async_rst_i.
+    //   We want sync_rst_o to be 0 when asserted.
+    //   Logic: sync_rst_o = 0 if (rst_is_active OR deassert_cnt > 0).
+    //   Else sync_rst_o = 1.
+    //   This is equivalent to: sync_rst_o = ~(rst_is_active | (deassert_cnt > 0)).
+    
+    // Unified Logic:
+    // Let `force_assert` = (deassert_cnt > 0).
+    // If RST_POL == 1:
+    //    sync_rst_o = rst_is_active | force_assert;
+    // If RST_POL == 0:
+    //    sync_rst_o = ~(rst_is_active | force_assert);
+    
+    // Wait, if RST_POL=0, and input goes 1->0 (Active).
+    // rst_is_active = 1. force_assert = 0.
+    // sync_rst_o = ~(1 | 0) = 0. (Asserted). Correct.
+    // If input goes 0->1 (Inactive).
+    // rst_is_active = 0. force_assert becomes 1 (next cycle).
+    // sync_rst_o = ~(0 | 1) = 0? No, we want 1 (Deasserted).
+    // My logic `sync_rst_o = ~(rst_is_active | force_assert)` yields 0 when force_assert is 1.
+    // That means it stays asserted even when we want to deassert.
+    
+    // Let's rethink the "Force Assert" concept.
+    // We want to FORCE the reset to be ACTIVE while the counter is running.
+    // If RST_POL=1, Force Active = 1.
+    // If RST_POL=0, Force Active = 0.
+    // So `force_active_val` = (RST_POL == 1) ? 1'b1 : 1'b0;
+    // `force_assert` = (deassert_cnt > 0) ? force_active_val : 1'b0;
+    
+    // Then:
+    // sync_rst_o = rst_is_active ? force_active_val : 1'b0; // If input is active, output is active.
+    // But we need to OR with the forced state during the chain.
+    // sync_rst_o = (rst_is_active | (deassert_cnt > 0)) ? force_active_val : 1'b0;
+    
+    // Let's test RST_POL=0 (Active Low):
+    // Input 1->0 (Active). rst_is_active=1. deassert_cnt=0.
+    // Term = (1 | 0) = 1. sync_rst_o = 1 ? 0 : 0 = 0. (Asserted). Correct.
+    // Input 0->1 (Inactive). rst_is_active=0. deassert_cnt becomes 1.
+    // Term = (0 | 1) = 1. sync_rst_o = 1 ? 0 : 0 = 0. (Still Asserted). Correct.
+    // After CHAINS cycles, deassert_cnt=0.
+    // Term = (0 | 0) = 0. sync_rst_o = 0 ? 0 : 0 = 0? 
+    // Wait, if input is 1 (Inactive), rst_is_active=0.
+    // Term = 0. sync_rst_o = 0.
+    // But we want it to be 1 (Deasserted/Inactive).
+    // The logic `sync_rst_o = (condition) ? force_active_val : 1'b0` forces it to 0 if condition is false.
+    // If RST_POL=0, Deasserted state is 1.
+    // So if condition is false, we want 1.
+    // If RST_POL=1, Deasserted state is 0.
+    // So if condition is false, we want 0.
+    
+    // So:
+    // sync_rst_o = (rst_is_active | (deassert_cnt > 0)) ? force_active_val : ~force_active_val;
+    
+    // Test RST_POL=1:
+    // force_active_val = 1. ~force = 0.
+    // Cond true -> 1. Cond false -> 0. Correct.
+    
+    // Test RST_POL=0:
+    // force_active_val = 0. ~force = 1.
+    // Cond true -> 0. Cond false -> 1. Correct.
+    
+    // Final Logic:
+    // wire force_active_val = (RST_POL == 1'b1) ? 1'b1 : 1'b0;
+    // wire should_be_active = rst_is_active | (deassert_cnt > 0);
+    // assign sync_rst_o = should_be_active ? force_active_val : ~force_active_val;
+
+    wire force_active_val = (RST_POL == 1'b1) ? 1'b1 : 1'b0;
+    wire should_be_active = rst_is_active | (deassert_cnt > 0);
+    
+    assign sync_rst_o = should_be_active ? force_active_val : ~force_active_val;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,143 @@
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output reg [WIDTH-1:0] dst_data_o
+);
+
+    // Source domain state
+    reg src_valid_reg;
+    reg [WIDTH-1:0] src_data_reg;
+    reg src_valid_prev;
+
+    // Destination domain state
+    reg dst_valid_reg;
+    reg [WIDTH-1:0] dst_data_reg;
+    reg dst_valid_prev;
+
+    // 2-deep FIFO pointers
+    reg [1:0] src_ptr;
+    reg [1:0] dst_ptr;
+    reg [WIDTH*2-1:0] fifo_mem [2:0]; // 3 entries for 2-deep (0,1,2)
+
+    // Source domain logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_valid_reg <= 1'b0;
+            src_data_reg <= 1'b0;
+            src_valid_prev <= 1'b0;
+            src_ptr <= 2'b00;
+        end else begin
+            src_valid_reg <= src_valid_i;
+            src_data_reg <= src_data_i;
+            src_valid_prev <= src_valid_reg;
+        end
+    end
+
+    // Destination domain logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_valid_reg <= 1'b0;
+            dst_data_reg <= 1'b0;
+            dst_valid_prev <= 1'b0;
+            dst_ptr <= 2'b00;
+        end else begin
+            dst_valid_reg <= dst_valid_i;
+            dst_data_reg <= dst_data_i;
+            dst_valid_prev <= dst_valid_reg;
+        end
+    end
+
+    // Cross-domain handshake logic
+    // We use a simple 2-deep buffer approach:
+    // - When src_valid is high and dst_ready is high, we push to buffer
+    // - We maintain pointers to track full/empty states
+    // - Since clocks are related, we can sample across domains safely with proper sequencing
+
+    // Source ready output
+    assign src_ready_o = (src_ptr != 2'b11) && (src_valid_reg && dst_ready_i);
+
+    // Destination valid output
+    assign dst_valid_o = (dst_ptr != 2'b00) && (dst_valid_reg && dst_ready_i);
+
+    // Write to FIFO on source domain when valid and ready
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            fifo_mem[0] <= 1'b0;
+            fifo_mem[1] <= 1'b0;
+            fifo_mem[2] <= 1'b0;
+            src_ptr <= 2'b00;
+        end else if (src_valid_i && src_ready_o) begin
+            case (src_ptr)
+                2'b00: fifo_mem[0] <= {src_data_reg, 1'b0};
+                2'b01: fifo_mem[1] <= {src_data_reg, 1'b0};
+                2'b10: fifo_mem[2] <= {src_data_reg, 1'b0};
+                default: ;
+            endcase
+            src_ptr <= src_ptr + 1'b1;
+        end
+    end
+
+    // Read from FIFO on destination domain when valid and ready
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_data_reg <= 1'b0;
+            dst_ptr <= 2'b00;
+        end else if (dst_valid_i && dst_ready_i) begin
+            case (dst_ptr)
+                2'b00: dst_data_reg <= fifo_mem[0][WIDTH-1:0];
+                2'b01: dst_data_reg <= fifo_mem[1][WIDTH-1:0];
+                2'b10: dst_data_reg <= fifo_mem[2][WIDTH-1:0];
+                default: dst_data_reg <= 1'b0;
+            endcase
+            dst_ptr <= dst_ptr + 1'b1;
+        end
+    end
+
+    // Generate dst_valid_i for the destination domain logic
+    // This is a bit tricky - we need to generate dst_valid_i based on FIFO state
+    // We'll use a separate process for this
+
+    reg dst_valid_i;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_valid_i <= 1'b0;
+        end else begin
+            // dst_valid_i is high if there's data in the FIFO and we're not at the end
+            case (dst_ptr)
+                2'b00: dst_valid_i <= (src_ptr != 2'b00);
+                2'b01: dst_valid_i <= (src_ptr != 2'b01);
+                2'b10: dst_valid_i <= (src_ptr != 2'b10);
+                default: dst_valid_i <= 1'b0;
+            endcase
+        end
+    end
+
+    // Re-implement the destination logic with proper dst_valid_i
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_valid_reg <= 1'b0;
+            dst_data_reg <= 1'b0;
+            dst_valid_prev <= 1'b0;
+            dst_ptr <= 2'b00;
+        end else begin
+            dst_valid_reg <= dst_valid_i;
+            dst_data_reg <= dst_data_i;
+            dst_valid_prev <= dst_valid_reg;
+        end
+    end
+
+    // Final output assignments
+    assign dst_valid_o = dst_valid_reg && dst_ready_i;
+    assign dst_data_o = dst_data_reg;
+
+endmodule<|im_end|>

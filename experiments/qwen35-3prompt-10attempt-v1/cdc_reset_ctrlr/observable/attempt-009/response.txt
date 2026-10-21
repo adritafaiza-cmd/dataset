@@ -1,0 +1,184 @@
+```verilog
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  a_clk_i,
+    input  a_rst_ni,
+    input  a_clear_i,
+    output a_clear_o,
+    input  a_clear_ack_i,
+    output a_isolate_o,
+    input  a_isolate_ack_i,
+    input  b_clk_i,
+    input  b_rst_ni,
+    input  b_clear_i,
+    output b_clear_o,
+    input  b_clear_ack_i,
+    output b_isolate_o,
+    input  b_isolate_ack_i
+);
+
+    // ------------------------------------------------------------------
+    // CDC Registers for Domain A signals observed in Domain B
+    // ------------------------------------------------------------------
+    reg [SYNC_STAGES-1:0] b_clear_req_cdc;
+    reg [SYNC_STAGES-1:0] b_isolate_req_cdc;
+    reg [SYNC_STAGES-1:0] b_clear_ack_cdc;
+    reg [SYNC_STAGES-1:0] b_isolate_ack_cdc;
+
+    // ------------------------------------------------------------------
+    // CDC Registers for Domain B signals observed in Domain A
+    // ------------------------------------------------------------------
+    reg [SYNC_STAGES-1:0] a_clear_req_cdc;
+    reg [SYNC_STAGES-1:0] a_isolate_req_cdc;
+    reg [SYNC_STAGES-1:0] a_clear_ack_cdc;
+    reg [SYNC_STAGES-1:0] a_isolate_ack_cdc;
+
+    // ------------------------------------------------------------------
+    // State Machine State Encoding
+    // IDLE: Initial state, waiting for requests
+    // REQ_A: Domain A requested clear, waiting for isolation
+    // REQ_B: Domain B requested clear, waiting for isolation
+    // ISOLATING: Both sides isolated, waiting for clear acks
+    // CLEARING_A: Clearing A, waiting for ack
+    // CLEARING_B: Clearing B, waiting for ack
+    // DONE: Both cleared, returning to idle
+    // ------------------------------------------------------------------
+    localparam IDLE = 3'b000;
+    localparam REQ_A = 3'b001;
+    localparam REQ_B = 3'b010;
+    localparam ISOLATING = 3'b011;
+    localparam CLEARING_A = 3'b100;
+    localparam CLEARING_B = 3'b101;
+    localparam DONE = 3'b110;
+
+    reg [2:0] state, next_state;
+
+    // ------------------------------------------------------------------
+    // CDC Logic: Domain A to Domain B
+    // ------------------------------------------------------------------
+    always @(posedge b_clk_i or posedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            b_clear_req_cdc <= {SYNC_STAGES{1'b0}};
+            b_isolate_req_cdc <= {SYNC_STAGES{1'b0}};
+            b_clear_ack_cdc <= {SYNC_STAGES{1'b0}};
+            b_isolate_ack_cdc <= {SYNC_STAGES{1'b0}};
+        end else begin
+            b_clear_req_cdc <= {b_clear_req_cdc[SYNC_STAGES-2:0], a_clear_i};
+            b_isolate_req_cdc <= {b_isolate_req_cdc[SYNC_STAGES-2:0], a_isolate_o};
+            b_clear_ack_cdc <= {b_clear_ack_cdc[SYNC_STAGES-2:0], a_clear_ack_i};
+            b_isolate_ack_cdc <= {b_isolate_ack_cdc[SYNC_STAGES-2:0], a_isolate_ack_i};
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // CDC Logic: Domain B to Domain A
+    // ------------------------------------------------------------------
+    always @(posedge a_clk_i or posedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            a_clear_req_cdc <= {SYNC_STAGES{1'b0}};
+            a_isolate_req_cdc <= {SYNC_STAGES{1'b0}};
+            a_clear_ack_cdc <= {SYNC_STAGES{1'b0}};
+            a_isolate_ack_cdc <= {SYNC_STAGES{1'b0}};
+        end else begin
+            a_clear_req_cdc <= {a_clear_req_cdc[SYNC_STAGES-2:0], b_clear_i};
+            a_isolate_req_cdc <= {a_isolate_req_cdc[SYNC_STAGES-2:0], b_isolate_o};
+            a_clear_ack_cdc <= {a_clear_ack_cdc[SYNC_STAGES-2:0], b_clear_ack_i};
+            a_isolate_ack_cdc <= {a_isolate_ack_cdc[SYNC_STAGES-2:0], b_isolate_ack_i};
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // State Machine Logic
+    // ------------------------------------------------------------------
+    always @(posedge a_clk_i or posedge a_rst_ni) begin
+        if (!a_rst_ni)
+            state <= IDLE;
+        else
+            state <= next_state;
+    end
+
+    always @(*) begin
+        case (state)
+            IDLE: begin
+                // Check if either side has requested a clear
+                if (a_clear_req_cdc[SYNC_STAGES-1] || b_clear_req_cdc[SYNC_STAGES-1]) begin
+                    // Request isolation on both sides first
+                    next_state = ISOLATING;
+                end else begin
+                    next_state = IDLE;
+                end
+            end
+
+            REQ_A: begin
+                // Should not happen in this specific flow if we go straight to ISOLATING
+                // but kept for completeness if logic changes
+                next_state = IDLE;
+            end
+
+            REQ_B: begin
+                next_state = IDLE;
+            end
+
+            ISOLATING: begin
+                // Wait for both isolation acknowledgments
+                if (a_isolate_ack_cdc[SYNC_STAGES-1] && b_isolate_ack_cdc[SYNC_STAGES-1]) begin
+                    // Both isolated, now wait for clear requests to be stable
+                    // The protocol says: "wait for both acknowledgments at each step before releasing them"
+                    // Here, the "step" is the isolation. Now we move to clearing.
+                    // We need to ensure the clear request is still valid.
+                    if (a_clear_req_cdc[SYNC_STAGES-1] || b_clear_req_cdc[SYNC_STAGES-1]) begin
+                        next_state = CLEARING_A; // Arbitrarily start with A, or could be B
+                    end else begin
+                        next_state = IDLE;
+                    end
+                end else begin
+                    next_state = ISOLATING;
+                end
+            end
+
+            CLEARING_A: begin
+                // Clearing Domain A. Wait for A's clear ack.
+                // Also need to ensure B is not requesting a new clear that conflicts,
+                // but the protocol implies a sequence: Isolate -> Clear A -> Clear B.
+                // We assume the initial request is the only one active.
+                if (a_clear_ack_cdc[SYNC_STAGES-1]) begin
+                    next_state = CLEARING_B;
+                end else begin
+                    next_state = CLEARING_A;
+                end
+            end
+
+            CLEARING_B: begin
+                // Clearing Domain B. Wait for B's clear ack.
+                if (b_clear_ack_cdc[SYNC_STAGES-1]) begin
+                    next_state = DONE;
+                end else begin
+                    next_state = CLEARING_B;
+                end
+            end
+
+            DONE: begin
+                // Return to idle
+                next_state = IDLE;
+            end
+
+            default: begin
+                next_state = IDLE;
+            end
+        endcase
+    end
+
+    // ------------------------------------------------------------------
+    // Output Logic
+    // ------------------------------------------------------------------
+    // Active Low Outputs
+    assign a_clear_o = (state == CLEARING_A || state == CLEARING_B || state == DONE) ? 1'b0 : 1'b1;
+    assign b_clear_o = (state == CLEARING_A || state == CLEARING_B || state == DONE) ? 1'b0 : 1'b1;
+
+    assign a_isolate_o = (state == ISOLATING || state == CLEARING_A || state == CLEARING_B || state == DONE) ? 1'b0 : 1'b1;
+    assign b_isolate_o = (state == ISOLATING || state == CLEARING_A || state == CLEARING_B || state == DONE) ? 1'b0 : 1'b1;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,345 @@
+```systemverilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam ADDR_MASK = (1 << ADDR_WIDTH) - 1;
+    localparam FIFO_DEPTH = 1 << ADDR_WIDTH;
+
+    // Internal pointers: [ADDR_WIDTH-1:0] for address, [ADDR_WIDTH:0] for full/empty flags
+    // We use a wider internal pointer to handle the full/empty flag bit naturally.
+    // wptr: [ADDR_WIDTH:0], rptr: [ADDR_WIDTH:0]
+    // Full condition: wptr == rptr + 1 (with wrap around logic handled by comparison)
+    // Empty condition: wptr == rptr
+
+    reg [ADDR_WIDTH:0] wptr;
+    reg [ADDR_WIDTH:0] rptr;
+    reg [DATA_WIDTH-1:0] wdata_mem [0:FIFO_DEPTH-1];
+
+    // Synchronizers for control signals
+    // winc_sync: 2-stage synchronizer for write enable
+    reg winc_sync_1;
+    reg winc_sync_2;
+
+    // rinc_sync: 2-stage synchronizer for read enable
+    reg rinc_sync_1;
+    reg rinc_sync_2;
+
+    // Reset synchronization
+    // wrst_n_sync: Synchronize write reset to read domain
+    reg wrst_n_sync_1;
+    reg wrst_n_sync_2;
+
+    // rrst_n_sync: Synchronize read reset to write domain
+    reg rrst_n_sync_1;
+    reg rrst_n_sync_2;
+
+    // Full flag synchronization (Write domain -> Read domain)
+    // We generate the full flag in the write domain and synchronize it to the read domain.
+    // To avoid metastability on the full flag itself, we use a Gray code or simple 2-stage sync.
+    // Since wfull is an output, we generate it in write domain and sync it out.
+    // However, the requirement says "wfull: FIFO full, write domain". So we generate it there.
+    // The read domain needs to know if it's empty. We generate rempty in read domain.
+    // The tricky part is the empty flag crossing from write to read.
+    // Standard approach:
+    // 1. Generate wptr and rptr in respective domains.
+    // 2. Generate wfull in write domain: (wptr == rptr + 1)
+    //    But rptr is in read domain. We cannot compare directly.
+    //    Instead, we generate a "full" flag in write domain based on wptr and a synchronized version of rptr?
+    //    No, standard Gray code or pointer synchronization is used.
+    //    Better approach for safety:
+    //    - Synchronize rptr to write domain to generate wfull.
+    //    - Synchronize wptr to read domain to generate rempty.
+    //    This ensures that the comparison happens in the same clock domain.
+
+    // Synchronize rptr (Read Pointer) to Write Domain for wfull generation
+    reg [ADDR_WIDTH:0] rptr_sync_w_1;
+    reg [ADDR_WIDTH:0] rptr_sync_w_2;
+
+    // Synchronize wptr (Write Pointer) to Read Domain for rempty generation
+    reg [ADDR_WIDTH:0] wptr_sync_r_1;
+    reg [ADDR_WIDTH:0] wptr_sync_r_2;
+
+    // Synchronize wrst_n to both domains (already done via sync stages above, but let's be explicit)
+    // Actually, we need to sync wrst_n to read domain and rrst_n to write domain.
+
+    // --- Write Domain Logic ---
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {1'b0, 1'b0}; // Reset to 0
+            wdata_mem <= '0;
+        end else begin
+            if (winc) begin
+                wptr <= wptr + 1'b1;
+                wdata_mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+            end
+        end
+    end
+
+    // Generate wfull in Write Domain
+    // We need rptr synchronized to write domain.
+    // rptr_sync_w_2 is the stable value of rptr in write domain.
+    // Full condition: wptr == rptr + 1 (considering wrap around)
+    // Since we use [ADDR_WIDTH:0] pointers where bit 0 is the data pointer and bit ADDR_WIDTH is the flag?
+    // Let's stick to standard: wptr[ADDR_WIDTH-1:0] is address, wptr[ADDR_WIDTH] is flag?
+    // No, let's use the standard method:
+    // wptr and rptr are [ADDR_WIDTH:0].
+    // wptr[ADDR_WIDTH-1:0] is the actual address.
+    // wptr[ADDR_WIDTH] is used to indicate full? No, that complicates increment.
+    // Standard method:
+    // wptr and rptr are [ADDR_WIDTH:0].
+    // wptr[ADDR_WIDTH-1:0] is address.
+    // wptr[ADDR_WIDTH] is not used for address, but we can use the MSB for full/empty logic?
+    // Actually, the simplest robust way:
+    // wptr and rptr are [ADDR_WIDTH:0].
+    // wptr[ADDR_WIDTH-1:0] is address.
+    // wptr[ADDR_WIDTH] is a flag? No.
+    // Let's use the standard "pointer + flag" approach where the pointer is [ADDR_WIDTH:0] and the MSB is the flag.
+    // But incrementing a pointer with a flag bit is tricky if the flag bit is part of the value.
+    // Alternative: Use two [ADDR_WIDTH:0] pointers.
+    // wptr[ADDR_WIDTH-1:0] is address.
+    // rptr[ADDR_WIDTH-1:0] is address.
+    // wfull = (wptr[ADDR_WIDTH-1:0] == (rptr[ADDR_WIDTH-1:0] + 1) & ADDR_MASK) ? 1 : 0;
+    // But this requires comparing across domains if not synchronized.
+    // So we MUST synchronize rptr to write domain.
+
+    // Synchronize rptr to write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_sync_w_1 <= 1'b0;
+            rptr_sync_w_2 <= 1'b0;
+        end else begin
+            rptr_sync_w_1 <= rptr[ADDR_WIDTH-1:0];
+            rptr_sync_w_2 <= rptr_sync_w_1;
+        end
+    end
+
+    // Generate wfull
+    // Full if wptr == rptr + 1 (modulo 2^ADDR_WIDTH)
+    // We compare wptr[ADDR_WIDTH-1:0] with (rptr_sync_w_2[ADDR_WIDTH-1:0] + 1) & ADDR_MASK
+    // However, there is a nuance: if the FIFO is full, we might have wptr == rptr + 1.
+    // But if we just incremented wptr, it becomes rptr + 1.
+    // So wfull = (wptr[ADDR_WIDTH-1:0] == (rptr_sync_w_2[ADDR_WIDTH-1:0] + 1'b1) & ADDR_MASK);
+    // Wait, if rptr is 0, rptr+1 is 1. If wptr is 1, it's full.
+    // If rptr is MAX, rptr+1 is 0. If wptr is 0, it's full.
+    // This logic holds.
+    // But we need to be careful about the case where winc is asserted when full.
+    // The condition "winc && !wfull" handles that.
+    // So wfull is simply the comparison result.
+    
+    // Note: To be absolutely safe against metastability on the comparison, 
+    // we rely on the fact that wptr and rptr_sync_w_2 are stable in wclk domain.
+    // The comparison result is stable.
+    
+    // However, a more robust implementation for wfull often uses a dedicated flag bit in the pointer.
+    // Let's use the pointer with a flag bit approach for clarity and robustness.
+    // wptr and rptr are [ADDR_WIDTH:0].
+    // wptr[ADDR_WIDTH-1:0] is address.
+    // wptr[ADDR_WIDTH] is the flag? No, let's keep it simple.
+    // Standard practice:
+    // wptr and rptr are [ADDR_WIDTH:0].
+    // wptr[ADDR_WIDTH-1:0] is address.
+    // wptr[ADDR_WIDTH] is not used.
+    // wfull = (wptr[ADDR_WIDTH-1:0] == (rptr_sync_w_2[ADDR_WIDTH-1:0] + 1) & ADDR_MASK);
+    // This is correct.
+
+    // Generate waddr
+    assign waddr = wptr; // Output the full pointer for debug
+
+    // --- Read Domain Logic ---
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= {1'b0, 1'b0};
+        end else begin
+            if (rinc) begin
+                // Check if empty before incrementing
+                // We need wptr synchronized to read domain to check emptiness.
+                // But we can't check emptiness inside the read domain logic if we haven't synced wptr yet.
+                // So we need wptr_sync_r_2 here.
+                if (wptr_sync_r_2[ADDR_WIDTH-1:0] == rptr[ADDR_WIDTH-1:0]) begin
+                    // Empty, do not increment
+                end else begin
+                    rptr <= rptr + 1'b1;
+                end
+            end
+        end
+    end
+
+    // Synchronize wptr to read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_sync_r_1 <= 1'b0;
+            wptr_sync_r_2 <= 1'b0;
+        end else begin
+            wptr_sync_r_1 <= wptr[ADDR_WIDTH-1:0];
+            wptr_sync_r_2 <= wptr_sync_r_1;
+        end
+    end
+
+    // Generate rempty
+    // Empty if wptr == rptr
+    assign rempty = (wptr_sync_r_2[ADDR_WIDTH-1:0] == rptr[ADDR_WIDTH-1:0]);
+
+    // Generate rdata
+    // rdata is the data at rptr[ADDR_WIDTH-1:0]
+    assign rdata = wdata_mem[rptr[ADDR_WIDTH-1:0]];
+
+    // --- Synchronization of Reset Signals ---
+    // Sync wrst_n to read domain
+    always @(posedge rclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wrst_n_sync_1 <= 1'b0;
+            wrst_n_sync_2 <= 1'b0;
+        end else begin
+            wrst_n_sync_1 <= wrst_n;
+            wrst_n_sync_2 <= wrst_n_sync_1;
+        end
+    end
+
+    // Sync rrst_n to write domain
+    always @(posedge wclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rrst_n_sync_1 <= 1'b0;
+            rrst_n_sync_2 <= 1'b0;
+        end else begin
+            rrst_n_sync_1 <= rrst_n;
+            rrst_n_sync_2 <= rrst_n_sync_1;
+        end
+    end
+
+    // Sync winc to read domain (optional, but good for debugging or if rinc depends on it)
+    // Not strictly needed for functionality if rinc is independent, but let's sync it for completeness if needed.
+    // The prompt doesn't require syncing winc to read domain, only rinc to write domain?
+    // Actually, rinc is input to write domain? No, rinc is input to read domain.
+    // winc is input to write domain.
+    // rinc is input to read domain.
+    // We need to sync rinc to write domain? No, rinc is used in read domain.
+    // We need to sync winc to read domain? No, winc is used in write domain.
+    // The only cross-domain signals are:
+    // 1. wptr (Write) -> Read (for rempty)
+    // 2. rptr (Read) -> Write (for wfull)
+    // 3. wrst_n (Write) -> Read (for read domain reset)
+    // 4. rrst_n (Read) -> Write (for write domain reset)
+    // 5. winc (Write) -> Read? No.
+    // 6. rinc (Read) -> Write? No.
+    // So the above logic covers all CDC requirements.
+
+    // One detail: The read domain logic for rinc needs to know if the FIFO is empty.
+    // We used wptr_sync_r_2 for that.
+    // The write domain logic for winc needs to know if the FIFO is full.
+    // We used rptr_sync_w_2 for that.
+
+    // Final check on wfull logic:
+    // wfull = (wptr[ADDR_WIDTH-1:0] == (rptr_sync_w_2[ADDR_WIDTH-1:0] + 1) & ADDR_MASK);
+    // This is correct.
+
+    // Final check on rempty logic:
+    // rempty = (wptr_sync_r_2[ADDR_WIDTH-1:0] == rptr[ADDR_WIDTH-1:0]);
+    // This is correct.
+
+    // One edge case: Reset release.
+    // If wrst_n is released, wptr starts at 0.
+    // If rrst_n is released, rptr starts at 0.
+    // If both are released simultaneously, wptr=0, rptr=0, rempty=1, wfull=0. Correct.
+    // If wrst_n is released first, wptr=0. Then rrst_n released, rptr=0. rempty=1. Correct.
+    // If rrst_n is released first, rptr=0. Then wrst_n released, wptr=0. rempty=1. Correct.
+    // The synchronization of resets ensures that the read domain sees the write reset state correctly.
+
+    // One more thing: The prompt says "waddr and raddr are debug pointer outputs".
+    // We output wptr and rptr directly.
+    // waddr = wptr;
+    // raddr = rptr;
+    // This is fine.
+
+    // One potential issue: The comparison for wfull and rempty might be metastable if the pointers change at the same time?
+    // No, wptr changes on wclk, rptr changes on rclk. They are asynchronous.
+    // But we are comparing wptr (stable in wclk) with rptr_sync_w_2 (stable in wclk).
+    // So the comparison is safe in wclk domain.
+    // Similarly, rempty compares wptr_sync_r_2 (stable in rclk) with rptr (stable in rclk).
+    // So the comparison is safe in rclk domain.
+
+    // One detail: The prompt says "winc: Write increment / write request".
+    // "A write is accepted when winc is high and wfull is low."
+    // Our logic: if (winc) ... wptr <= wptr + 1.
+    // But we need to check wfull before incrementing?
+    // The prompt says "A write is accepted when winc is high and wfull is low."
+    // This implies that if wfull is high, winc should be ignored.
+    // Our current logic: if (winc) wptr <= wptr + 1.
+    // If wfull is high, wptr == rptr + 1.
+    // If we increment wptr, it becomes rptr + 2 (modulo).
+    // This would cause data loss or corruption if we overwrite.
+    // So we MUST check wfull before incrementing.
+    // But wfull is generated in the same clock cycle as winc.
+    // So we can use the current wfull value.
+    // However, wfull is an output. Can we use it in the combinational logic of the same process?
+    // Yes, wfull is assigned in the same process (or combinational).
+    // But wfull depends on rptr_sync_w_2.
+    // So we can compute wfull in combinational logic and use it in the sequential logic.
+    // Let's restructure the write domain logic to be clear.
+
+    // Revised Write Domain Logic:
+    // 1. Compute wfull_comb = (wptr[ADDR_WIDTH-1:0] == (rptr_sync_w_2[ADDR_WIDTH-1:0] + 1) & ADDR_MASK);
+    // 2. Sequential logic: if (!wrst_n) ... else if (winc && !wfull_comb) ...
+    // This ensures we don't write when full.
+
+    // Revised Read Domain Logic:
+    // 1. Compute rempty_comb = (wptr_sync_r_2[ADDR_WIDTH-1:0] == rptr[ADDR_WIDTH-1:0]);
+    // 2. Sequential logic: if (!rrst_n) ... else if (rinc && !rempty_comb) ...
+    // This ensures we don't read when empty.
+
+    // Let's implement this revised logic.
+
+    // --- Revised Write Domain ---
+    wire wfull_comb;
+    assign wfull_comb = (wptr[ADDR_WIDTH-1:0] == ((rptr_sync_w_2[ADDR_WIDTH-1:0] + 1'b1) & ADDR_MASK));
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {1'b0, 1'b0};
+            wdata_mem <= '0;
+        end else begin
+            if (winc && !wfull_comb) begin
+                wptr <= wptr + 1'b1;
+                wdata_mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+            end
+        end
+    end
+
+    // --- Revised Read Domain ---
+    wire rempty_comb;
+    assign rempty_comb = (wptr_sync_r_2[ADDR_WIDTH-1:0] == rptr[ADDR_WIDTH-1:0]);
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= {1'b0, 1'b0};
+        end else begin
+            if (rinc && !rempty_comb) begin
+                rptr <= rptr + 1'b1;
+            end
+        end
+    end
+
+    // Assign outputs
+    assign wfull = wfull_comb;
+    assign rempty = rempty_comb;
+    assign waddr = wptr;
+    assign raddr = rptr;
+    assign rdata = wdata_mem[rptr[ADDR_WIDTH-1:0]];
+
+endmodule
+```<|im_end|>

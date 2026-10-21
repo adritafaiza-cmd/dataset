@@ -1,0 +1,220 @@
+```verilog
+`timescale 1ns/1ps
+
+module axis_register #
+(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI Stream input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI Stream output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser
+);
+
+    // Internal state registers
+    reg [DATA_WIDTH-1:0] reg_data;
+    reg [KEEP_WIDTH-1:0] reg_keep;
+    reg reg_last;
+    reg [ID_WIDTH-1:0]   reg_id;
+    reg [DEST_WIDTH-1:0] reg_dest;
+    reg [USER_WIDTH-1:0] reg_user;
+    reg reg_valid;
+
+    // Control signals
+    wire wire_type;
+    wire wire_buffer;
+    wire wire_skid;
+
+    // Determine register type behavior
+    // REG_TYPE = 0: Wire (Transparent)
+    // REG_TYPE = 1: Buffer (Valid/Ready handshake only)
+    // REG_TYPE = 2: Skid Buffer (Store data on valid, forward on ready)
+    assign wire_type = (REG_TYPE == 0);
+    assign wire_buffer = (REG_TYPE == 1);
+    assign wire_skid = (REG_TYPE == 2);
+
+    // Logic to determine if we should accept new data
+    // For Wire: Always accept if ready
+    // For Buffer: Accept if ready (no storage needed beyond current cycle)
+    // For Skid: Accept if valid and ready (store in register)
+    
+    wire accept_data;
+    assign accept_data = (s_axis_tvalid && m_axis_tready);
+
+    // Logic to determine if we should forward data
+    // For Wire: Forward immediately if valid
+    // For Buffer: Forward immediately if valid
+    // For Skid: Forward if valid and ready (data is already stored)
+    
+    wire forward_data;
+    assign forward_data = (reg_valid && m_axis_tready);
+
+    // State Machine / Logic for each register type
+
+    // 1. Wire Mode (Transparent)
+    // Data passes through immediately. No storage required.
+    // However, to strictly follow "single-clock" and "register slice" semantics 
+    // while acting as a wire, we typically just pass signals. 
+    // But the prompt asks for a "register slice" that behaves as a wire.
+    // In AXI-Stream, a wire is often implemented by just passing signals, 
+    // but if we must use registers to align phases or handle resets cleanly:
+    // We will store data on valid/ready and forward on next clock if ready.
+    // Actually, a true wire is combinational. A "register wire" usually implies 
+    // storing the data for one cycle. Let's implement the storage logic 
+    // but only forward if the downstream is ready.
+    
+    // 2. Buffer Mode
+    // Acts as a buffer. Stores data on valid/ready. 
+    // If downstream is not ready, it holds the data.
+    // If downstream is ready, it forwards.
+    // This is effectively the same as Skid but without the "skid" delay concept 
+    // (i.e., it doesn't necessarily delay the first packet if the first packet 
+    // is ready immediately, but it ensures alignment).
+    // Standard interpretation: Buffer stores data when s_valid=1 and m_ready=1.
+    // If m_ready=0, it waits.
+    
+    // 3. Skid Buffer Mode
+    // Stores data on s_valid=1 regardless of m_ready.
+    // Forwards data on m_ready=1.
+    // This decouples the producer and consumer completely.
+
+    // Unified Logic for Data Storage
+    // We store data if:
+    // - Wire: s_valid && m_ready (Transparent pass-through with 1-cycle latency)
+    // - Buffer: s_valid && m_ready (Store if ready, else wait)
+    // - Skid: s_valid (Always store on valid, forward on ready)
+    
+    // Let's refine the "Buffer" definition based on standard AXI-Stream implementations.
+    // Often "Buffer" means it absorbs a burst if the downstream is slow, 
+    // but forwards as soon as possible. 
+    // "Skid" means it always absorbs one cycle of latency.
+    
+    // Implementation Strategy:
+    // We will use a single set of registers.
+    // The update logic depends on REG_TYPE.
+    
+    // Update Logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            reg_data      <= 0;
+            reg_keep      <= 0;
+            reg_last      <= 0;
+            reg_id        <= 0;
+            reg_dest      <= 0;
+            reg_user      <= 0;
+            reg_valid     <= 0;
+        end else begin
+            // Determine if we update the register
+            wire update_reg;
+            
+            if (wire_skid) begin
+                // Skid Buffer: Update on s_valid, regardless of m_ready
+                update_reg = s_axis_tvalid;
+            end else if (wire_buffer) begin
+                // Buffer: Update on s_valid && m_ready
+                // If m_ready is 0, we don't update (we wait for the next cycle where m_ready might be 1)
+                // This creates a "buffer" effect where we only commit when the path is clear.
+                update_reg = (s_axis_tvalid && m_axis_tready);
+            end else begin
+                // Wire: Update on s_valid && m_ready (1-cycle latency wire)
+                update_reg = (s_axis_tvalid && m_axis_tready);
+            end
+
+            if (update_reg) begin
+                reg_data      <= s_axis_tdata;
+                reg_keep      <= s_axis_tkeep;
+                reg_last      <= s_axis_tlast;
+                reg_id        <= s_axis_tid;
+                reg_dest      <= s_axis_tdest;
+                reg_user      <= s_axis_tuser;
+                reg_valid     <= 1;
+            end else begin
+                // For Skid, if we don't update, we must clear valid if s_valid was 0
+                // For Wire/Buffer, if we don't update, valid should be 0
+                if (wire_skid) begin
+                    // In skid mode, if s_valid is 0, we must clear the register
+                    if (!s_axis_tvalid) begin
+                        reg_valid <= 0;
+                    end
+                    // If s_valid is 1 but m_ready is 0, we keep the data (already handled by update_reg logic)
+                end else begin
+                    // Wire/Buffer: If we didn't update, it means we didn't get a valid/ready pair
+                    // So valid becomes 0
+                    reg_valid <= 0;
+                end
+            end
+        end
+    end
+
+    // Output Logic
+    // Determine when to assert m_valid
+    // Wire/Buffer: m_valid = reg_valid && m_axis_tready
+    // Skid: m_valid = reg_valid && m_axis_tready (Same logic, but data is always present)
+    
+    always @(*) begin
+        m_axis_tvalid = (reg_valid && m_axis_tready);
+        
+        if (m_axis_tvalid) begin
+            m_axis_tdata      = reg_data;
+            m_axis_tkeep      = reg_keep;
+            m_axis_tlast      = reg_last;
+            m_axis_tid        = reg_id;
+            m_axis_tdest      = reg_dest;
+            m_axis_tuser      = reg_user;
+        end else begin
+            m_axis_tdata      = 0;
+            m_axis_tkeep      = 0;
+            m_axis_tlast      = 0;
+            m_axis_tid        = 0;
+            m_axis_tdest      = 0;
+            m_axis_tuser      = 0;
+        end
+    end
+
+    // Input Ready Logic
+    // s_axis_tready is asserted if we are ready to accept data.
+    // Wire/Buffer: Ready if m_axis_tready is 1 (and we are not in a state where we are waiting for m_ready to update)
+    // Actually, for Wire/Buffer:
+    // If REG_TYPE != Skid:
+    //   We need s_valid && m_ready to update.
+    //   So s_ready = m_ready.
+    // If REG_TYPE == Skid:
+    //   We update on s_valid.
+    //   So s_ready = 1 (always ready to accept).
+    
+    assign s_axis_tready = (wire_skid) ? 1'b1 : m_axis_tready;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

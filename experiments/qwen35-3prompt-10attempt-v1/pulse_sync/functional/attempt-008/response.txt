@@ -1,0 +1,93 @@
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // Internal signals
+    wire [STAGES-1:0] state_a;
+    wire [STAGES-1:0] state_b;
+    wire pulseA_valid;
+    wire pulseB_valid;
+
+    // State encoding:
+    // 0: Idle
+    // 1: Pulse detected in domain A, propagating
+    // 2: Pulse detected in domain B, propagating
+    // We use a counter-like approach where we count up on detection and down on propagation
+    // to ensure the pulse width is exactly one cycle in the destination domain.
+
+    // Domain A Logic
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            state_a <= 0;
+        end else begin
+            case (state_a)
+                0: begin
+                    if (pulseA_i)
+                        state_a <= 1;
+                    else
+                        state_a <= 0;
+                end
+                1: begin
+                    // Once a pulse is detected, we stay in state 1 for exactly one cycle
+                    // to generate the pulse in domain B, then return to idle.
+                    // However, to prevent re-triggering if pulseA_i stays high,
+                    // we only transition back to 0 after one full cycle.
+                    // But the requirement says "one-cycle pulse".
+                    // Strategy: Detect edge or level? Usually level with one-cycle output.
+                    // If pulseA_i is high for multiple cycles, we only want ONE output pulse.
+                    // So we stay in state 1 for one cycle, then go to 0.
+                    // But we must ignore new pulses while busy.
+                    // Let's refine: State 1 means "Pulse in flight".
+                    // If we are in state 1, we ignore new pulseA_i.
+                    // After one cycle, we go to 0.
+                    state_a <= 0;
+                end
+                default: state_a <= 0;
+            endcase
+        end
+    end
+
+    // Domain B Logic
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            state_b <= 0;
+        end else begin
+            case (state_b)
+                0: begin
+                    if (pulseA_valid)
+                        state_b <= 1;
+                    else
+                        state_b <= 0;
+                end
+                1: begin
+                    state_b <= 0;
+                end
+                default: state_b <= 0;
+            endcase
+        end
+    end
+
+    // Generate pulseA_valid: High for exactly one cycle in domain A when pulseA_i goes high
+    // This ensures that even if pulseA_i is wide, we only send one trigger to domain B.
+    // Actually, the logic above in state_a handles the "ignore while busy" and "one pulse" requirement.
+    // pulseA_valid is simply the signal that indicates a pulse is currently being processed in domain A.
+    assign pulseA_valid = (state_a == 1);
+
+    // Generate pulseB_valid: High for exactly one cycle in domain B when state_b is 1
+    // This ensures the output is a one-cycle pulse.
+    assign pulseB_valid = (state_b == 1);
+
+    // Output assignments
+    assign pulseB_o = pulseB_valid;
+    assign busy_o = (state_a == 1) | (state_b == 1);
+
+endmodule<|im_end|>
+<|endoftext|>

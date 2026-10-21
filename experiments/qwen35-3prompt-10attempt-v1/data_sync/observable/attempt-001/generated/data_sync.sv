@@ -1,0 +1,88 @@
+```verilog
+`timescale 1ns / 1ps
+
+module data_sync #(
+    parameter STAGES = 2,
+    parameter DWIDTH = 8
+)(
+    input                  clk,
+    input                  rstn,
+    input  [DWIDTH-1:0]    din,
+    input                  dready_i,
+    output reg [DWIDTH-1:0] dout,
+    output reg             dready_o
+);
+
+    // Internal signals for the pipeline stages
+    // We use a shift register approach where each stage holds the data
+    // and a separate register holds the "ready" status of the previous stage.
+    
+    // Data pipeline: din -> stage0 -> stage1 -> ... -> stage(STAGES-1) -> dout
+    reg [DWIDTH-1:0] stage_data [0:STAGES-1];
+    
+    // Ready pipeline: dready_i -> stage0_ready -> stage1_ready -> ... -> stage(STAGES-1)_ready -> dready_o
+    // The logic is: stage_k_ready is true if stage_k_data is valid AND stage(k+1)_ready is true.
+    // For the last stage, it is true if stage(Stages-1)_data is valid.
+    reg stage_ready [0:STAGES-1];
+
+    // Validity flag for the input data
+    reg din_valid;
+
+    // Always block for logic in the destination clock domain
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            // Reset state
+            din_valid <= 1'b0;
+            dready_o <= 1'b0;
+            dout <= '0;
+            
+            // Reset all pipeline stages
+            for (integer i = 0; i < STAGES; i = i + 1) begin
+                stage_data[i] <= '0;
+                stage_ready[i] <= 1'b0;
+            end
+        end
+        else begin
+            // 1. Update validity of the input data
+            // Data is considered valid if dready_i is high (indicating the source is ready to push)
+            // Note: In many protocols, dready_i being high means "I am ready to accept". 
+            // However, the prompt says "dready_i enter the clk domain" and we need to indicate when output is ready.
+            // Standard interpretation: 
+            // - dready_i = 1: Source is ready to provide new data.
+            // - We capture din when dready_i is high.
+            din_valid <= dready_i;
+
+            // 2. Shift data through the pipeline
+            // Shift data from stage k to stage k+1 if stage k is valid
+            for (integer i = STAGES - 1; i >= 0; i = i - 1) begin
+                if (i < STAGES - 1) begin
+                    // Intermediate stages: shift if current stage is valid
+                    stage_data[i+1] <= stage_data[i] & stage_ready[i];
+                end else begin
+                    // Last stage: shift if previous stage is valid
+                    stage_data[STAGES-1] <= stage_data[STAGES-2] & stage_ready[STAGES-2];
+                end
+            end
+            // First stage: capture din if valid
+            stage_data[0] <= din & din_valid;
+
+            // 3. Calculate ready status for each stage
+            // stage_ready[i] is true if stage_data[i] is valid AND (i is last stage OR stage_ready[i+1] is true)
+            for (integer i = 0; i < STAGES; i = i + 1) begin
+                if (i == STAGES - 1) begin
+                    // Last stage: ready if its data is valid
+                    stage_ready[i] <= stage_data[i] != '0;
+                end else begin
+                    // Intermediate stages: ready if its data is valid AND next stage is ready
+                    stage_ready[i] <= (stage_data[i] != '0) & stage_ready[i+1];
+                end
+            end
+
+            // 4. Output assignment
+            dout <= stage_data[STAGES-1];
+            dready_o <= stage_ready[STAGES-1];
+        end
+    end
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,271 @@
+```verilog
+module axis_async_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    /*
+     * AXI input
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   s_pause_req,
+    output wire                   s_pause_ack,
+    input  wire                   m_pause_req,
+    output wire                   m_pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] s_status_depth,
+    output wire [$clog2(DEPTH):0] s_status_depth_commit,
+    output wire                   s_status_overflow,
+    output wire                   s_status_bad_frame,
+    output wire                   s_status_good_frame,
+    output wire [$clog2(DEPTH):0] m_status_depth,
+    output wire [$clog2(DEPTH):0] m_status_depth_commit,
+    output wire                   m_status_overflow,
+    output wire                   m_status_bad_frame,
+    output wire                   m_status_good_frame
+);
+
+    localparam LOG2_DEPTH = $clog2(DEPTH);
+    localparam KEEP_WIDTH_LOG = $clog2(KEEP_WIDTH);
+    localparam ID_WIDTH_LOG = $clog2(ID_WIDTH);
+    localparam DEST_WIDTH_LOG = $clog2(DEST_WIDTH);
+    localparam USER_WIDTH_LOG = $clog2(USER_WIDTH);
+
+    // Internal data width including sidebands
+    localparam AXIS_TDATA_WIDTH = DATA_WIDTH + (KEEP_ENABLE ? KEEP_WIDTH : 0) + 
+                                  (LAST_ENABLE ? 1 : 0) + 
+                                  (ID_ENABLE ? ID_WIDTH : 0) + 
+                                  (DEST_ENABLE ? DEST_WIDTH : 0) + 
+                                  (USER_ENABLE ? USER_WIDTH : 0);
+
+    // Calculate actual depth based on pipeline stages
+    localparam ACTUAL_DEPTH = (RAM_PIPELINE == 1) ? DEPTH : (DEPTH >> 1);
+    localparam LOG2_ACTUAL_DEPTH = $clog2(ACTUAL_DEPTH);
+
+    // Internal registers for pointers
+    reg [LOG2_ACTUAL_DEPTH-1:0] s_write_ptr;
+    reg [LOG2_ACTUAL_DEPTH-1:0] s_read_ptr;
+    reg [LOG2_ACTUAL_DEPTH-1:0] m_write_ptr;
+    reg [LOG2_ACTUAL_DEPTH-1:0] m_read_ptr;
+
+    // Internal status registers
+    reg s_status_empty;
+    reg s_status_full;
+    reg s_status_overflow;
+    reg s_status_bad_frame;
+    reg s_status_good_frame;
+    reg m_status_empty;
+    reg m_status_full;
+    reg m_status_overflow;
+    reg m_status_bad_frame;
+    reg m_status_good_frame;
+
+    // Internal data storage
+    reg [AXIS_TDATA_WIDTH-1:0] s_fifo_data [0:ACTUAL_DEPTH-1];
+    reg [AXIS_TDATA_WIDTH-1:0] m_fifo_data [0:ACTUAL_DEPTH-1];
+
+    // Control signals
+    wire s_fifo_empty;
+    wire s_fifo_full;
+    wire m_fifo_empty;
+    wire m_fifo_full;
+
+    // Generate empty/full signals
+    assign s_fifo_empty = (s_write_ptr == s_read_ptr);
+    assign s_fifo_full = (s_write_ptr == (s_read_ptr + LOG2_ACTUAL_DEPTH)) || 
+                         (s_write_ptr == (s_read_ptr + LOG2_ACTUAL_DEPTH - 1) && DROP_WHEN_FULL);
+    assign m_fifo_empty = (m_write_ptr == m_read_ptr);
+    assign m_fifo_full = (m_write_ptr == (m_read_ptr + LOG2_ACTUAL_DEPTH)) || 
+                         (m_write_ptr == (m_read_ptr + LOG2_ACTUAL_DEPTH - 1) && DROP_WHEN_FULL);
+
+    // Clock domain crossing logic for pointers
+    // S-domain to M-domain pointer crossing
+    wire s_ptr_valid;
+    wire s_ptr_data;
+    wire s_ptr_ack;
+    
+    // M-domain to S-domain pointer crossing
+    wire m_ptr_valid;
+    wire m_ptr_data;
+    wire m_ptr_ack;
+
+    // Simple pointer crossing logic
+    // S-domain writes to M-domain when s_write_ptr changes
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_write_ptr <= '0;
+            s_status_empty <= 1;
+            s_status_full <= 0;
+            s_status_overflow <= 0;
+            s_status_bad_frame <= 0;
+            s_status_good_frame <= 0;
+        end else begin
+            s_write_ptr <= s_write_ptr;
+            s_status_empty <= s_fifo_empty;
+            s_status_full <= s_fifo_full;
+            s_status_overflow <= 0;
+            s_status_bad_frame <= 0;
+            s_status_good_frame <= 0;
+        end
+    end
+
+    // M-domain writes to S-domain when m_write_ptr changes
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_write_ptr <= '0;
+            m_status_empty <= 1;
+            m_status_full <= 0;
+            m_status_overflow <= 0;
+            m_status_bad_frame <= 0;
+            m_status_good_frame <= 0;
+        end else begin
+            m_write_ptr <= m_write_ptr;
+            m_status_empty <= m_fifo_empty;
+            m_status_full <= m_fifo_full;
+            m_status_overflow <= 0;
+            m_status_bad_frame <= 0;
+            m_status_good_frame <= 0;
+        end
+    end
+
+    // S-domain logic
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_fifo_data <= '0;
+            s_axis_tready <= 0;
+            s_pause_ack <= 0;
+        end else begin
+            if (s_axis_tvalid && m_axis_tready && !s_fifo_full) begin
+                s_fifo_data[s_write_ptr] <= {s_axis_tdata, s_axis_tkeep, s_axis_tlast, 
+                                             s_axis_tid, s_axis_tdest, s_axis_tuser};
+                s_write_ptr <= s_write_ptr + 1;
+                s_axis_tready <= 1;
+                s_pause_ack <= 0;
+            end else if (s_axis_tvalid && m_axis_tready && s_fifo_full) begin
+                if (DROP_WHEN_FULL) begin
+                    s_axis_tready <= 1;
+                    s_pause_ack <= 0;
+                end else begin
+                    s_axis_tready <= 0;
+                    s_pause_ack <= 0;
+                end
+            end else begin
+                s_axis_tready <= 0;
+                s_pause_ack <= 0;
+            end
+        end
+    end
+
+    // M-domain logic
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_fifo_data <= '0;
+            m_axis_tvalid <= 0;
+            m_axis_tlast <= 0;
+            m_axis_tid <= '0;
+            m_axis_tdest <= '0;
+            m_axis_tuser <= '0;
+            m_axis_tkeep <= '0;
+            m_axis_tdata <= '0;
+            m_pause_ack <= 0;
+        end else begin
+            if (m_fifo_empty && m_axis_tready) begin
+                m_axis_tvalid <= 1;
+                m_axis_tdata <= m_fifo_data[m_read_ptr][DATA_WIDTH-1:0];
+                m_axis_tkeep <= m_fifo_data[m_read_ptr][DATA_WIDTH+KEEP_WIDTH-1:DATA_WIDTH];
+                m_axis_tlast <= m_fifo_data[m_read_ptr][DATA_WIDTH+KEEP_WIDTH];
+                m_axis_tid <= m_fifo_data[m_read_ptr][DATA_WIDTH+KEEP_WIDTH+1:DATA_WIDTH+KEEP_WIDTH+ID_WIDTH];
+                m_axis_tdest <= m_fifo_data[m_read_ptr][DATA_WIDTH+KEEP_WIDTH+ID_WIDTH+1:DATA_WIDTH+KEEP_WIDTH+ID_WIDTH+DEST_WIDTH];
+                m_axis_tuser <= m_fifo_data[m_read_ptr][DATA_WIDTH+KEEP_WIDTH+ID_WIDTH+DEST_WIDTH+1:DATA_WIDTH+KEEP_WIDTH+ID_WIDTH+DEST_WIDTH+USER_WIDTH];
+                m_read_ptr <= m_read_ptr + 1;
+                m_pause_ack <= 0;
+            end else if (m_fifo_empty && !m_axis_tready) begin
+                m_axis_tvalid <= 0;
+                m_axis_tlast <= 0;
+                m_axis_tid <= '0;
+                m_axis_tdest <= '0;
+                m_axis_tuser <= '0;
+                m_axis_tkeep <= '0;
+                m_axis_tdata <= '0;
+                m_pause_ack <= 0;
+            end else begin
+                m_axis_tvalid <= 0;
+                m_axis_tlast <= 0;
+                m_axis_tid <= '0;
+                m_axis_tdest <= '0;
+                m_axis_tuser <= '0;
+                m_axis_tkeep <= '0;
+                m_axis_tdata <= '0;
+                m_pause_ack <= 0;
+            end
+        end
+    end
+
+    // Status outputs
+    assign s_status_depth = s_write_ptr;
+    assign s_status_depth_commit = s_read_ptr;
+    assign s_status_overflow = 0;
+    assign s_status_bad_frame = 0;
+    assign s_status_good_frame = 0;
+
+    assign m_status_depth = m_write_ptr;
+    assign m_status_depth_commit = m_read_ptr;
+    assign m_status_overflow = 0;
+    assign m_status_bad_frame = 0;
+    assign m_status_good_frame = 0;
+
+    // Pause logic
+    assign s_pause_ack = 0;
+    assign m_pause_ack = 0;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

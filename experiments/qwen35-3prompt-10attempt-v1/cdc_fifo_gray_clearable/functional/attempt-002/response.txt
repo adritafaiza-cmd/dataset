@@ -1,0 +1,469 @@
+```verilog
+`timescale 1ns/1ps
+
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam GRAY_WIDTH = LOG_DEPTH;
+
+    // Internal signals for pointers
+    reg [LOG_DEPTH-1:0] src_ptr;
+    reg [LOG_DEPTH-1:0] dst_ptr;
+    reg [LOG_DEPTH-1:0] src_gray;
+    reg [LOG_DEPTH-1:0] dst_gray;
+    reg [LOG_DEPTH-1:0] src_gray_sync;
+    reg [LOG_DEPTH-1:0] dst_gray_sync;
+    reg [LOG_DEPTH-1:0] dst_gray_sync_2;
+    
+    // Clear state machine flags
+    reg src_clear_req;
+    reg dst_clear_req;
+    reg src_clear_pending;
+    reg dst_clear_pending;
+    reg src_clear_ack;
+    reg dst_clear_ack;
+    
+    // Write pointer synchronization
+    reg [LOG_DEPTH-1:0] dst_ptr_sync;
+    reg [LOG_DEPTH-1:0] dst_ptr_sync_2;
+    
+    // Read pointer synchronization
+    reg [LOG_DEPTH-1:0] src_ptr_sync;
+    reg [LOG_DEPTH-1:0] src_ptr_sync_2;
+    
+    // FIFO Memory
+    reg [WIDTH-1:0] mem [DEPTH-1:0];
+    reg [LOG_DEPTH-1:0] write_ptr;
+    reg [LOG_DEPTH-1:0] read_ptr;
+    reg full_flag;
+    reg empty_flag;
+    
+    // Clear control logic
+    reg src_clear_active;
+    reg dst_clear_active;
+    reg src_clear_done;
+    reg dst_clear_done;
+
+    // --- Source Domain Logic ---
+
+    // Clear Request Generation
+    assign src_clear_req = src_clear_i & ~src_clear_pending;
+    
+    // Clear Pending Output
+    assign src_clear_pending_o = src_clear_pending;
+
+    // Write Pointer Synchronizer (Gray to Binary conversion on dst side)
+    // We need to sync the write pointer to the destination domain to know if we are full
+    // and to handle the clear correctly.
+    
+    // 1. Sync Write Pointer (Binary) from Src to Dst
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_ptr_sync <= '0;
+        else if (dst_clear_active)
+            dst_ptr_sync <= '0;
+        else
+            dst_ptr_sync <= src_ptr;
+    end
+
+    // 2. Sync Write Pointer (Binary) again for stability
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_ptr_sync_2 <= '0;
+        else if (dst_clear_active)
+            dst_ptr_sync_2 <= '0;
+        else
+            dst_ptr_sync_2 <= dst_ptr_sync;
+    end
+
+    // 3. Convert Synced Binary to Gray for comparison with Read Pointer
+    assign src_ptr_sync = {dst_ptr_sync[LOG_DEPTH-1:1], dst_ptr_sync[LOG_DEPTH-1] ^ dst_ptr_sync[LOG_DEPTH-2:0]};
+    assign src_ptr_sync_2 = {dst_ptr_sync_2[LOG_DEPTH-1:1], dst_ptr_sync_2[LOG_DEPTH-1] ^ dst_ptr_sync_2[LOG_DEPTH-2:0]};
+
+    // 4. Sync Read Pointer (Binary) from Dst to Src
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_ptr_sync <= '0;
+        else if (src_clear_active)
+            src_ptr_sync <= '0;
+        else
+            src_ptr_sync <= dst_ptr;
+    end
+
+    // 5. Sync Read Pointer (Binary) again
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_ptr_sync_2 <= '0;
+        else if (src_clear_active)
+            src_ptr_sync_2 <= '0;
+        else
+            src_ptr_sync_2 <= src_ptr_sync;
+    end
+
+    // 6. Convert Synced Read Pointer to Gray
+    assign dst_gray_sync = {src_ptr_sync[LOG_DEPTH-1:1], src_ptr_sync[LOG_DEPTH-1] ^ src_ptr_sync[LOG_DEPTH-2:0]};
+    assign dst_gray_sync_2 = {src_ptr_sync_2[LOG_DEPTH-1:1], src_ptr_sync_2[LOG_DEPTH-1] ^ src_ptr_sync_2[LOG_DEPTH-2:0]};
+
+    // Full Flag Generation (Synced to Src)
+    // Full when write_ptr == read_ptr and we have data (or based on full_flag logic)
+    // Standard Gray FIFO full detection: write_gray == read_gray AND full_flag
+    // Since we are clearing, we reset pointers.
+    
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_ptr <= '0;
+            full_flag <= 1'b0;
+            src_clear_pending <= 1'b0;
+            src_clear_ack <= 1'b0;
+        end
+        else if (src_clear_active) begin
+            src_ptr <= '0;
+            full_flag <= 1'b0;
+            src_clear_pending <= 1'b1;
+            src_clear_ack <= 1'b0;
+        end
+        else begin
+            src_ptr <= src_ptr + 1'b1;
+            // Update full flag based on pointers
+            if (src_ptr == dst_gray_sync_2)
+                full_flag <= 1'b1;
+            else
+                full_flag <= 1'b0;
+        end
+    end
+
+    // Clear Ack Generation
+    // Acknowledge when write pointer has crossed the clear boundary (read_ptr)
+    // Actually, for a clearable FIFO, we usually wait until the write pointer is far enough ahead
+    // or simply wait until the write pointer wraps around past the read pointer after reset.
+    // Simpler approach: Acknowledge when write_ptr == read_ptr (empty) after clear request.
+    // However, to avoid metastability, we check if write_ptr has caught up to read_ptr.
+    
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_clear_ack <= 1'b0;
+        else if (src_clear_active)
+            src_clear_ack <= 1'b0;
+        else if (src_clear_req && src_ptr == dst_gray_sync_2)
+            src_clear_ack <= 1'b1;
+        else
+            src_clear_ack <= 1'b0;
+    end
+
+    // Clear Pending Output Logic
+    // Pending is high from request until ack
+    assign src_clear_pending = src_clear_req | (src_clear_active && !src_clear_ack);
+
+    // Write Enable
+    reg write_en;
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            write_en <= 1'b0;
+        else if (src_clear_active)
+            write_en <= 1'b0;
+        else if (src_valid_i && !full_flag && !src_clear_active)
+            write_en <= 1'b1;
+        else
+            write_en <= 1'b0;
+    end
+
+    // Write Pointer Update (Internal)
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            write_ptr <= '0;
+        else if (src_clear_active)
+            write_ptr <= '0;
+        else if (write_en)
+            write_ptr <= write_ptr + 1'b1;
+        else
+            write_ptr <= write_ptr;
+    end
+
+    // Memory Write
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            mem <= '0;
+        else if (src_clear_active)
+            mem <= '0;
+        else if (write_en)
+            mem[write_ptr] <= src_data_i;
+    end
+
+    // Read Enable (Synced to Src)
+    reg read_en;
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            read_en <= 1'b0;
+        else if (src_clear_active)
+            read_en <= 1'b0;
+        else if (dst_ready_i && !empty_flag && !src_clear_active)
+            read_en <= 1'b1;
+        else
+            read_en <= 1'b0;
+    end
+
+    // Read Pointer Update (Internal)
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            read_ptr <= '0;
+        else if (src_clear_active)
+            read_ptr <= '0;
+        else if (read_en)
+            read_ptr <= read_ptr + 1'b1;
+        else
+            read_ptr <= read_ptr;
+    end
+
+    // Empty Flag Generation (Synced to Src)
+    // Empty when read_ptr == write_ptr
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            empty_flag <= 1'b1;
+        else if (src_clear_active)
+            empty_flag <= 1'b1;
+        else if (read_ptr == write_ptr)
+            empty_flag <= 1'b1;
+        else
+            empty_flag <= 1'b0;
+    end
+
+    // Read Data Output (Synced to Src)
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_data_o <= '0;
+        else if (src_clear_active)
+            dst_data_o <= '0;
+        else if (read_en)
+            dst_data_o <= mem[read_ptr];
+        else
+            dst_data_o <= dst_data_o;
+    end
+
+    // Read Valid Output (Synced to Src)
+    // Valid when read_ptr != write_ptr (not empty)
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_valid_o <= 1'b0;
+        else if (src_clear_active)
+            dst_valid_o <= 1'b0;
+        else if (read_ptr != write_ptr)
+            dst_valid_o <= 1'b1;
+        else
+            dst_valid_o <= 1'b0;
+    end
+
+    // Source Ready Output
+    // Ready when not full and not clearing
+    assign src_ready_o = !full_flag && !src_clear_active;
+
+    // --- Destination Domain Logic ---
+
+    // Clear Request Generation
+    assign dst_clear_req = dst_clear_i & ~dst_clear_pending;
+
+    // Clear Pending Output
+    assign dst_clear_pending_o = dst_clear_pending;
+
+    // Read Pointer Synchronizer (Gray to Binary conversion on src side)
+    // We need to sync the read pointer to the source domain to know if we are empty
+    // and to handle the clear correctly.
+
+    // 1. Sync Read Pointer (Binary) from Dst to Src
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_ptr_sync <= '0;
+        else if (src_clear_active)
+            src_ptr_sync <= '0;
+        else
+            src_ptr_sync <= dst_ptr;
+    end
+
+    // 2. Sync Read Pointer (Binary) again for stability
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_ptr_sync_2 <= '0;
+        else if (src_clear_active)
+            src_ptr_sync_2 <= '0;
+        else
+            src_ptr_sync_2 <= src_ptr_sync;
+    end
+
+    // 3. Convert Synced Binary to Gray for comparison with Write Pointer
+    assign dst_gray_sync = {src_ptr_sync[LOG_DEPTH-1:1], src_ptr_sync[LOG_DEPTH-1] ^ src_ptr_sync[LOG_DEPTH-2:0]};
+    assign dst_gray_sync_2 = {src_ptr_sync_2[LOG_DEPTH-1:1], src_ptr_sync_2[LOG_DEPTH-1] ^ src_ptr_sync_2[LOG_DEPTH-2:0]};
+
+    // 4. Sync Write Pointer (Binary) from Src to Dst
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_ptr_sync <= '0;
+        else if (dst_clear_active)
+            dst_ptr_sync <= '0;
+        else
+            dst_ptr_sync <= src_ptr;
+    end
+
+    // 5. Sync Write Pointer (Binary) again
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_ptr_sync_2 <= '0;
+        else if (dst_clear_active)
+            dst_ptr_sync_2 <= '0;
+        else
+            dst_ptr_sync_2 <= dst_ptr_sync;
+    end
+
+    // 6. Convert Synced Write Pointer to Gray
+    assign src_ptr_sync = {dst_ptr_sync_2[LOG_DEPTH-1:1], dst_ptr_sync_2[LOG_DEPTH-1] ^ dst_ptr_sync_2[LOG_DEPTH-2:0]};
+    assign src_ptr_sync_2 = {dst_ptr_sync_2[LOG_DEPTH-1:1], dst_ptr_sync_2[LOG_DEPTH-1] ^ dst_ptr_sync_2[LOG_DEPTH-2:0]};
+
+    // Full Flag Generation (Synced to Dst)
+    // Full when write_ptr == read_ptr and we have data
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_ptr <= '0;
+            full_flag <= 1'b0;
+            dst_clear_pending <= 1'b0;
+            dst_clear_ack <= 1'b0;
+        end
+        else if (dst_clear_active) begin
+            dst_ptr <= '0;
+            full_flag <= 1'b0;
+            dst_clear_pending <= 1'b1;
+            dst_clear_ack <= 1'b0;
+        end
+        else begin
+            dst_ptr <= dst_ptr + 1'b1;
+            if (dst_ptr == src_ptr_sync_2)
+                full_flag <= 1'b1;
+            else
+                full_flag <= 1'b0;
+        end
+    end
+
+    // Clear Ack Generation
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_clear_ack <= 1'b0;
+        else if (dst_clear_active)
+            dst_clear_ack <= 1'b0;
+        else if (dst_clear_req && dst_ptr == src_ptr_sync_2)
+            dst_clear_ack <= 1'b1;
+        else
+            dst_clear_ack <= 1'b0;
+    end
+
+    // Clear Pending Output Logic
+    assign dst_clear_pending = dst_clear_req | (dst_clear_active && !dst_clear_ack);
+
+    // Read Enable (Synced to Dst)
+    reg read_en;
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            read_en <= 1'b0;
+        else if (dst_clear_active)
+            read_en <= 1'b0;
+        else if (dst_ready_i && !empty_flag && !dst_clear_active)
+            read_en <= 1'b1;
+        else
+            read_en <= 1'b0;
+    end
+
+    // Read Pointer Update (Internal)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            read_ptr <= '0;
+        else if (dst_clear_active)
+            read_ptr <= '0;
+        else if (read_en)
+            read_ptr <= read_ptr + 1'b1;
+        else
+            read_ptr <= read_ptr;
+    end
+
+    // Empty Flag Generation (Synced to Dst)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            empty_flag <= 1'b1;
+        else if (dst_clear_active)
+            empty_flag <= 1'b1;
+        else if (read_ptr == write_ptr)
+            empty_flag <= 1'b1;
+        else
+            empty_flag <= 1'b0;
+    end
+
+    // Read Data Output (Synced to Dst)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_data_o <= '0;
+        else if (dst_clear_active)
+            dst_data_o <= '0;
+        else if (read_en)
+            dst_data_o <= mem[read_ptr];
+        else
+            dst_data_o <= dst_data_o;
+    end
+
+    // Read Valid Output (Synced to Dst)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_valid_o <= 1'b0;
+        else if (dst_clear_active)
+            dst_valid_o <= 1'b0;
+        else if (read_ptr != write_ptr)
+            dst_valid_o <= 1'b1;
+        else
+            dst_valid_o <= 1'b0;
+    end
+
+    // Source Ready Output (Synced to Dst)
+    assign src_ready_o = !full_flag && !dst_clear_active;
+
+    // --- Clear Control Logic ---
+
+    // Clear Active Logic
+    // Clear is active from request until ack
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_clear_active <= 1'b0;
+        else if (src_clear_req)
+            src_clear_active <= 1'b1;
+        else if (src_clear_ack)
+            src_clear_active <= 1'b0;
+        else
+            src_clear_active <= 1'b0;
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_clear_active <= 1'b0;
+        else if (dst_clear_req)
+            dst_clear_active <= 1'b1;
+        else if (dst_clear_ack)
+            dst_clear_active <= 1'b0;
+        else
+            dst_clear_active <= 1'b0;
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

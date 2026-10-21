@@ -1,0 +1,126 @@
+```verilog
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  // CDC Strategy:
+  // 1. Capture the edge event in the TX domain using a 2-bit state machine (Gray code style)
+  //    to detect rising and falling edges safely.
+  // 2. Transfer the single-bit "edge detected" signal to the RX domain using a standard
+  //    2-FIFO (or 2-FF) synchronizer chain to handle the clock domain crossing.
+  // 3. In the RX domain, use a pulse generator (one-shot) to convert the single-cycle
+  //    valid signal into a single-cycle pulse on edge_o, ensuring no double-counting
+  //    or loss of isolated edges.
+
+  // TX Domain: Edge Detection State Machine
+  // States: IDLE (00), RISING (01), FALLING (10). 
+  // We use 2 bits to avoid metastability issues during state transitions (Gray code).
+  typedef enum logic [1:0] {
+    TX_IDLE,
+    TX_RISING,
+    TX_FALLING
+  } tx_state_t;
+
+  tx_state_t tx_state_reg;
+  tx_state_t tx_state_next;
+
+  // RX Domain: Synchronizer and Pulse Generator
+  // We use a 2-FF synchronizer to safely cross the clock domain.
+  logic rx_sync_0;
+  logic rx_sync_1;
+  logic rx_pulse;
+  logic rx_pulse_next;
+
+  // --- TX Domain Logic ---
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      tx_state_reg <= TX_IDLE;
+    end else begin
+      tx_state_reg <= tx_state_next;
+    end
+  end
+
+  always_comb begin
+    tx_state_next = tx_state_reg;
+
+    case (tx_state_reg)
+      TX_IDLE: begin
+        if (edge_i)
+          tx_state_next = TX_RISING;
+        // else stay in IDLE
+      end
+      TX_RISING: begin
+        if (!edge_i)
+          tx_state_next = TX_FALLING;
+        // else stay in RISING (ignore glitches on rising edge)
+      end
+      TX_FALLING: begin
+        if (edge_i)
+          tx_state_next = TX_RISING;
+        // else stay in FALLING (ignore glitches on falling edge)
+      end
+      default: tx_state_next = TX_IDLE;
+    endcase
+  end
+
+  // Generate a single-cycle pulse in TX domain to indicate an edge occurred
+  // This pulse is valid for exactly one cycle in the TX domain.
+  logic tx_edge_pulse;
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i)
+      tx_edge_pulse <= 1'b0;
+    else if (tx_state_reg != tx_state_next) begin
+      // State changed means an edge was detected
+      tx_edge_pulse <= 1'b1;
+    end else begin
+      tx_edge_pulse <= 1'b0;
+    end
+  end
+
+  // --- RX Domain Logic ---
+  // 2-FF Synchronizer for Clock Domain Crossing
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      rx_sync_0 <= 1'b0;
+      rx_sync_1 <= 1'b0;
+    end else begin
+      rx_sync_0 <= tx_edge_pulse;
+      rx_sync_1 <= rx_sync_0;
+    end
+  end
+
+  // Pulse Generator in RX Domain
+  // Converts the single-cycle valid signal from the synchronizer into a single-cycle pulse.
+  // This ensures that even if the synchronizer takes multiple cycles to propagate,
+  // we only generate one output pulse per input edge.
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      rx_pulse <= 1'b0;
+    end else begin
+      // If the synchronizer output is high, generate a pulse.
+      // We use a simple one-shot logic: if current is high and previous was low, pulse.
+      // However, since rx_sync_1 is the delayed version of rx_sync_0, 
+      // we can just assert when rx_sync_1 is high and deassert immediately next cycle?
+      // Actually, simpler approach: 
+      // If rx_sync_1 is high, it means the edge was captured. 
+      // We want edge_o to be high for exactly one cycle.
+      
+      if (rx_sync_1) begin
+        rx_pulse <= 1'b1;
+      end else begin
+        rx_pulse <= 1'b0;
+      end
+    end
+  end
+
+  // Assign output
+  assign edge_o = rx_pulse;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

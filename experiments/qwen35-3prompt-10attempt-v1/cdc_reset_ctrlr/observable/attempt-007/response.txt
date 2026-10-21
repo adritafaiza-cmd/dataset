@@ -1,0 +1,519 @@
+```verilog
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  a_clk_i,
+    input  a_rst_ni,
+    input  a_clear_i,
+    output a_clear_o,
+    input  a_clear_ack_i,
+    output a_isolate_o,
+    input  a_isolate_ack_i,
+    input  b_clk_i,
+    input  b_rst_ni,
+    input  b_clear_i,
+    output b_clear_o,
+    input  b_clear_ack_i,
+    output b_isolate_o,
+    input  b_isolate_ack_i
+);
+
+    // ------------------------------------------------------------------
+    // CDC Registers for Domain A Signals (to be read in Domain B)
+    // ------------------------------------------------------------------
+    reg a_clear_req;
+    reg a_isolate_req;
+    reg a_clear_ack;
+    reg a_isolate_ack;
+
+    wire [SYNC_STAGES-1:0] a_clear_req_sync;
+    wire [SYNC_STAGES-1:0] a_isolate_req_sync;
+    wire [SYNC_STAGES-1:0] a_clear_ack_sync;
+    wire [SYNC_STAGES-1:0] a_isolate_ack_sync;
+
+    // ------------------------------------------------------------------
+    // CDC Registers for Domain B Signals (to be read in Domain A)
+    // ------------------------------------------------------------------
+    reg b_clear_req;
+    reg b_isolate_req;
+    reg b_clear_ack;
+    reg b_isolate_ack;
+
+    wire [SYNC_STAGES-1:0] b_clear_req_sync;
+    wire [SYNC_STAGES-1:0] b_isolate_req_sync;
+    wire [SYNC_STAGES-1:0] b_clear_ack_sync;
+    wire [SYNC_STAGES-1:0] b_isolate_ack_sync;
+
+    // ------------------------------------------------------------------
+    // Synchronizers for Domain A inputs to Domain B
+    // ------------------------------------------------------------------
+    genvar i;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : sync_a_to_b
+            always @(posedge b_clk_i or negedge b_rst_ni) begin : not_rst
+                if (!b_rst_ni) begin
+                    a_clear_req_sync[i] <= 1'b0;
+                    a_isolate_req_sync[i] <= 1'b0;
+                    a_clear_ack_sync[i] <= 1'b0;
+                    a_isolate_ack_sync[i] <= 1'b0;
+                end else begin
+                    a_clear_req_sync[i] <= a_clear_req_sync[i-1];
+                    a_isolate_req_sync[i] <= a_isolate_req_sync[i-1];
+                    a_clear_ack_sync[i] <= a_clear_ack_sync[i-1];
+                    a_isolate_ack_sync[i] <= a_isolate_ack_sync[i-1];
+                end
+            end
+        end
+    endgenerate
+
+    // ------------------------------------------------------------------
+    // Synchronizers for Domain B inputs to Domain A
+    // ------------------------------------------------------------------
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : sync_b_to_a
+            always @(posedge a_clk_i or negedge a_rst_ni) begin : not_rst
+                if (!a_rst_ni) begin
+                    b_clear_req_sync[i] <= 1'b0;
+                    b_isolate_req_sync[i] <= 1'b0;
+                    b_clear_ack_sync[i] <= 1'b0;
+                    b_isolate_ack_sync[i] <= 1'b0;
+                end else begin
+                    b_clear_req_sync[i] <= b_clear_req_sync[i-1];
+                    b_isolate_req_sync[i] <= b_isolate_req_sync[i-1];
+                    b_clear_ack_sync[i] <= b_clear_ack_sync[i-1];
+                    b_isolate_ack_sync[i] <= b_isolate_ack_sync[i-1];
+                end
+            end
+        end
+    endgenerate
+
+    // ------------------------------------------------------------------
+    // State Machine Logic (Implemented in Domain B)
+    // ------------------------------------------------------------------
+    // States:
+    // IDLE: Waiting for requests.
+    // ISOLATE_A: Isolating Domain A.
+    // ISOLATE_B: Isolating Domain B.
+    // CLEAR_A: Clearing Domain A.
+    // CLEAR_B: Clearing Domain B.
+    // DONE: Resetting to IDLE.
+
+    localparam STATE_IDLE = 2'b00;
+    localparam STATE_ISOLATE_A = 2'b01;
+    localparam STATE_ISOLATE_B = 2'b10;
+    localparam STATE_CLEAR_A = 2'b11;
+
+    reg [1:0] state_b;
+    reg next_state_b;
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin : fsm_logic
+        if (!b_rst_ni)
+            state_b <= STATE_IDLE;
+        else
+            state_b <= next_state_b;
+    end
+
+    always @(*) begin
+        next_state_b = state_b;
+        case (state_b)
+            STATE_IDLE: begin
+                // Check if either side requests clear
+                if (b_clear_req_sync[SYNC_STAGES-1] || b_isolate_req_sync[SYNC_STAGES-1])
+                    next_state_b = STATE_ISOLATE_A; // Start with A as per spec "isolate both sides before clearing either"
+                else
+                    next_state_b = STATE_IDLE;
+            end
+            STATE_ISOLATE_A: begin
+                // Wait for A isolate ack
+                if (a_isolate_ack_sync[SYNC_STAGES-1])
+                    next_state_b = STATE_ISOLATE_B;
+                else
+                    next_state_b = STATE_ISOLATE_A;
+            end
+            STATE_ISOLATE_B: begin
+                // Wait for B isolate ack
+                if (b_isolate_ack_sync[SYNC_STAGES-1])
+                    next_state_b = STATE_CLEAR_A;
+                else
+                    next_state_b = STATE_ISOLATE_B;
+            end
+            STATE_CLEAR_A: begin
+                // Wait for A clear ack
+                if (a_clear_ack_sync[SYNC_STAGES-1])
+                    next_state_b = STATE_CLEAR_B;
+                else
+                    next_state_b = STATE_CLEAR_A;
+            end
+            STATE_CLEAR_B: begin
+                // Wait for B clear ack
+                if (b_clear_ack_sync[SYNC_STAGES-1])
+                    next_state_b = STATE_IDLE;
+                else
+                    next_state_b = STATE_CLEAR_B;
+            end
+            default: next_state_b = STATE_IDLE;
+        endcase
+    end
+
+    // ------------------------------------------------------------------
+    // Output Logic (Domain B)
+    // ------------------------------------------------------------------
+    assign a_isolate_o = (state_b == STATE_ISOLATE_A) ? 1'b0 : 1'b1;
+    assign b_isolate_o = (state_b == STATE_ISOLATE_B) ? 1'b0 : 1'b1;
+    assign a_clear_o = (state_b == STATE_CLEAR_A) ? 1'b0 : 1'b1;
+    assign b_clear_o = (state_b == STATE_CLEAR_B) ? 1'b0 : 1'b1;
+
+    // ------------------------------------------------------------------
+    // Input Capture Logic (Domain A)
+    // ------------------------------------------------------------------
+    assign a_clear_req = a_clear_i;
+    assign a_isolate_req = a_isolate_i; // Note: Input port name in module header is a_isolate_ack_i, but logic needs request. 
+    // Correction based on module interface: 
+    // Inputs: a_clear_i, a_clear_ack_i, a_isolate_ack_i
+    // Outputs: a_clear_o, a_isolate_o
+    // The prompt says "When either side requests a clear". 
+    // The interface has 'a_clear_i' as input. 
+    // The interface does NOT have 'a_isolate_i'. It has 'a_isolate_ack_i'.
+    // Re-reading prompt: "When either side requests a clear...". 
+    // The interface provided has:
+    // input a_clear_i
+    // output a_clear_o
+    // input a_clear_ack_i
+    // output a_isolate_o
+    // input a_isolate_ack_i
+    // There is NO 'a_isolate_i' input. 
+    // However, the prompt says "When either side requests a clear, isolate both sides...".
+    // This implies the request comes from the 'clear' signal itself triggering the isolation sequence.
+    // The 'isolate' signal is an output from this controller to the peer.
+    // The peer sends 'isolate_ack_i' back.
+    // So the trigger is solely 'a_clear_i' or 'b_clear_i'.
+    
+    // Re-evaluating the handshake logic based on prompt:
+    // "Peer progress arrives in order: idle, then active, then done, then idle."
+    // "Each step is observed one handshake after the local transition."
+    // This implies the clear signal is the request. The isolation is automatic upon request.
+    // The controller outputs 'isolate_o' to the peer. The peer responds with 'isolate_ack_i'.
+    // The controller outputs 'clear_o' to the peer. The peer responds with 'clear_ack_i'.
+    
+    // Logic refinement:
+    // 1. Local side sees clear_i.
+    // 2. Controller asserts isolate_o (to peer).
+    // 3. Controller waits for peer's isolate_ack_i.
+    // 4. Controller asserts clear_o (to peer).
+    // 5. Controller waits for peer's clear_ack_i.
+    // 6. Controller de-asserts clear_o and isolate_o.
+    
+    // Wait, the prompt says: "When either side requests a clear, isolate both sides before clearing either of them".
+    // This means if A requests clear, A must wait for B to be isolated, then A is isolated, then both cleared.
+    // But the interface only has 'a_clear_i'. Where does the request for isolation come from?
+    // Usually, the clear request triggers the isolation handshake.
+    // Let's assume:
+    // - If a_clear_i is high, Domain A wants to reset.
+    // - The controller must ensure Domain B is also isolated/cleared before A proceeds?
+    // - Or does it mean: If A requests clear, we isolate A, then isolate B, then clear A, then clear B?
+    // - "isolate both sides before clearing either of them".
+    // - "wait for both acknowledgments at each step".
+    // - "Peer progress arrives in order: idle, then active, then done, then idle."
+    
+    // Interpretation:
+    // The system is symmetric. If A requests clear, the controller enters a sequence.
+    // Sequence:
+    // 1. Assert Isolate_A (to A's peer? No, A is local). 
+    //    Actually, the controller drives 'a_isolate_o' to the external logic of Domain A? 
+    //    No, 'a_isolate_o' is an output of this module. It likely drives the isolation signal for Domain A.
+    //    But the prompt says "isolate both sides".
+    //    If A requests clear, we need to isolate A and B.
+    //    How do we isolate B? By driving 'b_isolate_o'.
+    //    How do we isolate A? By driving 'a_isolate_o'.
+    //    But we need acknowledgments.
+    //    'a_isolate_ack_i' comes from Domain A logic.
+    //    'b_isolate_ack_i' comes from Domain B logic.
+    
+    // Revised State Machine Logic:
+    // Trigger: a_clear_i OR b_clear_i.
+    // Step 1: Isolate A. Drive a_isolate_o. Wait for a_isolate_ack_i.
+    // Step 2: Isolate B. Drive b_isolate_o. Wait for b_isolate_ack_i.
+    // Step 3: Clear A. Drive a_clear_o. Wait for a_clear_ack_i.
+    // Step 4: Clear B. Drive b_clear_o. Wait for b_clear_ack_i.
+    // Step 5: Done.
+    
+    // Wait, "isolate both sides before clearing either".
+    // Does this mean:
+    // 1. Isolate A (wait ack)
+    // 2. Isolate B (wait ack)
+    // 3. Clear A (wait ack)
+    // 4. Clear B (wait ack)
+    // This matches "wait for both acknowledgments at each step".
+    // "Peer progress arrives in order: idle, then active, then done, then idle."
+    // This suggests the handshake is: Request -> Active (Isolate) -> Done (Ack) -> Request (Clear) -> Active (Clear) -> Done (Ack).
+    
+    // Let's refine the states to match the "Peer progress" description.
+    // The "Peer" in the context of the handshake is the other domain's logic.
+    // But the controller drives both sides.
+    // If A requests clear:
+    // 1. Controller asserts a_isolate_o. (Local transition: A goes to active/isolated state).
+    //    Wait for a_isolate_ack_i. (Peer A confirms isolation).
+    // 2. Controller asserts b_isolate_o. (Local transition: B goes to active/isolated state).
+    //    Wait for b_isolate_ack_i. (Peer B confirms isolation).
+    // 3. Controller asserts a_clear_o. (Local transition: A goes to clear state).
+    //    Wait for a_clear_ack_i. (Peer A confirms clear).
+    // 4. Controller asserts b_clear_o. (Local transition: B goes to clear state).
+    //    Wait for b_clear_ack_i. (Peer B confirms clear).
+    
+    // This seems to be the intended flow.
+    // However, the prompt says "When either side requests a clear".
+    // If A requests, we do the sequence. If B requests, we do the sequence.
+    // The sequence is the same regardless of who requested, because "isolate both sides before clearing either".
+    
+    // One nuance: "Each step is observed one handshake after the local transition."
+    // This confirms the sequence: Assert Signal -> Wait Ack.
+    
+    // Let's adjust the FSM to handle the sequence strictly.
+    // States:
+    // IDLE
+    // REQ_A (Request received from A)
+    // REQ_B (Request received from B)
+    // ISOLATE_A (Assert a_isolate_o, wait ack)
+    // ISOLATE_B (Assert b_isolate_o, wait ack)
+    // CLEAR_A (Assert a_clear_o, wait ack)
+    // CLEAR_B (Assert b_clear_o, wait ack)
+    
+    // Wait, if A requests, do we immediately go to ISOLATE_A?
+    // Yes.
+    // But what if B also requests? The prompt implies a single request triggers the global reset.
+    // "When either side requests a clear".
+    // We can merge REQ_A and REQ_B into a single "REQUEST" state if both are high, or just pick one.
+    // Given "isolate both sides", the order of isolation might not matter, but the order of clearing must be sequential?
+    // "wait for both acknowledgments at each step".
+    // Step 1: Isolate A. Wait for A ack.
+    // Step 2: Isolate B. Wait for B ack.
+    // Step 3: Clear A. Wait for A ack.
+    // Step 4: Clear B. Wait for B ack.
+    // This order ensures "both sides isolated before clearing either".
+    
+    // Let's implement this logic.
+    
+    reg [2:0] state_b_fsm;
+    localparam S_IDLE = 3'b000;
+    localparam S_REQ = 3'b001;
+    localparam S_ISOLATE_A = 3'b010;
+    localparam S_ISOLATE_B = 3'b011;
+    localparam S_CLEAR_A = 3'b100;
+    localparam S_CLEAR_B = 3'b101;
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin : fsm_seq
+        if (!b_rst_ni)
+            state_b_fsm <= S_IDLE;
+        else
+            state_b_fsm <= next_state_b_fsm;
+    end
+
+    always @(*) begin
+        next_state_b_fsm = state_b_fsm;
+        case (state_b_fsm)
+            S_IDLE: begin
+                if (b_clear_req_sync[SYNC_STAGES-1] || a_clear_req_sync[SYNC_STAGES-1])
+                    next_state_b_fsm = S_REQ;
+                else
+                    next_state_b_fsm = S_IDLE;
+            end
+            S_REQ: begin
+                // Determine which side requested first or just start isolation sequence.
+                // Since the sequence is symmetric (isolate both, then clear both), 
+                // we can start with Isolate A.
+                next_state_b_fsm = S_ISOLATE_A;
+            end
+            S_ISOLATE_A: begin
+                if (a_isolate_ack_sync[SYNC_STAGES-1])
+                    next_state_b_fsm = S_ISOLATE_B;
+                else
+                    next_state_b_fsm = S_ISOLATE_A;
+            end
+            S_ISOLATE_B: begin
+                if (b_isolate_ack_sync[SYNC_STAGES-1])
+                    next_state_b_fsm = S_CLEAR_A;
+                else
+                    next_state_b_fsm = S_ISOLATE_B;
+            end
+            S_CLEAR_A: begin
+                if (a_clear_ack_sync[SYNC_STAGES-1])
+                    next_state_b_fsm = S_CLEAR_B;
+                else
+                    next_state_b_fsm = S_CLEAR_A;
+            end
+            S_CLEAR_B: begin
+                if (b_clear_ack_sync[SYNC_STAGES-1])
+                    next_state_b_fsm = S_IDLE;
+                else
+                    next_state_b_fsm = S_CLEAR_B;
+            end
+            default: next_state_b_fsm = S_IDLE;
+        endcase
+    end
+
+    // Output Assignments based on FSM State
+    assign a_isolate_o = (state_b_fsm == S_ISOLATE_A) ? 1'b0 : 1'b1;
+    assign b_isolate_o = (state_b_fsm == S_ISOLATE_B) ? 1'b0 : 1'b1;
+    assign a_clear_o = (state_b_fsm == S_CLEAR_A) ? 1'b0 : 1'b1;
+    assign b_clear_o = (state_b_fsm == S_CLEAR_B) ? 1'b0 : 1'b1;
+
+    // ------------------------------------------------------------------
+    // Input Capture Logic (Domain A)
+    // ------------------------------------------------------------------
+    // Note: The module interface has 'a_clear_i' as input.
+    // We need to capture this in Domain B.
+    // Also, we need to capture 'a_clear_ack_i' in Domain A? 
+    // No, 'a_clear_ack_i' is an input to this module. It comes from Domain A logic.
+    // So 'a_clear_ack_i' is already in Domain A. We don't need to sync it to B for the ACK check of A's clear.
+    // Wait, the FSM is in Domain B. It needs to know when A's clear is done.
+    // So 'a_clear_ack_i' MUST be synced to Domain B.
+    // Similarly, 'a_isolate_ack_i' is an input to this module (from Domain A).
+    // It MUST be synced to Domain B.
+    
+    // Similarly, 'b_clear_ack_i' is an input (from Domain B). It is already in Domain B.
+    // 'b_isolate_ack_i' is an input (from Domain B). It is already in Domain B.
+    
+    // So we need to sync:
+    // From A to B: a_clear_i (request), a_isolate_ack_i (ack), a_clear_ack_i (ack).
+    // From B to A: b_clear_i (request), b_isolate_ack_i (ack), b_clear_ack_i (ack).
+    
+    // Wait, I already synced 'a_clear_req', 'a_isolate_req', 'a_clear_ack', 'a_isolate_ack' in the first block.
+    // But the inputs are named differently in the module header.
+    // Module Header:
+    // input a_clear_i
+    // input a_clear_ack_i
+    // input a_isolate_ack_i
+    // 
+    // My previous code used:
+    // reg a_clear_req; assign a_clear_req = a_clear_i;
+    // reg a_isolate_req; // This was a mistake. There is no 'a_isolate_i' input.
+    // reg a_clear_ack; assign a_clear_ack = a_clear_ack_i;
+    // reg a_isolate_ack; assign a_isolate_ack = a_isolate_ack_i;
+    
+    // Let's correct the input capture logic.
+    
+    // Corrected Input Capture for Domain A -> Domain B
+    assign a_clear_req = a_clear_i;
+    assign a_clear_ack = a_clear_ack_i;
+    assign a_isolate_ack = a_isolate_ack_i;
+    // There is no 'a_isolate_req' input. The request is implicit in 'a_clear_i'.
+    // The isolation is driven by the controller.
+    
+    // Corrected Input Capture for Domain B -> Domain A
+    assign b_clear_req = b_clear_i;
+    assign b_clear_ack = b_clear_ack_i;
+    assign b_isolate_ack = b_isolate_ack_i;
+    // There is no 'b_isolate_req' input.
+    
+    // Re-verify the sync logic variables.
+    // a_clear_req_sync, a_clear_ack_sync, a_isolate_ack_sync are needed in Domain B.
+    // b_clear_req_sync, b_clear_ack_sync, b_isolate_ack_sync are needed in Domain A.
+    
+    // The previous sync generation blocks used generic names. I need to ensure the assignments match.
+    // In the first generation block (sync_a_to_b), I used:
+    // a_clear_req_sync, a_isolate_req_sync, a_clear_ack_sync, a_isolate_ack_sync.
+    // But 'a_isolate_req' doesn't exist as an input.
+    // I should remove 'a_isolate_req_sync' from the sync chain and just use 'a_clear_req_sync' to trigger the state machine.
+    // Actually, the state machine logic in Domain B needs to know if A requested clear.
+    // So 'a_clear_req_sync' is sufficient to trigger the sequence.
+    
+    // Let's rewrite the sync blocks to only include necessary signals.
+    
+    // Sync A signals to B
+    genvar j;
+    generate
+        for (j = 0; j < SYNC_STAGES; j = j + 1) begin : sync_a_to_b
+            always @(posedge b_clk_i or negedge b_rst_ni) begin : not_rst
+                if (!b_rst_ni) begin
+                    a_clear_req_sync[j] <= 1'b0;
+                    a_clear_ack_sync[j] <= 1'b0;
+                    a_isolate_ack_sync[j] <= 1'b0;
+                end else begin
+                    a_clear_req_sync[j] <= a_clear_req_sync[j-1];
+                    a_clear_ack_sync[j] <= a_clear_ack_sync[j-1];
+                    a_isolate_ack_sync[j] <= a_isolate_ack_sync[j-1];
+                end
+            end
+        end
+    endgenerate
+
+    // Sync B signals to A
+    generate
+        for (j = 0; j < SYNC_STAGES; j = j + 1) begin : sync_b_to_a
+            always @(posedge a_clk_i or negedge a_rst_ni) begin : not_rst
+                if (!a_rst_ni) begin
+                    b_clear_req_sync[j] <= 1'b0;
+                    b_clear_ack_sync[j] <= 1'b0;
+                    b_isolate_ack_sync[j] <= 1'b0;
+                end else begin
+                    b_clear_req_sync[j] <= b_clear_req_sync[j-1];
+                    b_clear_ack_sync[j] <= b_clear_ack_sync[j-1];
+                    b_isolate_ack_sync[j] <= b_isolate_ack_sync[j-1];
+                end
+            end
+        end
+    endgenerate
+
+    // Re-verify the FSM logic with corrected inputs.
+    // Trigger: a_clear_req_sync[SYNC_STAGES-1] OR b_clear_req_sync[SYNC_STAGES-1].
+    // Steps:
+    // 1. Isolate A: Drive a_isolate_o. Wait for a_isolate_ack_sync[SYNC_STAGES-1].
+    // 2. Isolate B: Drive b_isolate_o. Wait for b_isolate_ack_sync[SYNC_STAGES-1].
+    // 3. Clear A: Drive a_clear_o. Wait for a_clear_ack_sync[SYNC_STAGES-1].
+    // 4. Clear B: Drive b_clear_o. Wait for b_clear_ack_sync[SYNC_STAGES-1].
+    
+    // This logic holds.
+    
+    // One detail: "Peer progress arrives in order: idle, then active, then done, then idle."
+    // This describes the handshake protocol.
+    // Local transition (e.g., asserting isolate) -> Peer observes -> Peer transitions to active -> Peer asserts ack (done) -> Local observes.
+    // My logic: Assert signal -> Wait for ack. This matches.
+    
+    // Final check on output assignments.
+    // a_isolate_o: 0 when isolating A, 1 otherwise.
+    // b_isolate_o: 0 when isolating B, 1 otherwise.
+    // a_clear_o: 0 when clearing A, 1 otherwise.
+    // b_clear_o: 0 when clearing B, 1 otherwise.
+    
+    // The FSM states are mutually exclusive, so this is safe.
+    
+    // One edge case: What if both request clear at the same time?
+    // The FSM goes to S_REQ. It starts the sequence.
+    // Since the sequence isolates both sides anyway, it doesn't matter who started it.
+    // The sequence is deterministic.
+    
+    // One more check: "Do not release isolate or clear before the peer completion has been observed."
+    // My FSM waits for the specific ack before moving to the next step.
+    // Step 1 (Isolate A) waits for A's ack.
+    // Step 2 (Isolate B) waits for B's ack.
+    // Step 3 (Clear A) waits for A's ack.
+    // Step 4 (Clear B) waits for B's ack.
+    // This satisfies the condition.
+    
+    // Wait, "wait for both acknowledgments at each step".
+    // Does this mean:
+    // Step 1: Isolate A. Wait for A ack AND B ack?
+    // Or Step 1: Isolate A. Wait for A ack. Then Step 2: Isolate B. Wait for B ack.
+    // "wait for both acknowledgments at each step before releasing them."
+    // "releasing them" refers to the isolation/clear signals.
+    // If I isolate A, I must wait for A's ack.
+    // Then I isolate B, I must wait for B's ack.
+    // Then I clear A, I must wait for A's ack.
+    // Then I clear B, I must wait for B's ack.
+    // This interpretation aligns with "Peer progress arrives in order".
+    // If I had to wait for BOTH acks at Step 1, I would be waiting for B's ack before even isolating B?
+    // That would be inefficient and potentially deadlock if B is slow.
+    // The phrase "at each step" likely means "for the action taken in that step, wait for the corresponding peer ack".
+    // Also "Peer progress arrives in order: idle, then active, then done".
+    // This implies a sequential handshake per domain per step.
+    // So:
+    // Action: Isolate A. Handshake: A Idle -> Active -> Done (Ack).
+    // Action: Isolate B. Handshake: B Idle -> Active -> Done (Ack).
+    // Action: Clear A. Handshake: A Idle -> Active -> Done (Ack).
+    // Action: Clear B. Handshake: B Idle -> Active -> Done (Ack).
+    
+    // This confirms the sequential state machine approach.
+
+endmodule
+```<|im_end|>
+<|endoftext|>

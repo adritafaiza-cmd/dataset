@@ -1,0 +1,433 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // -----------------------------------------------------------------------
+    // Internal Signals
+    // -----------------------------------------------------------------------
+    wire s_rst_n;
+    wire m_rst_n;
+    wire s_clk_n;
+    wire m_clk_n;
+
+    // CDC Registers for Reset Synchronization
+    reg s_rst_sync;
+    reg m_rst_sync;
+
+    // Write Channel State
+    reg s_w_valid;
+    reg s_w_data;
+    reg s_w_strb;
+    reg s_w_addr;
+    reg s_w_prot;
+    reg s_w_ready;
+    reg s_w_pending;
+
+    reg m_w_valid;
+    reg m_w_data;
+    reg m_w_strb;
+    reg m_w_addr;
+    reg m_w_prot;
+    reg m_w_ready;
+    reg m_w_pending;
+
+    // Read Channel State (Write path for Read Request)
+    reg s_ar_valid;
+    reg s_ar_addr;
+    reg s_ar_prot;
+    reg s_ar_ready;
+    reg s_ar_pending;
+
+    reg m_ar_valid;
+    reg m_ar_addr;
+    reg m_ar_prot;
+    reg m_ar_ready;
+    reg m_ar_pending;
+
+    // Read Response State (Read Response path)
+    reg s_r_valid;
+    reg s_r_data;
+    reg s_r_resp;
+    reg s_r_ready;
+    reg s_r_pending;
+
+    reg m_r_valid;
+    reg m_r_data;
+    reg m_r_resp;
+    reg m_r_ready;
+    reg m_r_pending;
+
+    // Write Response State (Write Response path)
+    reg s_b_valid;
+    reg s_b_resp;
+    reg s_b_ready;
+    reg s_b_pending;
+
+    reg m_b_valid;
+    reg m_b_resp;
+    reg m_b_ready;
+    reg m_b_pending;
+
+    // -----------------------------------------------------------------------
+    // Reset Synchronization
+    // -----------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_rst_sync <= 1'b1;
+        else
+            s_rst_sync <= 1'b0;
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_rst_sync <= 1'b1;
+        else
+            m_rst_sync <= 1'b0;
+    end
+
+    // -----------------------------------------------------------------------
+    // Write Channel: Slave Side (s_clk domain)
+    // -----------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_w_valid <= 1'b0;
+            s_w_data <= 1'b0;
+            s_w_strb <= 1'b0;
+            s_w_addr <= 1'b0;
+            s_w_prot <= 1'b0;
+            s_w_ready <= 1'b1;
+            s_w_pending <= 1'b0;
+        end
+        else begin
+            // Capture transaction if valid and ready
+            if (s_axil_awvalid && s_axil_wvalid && s_axil_awready && s_axil_wready) begin
+                s_w_valid <= 1'b1;
+                s_w_data <= s_axil_wdata;
+                s_w_strb <= s_axil_wstrb;
+                s_w_addr <= s_axil_awaddr;
+                s_w_prot <= s_axil_awprot;
+                s_w_ready <= 1'b0;
+                s_w_pending <= 1'b1;
+            end
+            else if (s_w_pending) begin
+                s_w_valid <= 1'b0;
+                s_w_data <= 1'b0;
+                s_w_strb <= 1'b0;
+                s_w_addr <= 1'b0;
+                s_w_prot <= 1'b0;
+                s_w_ready <= 1'b1;
+                s_w_pending <= 1'b0;
+            end
+            else begin
+                s_w_ready <= 1'b1;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Write Channel: Master Side (m_clk domain)
+    // -----------------------------------------------------------------------
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_w_valid <= 1'b0;
+            m_w_data <= 1'b0;
+            m_w_strb <= 1'b0;
+            m_w_addr <= 1'b0;
+            m_w_prot <= 1'b0;
+            m_w_ready <= 1'b1;
+            m_w_pending <= 1'b0;
+        end
+        else begin
+            // Capture transaction if valid and ready
+            if (m_axil_awvalid && m_axil_wvalid && m_axil_awready && m_axil_wready) begin
+                m_w_valid <= 1'b1;
+                m_w_data <= m_axil_wdata;
+                m_w_strb <= m_axil_wstrb;
+                m_w_addr <= m_axil_awaddr;
+                m_w_prot <= m_axil_awprot;
+                m_w_ready <= 1'b0;
+                m_w_pending <= 1'b1;
+            end
+            else if (m_w_pending) begin
+                m_w_valid <= 1'b0;
+                m_w_data <= 1'b0;
+                m_w_strb <= 1'b0;
+                m_w_addr <= 1'b0;
+                m_w_prot <= 1'b0;
+                m_w_ready <= 1'b1;
+                m_w_pending <= 1'b0;
+            end
+            else begin
+                m_w_ready <= 1'b1;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Write Channel: Response Handling
+    // -----------------------------------------------------------------------
+    // Slave Side Response (s_clk)
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_b_valid <= 1'b0;
+            s_b_resp <= 1'b0;
+            s_b_ready <= 1'b1;
+            s_b_pending <= 1'b0;
+        end
+        else begin
+            if (m_axil_bvalid && s_axil_bready && !s_b_pending) begin
+                s_b_valid <= 1'b1;
+                s_b_resp <= m_axil_bresp;
+                s_b_ready <= 1'b0;
+                s_b_pending <= 1'b1;
+            end
+            else if (s_b_pending) begin
+                s_b_valid <= 1'b0;
+                s_b_resp <= 1'b0;
+                s_b_ready <= 1'b1;
+                s_b_pending <= 1'b0;
+            end
+            else begin
+                s_b_ready <= 1'b1;
+            end
+        end
+    end
+
+    // Master Side Response (m_clk)
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_b_valid <= 1'b0;
+            m_b_resp <= 1'b0;
+            m_b_ready <= 1'b1;
+            m_b_pending <= 1'b0;
+        end
+        else begin
+            if (s_axil_bvalid && m_axil_bready && !m_b_pending) begin
+                m_b_valid <= 1'b1;
+                m_b_resp <= s_axil_bresp;
+                m_b_ready <= 1'b0;
+                m_b_pending <= 1'b1;
+            end
+            else if (m_b_pending) begin
+                m_b_valid <= 1'b0;
+                m_b_resp <= 1'b0;
+                m_b_ready <= 1'b1;
+                m_b_pending <= 1'b0;
+            end
+            else begin
+                m_b_ready <= 1'b1;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Read Channel: Request Path
+    // -----------------------------------------------------------------------
+    // Slave Side Request (s_clk)
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_ar_valid <= 1'b0;
+            s_ar_addr <= 1'b0;
+            s_ar_prot <= 1'b0;
+            s_ar_ready <= 1'b1;
+            s_ar_pending <= 1'b0;
+        end
+        else begin
+            if (s_axil_arvalid && s_axil_arready && !s_ar_pending) begin
+                s_ar_valid <= 1'b1;
+                s_ar_addr <= s_axil_araddr;
+                s_ar_prot <= s_axil_arprot;
+                s_ar_ready <= 1'b0;
+                s_ar_pending <= 1'b1;
+            end
+            else if (s_ar_pending) begin
+                s_ar_valid <= 1'b0;
+                s_ar_addr <= 1'b0;
+                s_ar_prot <= 1'b0;
+                s_ar_ready <= 1'b1;
+                s_ar_pending <= 1'b0;
+            end
+            else begin
+                s_ar_ready <= 1'b1;
+            end
+        end
+    end
+
+    // Master Side Request (m_clk)
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_ar_valid <= 1'b0;
+            m_ar_addr <= 1'b0;
+            m_ar_prot <= 1'b0;
+            m_ar_ready <= 1'b1;
+            m_ar_pending <= 1'b0;
+        end
+        else begin
+            if (s_axil_arvalid && m_axil_arready && !m_ar_pending) begin
+                m_ar_valid <= 1'b1;
+                m_ar_addr <= s_axil_araddr;
+                m_ar_prot <= s_axil_arprot;
+                m_ar_ready <= 1'b0;
+                m_ar_pending <= 1'b1;
+            end
+            else if (m_ar_pending) begin
+                m_ar_valid <= 1'b0;
+                m_ar_addr <= 1'b0;
+                m_ar_prot <= 1'b0;
+                m_ar_ready <= 1'b1;
+                m_ar_pending <= 1'b0;
+            end
+            else begin
+                m_ar_ready <= 1'b1;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Read Channel: Response Path
+    // -----------------------------------------------------------------------
+    // Slave Side Response (s_clk)
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_r_valid <= 1'b0;
+            s_r_data <= 1'b0;
+            s_r_resp <= 1'b0;
+            s_r_ready <= 1'b1;
+            s_r_pending <= 1'b0;
+        end
+        else begin
+            if (m_axil_rvalid && s_axil_rready && !s_r_pending) begin
+                s_r_valid <= 1'b1;
+                s_r_data <= m_axil_rdata;
+                s_r_resp <= m_axil_rresp;
+                s_r_ready <= 1'b0;
+                s_r_pending <= 1'b1;
+            end
+            else if (s_r_pending) begin
+                s_r_valid <= 1'b0;
+                s_r_data <= 1'b0;
+                s_r_resp <= 1'b0;
+                s_r_ready <= 1'b1;
+                s_r_pending <= 1'b0;
+            end
+            else begin
+                s_r_ready <= 1'b1;
+            end
+        end
+    end
+
+    // Master Side Response (m_clk)
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_r_valid <= 1'b0;
+            m_r_data <= 1'b0;
+            m_r_resp <= 1'b0;
+            m_r_ready <= 1'b1;
+            m_r_pending <= 1'b0;
+        end
+        else begin
+            if (s_axil_rvalid && m_axil_rready && !m_r_pending) begin
+                m_r_valid <= 1'b1;
+                m_r_data <= s_axil_rdata;
+                m_r_resp <= s_axil_rresp;
+                m_r_ready <= 1'b0;
+                m_r_pending <= 1'b1;
+            end
+            else if (m_r_pending) begin
+                m_r_valid <= 1'b0;
+                m_r_data <= 1'b0;
+                m_r_resp <= 1'b0;
+                m_r_ready <= 1'b1;
+                m_r_pending <= 1'b0;
+            end
+            else begin
+                m_r_ready <= 1'b1;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Output Drivers (Slave Side)
+    // -----------------------------------------------------------------------
+    assign s_axil_awready = (s_w_ready && s_axil_awvalid) ? 1'b1 : 1'b0;
+    assign s_axil_wready = (s_w_ready && s_axil_wvalid) ? 1'b1 : 1'b0;
+    assign s_axil_bresp = s_b_valid ? s_b_resp : 2'b00;
+    assign s_axil_bvalid = s_b_valid;
+    assign s_axil_arready = (s_ar_ready && s_axil_arvalid) ? 1'b1 : 1'b0;
+    assign s_axil_rdata = s_r_valid ? s_r_data : 32'h0;
+    assign s_axil_rresp = s_r_valid ? s_r_resp : 2'b00;
+    assign s_axil_rvalid = s_r_valid;
+
+    // -----------------------------------------------------------------------
+    // Output Drivers (Master Side)
+    // -----------------------------------------------------------------------
+    assign m_axil_awaddr = m_w_valid ? m_w_addr : 32'h0;
+    assign m_axil_awprot = m_w_valid ? m_w_prot : 3'b000;
+    assign m_axil_awvalid = m_w_valid;
+    assign m_axil_wdata = m_w_valid ? m_w_data : 32'h0;
+    assign m_axil_wstrb = m_w_valid ? m_w_strb : 4'h0;
+    assign m_axil_wvalid = m_w_valid;
+    assign m_axil_bready = m_b_ready;
+    assign m_axil_araddr = m_ar_valid ? m_ar_addr : 32'h0;
+    assign m_axil_arprot = m_ar_valid ? m_ar_prot : 3'b000;
+    assign m_axil_arvalid = m_ar_valid;
+    assign m_axil_rdata = m_r_valid ? m_r_data : 32'h0;
+    assign m_axil_rresp = m_r_valid ? m_r_resp : 2'b00;
+    assign m_axil_rvalid = m_r_valid;
+
+endmodule
+```<|im_end|>

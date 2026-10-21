@@ -1,0 +1,293 @@
+```verilog
+module apbxclk #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	parameter [0:0]	OPT_REGISTERED = 1'b0,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH
+) (
+	input	wire			S_APB_PCLK, S_PRESETn,
+	input	wire			S_APB_PSEL,
+	input	wire			S_APB_PENABLE,
+	output	reg			S_APB_PREADY,
+	input	wire	[AW-1:0]	S_APB_PADDR,
+	input	wire			S_APB_PWRITE,
+	input	wire	[DW-1:0]	S_APB_PWDATA,
+	input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+	input	wire	[2:0]		S_APB_PPROT,
+	output	wire	[DW-1:0]	S_APB_PRDATA,
+	output	wire			S_APB_PSLVERR,
+	input	wire			M_APB_PCLK,
+	output	reg			M_PRESETn,
+	output	reg			M_APB_PSEL,
+	output	reg			M_APB_PENABLE,
+	input	wire			M_APB_PREADY,
+	output	wire	[AW-1:0]	M_APB_PADDR,
+	output	wire			M_APB_PWRITE,
+	output	wire	[DW-1:0]	M_APB_PWDATA,
+	output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+	output	wire	[2:0]		M_APB_PPROT,
+	input	wire	[DW-1:0]	M_APB_PRDATA,
+	input	wire			M_APB_PSLVERR
+);
+
+	localparam	AW_REG = OPT_REGISTERED ? 1 : 0;
+	localparam	DW_REG = OPT_REGISTERED ? 1 : 0;
+
+	reg [AW-1:0]	fifo_addr;
+	reg [DW-1:0]	fifo_data;
+	reg [DW/8-1:0]	fifo_wstrb;
+	reg			fifo_write;
+	reg			fifo_valid;
+	reg			fifo_ready;
+	reg			fifo_busy;
+	reg			fifo_error;
+	reg			fifo_done;
+
+	// Cross-clock FIFO for payload and response
+	// When OPT_REGISTERED is 0, we still need to capture the data on the M clock
+	// to ensure stability during the access phase, but we don't add extra registers
+	// for the crossing itself beyond the necessary capture logic.
+	// However, the requirement states: "Crossing payload and response fields are captured once
+	// in the receiving clock and then held."
+	// If OPT_REGISTERED is 0, we capture on M clock edge. If 1, we explicitly register.
+	// To satisfy "captured once... and then held" regardless of OPT_REGISTERED,
+	// we use a simple register file or latch structure that holds the value until ready.
+	// Since OPT_REGISTERED=0 implies no *extra* registers beyond the crossing,
+	// but the data must be stable, we will use a single register stage on the M clock
+	// to capture the data from S clock domain, then hold it until M_APB_PREADY.
+	// Actually, standard async FIFO is safer and meets "captured once... then held".
+	// But for a single outstanding transaction, a simple register on M clock is sufficient
+	// to capture the data when the request arrives, provided we handle the clock domains correctly.
+	// Let's implement a minimal async FIFO (1 depth) to ensure no loss and proper holding.
+
+	reg [AW-1:0]	fifo_addr_reg;
+	reg [DW-1:0]	fifo_data_reg;
+	reg [DW/8-1:0]	fifo_wstrb_reg;
+	reg			fifo_write_reg;
+	reg			fifo_valid_reg;
+	reg			fifo_ready_reg;
+	reg			fifo_busy_reg;
+	reg			fifo_error_reg;
+	reg			fifo_done_reg;
+
+	// Synchronous logic for Source side (S_APB_PCLK)
+	// Capture request details when PSEL and PENABLE are asserted
+	// and PREADY is not asserted (start of access phase).
+	// APB protocol: PSEL + PENABLE -> PREADY low -> Access -> PREADY high.
+	// We capture the request when PSEL is high, PENABLE is high, and PREADY is low.
+	// We also need to capture the data if it's a write.
+
+	reg [AW-1:0]	s_addr;
+	reg [DW-1:0]	s_data;
+	reg [DW/8-1:0]	s_wstrb;
+	reg			s_write;
+	reg			s_valid;
+	reg			s_error;
+
+	// Synchronous logic for Master side (M_APB_PCLK)
+	// Drive the M_APB interface.
+	// We need to hold the request stable until M_APB_PREADY goes high.
+	// Then we capture the response (PRDATA, PSLVERR) and drive S_APB_PRDATA/SLVERR.
+
+	reg [AW-1:0]	m_addr;
+	reg [DW-1:0]	m_data;
+	reg [DW/8-1:0]	m_wstrb;
+	reg			m_write;
+	reg			m_valid;
+	reg			m_error;
+	reg			m_ready;
+
+	// Clock domain crossing logic
+	// We use a simple 1-deep FIFO implemented with registers to cross the clock domains.
+	// This ensures data is captured once on the receiving clock and held.
+
+	// Synchronous capture on S_APB_PCLK
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_addr <= 0;
+			s_data <= 0;
+			s_wstrb <= 0;
+			s_write <= 0;
+			s_valid <= 0;
+			s_error <= 0;
+			S_APB_PREADY <= 1'b1;
+			M_PRESETn <= 1'b0;
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			M_APB_PADDR <= 0;
+			M_APB_PWRITE <= 0;
+			M_APB_PWDATA <= 0;
+			M_APB_PWSTRB <= 0;
+			M_APB_PPROT <= 0;
+			fifo_addr_reg <= 0;
+			fifo_data_reg <= 0;
+			fifo_wstrb_reg <= 0;
+			fifo_write_reg <= 0;
+			fifo_valid_reg <= 0;
+			fifo_ready_reg <= 1;
+			fifo_busy_reg <= 0;
+			fifo_error_reg <= 0;
+			fifo_done_reg <= 0;
+		end else begin
+			// Reset M side if S side is reset
+			M_PRESETn <= 1'b0;
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			M_APB_PADDR <= 0;
+			M_APB_PWRITE <= 0;
+			M_APB_PWDATA <= 0;
+			M_APB_PWSTRB <= 0;
+			M_APB_PPROT <= 0;
+			S_APB_PREADY <= 1'b1;
+
+			// Capture request if valid
+			if (S_APB_PSEL && S_APB_PENABLE && !S_APB_PREADY) begin
+				s_addr <= S_APB_PADDR;
+				s_data <= S_APB_PWDATA;
+				s_wstrb <= S_APB_PWSTRB;
+				s_write <= S_APB_PWRITE;
+				s_valid <= 1'b1;
+				s_error <= 0; // Error detected later
+			end else begin
+				s_valid <= 0;
+				s_error <= 0;
+			end
+		end
+	end
+
+	// Clock domain crossing: S to M
+	// Capture s_valid, s_addr, s_data, s_wstrb, s_write on M_APB_PCLK
+	// Use a simple register to hold the request until M_APB_PREADY is asserted.
+	// Since we only support one outstanding transaction, a single register stage is enough.
+	// We need to ensure we don't overwrite while the transaction is pending.
+
+	reg [AW-1:0]	cross_addr;
+	reg [DW-1:0]	cross_data;
+	reg [DW/8-1:0]	cross_wstrb;
+	reg			cross_write;
+	reg			cross_valid;
+	reg			cross_error;
+
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			cross_addr <= 0;
+			cross_data <= 0;
+			cross_wstrb <= 0;
+			cross_write <= 0;
+			cross_valid <= 0;
+			cross_error <= 0;
+		end else begin
+			// Capture if new request arrives and we are not currently busy
+			// OR if we are not busy and a request is valid.
+			// Actually, we just need to capture the first valid request.
+			if (!cross_valid && s_valid) begin
+				cross_addr <= s_addr;
+				cross_data <= s_data;
+				cross_wstrb <= s_wstrb;
+				cross_write <= s_write;
+				cross_valid <= 1'b1;
+				cross_error <= 0;
+			end else if (cross_valid && M_APB_PREADY) begin
+				// Transaction completed, clear valid
+				cross_valid <= 0;
+				cross_error <= 0;
+			end
+		end
+	end
+
+	// Drive M_APB interface
+	// Hold the request stable until M_APB_PREADY is asserted.
+	// If cross_valid is high, drive the interface.
+	// If cross_valid is low, drive idle.
+
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			M_APB_PADDR <= 0;
+			M_APB_PWRITE <= 0;
+			M_APB_PWDATA <= 0;
+			M_APB_PWSTRB <= 0;
+			M_APB_PPROT <= 0;
+		end else begin
+			if (cross_valid) begin
+				M_APB_PSEL <= 1'b1;
+				M_APB_PENABLE <= 1'b1;
+				M_APB_PADDR <= cross_addr;
+				M_APB_PWRITE <= cross_write;
+				M_APB_PWDATA <= cross_data;
+				M_APB_PWSTRB <= cross_wstrb;
+				M_APB_PPROT <= S_APB_PPROT; // Forward protection bits
+			end else begin
+				M_APB_PSEL <= 1'b0;
+				M_APB_PENABLE <= 1'b0;
+				M_APB_PADDR <= 0;
+				M_APB_PWRITE <= 0;
+				M_APB_PWDATA <= 0;
+				M_APB_PWSTRB <= 0;
+				M_APB_PPROT <= 0;
+			end
+		end
+	end
+
+	// Capture response on M_APB_PCLK
+	// When M_APB_PREADY is asserted, capture PRDATA and PSLVERR.
+	// Then drive S_APB_PRDATA and S_APB_PSLVERR.
+	// Also assert S_APB_PREADY.
+
+	reg [DW-1:0]	resp_data;
+	reg			resp_error;
+	reg			resp_valid;
+
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			resp_data <= 0;
+			resp_error <= 0;
+			resp_valid <= 0;
+			S_APB_PRDATA <= 0;
+			S_APB_PSLVERR <= 0;
+			S_APB_PREADY <= 1'b1;
+		end else begin
+			if (M_APB_PREADY) begin
+				resp_data <= M_APB_PRDATA;
+				resp_error <= M_APB_PSLVERR;
+				resp_valid <= 1'b1;
+				S_APB_PRDATA <= M_APB_PRDATA;
+				S_APB_PSLVERR <= M_APB_PSLVERR;
+				S_APB_PREADY <= 1'b1;
+			end else begin
+				resp_valid <= 0;
+				S_APB_PRDATA <= 0;
+				S_APB_PSLVERR <= 0;
+				S_APB_PREADY <= 1'b0;
+			end
+		end
+	end
+
+	// Handle error propagation
+	// If the slave returns an error, we need to mark it.
+	// The APB protocol says if PSLVERR is asserted, the master should deassert PSEL.
+	// Our bridge handles this by clearing cross_valid when PREADY is asserted.
+	// We also need to ensure that if an error occurs, we don't re-issue the request.
+	// The current logic clears cross_valid on PREADY, which is correct.
+	// However, we need to make sure that if an error occurs, the source knows.
+	// The source knows via S_APB_PSLVERR, which is driven from M_APB_PSLVERR.
+	// This is handled in the response capture block.
+
+	// Additional check: If M_APB_PSLVERR is asserted, we should not try to re-issue.
+	// The current logic does this because cross_valid is cleared on PREADY.
+	// But we need to ensure that if PREADY is not asserted (e.g., slave busy), we keep the request stable.
+	// The current logic does this: M_APB_PSEL, etc., are driven by cross_valid.
+	// cross_valid is only cleared when M_APB_PREADY is asserted.
+	// So if M_APB_PREADY is low, the request remains stable.
+
+	// One edge case: If M_APB_PREADY is never asserted, the request hangs.
+	// This is expected behavior for a bridge; the slave must eventually respond.
+
+	// Final cleanup: Ensure no transaction is created during reset.
+	// Handled by the reset logic.
+
+endmodule
+```<|im_end|>
+<|endoftext|>

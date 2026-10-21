@@ -1,0 +1,491 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ------------------------------------------------------------------
+    // CDC Logic: Synchronous Reset Generation
+    // ------------------------------------------------------------------
+    // Generate safe reset signals for both domains using a 2-stage synchronizer
+    // on the opposite domain's reset signal.
+    
+    wire s_rst_synced;
+    wire m_rst_synced;
+
+    // Synchronize m_rst into s domain
+    reg m_rst_sync1;
+    reg m_rst_sync2;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            m_rst_sync1 <= 1'b1;
+            m_rst_sync2 <= 1'b1;
+        end else begin
+            m_rst_sync1 <= m_rst;
+            m_rst_sync2 <= m_rst_sync1;
+        end
+    end
+    assign s_rst_synced = m_rst_sync2;
+
+    // Synchronize s_rst into m domain
+    reg s_rst_sync1;
+    reg s_rst_sync2;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            s_rst_sync1 <= 1'b1;
+            s_rst_sync2 <= 1'b1;
+        end else begin
+            s_rst_sync1 <= s_rst;
+            s_rst_sync2 <= s_rst_sync1;
+        end
+    end
+    assign m_rst_synced = s_rst_sync2;
+
+    // ------------------------------------------------------------------
+    // CDC Logic: Single-bit Handshake Signals
+    // ------------------------------------------------------------------
+    // Capture valid/ready signals from the opposite domain and forward them
+    // to the local domain. This ensures no metastability is propagated to
+    // the local logic.
+
+    // --- Write Channel (Slave -> Master) ---
+    // Capture s_axil_wvalid in m domain
+    reg s_wvalid_sync1;
+    reg s_wvalid_sync2;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            s_wvalid_sync1 <= 1'b0;
+            s_wvalid_sync2 <= 1'b0;
+        end else begin
+            s_wvalid_sync1 <= s_axil_wvalid;
+            s_wvalid_sync2 <= s_wvalid_sync1;
+        end
+    end
+    assign m_axil_wvalid = s_wvalid_sync2;
+
+    // Capture m_axil_wready in s domain
+    reg m_wready_sync1;
+    reg m_wready_sync2;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            m_wready_sync1 <= 1'b0;
+            m_wready_sync2 <= 1'b0;
+        end else begin
+            m_wready_sync1 <= m_axil_wready;
+            m_wready_sync2 <= m_wready_sync1;
+        end
+    end
+    assign s_axil_wready = m_wready_sync2;
+
+    // Capture m_axil_bvalid in s domain
+    reg m_bvalid_sync1;
+    reg m_bvalid_sync2;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            m_bvalid_sync1 <= 1'b0;
+            m_bvalid_sync2 <= 1'b0;
+        end else begin
+            m_bvalid_sync1 <= m_axil_bvalid;
+            m_bvalid_sync2 <= m_bvalid_sync1;
+        end
+    end
+    assign s_axil_bvalid = m_bvalid_sync2;
+
+    // Capture s_axil_bready in m domain
+    reg s_bready_sync1;
+    reg s_bready_sync2;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            s_bready_sync1 <= 1'b0;
+            s_bready_sync2 <= 1'b0;
+        end else begin
+            s_bready_sync1 <= s_axil_bready;
+            s_bready_sync2 <= s_bready_sync1;
+        end
+    end
+    assign m_axil_bready = s_bready_sync2;
+
+    // --- Read Channel (Slave -> Master) ---
+    // Capture s_axil_arvalid in m domain
+    reg s_arvalid_sync1;
+    reg s_arvalid_sync2;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            s_arvalid_sync1 <= 1'b0;
+            s_arvalid_sync2 <= 1'b0;
+        end else begin
+            s_arvalid_sync1 <= s_axil_arvalid;
+            s_arvalid_sync2 <= s_arvalid_sync1;
+        end
+    end
+    assign m_axil_arvalid = s_arvalid_sync2;
+
+    // Capture m_axil_arready in s domain
+    reg m_arready_sync1;
+    reg m_arready_sync2;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            m_arready_sync1 <= 1'b0;
+            m_arready_sync2 <= 1'b0;
+        end else begin
+            m_arready_sync1 <= m_axil_arready;
+            m_arready_sync2 <= m_arready_sync1;
+        end
+    end
+    assign s_axil_arready = m_arready_sync2;
+
+    // Capture m_axil_rvalid in s domain
+    reg m_rvalid_sync1;
+    reg m_rvalid_sync2;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            m_rvalid_sync1 <= 1'b0;
+            m_rvalid_sync2 <= 1'b0;
+        end else begin
+            m_rvalid_sync1 <= m_axil_rvalid;
+            m_rvalid_sync2 <= m_rvalid_sync1;
+        end
+    end
+    assign s_axil_rvalid = m_rvalid_sync2;
+
+    // Capture s_axil_rready in m domain
+    reg s_rready_sync1;
+    reg s_rready_sync2;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            s_rready_sync1 <= 1'b0;
+            s_rready_sync2 <= 1'b0;
+        end else begin
+            s_rready_sync1 <= s_axil_rready;
+            s_rready_sync2 <= s_rready_sync1;
+        end
+    end
+    assign m_axil_rready = s_rready_sync2;
+
+    // ------------------------------------------------------------------
+    // CDC Logic: Multi-bit Data Forwarding
+    // ------------------------------------------------------------------
+    // Capture multi-bit data from the opposite domain using a 2-stage synchronizer.
+    // This ensures data stability before it is used in the local domain.
+
+    // --- Write Data (Slave -> Master) ---
+    reg [DATA_WIDTH-1:0] s_wdata_sync1;
+    reg [DATA_WIDTH-1:0] s_wdata_sync2;
+    reg [STRB_WIDTH-1:0] s_wstrb_sync1;
+    reg [STRB_WIDTH-1:0] s_wstrb_sync2;
+    reg [ADDR_WIDTH-1:0] s_awaddr_sync1;
+    reg [ADDR_WIDTH-1:0] s_awaddr_sync2;
+    reg [2:0] s_awprot_sync1;
+    reg [2:0] s_awprot_sync2;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            s_wdata_sync1     <= 0;
+            s_wdata_sync2     <= 0;
+            s_wstrb_sync1     <= 0;
+            s_wstrb_sync2     <= 0;
+            s_awaddr_sync1    <= 0;
+            s_awaddr_sync2    <= 0;
+            s_awprot_sync1    <= 0;
+            s_awprot_sync2    <= 0;
+        end else begin
+            s_wdata_sync1     <= s_axil_wdata;
+            s_wdata_sync2     <= s_wdata_sync1;
+            s_wstrb_sync1     <= s_axil_wstrb;
+            s_wstrb_sync2     <= s_wstrb_sync1;
+            s_awaddr_sync1    <= s_axil_awaddr;
+            s_awaddr_sync2    <= s_awaddr_sync1;
+            s_awprot_sync1    <= s_axil_awprot;
+            s_awprot_sync2    <= s_awprot_sync1;
+        end
+    end
+    assign m_axil_wdata     = s_wdata_sync2;
+    assign m_axil_wstrb     = s_wstrb_sync2;
+    assign m_axil_awaddr    = s_awaddr_sync2;
+    assign m_axil_awprot    = s_awprot_sync2;
+
+    // --- Read Data (Master -> Slave) ---
+    reg [DATA_WIDTH-1:0] m_rdata_sync1;
+    reg [DATA_WIDTH-1:0] m_rdata_sync2;
+    reg [ADDR_WIDTH-1:0] m_araddr_sync1;
+    reg [ADDR_WIDTH-1:0] m_araddr_sync2;
+    reg [2:0] m_arprot_sync1;
+    reg [2:0] m_arprot_sync2;
+    reg [1:0] m_rresp_sync1;
+    reg [1:0] m_rresp_sync2;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            m_rdata_sync1     <= 0;
+            m_rdata_sync2     <= 0;
+            m_araddr_sync1    <= 0;
+            m_araddr_sync2    <= 0;
+            m_arprot_sync1    <= 0;
+            m_arprot_sync2    <= 0;
+            m_rresp_sync1     <= 0;
+            m_rresp_sync2     <= 0;
+        end else begin
+            m_rdata_sync1     <= m_axil_rdata;
+            m_rdata_sync2     <= m_rdata_sync1;
+            m_araddr_sync1    <= m_axil_araddr;
+            m_araddr_sync2    <= m_araddr_sync1;
+            m_arprot_sync1    <= m_axil_arprot;
+            m_arprot_sync2    <= m_arprot_sync1;
+            m_rresp_sync1     <= m_axil_rresp;
+            m_rresp_sync2     <= m_rresp_sync1;
+        end
+    end
+    assign s_axil_rdata     = m_rdata_sync2;
+    assign s_axil_araddr    = m_araddr_sync2;
+    assign s_axil_arprot    = m_arprot_sync2;
+    assign s_axil_rresp     = m_rresp_sync2;
+
+    // ------------------------------------------------------------------
+    // State Machine & Control Logic (Slave Domain)
+    // ------------------------------------------------------------------
+    // Handles Write and Read transactions.
+    // State encoding:
+    // 0: IDLE
+    // 1: AW_WAIT (Waiting for AW ready)
+    // 2: W_WAIT (Waiting for W ready)
+    // 3: B_WAIT (Waiting for B ready)
+    // 4: AR_WAIT (Waiting for AR ready)
+    // 5: R_WAIT (Waiting for R ready)
+
+    typedef enum logic [1:0] {
+        IDLE,
+        AW_WAIT,
+        W_WAIT,
+        B_WAIT,
+        AR_WAIT,
+        R_WAIT
+    } state_t;
+
+    state_t state, next_state;
+    logic write_in_progress;
+    logic read_in_progress;
+
+    // Write Transaction State
+    logic write_aw_valid;
+    logic write_w_valid;
+    logic write_b_valid;
+    logic [DATA_WIDTH-1:0] write_wdata;
+    logic [STRB_WIDTH-1:0] write_wstrb;
+    logic [ADDR_WIDTH-1:0] write_awaddr;
+    logic [2:0] write_awprot;
+    logic [1:0] write_bresp;
+
+    // Read Transaction State
+    logic read_ar_valid;
+    logic read_r_valid;
+    logic [DATA_WIDTH-1:0] read_rdata;
+    logic [1:0] read_rresp;
+    logic [ADDR_WIDTH-1:0] read_araddr;
+    logic [2:0] read_arprot;
+
+    // ------------------------------------------------------------------
+    // State Machine Logic
+    // ------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            state <= IDLE;
+            write_in_progress <= 1'b0;
+            read_in_progress <= 1'b0;
+            write_aw_valid <= 1'b0;
+            write_w_valid <= 1'b0;
+            write_b_valid <= 1'b0;
+            read_ar_valid <= 1'b0;
+            read_r_valid <= 1'b0;
+        end else begin
+            state <= next_state;
+        end
+    end
+
+    always @(*) begin
+        next_state = state;
+        write_in_progress = 1'b0;
+        read_in_progress = 1'b0;
+        write_aw_valid = 1'b0;
+        write_w_valid = 1'b0;
+        write_b_valid = 1'b0;
+        read_ar_valid = 1'b0;
+        read_r_valid = 1'b0;
+
+        case (state)
+            IDLE: begin
+                // Check for new Write or Read request
+                if (s_axil_awvalid && s_axil_awready) begin
+                    next_state = AW_WAIT;
+                    write_in_progress = 1'b1;
+                    write_aw_valid = 1'b1;
+                end else if (s_axil_arvalid && s_axil_arready) begin
+                    next_state = AR_WAIT;
+                    read_in_progress = 1'b1;
+                    read_ar_valid = 1'b1;
+                end
+            end
+
+            AW_WAIT: begin
+                // Wait for W channel to be ready
+                if (s_axil_wvalid && s_axil_wready) begin
+                    next_state = W_WAIT;
+                    write_w_valid = 1'b1;
+                end else if (s_axil_bready && write_b_valid) begin
+                    // If B is ready and we have a pending B, send it
+                    next_state = IDLE;
+                    write_b_valid = 1'b0;
+                end
+            end
+
+            W_WAIT: begin
+                // Wait for B channel to be ready
+                if (s_axil_bready && write_b_valid) begin
+                    next_state = IDLE;
+                    write_b_valid = 1'b0;
+                end
+            end
+
+            AR_WAIT: begin
+                // Wait for R channel to be ready
+                if (s_axil_rready && read_r_valid) begin
+                    next_state = IDLE;
+                    read_r_valid = 1'b0;
+                end
+            end
+
+            R_WAIT: begin
+                // Wait for R to be ready (handled above)
+                // If R is not ready, stay in R_WAIT
+            end
+        endcase
+    end
+
+    // ------------------------------------------------------------------
+    // Slave Port Drivers
+    // ------------------------------------------------------------------
+    assign s_axil_awready = (state == IDLE) ? 1'b1 : 1'b0;
+    assign s_axil_wready = (state == AW_WAIT) ? 1'b1 : 1'b0;
+    assign s_axil_bready = (state == W_WAIT) ? 1'b1 : 1'b0;
+    assign s_axil_arready = (state == IDLE) ? 1'b1 : 1'b0;
+    assign s_axil_rready = (state == AR_WAIT) ? 1'b1 : 1'b0;
+
+    assign s_axil_awaddr = write_aw_valid ? write_awaddr : 0;
+    assign s_axil_awprot = write_aw_valid ? write_awprot : 0;
+    assign s_axil_wdata = write_w_valid ? write_wdata : 0;
+    assign s_axil_wstrb = write_w_valid ? write_wstrb : 0;
+    assign s_axil_bresp = write_b_valid ? write_bresp : 0;
+    assign s_axil_bvalid = write_b_valid;
+    assign s_axil_araddr = read_ar_valid ? read_araddr : 0;
+    assign s_axil_arprot = read_ar_valid ? read_arprot : 0;
+    assign s_axil_rdata = read_r_valid ? read_rdata : 0;
+    assign s_axil_rresp = read_r_valid ? read_rresp : 0;
+    assign s_axil_rvalid = read_r_valid;
+
+    // ------------------------------------------------------------------
+    // Master Port Drivers
+    // ------------------------------------------------------------------
+    assign m_axil_awaddr = write_aw_valid ? write_awaddr : 0;
+    assign m_axil_awprot = write_aw_valid ? write_awprot : 0;
+    assign m_axil_awvalid = write_aw_valid;
+    assign m_axil_wdata = write_w_valid ? write_wdata : 0;
+    assign m_axil_wstrb = write_w_valid ? write_wstrb : 0;
+    assign m_axil_wvalid = write_w_valid;
+    assign m_axil_bready = write_b_valid;
+    assign m_axil_araddr = read_ar_valid ? read_araddr : 0;
+    assign m_axil_arprot = read_ar_valid ? read_arprot : 0;
+    assign m_axil_arvalid = read_ar_valid;
+    assign m_axil_rready = read_r_valid;
+
+    // ------------------------------------------------------------------
+    // Internal State Registers (Slave Domain)
+    // ------------------------------------------------------------------
+    // Store incoming data from the master domain (already synchronized)
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            write_awaddr <= 0;
+            write_awprot <= 0;
+            write_wdata  <= 0;
+            write_wstrb  <= 0;
+            write_bresp  <= 0;
+            read_araddr  <= 0;
+            read_arprot  <= 0;
+            read_rdata   <= 0;
+            read_rresp   <= 0;
+        end else begin
+            if (write_aw_valid) begin
+                write_awaddr <= m_axil_awaddr;
+                write_awprot <= m_axil_awprot;
+            end
+            if (write_w_valid) begin
+                write_wdata  <= m_axil_wdata;
+                write_wstrb  <= m_axil_wstrb;
+            end
+            if (write_b_valid) begin
+                write_bresp  <= m_axil_bresp;
+            end
+            if (read_ar_valid) begin
+                read_araddr  <= m_axil_araddr;
+                read_arprot  <= m_axil_arprot;
+            end
+            if (read_r_valid) begin
+                read_rdata   <= m_axil_rdata;
+                read_rresp   <= m_axil_rresp;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

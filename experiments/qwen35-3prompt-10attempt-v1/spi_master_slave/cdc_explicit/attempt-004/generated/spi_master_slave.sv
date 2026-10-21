@@ -1,0 +1,482 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // ==================================================================
+    // Clock Domain Crossing (CDC) Strategy:
+    // 1. PCLK Domain: State Machine, Data Capture, and Control Logic.
+    // 2. SCLK Domain: SPI Signal Generation (SS, SCK, MOSI).
+    // 3. Handshake: di_req_o (PCLK -> SCLK), wr_ack_o (SCLK -> PCLK), do_valid_o (SCLK -> PCLK).
+    // 4. Reset: Synchronous in both domains using dedicated reset logic.
+    // ==================================================================
+
+    // ------------------------------------------------------------------
+    // PCLK Domain: State Machine and Data Handling
+    // ------------------------------------------------------------------
+    localparam STATE_IDLE = 2'b00;
+    localparam STATE_SHIFT = 2'b01;
+    localparam STATE_DONE = 2'b10;
+
+    reg [1:0] state_p;
+    reg [N-1:0] shift_reg_p;
+    reg [N-1:0] rx_data_p;
+    reg shift_cnt_p;
+    reg shift_done_p;
+    reg di_req_ack_p; // Flag to indicate we are ready to accept next word
+
+    // ------------------------------------------------------------------
+    // SCLK Domain: SPI Signal Generation
+    // ------------------------------------------------------------------
+    reg [N-1:0] shift_reg_s;
+    reg [N-1:0] rx_data_s;
+    reg shift_cnt_s;
+    reg shift_done_s;
+    reg [SPI_2X_CLK_DIV-1:0] div_cnt_s;
+    reg sck_en_s;
+
+    // ------------------------------------------------------------------
+    // CDC Registers (PCLK -> SCLK)
+    // ------------------------------------------------------------------
+    reg [N-1:0] shift_reg_cdc;
+    reg [N-1:0] rx_data_cdc;
+    reg shift_cnt_cdc;
+    reg shift_done_cdc;
+    reg di_req_cdc;
+
+    // ------------------------------------------------------------------
+    // CDC Registers (SCLK -> PCLK)
+    // ------------------------------------------------------------------
+    reg [N-1:0] rx_data_cdc_p;
+    reg shift_done_cdc_p;
+    reg di_req_ack_cdc;
+
+    // ------------------------------------------------------------------
+    // PCLK Domain Logic
+    // ------------------------------------------------------------------
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state_p <= STATE_IDLE;
+            shift_reg_p <= 0;
+            rx_data_p <= 0;
+            shift_cnt_p <= 0;
+            shift_done_p <= 0;
+            di_req_ack_p <= 0;
+            spi_ssel_o <= 1'b1;
+            spi_sck_o <= 1'b1;
+            spi_mosi_o <= 1'b1;
+            di_req_o <= 1'b0;
+            wr_ack_o <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o <= 0;
+        end else begin
+            // State Machine
+            case (state_p)
+                STATE_IDLE: begin
+                    if (di_req_cdc) begin
+                        // Data loaded from CDC register
+                        shift_reg_p <= shift_reg_cdc;
+                        rx_data_p <= rx_data_cdc;
+                        shift_cnt_p <= N;
+                        shift_done_p <= 0;
+                        state_p <= STATE_SHIFT;
+                        di_req_ack_p <= 1; // Acknowledge request
+                    end
+                end
+
+                STATE_SHIFT: begin
+                    if (shift_cnt_p == 0) begin
+                        state_p <= STATE_DONE;
+                        shift_done_p <= 1;
+                    end else begin
+                        shift_cnt_p <= shift_cnt_p - 1;
+                    end
+                end
+
+                STATE_DONE: begin
+                    if (shift_done_p) begin
+                        state_p <= STATE_IDLE;
+                        shift_done_p <= 0;
+                        di_req_o <= 1'b1; // Request next word
+                    end
+                end
+            endcase
+
+            // Output Control
+            spi_ssel_o <= (state_p == STATE_IDLE) ? 1'b1 : 1'b0;
+            
+            // MOSI is driven by the shift register in SCLK domain, 
+            // but we can drive it here if we use a latch or just let the SCLK domain drive it.
+            // To ensure clean CDC, we will drive MOSI from the SCLK domain logic below.
+            // However, for simplicity in this single file without extra latches, 
+            // we assign the value here but the actual toggling happens in SCLK domain.
+            // Actually, standard practice: Drive MOSI from SCLK domain to avoid metastability on capture.
+            // We will set spi_mosi_o in the SCLK block.
+            
+            spi_sck_o <= 1'b1; // Default high, driven low in SCLK domain
+            wr_ack_o <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o <= rx_data_p; // Valid only when STATE_DONE
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // SCLK Domain Logic
+    // ------------------------------------------------------------------
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            shift_reg_s <= 0;
+            rx_data_s <= 0;
+            shift_cnt_s <= 0;
+            shift_done_s <= 0;
+            div_cnt_s <= 0;
+            sck_en_s <= 0;
+            spi_ssel_o <= 1'b1;
+            spi_sck_o <= 1'b1;
+            spi_mosi_o <= 1'b1;
+        end else begin
+            // Shift Register and Counter
+            if (shift_done_s) begin
+                shift_reg_s <= 0;
+                rx_data_s <= 0;
+                shift_cnt_s <= N;
+                shift_done_s <= 0;
+                // End of transaction, release SS
+                spi_ssel_o <= 1'b1;
+            end else begin
+                // Shift logic
+                shift_cnt_s <= shift_cnt_s - 1;
+                
+                // Capture MISO
+                rx_data_s <= {rx_data_s[N-2:0], spi_miso_i};
+                
+                // Drive MOSI from the CDC register (which holds PCLK domain data)
+                spi_mosi_o <= shift_reg_cdc[shift_cnt_s - 1];
+                
+                // Drive SCK
+                if (shift_cnt_s == 0) begin
+                    sck_en_s <= 1'b1;
+                end else begin
+                    sck_en_s <= 1'b0;
+                end
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // CDC: PCLK -> SCLK (Data and Control)
+    // ------------------------------------------------------------------
+    // Use a simple pipeline to cross from PCLK to SCLK safely.
+    // We assume the SCLK domain is fast enough to sample the stable PCLK data.
+    // To be extra safe against reset domain crossing issues, we use a dedicated 
+    // register chain.
+    
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            shift_reg_cdc <= 0;
+            rx_data_cdc <= 0;
+            shift_cnt_cdc <= 0;
+            shift_done_cdc <= 0;
+            di_req_cdc <= 0;
+        end else begin
+            // Sample PCLK domain state
+            shift_reg_cdc <= shift_reg_p;
+            rx_data_cdc <= rx_data_p;
+            shift_cnt_cdc <= shift_cnt_p;
+            shift_done_cdc <= shift_done_p;
+            di_req_cdc <= di_req_ack_p;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // CDC: SCLK -> PCLK (Data and Control)
+    // ------------------------------------------------------------------
+    // Sample SCLK domain signals in PCLK domain.
+    // We use a pipeline stage to ensure stability.
+    
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            rx_data_cdc_p <= 0;
+            shift_done_cdc_p <= 0;
+            di_req_ack_cdc <= 0;
+        end else begin
+            // Sample SCLK domain signals
+            // Note: shift_done_s and di_req_cdc are single bits, rx_data is multi-bit.
+            // We sample them directly.
+            rx_data_cdc_p <= rx_data_s;
+            shift_done_cdc_p <= shift_done_s;
+            di_req_ack_cdc <= di_req_cdc;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // SCK Generation Logic (SCLK Domain)
+    // ------------------------------------------------------------------
+    // Generate SCK based on the divider parameter.
+    // We need to toggle SCK for every bit shift.
+    // Since shift_cnt_s counts down from N, we can generate a pulse or toggle.
+    // A simple toggle counter approach:
+    
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            div_cnt_s <= 0;
+            spi_sck_o <= 1'b1;
+        end else begin
+            if (shift_done_s) begin
+                div_cnt_s <= 0;
+                spi_sck_o <= 1'b1;
+            end else begin
+                // Toggle logic
+                if (div_cnt_s == SPI_2X_CLK_DIV - 1) begin
+                    div_cnt_s <= 0;
+                    spi_sck_o <= ~spi_sck_o;
+                end else begin
+                    div_cnt_s <= div_cnt_s + 1;
+                    spi_sck_o <= spi_sck_o;
+                end
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Output Logic for PCLK Domain
+    // ------------------------------------------------------------------
+    // Assign do_valid_o and wr_ack_o based on the sampled SCLK domain status.
+    // do_valid_o is high when STATE_DONE is reached in PCLK domain.
+    // wr_ack_o is high when the SCLK domain has finished shifting (shift_done_s).
+    
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            do_valid_o <= 1'b0;
+            wr_ack_o <= 1'b0;
+        end else begin
+            // do_valid_o is asserted when the shift is complete in PCLK domain
+            // This corresponds to STATE_DONE
+            if (state_p == STATE_DONE) begin
+                do_valid_o <= 1'b1;
+            end else begin
+                do_valid_o <= 1'b0;
+            end
+            
+            // wr_ack_o is asserted when the SCLK domain finishes the shift
+            // We sample shift_done_s from the SCLK domain
+            if (shift_done_cdc_p) begin
+                wr_ack_o <= 1'b1;
+            end else begin
+                wr_ack_o <= 1'b0;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Reset Synchronization (Optional but good practice for async resets)
+    // The problem states rst_i is active-high. 
+    // If rst_i is asynchronous to both clocks, we should synchronize it.
+    // However, the prompt says "rst_i: Active-high reset" and "Reset release must be safe".
+    // Assuming rst_i is a global reset that might be async, we synchronize it.
+    // If rst_i is already synchronous to one domain, this logic still works safely.
+    
+    reg rst_s_sync;
+    reg rst_p_sync;
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            rst_s_sync <= 1'b1;
+        end else begin
+            if (rst_i) begin
+                rst_s_sync <= 1'b1;
+            end else if (sclk_i) begin
+                rst_s_sync <= rst_s_sync;
+            end
+        end
+    end
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            rst_p_sync <= 1'b1;
+        end else begin
+            if (rst_i) begin
+                rst_p_sync <= 1'b1;
+            end else if (pclk_i) begin
+                rst_p_sync <= rst_p_sync;
+            end
+        end
+    end
+
+    // Use synchronized resets for the state machines to ensure clean startup
+    // across both domains.
+    
+    // Re-define the always blocks to use synchronized resets for state machines
+    // to guarantee RDC safety.
+    
+    // PCLK State Machine with Sync Reset
+    always @(posedge pclk_i or posedge rst_p_sync) begin
+        if (rst_p_sync) begin
+            state_p <= STATE_IDLE;
+            shift_reg_p <= 0;
+            rx_data_p <= 0;
+            shift_cnt_p <= 0;
+            shift_done_p <= 0;
+            di_req_ack_p <= 0;
+            spi_ssel_o <= 1'b1;
+            spi_sck_o <= 1'b1;
+            spi_mosi_o <= 1'b1;
+            di_req_o <= 1'b0;
+            wr_ack_o <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o <= 0;
+        end else begin
+            case (state_p)
+                STATE_IDLE: begin
+                    if (di_req_cdc) begin
+                        shift_reg_p <= shift_reg_cdc;
+                        rx_data_p <= rx_data_cdc;
+                        shift_cnt_p <= N;
+                        shift_done_p <= 0;
+                        state_p <= STATE_SHIFT;
+                        di_req_ack_p <= 1;
+                    end
+                end
+                STATE_SHIFT: begin
+                    if (shift_cnt_p == 0) begin
+                        state_p <= STATE_DONE;
+                        shift_done_p <= 1;
+                    end else begin
+                        shift_cnt_p <= shift_cnt_p - 1;
+                    end
+                end
+                STATE_DONE: begin
+                    if (shift_done_p) begin
+                        state_p <= STATE_IDLE;
+                        shift_done_p <= 0;
+                        di_req_o <= 1'b1;
+                    end
+                end
+            endcase
+            spi_ssel_o <= (state_p == STATE_IDLE) ? 1'b1 : 1'b0;
+            spi_sck_o <= 1'b1;
+            wr_ack_o <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o <= rx_data_p;
+        end
+    end
+
+    // SCLK State Machine with Sync Reset
+    always @(posedge sclk_i or posedge rst_s_sync) begin
+        if (rst_s_sync) begin
+            shift_reg_s <= 0;
+            rx_data_s <= 0;
+            shift_cnt_s <= 0;
+            shift_done_s <= 0;
+            div_cnt_s <= 0;
+            spi_ssel_o <= 1'b1;
+            spi_sck_o <= 1'b1;
+            spi_mosi_o <= 1'b1;
+        end else begin
+            if (shift_done_s) begin
+                shift_reg_s <= 0;
+                rx_data_s <= 0;
+                shift_cnt_s <= N;
+                shift_done_s <= 0;
+                spi_ssel_o <= 1'b1;
+            end else begin
+                shift_cnt_s <= shift_cnt_s - 1;
+                rx_data_s <= {rx_data_s[N-2:0], spi_miso_i};
+                spi_mosi_o <= shift_reg_cdc[shift_cnt_s - 1];
+                
+                if (shift_cnt_s == 0) begin
+                    sck_en_s <= 1'b1;
+                end else begin
+                    sck_en_s <= 1'b0;
+                end
+            end
+        end
+    end
+
+    // SCK Divider Logic with Sync Reset
+    always @(posedge sclk_i or posedge rst_s_sync) begin
+        if (rst_s_sync) begin
+            div_cnt_s <= 0;
+            spi_sck_o <= 1'b1;
+        end else begin
+            if (shift_done_s) begin
+                div_cnt_s <= 0;
+                spi_sck_o <= 1'b1;
+            end else begin
+                if (div_cnt_s == SPI_2X_CLK_DIV - 1) begin
+                    div_cnt_s <= 0;
+                    spi_sck_o <= ~spi_sck_o;
+                end else begin
+                    div_cnt_s <= div_cnt_s + 1;
+                    spi_sck_o <= spi_sck_o;
+                end
+            end
+        end
+    end
+
+    // CDC Registers (PCLK -> SCLK) with Sync Reset
+    always @(posedge sclk_i or posedge rst_s_sync) begin
+        if (rst_s_sync) begin
+            shift_reg_cdc <= 0;
+            rx_data_cdc <= 0;
+            shift_cnt_cdc <= 0;
+            shift_done_cdc <= 0;
+            di_req_cdc <= 0;
+        end else begin
+            shift_reg_cdc <= shift_reg_p;
+            rx_data_cdc <= rx_data_p;
+            shift_cnt_cdc <= shift_cnt_p;
+            shift_done_cdc <= shift_done_p;
+            di_req_cdc <= di_req_ack_p;
+        end
+    end
+
+    // CDC Registers (SCLK -> PCLK) with Sync Reset
+    always @(posedge pclk_i or posedge rst_p_sync) begin
+        if (rst_p_sync) begin
+            rx_data_cdc_p <= 0;
+            shift_done_cdc_p <= 0;
+            di_req_ack_cdc <= 0;
+        end else begin
+            rx_data_cdc_p <= rx_data_s;
+            shift_done_cdc_p <= shift_done_s;
+            di_req_ack_cdc <= di_req_cdc;
+        end
+    end
+
+    // Output Logic with Sync Reset
+    always @(posedge pclk_i or posedge rst_p_sync) begin
+        if (rst_p_sync) begin
+            do_valid_o <= 1'b0;
+            wr_ack_o <= 1'b0;
+        end else begin
+            if (state_p == STATE_DONE) begin
+                do_valid_o <= 1'b1;
+            end else begin
+                do_valid_o <= 1'b0;
+            end
+            if (shift_done_cdc_p) begin
+                wr_ack_o <= 1'b1;
+            end else begin
+                wr_ack_o <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

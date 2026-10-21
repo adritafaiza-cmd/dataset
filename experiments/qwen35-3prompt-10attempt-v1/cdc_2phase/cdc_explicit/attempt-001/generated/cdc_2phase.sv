@@ -1,0 +1,146 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain signals
+  logic src_valid_reg;
+  logic src_ready_reg;
+  logic [WIDTH-1:0] src_data_reg;
+  logic src_valid_next;
+  logic src_ready_next;
+
+  // Destination domain signals
+  logic dst_valid_reg;
+  logic dst_ready_reg;
+  logic [WIDTH-1:0] dst_data_reg;
+  logic dst_valid_next;
+  logic dst_ready_next;
+
+  // ------------------------------------------------------------------
+  // Source Domain Logic
+  // ------------------------------------------------------------------
+  // Capture incoming valid and data on rising edge of src_clk_i
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_data_reg  <= 1'b0;
+      src_ready_reg <= 1'b1;
+    end else begin
+      src_valid_reg <= src_valid_i;
+      src_data_reg  <= src_data_i;
+      // Ready is driven by the handshake logic below
+      src_ready_reg <= src_ready_next;
+    end
+  end
+
+  // Handshake logic in source domain
+  // We can accept a new item if we are not currently waiting for the destination
+  // to consume the previous item.
+  always_comb begin
+    src_ready_next = 1'b0;
+    if (src_valid_reg && dst_ready_reg) begin
+      src_ready_next = 1'b1;
+    end
+  end
+
+  // ------------------------------------------------------------------
+  // Destination Domain Logic
+  // ------------------------------------------------------------------
+  // Capture incoming valid and data on rising edge of dst_clk_i
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_data_reg  <= 1'b0;
+      dst_ready_reg <= 1'b1;
+    end else begin
+      dst_valid_reg <= dst_valid_next;
+      dst_data_reg  <= dst_data_next;
+      // Ready is driven by the handshake logic below
+      dst_ready_reg <= dst_ready_next;
+    end
+  end
+
+  // Handshake logic in destination domain
+  // We can accept a new item if the destination is ready and we are not
+  // currently holding a valid item that hasn't been consumed.
+  always_comb begin
+    dst_ready_next = 1'b0;
+    if (dst_valid_reg && dst_ready_i) begin
+      dst_ready_next = 1'b1;
+    end
+  end
+
+  // ------------------------------------------------------------------
+  // Cross-Domain Transfer Logic (2-Phase Handshake)
+  // ------------------------------------------------------------------
+  // Phase 1: Source asserts valid when it has data and is ready to send.
+  // This signal crosses to the destination domain.
+  // Phase 2: Destination asserts valid when it has data and is ready to send.
+  // This signal crosses back to the source domain.
+
+  // Capture src_valid_reg in destination domain to trigger dst_valid
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_next <= 1'b0;
+      dst_data_next  <= 1'b0;
+    end else begin
+      // If we see a valid signal from source, we grab the data and assert our own valid
+      // We only do this if we are not already holding a valid item (to prevent overwriting)
+      // However, in a 2-phase handshake with 1 outstanding item, we simply capture
+      // the first valid we see. If dst_valid_reg is already high, it means we are
+      // waiting for dst_ready_i. We should not overwrite dst_data_reg until the
+      // current transaction is complete.
+      //
+      // Logic:
+      // If src_valid_reg is high AND dst_valid_reg is low -> Start new transaction
+      // If src_valid_reg is high AND dst_valid_reg is high -> Ignore (waiting for ready)
+      // If src_valid_reg is low  AND dst_valid_reg is high -> Keep current data
+      // If src_valid_reg is low  AND dst_valid_reg is low -> Idle
+      
+      if (src_valid_reg && !dst_valid_reg) begin
+        dst_valid_next <= 1'b1;
+        dst_data_next  <= src_data_reg;
+      end else if (!src_valid_reg && dst_valid_reg) begin
+        // Keep current state
+        dst_valid_next <= dst_valid_reg;
+        dst_data_next  <= dst_data_reg;
+      end else begin
+        // Both low or both high (shouldn't happen if logic is correct, but safe default)
+        dst_valid_next <= 1'b0;
+        dst_data_next  <= 1'b0;
+      end
+    end
+  end
+
+  // Capture dst_valid_reg in source domain to drive src_ready
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_ready_next <= 1'b1;
+    end else begin
+      // If destination has asserted valid, it means it has accepted the previous item
+      // and is now ready to accept a new one.
+      if (dst_valid_reg) begin
+        src_ready_next <= 1'b1;
+      end else begin
+        src_ready_next <= 1'b0;
+      end
+    end
+  end
+
+  // Assign outputs
+  assign src_ready_o = src_ready_reg;
+  assign dst_valid_o = dst_valid_reg;
+  assign dst_data_o  = dst_data_reg;
+
+endmodule<|im_end|>

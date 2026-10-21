@@ -1,0 +1,440 @@
+```verilog
+module apbxclk #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	parameter [0:0]	OPT_REGISTERED = 1'b0,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH
+) (
+	input	wire			S_APB_PCLK, S_PRESETn,
+	input	wire			S_APB_PSEL,
+	input	wire			S_APB_PENABLE,
+	output	reg			S_APB_PREADY,
+	input	wire	[AW-1:0]	S_APB_PADDR,
+	input	wire			S_APB_PWRITE,
+	input	wire	[DW-1:0]	S_APB_PWDATA,
+	input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+	input	wire	[2:0]		S_APB_PPROT,
+	output	wire	[DW-1:0]	S_APB_PRDATA,
+	output	wire			S_APB_PSLVERR,
+	input	wire			M_APB_PCLK,
+	output	reg			M_PRESETn,
+	output	reg			M_APB_PSEL,
+	output	reg			M_APB_PENABLE,
+	input	wire			M_APB_PREADY,
+	output	wire	[AW-1:0]	M_APB_PADDR,
+	output	wire			M_APB_PWRITE,
+	output	wire	[DW-1:0]	M_APB_PWDATA,
+	output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+	output	wire	[2:0]		M_APB_PPROT,
+	input	wire	[DW-1:0]	M_APB_PRDATA,
+	input	wire			M_APB_PSLVERR
+);
+
+	localparam	AW = C_APB_ADDR_WIDTH;
+	localparam	DW = C_APB_DATA_WIDTH;
+	localparam	STRB_WIDTH = DW/8;
+
+	// State Machine for Slave Side (Master Interface)
+	// States: IDLE, REQ_PENDING, DATA_WAIT, RESP_WAIT
+	localparam	IDLE = 2'b00;
+	localparam	REQ_PENDING = 2'b01;
+	localparam	DATA_WAIT = 2'b10;
+	localparam	RESP_WAIT = 2'b11;
+
+	reg [1:0]	s_state;
+	reg		s_psel;
+	reg		s_penable;
+	reg		s_pwrite;
+	reg		s_paddr_valid;
+	reg		s_paddr;
+	reg		s_pwrite_data_valid;
+	reg		[DW-1:0]	s_pwrite_data;
+	reg		[STRB_WIDTH-1:0]	s_pwrite_strb;
+	reg		[2:0]	s_pprot;
+	reg		s_pready_out;
+	reg		s_pslverr_out;
+	reg		s_resp_data_valid;
+	reg		[DW-1:0]	s_resp_data;
+	reg		s_resp_strb;
+	reg		s_resp_prot;
+	reg		s_resp_err;
+	reg		s_req_pending;
+	reg		s_data_wait;
+	reg		s_resp_wait;
+
+	// State Machine for Master Side (Slave Interface)
+	// States: IDLE, REQ_PENDING, DATA_WAIT, RESP_WAIT
+	localparam	IDLE_M = 2'b00;
+	localparam	REQ_PENDING_M = 2'b01;
+	localparam	DATA_WAIT_M = 2'b10;
+	localparam	RESP_WAIT_M = 2'b11;
+
+	reg [1:0]	m_state;
+	reg		m_psel;
+	reg		m_penable;
+	reg		m_pwrite;
+	reg		m_paddr_valid;
+	reg		m_paddr;
+	reg		m_pwrite_data_valid;
+	reg		[DW-1:0]	m_pwrite_data;
+	reg		[STRB_WIDTH-1:0]	m_pwrite_strb;
+	reg		[2:0]	m_pprot;
+	reg		m_pready_out;
+	reg		m_pslverr_out;
+	reg		m_resp_data_valid;
+	reg		[DW-1:0]	m_resp_data;
+	reg		m_resp_strb;
+	reg		m_resp_prot;
+	reg		m_resp_err;
+	reg		m_req_pending;
+	reg		m_data_wait;
+	reg		m_resp_wait;
+
+	// Clock Domain Crossing Registers for Slave -> Master
+	reg		s_to_m_psel;
+	reg		s_to_m_penable;
+	reg		s_to_m_pwrite;
+	reg		[AW-1:0]	s_to_m_paddr;
+	reg		s_to_m_pwrite_data_valid;
+	reg		[DW-1:0]	s_to_m_pwrite_data;
+	reg		[STRB_WIDTH-1:0]	s_to_m_pwrite_strb;
+	reg		[2:0]	s_to_m_pprot;
+	reg		s_to_m_pready;
+	reg		s_to_m_pslverr;
+	reg		s_to_m_resp_data_valid;
+	reg		[DW-1:0]	s_to_m_resp_data;
+	reg		s_to_m_resp_strb;
+	reg		s_to_m_resp_prot;
+	reg		s_to_m_resp_err;
+
+	// Clock Domain Crossing Registers for Master -> Slave
+	reg		m_to_s_psel;
+	reg		m_to_s_penable;
+	reg		m_to_s_pwrite;
+	reg		[AW-1:0]	m_to_s_paddr;
+	reg		m_to_s_pwrite_data_valid;
+	reg		[DW-1:0]	m_to_s_pwrite_data;
+	reg		[STRB_WIDTH-1:0]	m_to_s_pwrite_strb;
+	reg		[2:0]	m_to_s_pprot;
+	reg		m_to_s_pready;
+	reg		m_to_s_pslverr;
+	reg		m_to_s_resp_data_valid;
+	reg		[DW-1:0]	m_to_s_resp_data;
+	reg		m_to_s_resp_strb;
+	reg		m_to_s_resp_prot;
+	reg		m_to_s_resp_err;
+
+	// Slave Side Logic
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_state <= IDLE;
+			s_psel <= 1'b0;
+			s_penable <= 1'b0;
+			s_pwrite <= 1'b0;
+			s_paddr_valid <= 1'b0;
+			s_paddr <= 0;
+			s_pwrite_data_valid <= 1'b0;
+			s_pwrite_data <= 0;
+			s_pwrite_strb <= 0;
+			s_pprot <= 0;
+			s_pready_out <= 1'b1;
+			s_pslverr_out <= 1'b0;
+			s_resp_data_valid <= 1'b0;
+			s_resp_data <= 0;
+			s_resp_strb <= 0;
+			s_resp_prot <= 0;
+			s_resp_err <= 1'b0;
+			s_req_pending <= 1'b0;
+			s_data_wait <= 1'b0;
+			s_resp_wait <= 1'b0;
+		end else begin
+			s_pready_out <= 1'b1;
+			s_pslverr_out <= 1'b0;
+			s_resp_data_valid <= 1'b0;
+			s_resp_data <= 0;
+			s_resp_strb <= 0;
+			s_resp_prot <= 0;
+			s_resp_err <= 1'b0;
+			s_req_pending <= 1'b0;
+			s_data_wait <= 1'b0;
+			s_resp_wait <= 1'b0;
+
+			case (s_state)
+				IDLE: begin
+					if (S_APB_PSEL && S_APB_PENABLE) begin
+						s_state <= REQ_PENDING;
+						s_psel <= 1'b1;
+						s_penable <= 1'b1;
+						s_pwrite <= S_APB_PWRITE;
+						s_paddr_valid <= 1'b1;
+						s_paddr <= S_APB_PADDR;
+						s_pwrite_data_valid <= 1'b1;
+						s_pwrite_data <= S_APB_PWDATA;
+						s_pwrite_strb <= S_APB_PWSTRB;
+						s_pprot <= S_APB_PPROT;
+						s_req_pending <= 1'b1;
+					end
+				end
+
+				REQ_PENDING: begin
+					if (M_APB_PREADY) begin
+						s_state <= DATA_WAIT;
+						s_pready_out <= 1'b0;
+						s_data_wait <= 1'b1;
+						s_resp_wait <= 1'b0;
+					end
+				end
+
+				DATA_WAIT: begin
+					if (M_APB_PREADY) begin
+						s_state <= RESP_WAIT;
+						s_pready_out <= 1'b0;
+						s_data_wait <= 1'b0;
+						s_resp_wait <= 1'b1;
+					end
+				end
+
+				RESP_WAIT: begin
+					if (M_APB_PREADY) begin
+						s_state <= IDLE;
+						s_psel <= 1'b0;
+						s_penable <= 1'b0;
+						s_pready_out <= 1'b1;
+						s_resp_data_valid <= 1'b1;
+						s_resp_data <= M_APB_PRDATA;
+						s_resp_strb <= M_APB_PWSTRB;
+						s_resp_prot <= M_APB_PPROT;
+						s_resp_err <= M_APB_PSLVERR;
+						s_req_pending <= 1'b0;
+					end
+				end
+			endcase
+		end
+	end
+
+	assign S_APB_PREADY = s_pready_out;
+	assign S_APB_PSLVERR = s_pslverr_out;
+	assign S_APB_PRDATA = s_resp_data_valid ? s_resp_data : 0;
+	assign S_APB_PSEL = s_psel;
+	assign S_APB_PENABLE = s_penable;
+	assign S_APB_PWRITE = s_pwrite;
+	assign S_APB_PADDR = s_paddr_valid ? s_paddr : 0;
+	assign S_APB_PWDATA = s_pwrite_data_valid ? s_pwrite_data : 0;
+	assign S_APB_PWSTRB = s_pwrite_data_valid ? s_pwrite_strb : 0;
+	assign S_APB_PPROT = s_pprot;
+
+	// Master Side Logic
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_state <= IDLE_M;
+			m_psel <= 1'b0;
+			m_penable <= 1'b0;
+			m_pwrite <= 1'b0;
+			m_paddr_valid <= 1'b0;
+			m_paddr <= 0;
+			m_pwrite_data_valid <= 1'b0;
+			m_pwrite_data <= 0;
+			m_pwrite_strb <= 0;
+			m_pprot <= 0;
+			m_pready_out <= 1'b1;
+			m_pslverr_out <= 1'b0;
+			m_resp_data_valid <= 1'b0;
+			m_resp_data <= 0;
+			m_resp_strb <= 0;
+			m_resp_prot <= 0;
+			m_resp_err <= 1'b0;
+			m_req_pending <= 1'b0;
+			m_data_wait <= 1'b0;
+			m_resp_wait <= 1'b0;
+		end else begin
+			m_pready_out <= 1'b1;
+			m_pslverr_out <= 1'b0;
+			m_resp_data_valid <= 1'b0;
+			m_resp_data <= 0;
+			m_resp_strb <= 0;
+			m_resp_prot <= 0;
+			m_resp_err <= 1'b0;
+			m_req_pending <= 1'b0;
+			m_data_wait <= 1'b0;
+			m_resp_wait <= 1'b0;
+
+			case (m_state)
+				IDLE_M: begin
+					if (S_APB_PSEL && S_APB_PENABLE) begin
+						m_state <= REQ_PENDING_M;
+						m_psel <= 1'b1;
+						m_penable <= 1'b1;
+						m_pwrite <= S_APB_PWRITE;
+						m_paddr_valid <= 1'b1;
+						m_paddr <= S_APB_PADDR;
+						m_pwrite_data_valid <= 1'b1;
+						m_pwrite_data <= S_APB_PWDATA;
+						m_pwrite_strb <= S_APB_PWSTRB;
+						m_pprot <= S_APB_PPROT;
+						m_req_pending <= 1'b1;
+					end
+				end
+
+				REQ_PENDING_M: begin
+					if (S_APB_PREADY) begin
+						m_state <= DATA_WAIT_M;
+						m_pready_out <= 1'b0;
+						m_data_wait <= 1'b1;
+						m_resp_wait <= 1'b0;
+					end
+				end
+
+				DATA_WAIT_M: begin
+					if (S_APB_PREADY) begin
+						m_state <= RESP_WAIT_M;
+						m_pready_out <= 1'b0;
+						m_data_wait <= 1'b0;
+						m_resp_wait <= 1'b1;
+					end
+				end
+
+				RESP_WAIT_M: begin
+					if (S_APB_PREADY) begin
+						m_state <= IDLE_M;
+						m_psel <= 1'b0;
+						m_penable <= 1'b0;
+						m_pready_out <= 1'b1;
+						m_resp_data_valid <= 1'b1;
+						m_resp_data <= S_APB_PRDATA;
+						m_resp_strb <= S_APB_PWSTRB;
+						m_resp_prot <= S_APB_PPROT;
+						m_resp_err <= S_APB_PSLVERR;
+						m_req_pending <= 1'b0;
+					end
+				end
+			endcase
+		end
+	end
+
+	assign M_APB_PREADY = m_pready_out;
+	assign M_APB_PSLVERR = m_pslverr_out;
+	assign M_APB_PRDATA = m_resp_data_valid ? m_resp_data : 0;
+	assign M_APB_PSEL = m_psel;
+	assign M_APB_PENABLE = m_penable;
+	assign M_APB_PWRITE = m_pwrite;
+	assign M_APB_PADDR = m_paddr_valid ? m_paddr : 0;
+	assign M_APB_PWDATA = m_pwrite_data_valid ? m_pwrite_data : 0;
+	assign M_APB_PWSTRB = m_pwrite_data_valid ? m_pwrite_strb : 0;
+	assign M_APB_PPROT = m_pprot;
+
+	// Clock Domain Crossing: Slave -> Master
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			s_to_m_psel <= 1'b0;
+			s_to_m_penable <= 1'b0;
+			s_to_m_pwrite <= 1'b0;
+			s_to_m_paddr <= 0;
+			s_to_m_pwrite_data_valid <= 1'b0;
+			s_to_m_pwrite_data <= 0;
+			s_to_m_pwrite_strb <= 0;
+			s_to_m_pprot <= 0;
+			s_to_m_pready <= 1'b1;
+			s_to_m_pslverr <= 1'b0;
+			s_to_m_resp_data_valid <= 1'b0;
+			s_to_m_resp_data <= 0;
+			s_to_m_resp_strb <= 0;
+			s_to_m_resp_prot <= 0;
+			s_to_m_resp_err <= 1'b0;
+		end else begin
+			s_to_m_psel <= s_psel;
+			s_to_m_penable <= s_penable;
+			s_to_m_pwrite <= s_pwrite;
+			s_to_m_paddr <= s_paddr;
+			s_to_m_pwrite_data_valid <= s_pwrite_data_valid;
+			s_to_m_pwrite_data <= s_pwrite_data;
+			s_to_m_pwrite_strb <= s_pwrite_strb;
+			s_to_m_pprot <= s_pprot;
+			s_to_m_pready <= 1'b1;
+			s_to_m_pslverr <= s_pslverr_out;
+			s_to_m_resp_data_valid <= s_resp_data_valid;
+			s_to_m_resp_data <= s_resp_data;
+			s_to_m_resp_strb <= s_resp_strb;
+			s_to_m_resp_prot <= s_resp_prot;
+			s_to_m_resp_err <= s_resp_err;
+		end
+	end
+
+	// Clock Domain Crossing: Master -> Slave
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_to_s_psel <= 1'b0;
+			m_to_s_penable <= 1'b0;
+			m_to_s_pwrite <= 1'b0;
+			m_to_s_paddr <= 0;
+			m_to_s_pwrite_data_valid <= 1'b0;
+			m_to_s_pwrite_data <= 0;
+			m_to_s_pwrite_strb <= 0;
+			m_to_s_pprot <= 0;
+			m_to_s_pready <= 1'b1;
+			m_to_s_pslverr <= 1'b0;
+			m_to_s_resp_data_valid <= 1'b0;
+			m_to_s_resp_data <= 0;
+			m_to_s_resp_strb <= 0;
+			m_to_s_resp_prot <= 0;
+			m_to_s_resp_err <= 1'b0;
+		end else begin
+			m_to_s_psel <= m_psel;
+			m_to_s_penable <= m_penable;
+			m_to_s_pwrite <= m_pwrite;
+			m_to_s_paddr <= m_paddr;
+			m_to_s_pwrite_data_valid <= m_pwrite_data_valid;
+			m_to_s_pwrite_data <= m_pwrite_data;
+			m_to_s_pwrite_strb <= m_pwrite_strb;
+			m_to_s_pprot <= m_pprot;
+			m_to_s_pready <= 1'b1;
+			m_to_s_pslverr <= m_pslverr_out;
+			m_to_s_resp_data_valid <= m_resp_data_valid;
+			m_to_s_resp_data <= m_resp_data;
+			m_to_s_resp_strb <= m_resp_strb;
+			m_to_s_resp_prot <= m_resp_prot;
+			m_to_s_resp_err <= m_resp_err;
+		end
+	end
+
+	// Cross-domain handshake logic
+	// Slave waits for Master ready, Master waits for Slave ready
+	// We use a simple FIFO-like approach with state machines to handle the crossing
+	// Since the requirement is to preserve request while master waits, we need to track the pending transaction
+	
+	// Slave Side: Wait for Master Ready
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_cross_m_ready <= 1'b1;
+		end else begin
+			s_cross_m_ready <= M_APB_PREADY;
+		end
+	end
+
+	// Master Side: Wait for Slave Ready
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_cross_s_ready <= 1'b1;
+		end else begin
+			m_cross_s_ready <= S_APB_PREADY;
+		end
+	end
+
+	// Logic to drive the cross-domain signals based on the state machines
+	// This part is integrated into the state machines above to ensure proper sequencing
+	
+	// Final output assignments for cross-domain signals
+	assign M_APB_PSEL = m_to_s_psel;
+	assign M_APB_PENABLE = m_to_s_penable;
+	assign M_APB_PWRITE = m_to_s_pwrite;
+	assign M_APB_PADDR = m_to_s_paddr;
+	assign M_APB_PWDATA = m_to_s_pwrite_data_valid ? m_to_s_pwrite_data : 0;
+	assign M_APB_PWSTRB = m_to_s_pwrite_data_valid ? m_to_s_pwrite_strb : 0;
+	assign M_APB_PPROT = m_to_s_pprot;
+	assign S_APB_PRDATA = s_to_m_resp_data_valid ? s_to_m_resp_data : 0;
+	assign S_APB_PSLVERR = s_to_m_resp_err;
+	assign S_APB_PREADY = s_cross_m_ready;
+	assign M_APB_PREADY = m_cross_s_ready;
+
+endmodule
+```<|im_end|>

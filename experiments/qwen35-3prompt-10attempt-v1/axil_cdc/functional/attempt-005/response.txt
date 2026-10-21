@@ -1,0 +1,532 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ------------------------------------------------------------------------
+    // Internal Signals
+    // ------------------------------------------------------------------------
+    wire s_aw_valid, s_w_valid, s_ar_valid, s_r_valid;
+    wire s_aw_ready, s_w_ready, s_ar_ready, s_r_ready;
+    wire s_b_valid, s_r_valid_out;
+    wire m_aw_valid, m_w_valid, m_ar_valid, m_r_valid;
+    wire m_aw_ready, m_w_ready, m_ar_ready, m_r_ready;
+    wire m_b_valid, m_r_valid_in;
+
+    reg   s_aw_addr, s_aw_prot;
+    reg   s_w_data, s_w_strb;
+    reg   s_ar_addr, s_ar_prot;
+    reg   s_b_resp;
+    reg   s_r_data, s_r_resp;
+
+    reg   m_aw_addr, m_aw_prot;
+    reg   m_w_data, m_w_strb;
+    reg   m_ar_addr, m_ar_prot;
+    reg   m_b_resp;
+    reg   m_r_data, m_r_resp;
+
+    // CDC State Machines for Write Address
+    reg [1:0] s_aw_state, m_aw_state;
+    reg       s_aw_cdc_valid, m_aw_cdc_valid;
+    reg       s_aw_cdc_ready, m_aw_cdc_ready;
+
+    // CDC State Machines for Write Data
+    reg [1:0] s_w_state, m_w_state;
+    reg       s_w_cdc_valid, m_w_cdc_valid;
+    reg       s_w_cdc_ready, m_w_cdc_ready;
+
+    // CDC State Machines for Read Address
+    reg [1:0] s_ar_state, m_ar_state;
+    reg       s_ar_cdc_valid, m_ar_cdc_valid;
+    reg       s_ar_cdc_ready, m_ar_cdc_ready;
+
+    // CDC State Machines for Read Response
+    reg [1:0] s_r_state, m_r_state;
+    reg       s_r_cdc_valid, m_r_cdc_valid;
+    reg       s_r_cdc_ready, m_r_cdc_ready;
+
+    // CDC State Machines for Write Response
+    reg [1:0] s_b_state, m_b_state;
+    reg       s_b_cdc_valid, m_b_cdc_valid;
+    reg       s_b_cdc_ready, m_b_cdc_ready;
+
+    // ------------------------------------------------------------------------
+    // Write Address Channel
+    // ------------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_aw_state <= 2'b00;
+            s_aw_cdc_valid <= 1'b0;
+            s_aw_cdc_ready <= 1'b0;
+        end else begin
+            case (s_aw_state)
+                2'b00: begin // Idle
+                    s_aw_cdc_valid <= 1'b0;
+                    s_aw_cdc_ready <= 1'b1;
+                    if (s_axil_awvalid && s_axil_awready)
+                        s_aw_state <= 2'b01;
+                end
+                2'b01: begin // Validating
+                    s_aw_cdc_valid <= 1'b1;
+                    s_aw_cdc_ready <= m_axil_awready;
+                    if (m_axil_awready)
+                        s_aw_state <= 2'b10;
+                end
+                2'b10: begin // Forwarding
+                    s_aw_cdc_valid <= 1'b0;
+                    s_aw_cdc_ready <= 1'b1;
+                    if (m_axil_awready)
+                        s_aw_state <= 2'b00;
+                end
+                default: begin
+                    s_aw_state <= 2'b00;
+                    s_aw_cdc_valid <= 1'b0;
+                    s_aw_cdc_ready <= 1'b1;
+                end
+            endcase
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_aw_state <= 2'b00;
+            m_aw_cdc_valid <= 1'b0;
+            m_aw_cdc_ready <= 1'b0;
+        end else begin
+            case (m_aw_state)
+                2'b00: begin // Idle
+                    m_aw_cdc_valid <= 1'b0;
+                    m_aw_cdc_ready <= 1'b1;
+                    if (s_axil_awvalid && s_axil_awready)
+                        m_aw_state <= 2'b01;
+                end
+                2'b01: begin // Validating
+                    m_aw_cdc_valid <= 1'b1;
+                    m_aw_cdc_ready <= s_axil_awready;
+                    if (s_axil_awready)
+                        m_aw_state <= 2'b10;
+                end
+                2'b10: begin // Forwarding
+                    m_aw_cdc_valid <= 1'b0;
+                    m_aw_cdc_ready <= 1'b1;
+                    if (s_axil_awready)
+                        m_aw_state <= 2'b00;
+                end
+                default: begin
+                    m_aw_state <= 2'b00;
+                    m_aw_cdc_valid <= 1'b0;
+                    m_aw_cdc_ready <= 1'b1;
+                end
+            endcase
+        end
+    end
+
+    assign s_axil_awready = s_aw_cdc_ready;
+    assign m_axil_awready = m_aw_cdc_ready;
+    assign s_axil_awvalid = s_aw_cdc_valid;
+    assign m_axil_awvalid = m_aw_cdc_valid;
+    assign s_aw_addr = s_axil_awaddr;
+    assign s_aw_prot = s_axil_awprot;
+    assign m_aw_addr = s_aw_addr;
+    assign m_aw_prot = s_aw_prot;
+
+    // ------------------------------------------------------------------------
+    // Write Data Channel
+    // ------------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_w_state <= 2'b00;
+            s_w_cdc_valid <= 1'b0;
+            s_w_cdc_ready <= 1'b0;
+        end else begin
+            case (s_w_state)
+                2'b00: begin // Idle
+                    s_w_cdc_valid <= 1'b0;
+                    s_w_cdc_ready <= 1'b1;
+                    if (s_axil_wvalid && s_axil_wready)
+                        s_w_state <= 2'b01;
+                end
+                2'b01: begin // Validating
+                    s_w_cdc_valid <= 1'b1;
+                    s_w_cdc_ready <= m_axil_wready;
+                    if (m_axil_wready)
+                        s_w_state <= 2'b10;
+                end
+                2'b10: begin // Forwarding
+                    s_w_cdc_valid <= 1'b0;
+                    s_w_cdc_ready <= 1'b1;
+                    if (m_axil_wready)
+                        s_w_state <= 2'b00;
+                end
+                default: begin
+                    s_w_state <= 2'b00;
+                    s_w_cdc_valid <= 1'b0;
+                    s_w_cdc_ready <= 1'b1;
+                end
+            endcase
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_w_state <= 2'b00;
+            m_w_cdc_valid <= 1'b0;
+            m_w_cdc_ready <= 1'b0;
+        end else begin
+            case (m_w_state)
+                2'b00: begin // Idle
+                    m_w_cdc_valid <= 1'b0;
+                    m_w_cdc_ready <= 1'b1;
+                    if (s_axil_wvalid && s_axil_wready)
+                        m_w_state <= 2'b01;
+                end
+                2'b01: begin // Validating
+                    m_w_cdc_valid <= 1'b1;
+                    m_w_cdc_ready <= s_axil_wready;
+                    if (s_axil_wready)
+                        m_w_state <= 2'b10;
+                end
+                2'b10: begin // Forwarding
+                    m_w_cdc_valid <= 1'b0;
+                    m_w_cdc_ready <= 1'b1;
+                    if (s_axil_wready)
+                        m_w_state <= 2'b00;
+                end
+                default: begin
+                    m_w_state <= 2'b00;
+                    m_w_cdc_valid <= 1'b0;
+                    m_w_cdc_ready <= 1'b1;
+                end
+            endcase
+        end
+    end
+
+    assign s_axil_wready = s_w_cdc_ready;
+    assign m_axil_wready = m_w_cdc_ready;
+    assign s_axil_wvalid = s_w_cdc_valid;
+    assign m_axil_wvalid = m_w_cdc_valid;
+    assign s_w_data = s_axil_wdata;
+    assign s_w_strb = s_axil_wstrb;
+    assign m_w_data = s_w_data;
+    assign m_w_strb = s_w_strb;
+
+    // ------------------------------------------------------------------------
+    // Write Response Channel
+    // ------------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_b_state <= 2'b00;
+            s_b_cdc_valid <= 1'b0;
+            s_b_cdc_ready <= 1'b0;
+        end else begin
+            case (s_b_state)
+                2'b00: begin // Idle
+                    s_b_cdc_valid <= 1'b0;
+                    s_b_cdc_ready <= 1'b1;
+                    if (m_axil_bvalid && m_axil_bready)
+                        s_b_state <= 2'b01;
+                end
+                2'b01: begin // Validating
+                    s_b_cdc_valid <= 1'b1;
+                    s_b_cdc_ready <= s_axil_bready;
+                    if (s_axil_bready)
+                        s_b_state <= 2'b10;
+                end
+                2'b10: begin // Forwarding
+                    s_b_cdc_valid <= 1'b0;
+                    s_b_cdc_ready <= 1'b1;
+                    if (s_axil_bready)
+                        s_b_state <= 2'b00;
+                end
+                default: begin
+                    s_b_state <= 2'b00;
+                    s_b_cdc_valid <= 1'b0;
+                    s_b_cdc_ready <= 1'b1;
+                end
+            endcase
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_b_state <= 2'b00;
+            m_b_cdc_valid <= 1'b0;
+            m_b_cdc_ready <= 1'b0;
+        end else begin
+            case (m_b_state)
+                2'b00: begin // Idle
+                    m_b_cdc_valid <= 1'b0;
+                    m_b_cdc_ready <= 1'b1;
+                    if (s_axil_bvalid && s_axil_bready)
+                        m_b_state <= 2'b01;
+                end
+                2'b01: begin // Validating
+                    m_b_cdc_valid <= 1'b1;
+                    m_b_cdc_ready <= m_axil_bready;
+                    if (m_axil_bready)
+                        m_b_state <= 2'b10;
+                end
+                2'b10: begin // Forwarding
+                    m_b_cdc_valid <= 1'b0;
+                    m_b_cdc_ready <= 1'b1;
+                    if (m_axil_bready)
+                        m_b_state <= 2'b00;
+                end
+                default: begin
+                    m_b_state <= 2'b00;
+                    m_b_cdc_valid <= 1'b0;
+                    m_b_cdc_ready <= 1'b1;
+                end
+            endcase
+        end
+    end
+
+    assign s_axil_bvalid = s_b_cdc_valid;
+    assign m_axil_bready = m_b_cdc_ready;
+    assign s_axil_bready = s_b_cdc_ready;
+    assign m_axil_bvalid = m_b_cdc_valid;
+    assign s_b_resp = m_axil_bresp;
+    assign m_b_resp = s_b_resp;
+
+    // ------------------------------------------------------------------------
+    // Read Address Channel
+    // ------------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_ar_state <= 2'b00;
+            s_ar_cdc_valid <= 1'b0;
+            s_ar_cdc_ready <= 1'b0;
+        end else begin
+            case (s_ar_state)
+                2'b00: begin // Idle
+                    s_ar_cdc_valid <= 1'b0;
+                    s_ar_cdc_ready <= 1'b1;
+                    if (s_axil_arvalid && s_axil_arready)
+                        s_ar_state <= 2'b01;
+                end
+                2'b01: begin // Validating
+                    s_ar_cdc_valid <= 1'b1;
+                    s_ar_cdc_ready <= m_axil_arready;
+                    if (m_axil_arready)
+                        s_ar_state <= 2'b10;
+                end
+                2'b10: begin // Forwarding
+                    s_ar_cdc_valid <= 1'b0;
+                    s_ar_cdc_ready <= 1'b1;
+                    if (m_axil_arready)
+                        s_ar_state <= 2'b00;
+                end
+                default: begin
+                    s_ar_state <= 2'b00;
+                    s_ar_cdc_valid <= 1'b0;
+                    s_ar_cdc_ready <= 1'b1;
+                end
+            endcase
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_ar_state <= 2'b00;
+            m_ar_cdc_valid <= 1'b0;
+            m_ar_cdc_ready <= 1'b0;
+        end else begin
+            case (m_ar_state)
+                2'b00: begin // Idle
+                    m_ar_cdc_valid <= 1'b0;
+                    m_ar_cdc_ready <= 1'b1;
+                    if (s_axil_arvalid && s_axil_arready)
+                        m_ar_state <= 2'b01;
+                end
+                2'b01: begin // Validating
+                    m_ar_cdc_valid <= 1'b1;
+                    m_ar_cdc_ready <= s_axil_arready;
+                    if (s_axil_arready)
+                        m_ar_state <= 2'b10;
+                end
+                2'b10: begin // Forwarding
+                    m_ar_cdc_valid <= 1'b0;
+                    m_ar_cdc_ready <= 1'b1;
+                    if (s_axil_arready)
+                        m_ar_state <= 2'b00;
+                end
+                default: begin
+                    m_ar_state <= 2'b00;
+                    m_ar_cdc_valid <= 1'b0;
+                    m_ar_cdc_ready <= 1'b1;
+                end
+            endcase
+        end
+    end
+
+    assign s_axil_arready = s_ar_cdc_ready;
+    assign m_axil_arready = m_ar_cdc_ready;
+    assign s_axil_arvalid = s_ar_cdc_valid;
+    assign m_axil_arvalid = m_ar_cdc_valid;
+    assign s_ar_addr = s_axil_araddr;
+    assign s_ar_prot = s_axil_arprot;
+    assign m_ar_addr = s_ar_addr;
+    assign m_ar_prot = s_ar_prot;
+
+    // ------------------------------------------------------------------------
+    // Read Response Channel
+    // ------------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_r_state <= 2'b00;
+            s_r_cdc_valid <= 1'b0;
+            s_r_cdc_ready <= 1'b0;
+        end else begin
+            case (s_r_state)
+                2'b00: begin // Idle
+                    s_r_cdc_valid <= 1'b0;
+                    s_r_cdc_ready <= 1'b1;
+                    if (m_axil_rvalid && m_axil_rready)
+                        s_r_state <= 2'b01;
+                end
+                2'b01: begin // Validating
+                    s_r_cdc_valid <= 1'b1;
+                    s_r_cdc_ready <= s_axil_rready;
+                    if (s_axil_rready)
+                        s_r_state <= 2'b10;
+                end
+                2'b10: begin // Forwarding
+                    s_r_cdc_valid <= 1'b0;
+                    s_r_cdc_ready <= 1'b1;
+                    if (s_axil_rready)
+                        s_r_state <= 2'b00;
+                end
+                default: begin
+                    s_r_state <= 2'b00;
+                    s_r_cdc_valid <= 1'b0;
+                    s_r_cdc_ready <= 1'b1;
+                end
+            endcase
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_r_state <= 2'b00;
+            m_r_cdc_valid <= 1'b0;
+            m_r_cdc_ready <= 1'b0;
+        end else begin
+            case (m_r_state)
+                2'b00: begin // Idle
+                    m_r_cdc_valid <= 1'b0;
+                    m_r_cdc_ready <= 1'b1;
+                    if (s_axil_rvalid && s_axil_rready)
+                        m_r_state <= 2'b01;
+                end
+                2'b01: begin // Validating
+                    m_r_cdc_valid <= 1'b1;
+                    m_r_cdc_ready <= m_axil_rready;
+                    if (m_axil_rready)
+                        m_r_state <= 2'b10;
+                end
+                2'b10: begin // Forwarding
+                    m_r_cdc_valid <= 1'b0;
+                    m_r_cdc_ready <= 1'b1;
+                    if (m_axil_rready)
+                        m_r_state <= 2'b00;
+                end
+                default: begin
+                    m_r_state <= 2'b00;
+                    m_r_cdc_valid <= 1'b0;
+                    m_r_cdc_ready <= 1'b1;
+                end
+            endcase
+        end
+    end
+
+    assign s_axil_rvalid = s_r_cdc_valid;
+    assign m_axil_rready = m_r_cdc_ready;
+    assign s_axil_rready = s_r_cdc_ready;
+    assign m_axil_rvalid = m_r_cdc_valid;
+    assign s_r_data = m_axil_rdata;
+    assign s_r_resp = m_axil_rresp;
+    assign m_r_data = s_r_data;
+    assign m_r_resp = s_r_resp;
+
+    // ------------------------------------------------------------------------
+    // Output Assignments
+    // ------------------------------------------------------------------------
+    assign s_axil_awready = s_aw_cdc_ready;
+    assign s_axil_wready = s_w_cdc_ready;
+    assign s_axil_bresp = s_b_resp;
+    assign s_axil_bvalid = s_b_cdc_valid;
+    assign s_axil_arready = s_ar_cdc_ready;
+    assign s_axil_rdata = s_r_data;
+    assign s_axil_rresp = s_r_resp;
+    assign s_axil_rvalid = s_r_cdc_valid;
+
+    assign m_axil_awaddr = m_aw_addr;
+    assign m_axil_awprot = m_aw_prot;
+    assign m_axil_awvalid = m_aw_cdc_valid;
+    assign m_axil_wdata = m_w_data;
+    assign m_axil_wstrb = m_w_strb;
+    assign m_axil_wvalid = m_w_cdc_valid;
+    assign m_axil_bready = m_b_cdc_ready;
+    assign m_axil_araddr = m_ar_addr;
+    assign m_axil_arprot = m_ar_prot;
+    assign m_axil_arvalid = m_ar_cdc_valid;
+    assign m_axil_rdata = m_r_data;
+    assign m_axil_rresp = m_r_resp;
+    assign m_axil_rvalid = m_r_cdc_valid;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

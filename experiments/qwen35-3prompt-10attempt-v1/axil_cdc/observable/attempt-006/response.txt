@@ -1,0 +1,639 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ------------------------------------------------------------------
+    // Internal Signals
+    // ------------------------------------------------------------------
+    wire [ADDR_WIDTH-1:0] s_awaddr, s_araddr;
+    wire [2:0]            s_awprot, s_arprot;
+    wire [DATA_WIDTH-1:0] s_wdata, s_rdata;
+    wire [STRB_WIDTH-1:0] s_wstrb;
+    wire                  s_awvalid, s_arvalid, s_wvalid, s_rvalid;
+    wire                  s_awready, s_arready, s_wready, s_rready;
+    wire                  s_bvalid, s_bready;
+    wire [1:0]            s_bresp, s_rresp;
+
+    wire                  m_awvalid, m_arvalid, m_wvalid, m_rvalid;
+    wire                  m_awready, m_arready, m_wready, m_rready;
+    wire                  m_bvalid, m_bready;
+    wire [1:0]            m_bresp, m_rresp;
+    wire [ADDR_WIDTH-1:0] m_awaddr, m_araddr;
+    wire [2:0]            m_awprot, m_arprot;
+    wire [DATA_WIDTH-1:0] m_wdata, m_rdata;
+    wire [STRB_WIDTH-1:0] m_wstrb;
+
+    // CDC Registers for Slave -> Master (Write Data, Read Data, Responses)
+    reg [DATA_WIDTH-1:0]  m_wdata_cdc;
+    reg [STRB_WIDTH-1:0]  m_wstrb_cdc;
+    reg [DATA_WIDTH-1:0]  m_rdata_cdc;
+    reg [1:0]            m_bresp_cdc;
+    reg [1:0]            m_rresp_cdc;
+    reg                  m_wvalid_cdc;
+    reg                  m_rvalid_cdc;
+    reg                  m_bvalid_cdc;
+    reg                  m_awvalid_cdc;
+    reg                  m_arvalid_cdc;
+    reg [ADDR_WIDTH-1:0] m_awaddr_cdc;
+    reg [2:0]            m_awprot_cdc;
+    reg [ADDR_WIDTH-1:0] m_araddr_cdc;
+    reg [2:0]            m_arprot_cdc;
+
+    // CDC Registers for Master -> Slave (Addresses, Protocols, Valid)
+    reg [ADDR_WIDTH-1:0] s_awaddr_cdc;
+    reg [2:0]            s_awprot_cdc;
+    reg                  s_awvalid_cdc;
+    reg [ADDR_WIDTH-1:0] s_araddr_cdc;
+    reg [2:0]            s_arprot_cdc;
+    reg                  s_arvalid_cdc;
+    reg [DATA_WIDTH-1:0] s_wdata_cdc;
+    reg [STRB_WIDTH-1:0] s_wstrb_cdc;
+    reg                  s_wvalid_cdc;
+    reg [DATA_WIDTH-1:0] s_rdata_cdc;
+    reg [1:0]            s_rresp_cdc;
+    reg                  s_rvalid_cdc;
+    reg [1:0]            s_bresp_cdc;
+    reg                  s_bvalid_cdc;
+
+    // State Machine for Write Handshake (Slave -> Master)
+    reg [2:0] state_write;
+    parameter IDLE_W = 3'd0, 
+               AW_VALID_W = 3'd1, 
+               W_VALID_W = 3'd2, 
+               B_VALID_W = 3'd3;
+
+    // State Machine for Read Handshake (Slave -> Master)
+    reg [2:0] state_read;
+    parameter IDLE_R = 3'd0, 
+               AR_VALID_R = 3'd1, 
+               R_VALID_R = 3'd2, 
+               B_VALID_R = 3'd3;
+
+    // State Machine for Master -> Slave Write Handshake
+    reg [2:0] state_m_write;
+    parameter IDLE_MW = 3'd0, 
+               AW_VALID_MW = 3'd1, 
+               W_VALID_MW = 3'd2, 
+               B_VALID_MW = 3'd3;
+
+    // State Machine for Master -> Slave Read Handshake
+    reg [2:0] state_m_read;
+    parameter IDLE_MR = 3'd0, 
+               AR_VALID_MR = 3'd1, 
+               R_VALID_MR = 3'd2, 
+               B_VALID_MR = 3'd3;
+
+    // ------------------------------------------------------------------
+    // CDC Logic: Slave -> Master (Write Path)
+    // ------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_awaddr_cdc <= {ADDR_WIDTH{1'b0}};
+            s_awprot_cdc <= 3'd0;
+            s_awvalid_cdc <= 1'b0;
+            s_wdata_cdc <= {DATA_WIDTH{1'b0}};
+            s_wstrb_cdc <= {STRB_WIDTH{1'b0}};
+            s_wvalid_cdc <= 1'b0;
+        end else begin
+            s_awaddr_cdc <= s_awaddr;
+            s_awprot_cdc <= s_awprot;
+            s_wdata_cdc  <= s_wdata;
+            s_wstrb_cdc  <= s_wstrb;
+            if (s_awvalid && s_awready)
+                s_awvalid_cdc <= 1'b1;
+            else if (s_wvalid && s_wready)
+                s_awvalid_cdc <= 1'b0;
+            else
+                s_awvalid_cdc <= s_awvalid;
+            
+            if (s_wvalid && s_wready)
+                s_wvalid_cdc <= 1'b1;
+            else
+                s_wvalid_cdc <= s_wvalid;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_awvalid_cdc <= 1'b0;
+            m_wvalid_cdc  <= 1'b0;
+            m_awaddr_cdc  <= {ADDR_WIDTH{1'b0}};
+            m_awprot_cdc  <= 3'd0;
+            m_wdata_cdc   <= {DATA_WIDTH{1'b0}};
+            m_wstrb_cdc   <= {STRB_WIDTH{1'b0}};
+        end else begin
+            m_awvalid_cdc <= s_awvalid_cdc;
+            m_wvalid_cdc  <= s_wvalid_cdc;
+            m_awaddr_cdc  <= s_awaddr_cdc;
+            m_awprot_cdc  <= s_awprot_cdc;
+            m_wdata_cdc   <= s_wdata_cdc;
+            m_wstrb_cdc   <= s_wstrb_cdc;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // CDC Logic: Slave -> Master (Read Path)
+    // ------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_araddr_cdc <= {ADDR_WIDTH{1'b0}};
+            s_arprot_cdc <= 3'd0;
+            s_arvalid_cdc <= 1'b0;
+            s_rdata_cdc <= {DATA_WIDTH{1'b0}};
+            s_rresp_cdc <= 2'd0;
+            s_rvalid_cdc <= 1'b0;
+        end else begin
+            s_araddr_cdc <= s_araddr;
+            s_arprot_cdc <= s_arprot;
+            if (s_arvalid && s_arready)
+                s_arvalid_cdc <= 1'b1;
+            else if (s_rvalid && s_rready)
+                s_arvalid_cdc <= 1'b0;
+            else
+                s_arvalid_cdc <= s_arvalid;
+            
+            if (s_rvalid && s_rready) begin
+                s_rdata_cdc <= s_rdata;
+                s_rresp_cdc <= s_rresp;
+                s_rvalid_cdc <= 1'b1;
+            end else begin
+                s_rdata_cdc <= s_rdata;
+                s_rresp_cdc <= s_rresp;
+                s_rvalid_cdc <= s_rvalid;
+            end
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_arvalid_cdc <= 1'b0;
+            m_rvalid_cdc  <= 1'b0;
+            m_araddr_cdc  <= {ADDR_WIDTH{1'b0}};
+            m_arprot_cdc  <= 3'd0;
+            m_rdata_cdc   <= {DATA_WIDTH{1'b0}};
+            m_rresp_cdc   <= 2'd0;
+        end else begin
+            m_arvalid_cdc <= s_arvalid_cdc;
+            m_rvalid_cdc  <= s_rvalid_cdc;
+            m_araddr_cdc  <= s_araddr_cdc;
+            m_arprot_cdc  <= s_arprot_cdc;
+            m_rdata_cdc   <= s_rdata_cdc;
+            m_rresp_cdc   <= s_rresp_cdc;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // CDC Logic: Master -> Slave (Write Response Path)
+    // ------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_bresp_cdc <= 2'd0;
+            s_bvalid_cdc <= 1'b0;
+        end else begin
+            if (m_bvalid && m_bready)
+                s_bvalid_cdc <= 1'b1;
+            else
+                s_bvalid_cdc <= m_bvalid;
+            s_bresp_cdc <= m_bresp;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_bready <= 1'b0;
+        end else begin
+            m_bready <= s_bvalid_cdc;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // CDC Logic: Master -> Slave (Read Response Path)
+    // ------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_rdata_cdc <= {DATA_WIDTH{1'b0}};
+            s_rresp_cdc <= 2'd0;
+            s_rvalid_cdc <= 1'b0;
+        end else begin
+            if (m_rvalid && m_rready)
+                s_rvalid_cdc <= 1'b1;
+            else
+                s_rvalid_cdc <= m_rvalid;
+            s_rdata_cdc <= m_rdata;
+            s_rresp_cdc <= m_rresp;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rready <= 1'b0;
+        end else begin
+            m_rready <= s_rvalid_cdc;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // State Machine: Write Handshake (Slave -> Master)
+    // ------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            state_write <= IDLE_W;
+        end else begin
+            case (state_write)
+                IDLE_W: begin
+                    if (s_awvalid && s_awready)
+                        state_write <= AW_VALID_W;
+                    else
+                        state_write <= IDLE_W;
+                end
+                AW_VALID_W: begin
+                    if (s_wvalid && s_wready)
+                        state_write <= W_VALID_W;
+                    else if (s_awvalid && s_awready)
+                        state_write <= AW_VALID_W;
+                    else
+                        state_write <= IDLE_W;
+                end
+                W_VALID_W: begin
+                    if (s_bvalid && s_bready)
+                        state_write <= B_VALID_W;
+                    else if (s_wvalid && s_wready)
+                        state_write <= W_VALID_W;
+                    else if (s_awvalid && s_awready)
+                        state_write <= AW_VALID_W;
+                    else
+                        state_write <= IDLE_W;
+                end
+                B_VALID_W: begin
+                    if (s_bvalid && s_bready)
+                        state_write <= IDLE_W;
+                    else if (s_bvalid)
+                        state_write <= B_VALID_W;
+                    else
+                        state_write <= IDLE_W;
+                end
+                default: state_write <= IDLE_W;
+            endcase
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // State Machine: Read Handshake (Slave -> Master)
+    // ------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            state_read <= IDLE_R;
+        end else begin
+            case (state_read)
+                IDLE_R: begin
+                    if (s_arvalid && s_arready)
+                        state_read <= AR_VALID_R;
+                    else
+                        state_read <= IDLE_R;
+                end
+                AR_VALID_R: begin
+                    if (s_rvalid && s_rready)
+                        state_read <= R_VALID_R;
+                    else if (s_arvalid && s_arready)
+                        state_read <= AR_VALID_R;
+                    else
+                        state_read <= IDLE_R;
+                end
+                R_VALID_R: begin
+                    if (s_bvalid && s_bready)
+                        state_read <= B_VALID_R;
+                    else if (s_rvalid && s_rready)
+                        state_read <= R_VALID_R;
+                    else if (s_arvalid && s_arready)
+                        state_read <= AR_VALID_R;
+                    else
+                        state_read <= IDLE_R;
+                end
+                B_VALID_R: begin
+                    if (s_bvalid && s_bready)
+                        state_read <= IDLE_R;
+                    else if (s_bvalid)
+                        state_read <= B_VALID_R;
+                    else
+                        state_read <= IDLE_R;
+                end
+                default: state_read <= IDLE_R;
+            endcase
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // State Machine: Write Handshake (Master -> Slave)
+    // ------------------------------------------------------------------
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            state_m_write <= IDLE_MW;
+        end else begin
+            case (state_m_write)
+                IDLE_MW: begin
+                    if (m_awvalid && m_awready)
+                        state_m_write <= AW_VALID_MW;
+                    else
+                        state_m_write <= IDLE_MW;
+                end
+                AW_VALID_MW: begin
+                    if (m_wvalid && m_wready)
+                        state_m_write <= W_VALID_MW;
+                    else if (m_awvalid && m_awready)
+                        state_m_write <= AW_VALID_MW;
+                    else
+                        state_m_write <= IDLE_MW;
+                end
+                W_VALID_MW: begin
+                    if (m_bvalid && m_bready)
+                        state_m_write <= B_VALID_MW;
+                    else if (m_wvalid && m_wready)
+                        state_m_write <= W_VALID_MW;
+                    else if (m_awvalid && m_awready)
+                        state_m_write <= AW_VALID_MW;
+                    else
+                        state_m_write <= IDLE_MW;
+                end
+                B_VALID_MW: begin
+                    if (m_bvalid && m_bready)
+                        state_m_write <= IDLE_MW;
+                    else if (m_bvalid)
+                        state_m_write <= B_VALID_MW;
+                    else
+                        state_m_write <= IDLE_MW;
+                end
+                default: state_m_write <= IDLE_MW;
+            endcase
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // State Machine: Read Handshake (Master -> Slave)
+    // ------------------------------------------------------------------
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            state_m_read <= IDLE_MR;
+        end else begin
+            case (state_m_read)
+                IDLE_MR: begin
+                    if (m_arvalid && m_arready)
+                        state_m_read <= AR_VALID_MR;
+                    else
+                        state_m_read <= IDLE_MR;
+                end
+                AR_VALID_MR: begin
+                    if (m_rvalid && m_rready)
+                        state_m_read <= R_VALID_MR;
+                    else if (m_arvalid && m_arready)
+                        state_m_read <= AR_VALID_MR;
+                    else
+                        state_m_read <= IDLE_MR;
+                end
+                R_VALID_MR: begin
+                    if (m_bvalid && m_bready)
+                        state_m_read <= B_VALID_MR;
+                    else if (m_rvalid && m_rready)
+                        state_m_read <= R_VALID_MR;
+                    else if (m_arvalid && m_arready)
+                        state_m_read <= AR_VALID_MR;
+                    else
+                        state_m_read <= IDLE_MR;
+                end
+                B_VALID_MR: begin
+                    if (m_bvalid && m_bready)
+                        state_m_read <= IDLE_MR;
+                    else if (m_bvalid)
+                        state_m_read <= B_VALID_MR;
+                    else
+                        state_m_read <= IDLE_MR;
+                end
+                default: state_m_read <= IDLE_MR;
+            endcase
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Interface Connections
+    // ------------------------------------------------------------------
+
+    // Slave Interface
+    assign s_axil_awaddr = s_awaddr;
+    assign s_axil_awprot = s_awprot;
+    assign s_axil_awvalid = s_awvalid;
+    assign s_axil_awready = s_awready;
+    assign s_axil_wdata = s_wdata;
+    assign s_axil_wstrb = s_wstrb;
+    assign s_axil_wvalid = s_wvalid;
+    assign s_axil_wready = s_wready;
+    assign s_axil_bresp = s_bresp;
+    assign s_axil_bvalid = s_bvalid;
+    assign s_axil_bready = s_bready;
+    assign s_axil_araddr = s_araddr;
+    assign s_axil_arprot = s_arprot;
+    assign s_axil_arvalid = s_arvalid;
+    assign s_axil_arready = s_arready;
+    assign s_axil_rdata = s_rdata;
+    assign s_axil_rresp = s_rresp;
+    assign s_axil_rvalid = s_rvalid;
+    assign s_axil_rready = s_rready;
+
+    // Master Interface
+    assign m_axil_awaddr = m_awaddr;
+    assign m_axil_awprot = m_awprot;
+    assign m_axil_awvalid = m_awvalid;
+    assign m_axil_awready = m_awready;
+    assign m_axil_wdata = m_wdata;
+    assign m_axil_wstrb = m_wstrb;
+    assign m_axil_wvalid = m_wvalid;
+    assign m_axil_wready = m_wready;
+    assign m_axil_bresp = m_bresp;
+    assign m_axil_bvalid = m_bvalid;
+    assign m_axil_bready = m_bready;
+    assign m_axil_araddr = m_araddr;
+    assign m_axil_arprot = m_arprot;
+    assign m_axil_arvalid = m_arvalid;
+    assign m_axil_arready = m_arready;
+    assign m_axil_rdata = m_rdata;
+    assign m_axil_rresp = m_rresp;
+    assign m_axil_rvalid = m_rvalid;
+    assign m_axil_rready = m_rready;
+
+    // ------------------------------------------------------------------
+    // Internal Logic: Slave Side (Decode and Forward)
+    // ------------------------------------------------------------------
+    assign s_awready = (state_write == IDLE_W);
+    assign s_awvalid = s_awvalid_cdc;
+    assign s_awaddr = m_awaddr_cdc;
+    assign s_awprot = m_awprot_cdc;
+
+    assign s_wready = (state_write == AW_VALID_W);
+    assign s_wvalid = m_wvalid_cdc;
+    assign s_wdata = m_wdata_cdc;
+    assign s_wstrb = m_wstrb_cdc;
+
+    assign s_bready = (state_write == W_VALID_W);
+    assign s_bvalid = m_bvalid_cdc;
+    assign s_bresp = m_bresp_cdc;
+
+    assign s_arready = (state_read == IDLE_R);
+    assign s_arvalid = s_arvalid_cdc;
+    assign s_araddr = m_araddr_cdc;
+    assign s_arprot = m_arprot_cdc;
+
+    assign s_rready = (state_read == AR_VALID_R);
+    assign s_rvalid = m_rvalid_cdc;
+    assign s_rdata = m_rdata_cdc;
+    assign s_rresp = m_rresp_cdc;
+
+    assign s_bvalid = m_bvalid_cdc;
+    assign s_bresp = m_bresp_cdc;
+
+    // ------------------------------------------------------------------
+    // Internal Logic: Master Side (Decode and Forward)
+    // ------------------------------------------------------------------
+    assign m_awready = (state_m_write == IDLE_MW);
+    assign m_awvalid = m_awvalid_cdc;
+    assign m_awaddr = s_awaddr_cdc;
+    assign m_awprot = s_awprot_cdc;
+
+    assign m_wready = (state_m_write == AW_VALID_MW);
+    assign m_wvalid = s_wvalid_cdc;
+    assign m_wdata = s_wdata_cdc;
+    assign m_wstrb = s_wstrb_cdc;
+
+    assign m_bready = (state_m_write == W_VALID_MW);
+    assign m_bvalid = s_bvalid_cdc;
+    assign m_bresp = s_bresp_cdc;
+
+    assign m_arready = (state_m_read == IDLE_MR);
+    assign m_arvalid = m_arvalid_cdc;
+    assign m_araddr = s_araddr_cdc;
+    assign m_arprot = s_arprot_cdc;
+
+    assign m_rready = (state_m_read == AR_VALID_MR);
+    assign m_rvalid = s_rvalid_cdc;
+    assign m_rdata = s_rdata_cdc;
+    assign m_rresp = s_rresp_cdc;
+
+    // ------------------------------------------------------------------
+    // Internal Logic: Handshake Control
+    // ------------------------------------------------------------------
+    assign s_awready = (state_write == IDLE_W);
+    assign s_wready = (state_write == AW_VALID_W);
+    assign s_bready = (state_write == W_VALID_W);
+    assign s_arready = (state_read == IDLE_R);
+    assign s_rready = (state_read == AR_VALID_R);
+
+    assign m_awready = (state_m_write == IDLE_MW);
+    assign m_wready = (state_m_write == AW_VALID_MW);
+    assign m_bready = (state_m_write == W_VALID_MW);
+    assign m_arready = (state_m_read == IDLE_MR);
+    assign m_rready = (state_m_read == AR_VALID_MR);
+
+    // ------------------------------------------------------------------
+    // Final Output Assignments based on State Machines
+    // ------------------------------------------------------------------
+    
+    // Slave Side Outputs
+    assign s_axil_awready = (state_write == IDLE_W);
+    assign s_axil_wready = (state_write == AW_VALID_W);
+    assign s_axil_bready = (state_write == W_VALID_W);
+    assign s_axil_arready = (state_read == IDLE_R);
+    assign s_axil_rready = (state_read == AR_VALID_R);
+
+    assign s_axil_awvalid = s_awvalid_cdc;
+    assign s_axil_wvalid = m_wvalid_cdc;
+    assign s_axil_bvalid = m_bvalid_cdc;
+    assign s_axil_arvalid = s_arvalid_cdc;
+    assign s_axil_rvalid = m_rvalid_cdc;
+
+    assign s_axil_awaddr = m_awaddr_cdc;
+    assign s_axil_awprot = m_awprot_cdc;
+    assign s_axil_wdata = m_wdata_cdc;
+    assign s_axil_wstrb = m_wstrb_cdc;
+    assign s_axil_bresp = m_bresp_cdc;
+    assign s_axil_araddr = m_araddr_cdc;
+    assign s_axil_arprot = m_arprot_cdc;
+    assign s_axil_rdata = m_rdata_cdc;
+    assign s_axil_rresp = m_rresp_cdc;
+
+    // Master Side Outputs
+    assign m_axil_awready = (state_m_write == IDLE_MW);
+    assign m_axil_wready = (state_m_write == AW_VALID_MW);
+    assign m_axil_bready = (state_m_write == W_VALID_MW);
+    assign m_axil_arready = (state_m_read == IDLE_MR);
+    assign m_axil_rready = (state_m_read == AR_VALID_MR);
+
+    assign m_axil_awvalid = m_awvalid_cdc;
+    assign m_axil_wvalid = s_wvalid_cdc;
+    assign m_axil_bvalid = s_bvalid_cdc;
+    assign m_axil_arvalid = m_arvalid_cdc;
+    assign m_axil_rvalid = s_rvalid_cdc;
+
+    assign m_axil_awaddr = s_awaddr_cdc;
+    assign m_axil_awprot = s_awprot_cdc;
+    assign m_axil_wdata = s_wdata_cdc;
+    assign m_axil_wstrb = s_wstrb_cdc;
+    assign m_axil_bresp = s_bresp_cdc;
+    assign m_axil_araddr = s_araddr_cdc;
+    assign m_axil_arprot = s_arprot_cdc;
+    assign m_axil_rdata = s_rdata_cdc;
+    assign m_axil_rresp = s_rresp_cdc;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

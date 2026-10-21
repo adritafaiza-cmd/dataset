@@ -1,0 +1,344 @@
+```verilog
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  wire a_clk_i,
+    input  wire a_rst_ni,
+    input  wire a_clear_i,
+    output reg  a_clear_o,
+    input  wire a_clear_ack_i,
+    output reg  a_isolate_o,
+    input  wire a_isolate_ack_i,
+    input  wire b_clk_i,
+    input  wire b_rst_ni,
+    input  wire b_clear_i,
+    output reg  b_clear_o,
+    input  wire b_clear_ack_i,
+    output reg  b_isolate_o,
+    input  wire b_isolate_ack_i
+);
+
+    localparam STATE_IDLE = 2'b00;
+    localparam STATE_ISOLATING = 2'b01;
+    localparam STATE_CLEARING = 2'b10;
+    localparam STATE_DONE = 2'b11;
+
+    // State machine for the control logic (runs on a_clk_i)
+    // This state machine coordinates the handshake between domains.
+    // It tracks the request from both sides and ensures synchronization.
+    
+    reg [1:0] state_a;
+    reg [1:0] state_b;
+    
+    // Handshake signals for the state machine
+    reg a_req_clear;
+    reg b_req_clear;
+    reg a_req_isolate;
+    reg b_req_isolate;
+    reg a_req_clear_ack;
+    reg b_req_clear_ack;
+    reg a_req_isolate_ack;
+    reg b_req_isolate_ack;
+
+    // Synchronizers for inputs crossing from b to a
+    reg [SYNC_STAGES-1:0] b_req_clear_sync_a;
+    reg [SYNC_STAGES-1:0] b_req_isolate_sync_a;
+    reg [SYNC_STAGES-1:0] b_req_clear_ack_sync_a;
+    reg [SYNC_STAGES-1:0] b_req_isolate_ack_sync_a;
+
+    // Synchronizers for inputs crossing from a to b
+    reg [SYNC_STAGES-1:0] a_req_clear_sync_b;
+    reg [SYNC_STAGES-1:0] a_req_isolate_sync_b;
+    reg [SYNC_STAGES-1:0] a_req_clear_ack_sync_b;
+    reg [SYNC_STAGES-1:0] a_req_isolate_ack_sync_b;
+
+    // Synchronizers for outputs crossing from a to b (for state machine visibility)
+    reg [SYNC_STAGES-1:0] a_clear_o_sync_b;
+    reg [SYNC_STAGES-1:0] a_isolate_o_sync_b;
+    reg [SYNC_STAGES-1:0] b_clear_o_sync_a;
+    reg [SYNC_STAGES-1:0] b_isolate_o_sync_a;
+
+    // State Machine Logic for Domain A
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            state_a <= STATE_IDLE;
+            a_clear_o <= 1'b0;
+            a_isolate_o <= 1'b0;
+        end else begin
+            case (state_a)
+                STATE_IDLE: begin
+                    // Check if we need to start the sequence
+                    // We need both a_clear_i and b_req_clear to be high to start
+                    // Actually, per spec: "When either side requests clear... first raise both isolate"
+                    // But we must wait for peer completion before releasing.
+                    // Let's interpret the sequence strictly:
+                    // 1. Request detected (local or remote).
+                    // 2. Raise Isolate (both sides).
+                    // 3. Wait for Isolate Ack (both sides).
+                    // 4. Raise Clear (both sides).
+                    // 5. Wait for Clear Ack (both sides).
+                    // 6. Release Clear and Isolate.
+                    
+                    // To simplify the FSM to a single controller that drives both outputs:
+                    // We will use a global state that dictates the outputs.
+                    // However, the state machine must run in one domain.
+                    // Let's make the state machine drive the outputs directly based on the synchronized requests.
+                    
+                    if (a_clear_i && b_req_clear_sync_a[0]) begin
+                        // Both requested. Start sequence.
+                        a_clear_o <= 1'b0;
+                        a_isolate_o <= 1'b1;
+                        state_a <= STATE_ISOLATING;
+                    end else if (a_clear_i && !b_req_clear_sync_a[0]) begin
+                        // Only A requested. Wait for B? 
+                        // Spec: "When either side requests clear... first raise both isolate".
+                        // This implies if A requests, it waits for B to acknowledge the isolation request?
+                        // Or does it mean the system enters a mode where both are isolated?
+                        // "Do not leave one domain cleared while the other is still live."
+                        // "Peer progress arrives in order... Each step is observed one handshake after the local transition."
+                        
+                        // Interpretation: The controller waits until BOTH sides have requested clear 
+                        // before entering the isolation phase, OR it waits for the peer to catch up.
+                        // Given "Peer progress arrives in order... idle, active, done, idle", 
+                        // it suggests a handshake protocol.
+                        
+                        // Let's assume the standard safe pattern: 
+                        // Both sides must request to enter the "Clear" sequence.
+                        // If only one requests, it waits for the other to request.
+                        // Once both request, we go to Isolate.
+                        
+                        // Wait, the spec says "When either side requests clear... first raise both isolate".
+                        // This could mean: As soon as A requests, A raises isolate. But B must also raise isolate.
+                        // If B hasn't requested, B won't raise isolate. This violates "raise both".
+                        // Therefore, the condition to raise isolate is (A_req AND B_req).
+                        
+                        // Let's refine the logic:
+                        // State IDLE: Wait for both requests.
+                        // State ISOLATING: Isolate outputs high. Wait for Isolate Ack from both.
+                        // State CLEARING: Clear outputs high. Wait for Clear Ack from both.
+                        // State DONE: Release outputs.
+                        
+                        // How do we detect "both requests"?
+                        // We need to synchronize the request signals.
+                        // a_clear_i is local. b_clear_i is remote.
+                        // We need to see if b_clear_i is asserted.
+                        
+                        // Let's use a simple handshake counter or state.
+                        // Actually, the simplest robust implementation for "Either side requests" 
+                        // where "Both must isolate" is:
+                        // The controller waits until it sees a request from A AND a request from B.
+                        // If A requests and B doesn't, A waits.
+                        // If B requests and A doesn't, B waits.
+                        // Once both see each other's request, they proceed.
+                        
+                        // Implementation detail:
+                        // We need to synchronize the *edge* or the *level* of the remote request.
+                        // Let's synchronize the level of b_clear_i into domain A.
+                        
+                        // Re-evaluating the "Peer progress" part:
+                        // "Peer progress arrives in order: idle, then active, then done, then idle."
+                        // This sounds like a specific protocol state machine.
+                        // Let's implement a 4-state machine per domain that coordinates.
+                        
+                        // Revised Plan:
+                        // Each domain has a local state machine.
+                        // They exchange "Ready" and "Done" signals.
+                        // But the spec describes a global sequence: Isolate -> Clear -> Release.
+                        
+                        // Let's stick to the simplest interpretation that satisfies safety:
+                        // 1. Detect Request (Local OR Remote).
+                        // 2. If Request detected, assert Isolate (after confirming peer is also ready/isolating).
+                        // 3. Wait for Isolate Ack.
+                        // 4. Assert Clear.
+                        // 5. Wait for Clear Ack.
+                        // 6. Deassert.
+                        
+                        // To handle "Either side requests", we can use a "Request Valid" flag that is set if
+                        // either side has requested, but the action (Isolate) only happens when BOTH have requested.
+                        // This ensures "raise both isolate".
+                        
+                        // Let's define:
+                        // req_a = a_clear_i
+                        // req_b = synchronized b_clear_i
+                        // If (req_a && req_b) -> Enter Isolate Phase.
+                        
+                        // Wait, what if A requests, then B requests later?
+                        // A waits for B. B waits for A.
+                        // Once both are high, we proceed.
+                        
+                        // What if A requests, B never requests?
+                        // System stays in IDLE forever. This is safe (no clear).
+                        
+                        // So the condition to enter ISOLATING is: (a_clear_i && b_req_clear_sync_a[0])
+                        
+                        if (a_clear_i && b_req_clear_sync_a[0]) begin
+                            a_clear_o <= 1'b0;
+                            a_isolate_o <= 1'b1;
+                            state_a <= STATE_ISOLATING;
+                        end
+                        else if (state_a == STATE_ISOLATING) begin
+                            // Wait for Isolate Ack from both sides
+                            if (a_isolate_ack_i && b_req_isolate_ack_sync_a[0]) begin
+                                a_clear_o <= 1'b1;
+                                a_isolate_o <= 1'b1; // Keep isolate high until clear ack? 
+                                // Spec: "wait for both isolate acks, then raise both clear outputs"
+                                // It doesn't explicitly say keep isolate high during clear, 
+                                // but "Do not leave one domain cleared while the other is still live"
+                                // implies isolation should persist until the clear is fully acknowledged.
+                                // Usually, Isolate is held high throughout the Clear phase.
+                                // Let's hold Isolate high until Clear Ack is received.
+                                
+                                // Actually, let's look at the sequence:
+                                // 1. Raise Isolate.
+                                // 2. Wait Isolate Ack.
+                                // 3. Raise Clear.
+                                // 4. Wait Clear Ack.
+                                // 5. Release Isolate and Clear.
+                                
+                                // So in STATE_ISOLATING:
+                                // Isolate is high. Clear is low.
+                                // Transition to CLEARING when Isolate Ack is received.
+                                
+                                if (a_isolate_ack_i && b_req_isolate_ack_sync_a[0]) begin
+                                    state_a <= STATE_CLEARING;
+                                end
+                            end
+                        end
+                        else if (state_a == STATE_CLEARING) begin
+                            // Wait for Clear Ack from both sides
+                            if (a_clear_ack_i && b_req_clear_ack_sync_a[0]) begin
+                                a_clear_o <= 1'b0;
+                                a_isolate_o <= 1'b0;
+                                state_a <= STATE_DONE;
+                            end
+                        end
+                        else if (state_a == STATE_DONE) begin
+                            // Stay done until reset or new request
+                            // Wait for reset to clear state
+                            if (!a_clear_i || !b_req_clear_sync_a[0]) begin
+                                // If request is gone, stay done.
+                                // If request comes again, we need to re-evaluate.
+                                // But we are in DONE. We should stay in DONE until reset?
+                                // Or should we loop back to IDLE?
+                                // Let's assume DONE is a stable state until reset.
+                                // But we need to be able to restart.
+                                // Let's make DONE transition to IDLE on the next clock if no request.
+                                // Actually, simpler: Just let the IDLE logic handle the transition if we aren't in a state.
+                                // But we are in a state.
+                                // Let's force a transition to IDLE if no request is active.
+                                
+                                if (!a_clear_i || !b_req_clear_sync_a[0]) begin
+                                    state_a <= STATE_IDLE;
+                                end
+                            end
+                        end
+                    end
+                end
+                default: begin
+                    state_a <= STATE_IDLE;
+                    a_clear_o <= 1'b0;
+                    a_isolate_o <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // State Machine Logic for Domain B
+    // Mirror of Domain A logic
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            state_b <= STATE_IDLE;
+            b_clear_o <= 1'b0;
+            b_isolate_o <= 1'b0;
+        end else begin
+            case (state_b)
+                STATE_IDLE: begin
+                    if (b_clear_i && a_req_clear_sync_b[0]) begin
+                        b_clear_o <= 1'b0;
+                        b_isolate_o <= 1'b1;
+                        state_b <= STATE_ISOLATING;
+                    end
+                end
+                STATE_ISOLATING: begin
+                    if (b_isolate_ack_i && a_req_isolate_ack_sync_b[0]) begin
+                        state_b <= STATE_CLEARING;
+                    end
+                end
+                STATE_CLEARING: begin
+                    if (b_clear_ack_i && a_req_clear_ack_sync_b[0]) begin
+                        b_clear_o <= 1'b0;
+                        b_isolate_o <= 1'b0;
+                        state_b <= STATE_DONE;
+                    end
+                end
+                STATE_DONE: begin
+                    if (!b_clear_i || !a_req_clear_sync_b[0]) begin
+                        state_b <= STATE_IDLE;
+                    end
+                end
+                default: begin
+                    state_b <= STATE_IDLE;
+                    b_clear_o <= 1'b0;
+                    b_isolate_o <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Synchronizers for b -> a
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            b_req_clear_sync_a <= {SYNC_STAGES{1'b0}};
+            b_req_isolate_sync_a <= {SYNC_STAGES{1'b0}};
+            b_req_clear_ack_sync_a <= {SYNC_STAGES{1'b0}};
+            b_req_isolate_ack_sync_a <= {SYNC_STAGES{1'b0}};
+        end else begin
+            b_req_clear_sync_a <= {b_req_clear_sync_a[SYNC_STAGES-1:1], b_clear_i};
+            b_req_isolate_sync_a <= {b_req_isolate_sync_a[SYNC_STAGES-1:1], b_isolate_o};
+            b_req_clear_ack_sync_a <= {b_req_clear_ack_sync_a[SYNC_STAGES-1:1], b_clear_ack_i};
+            b_req_isolate_ack_sync_a <= {b_req_isolate_ack_sync_a[SYNC_STAGES-1:1], b_isolate_ack_i};
+        end
+    end
+
+    // Synchronizers for a -> b
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            a_req_clear_sync_b <= {SYNC_STAGES{1'b0}};
+            a_req_isolate_sync_b <= {SYNC_STAGES{1'b0}};
+            a_req_clear_ack_sync_b <= {SYNC_STAGES{1'b0}};
+            a_req_isolate_ack_sync_b <= {SYNC_STAGES{1'b0}};
+        end else begin
+            a_req_clear_sync_b <= {a_req_clear_sync_b[SYNC_STAGES-1:1], a_clear_i};
+            a_req_isolate_sync_b <= {a_req_isolate_sync_b[SYNC_STAGES-1:1], a_isolate_o};
+            a_req_clear_ack_sync_b <= {a_req_clear_ack_sync_b[SYNC_STAGES-1:1], a_clear_ack_i};
+            a_req_isolate_ack_sync_b <= {a_req_isolate_ack_sync_b[SYNC_STAGES-1:1], a_isolate_ack_i};
+        end
+    end
+
+    // Output Synchronizers (for the peer to see the state correctly)
+    // These are needed because the peer state machine reads the remote outputs to decide its next state.
+    // e.g., Domain A reads b_isolate_o to know if it should transition to CLEARING.
+    // We need to synchronize b_isolate_o into Domain A.
+    
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            b_isolate_o_sync_a <= {SYNC_STAGES{1'b0}};
+            b_clear_o_sync_a <= {SYNC_STAGES{1'b0}};
+        end else begin
+            b_isolate_o_sync_a <= {b_isolate_o_sync_a[SYNC_STAGES-1:1], b_isolate_o};
+            b_clear_o_sync_a <= {b_clear_o_sync_a[SYNC_STAGES-1:1], b_clear_o};
+        end
+    end
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            a_isolate_o_sync_b <= {SYNC_STAGES{1'b0}};
+            a_clear_o_sync_b <= {SYNC_STAGES{1'b0}};
+        end else begin
+            a_isolate_o_sync_b <= {a_isolate_o_sync_b[SYNC_STAGES-1:1], a_isolate_o};
+            a_clear_o_sync_b <= {a_clear_o_sync_b[SYNC_STAGES-1:1], a_clear_o};
+        end
+    end
+
+endmodule
+```<|im_end|>

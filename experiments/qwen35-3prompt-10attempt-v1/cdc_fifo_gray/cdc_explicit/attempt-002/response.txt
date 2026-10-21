@@ -1,0 +1,172 @@
+```verilog
+`timescale 1ns/1ps
+
+module cdc_fifo_gray #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 2
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output reg [WIDTH-1:0] dst_data_o,
+    output reg             dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam GRAY_WIDTH = LOG_DEPTH + 1;
+
+    // Internal registers for pointers and data
+    reg [LOG_DEPTH-1:0] src_ptr;
+    reg [LOG_DEPTH-1:0] dst_ptr;
+    reg [LOG_DEPTH-1:0] src_gray_ptr;
+    reg [LOG_DEPTH-1:0] dst_gray_ptr;
+    reg [WIDTH-1:0] fifo_mem [DEPTH-1:0];
+    reg [WIDTH-1:0] dst_data_reg;
+    reg dst_valid_reg;
+
+    // ---------------------------------------------------------
+    // Source Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_ptr <= '{default: 0};
+            src_ready_o <= 1'b1;
+        end else begin
+            // Calculate Gray code for current pointer
+            src_gray_ptr <= src_ptr ^ (src_ptr >> 1);
+            
+            // Check if FIFO is full
+            if (src_gray_ptr == dst_gray_ptr) begin
+                src_ready_o <= 1'b0;
+            end else begin
+                src_ready_o <= 1'b1;
+            end
+            
+            // Write data if valid and ready
+            if (src_valid_i && src_ready_o) begin
+                fifo_mem[src_ptr] <= src_data_i;
+                src_ptr <= src_ptr + 1'b1;
+            end
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Destination Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_ptr <= '{default: 0};
+            dst_gray_ptr <= '{default: 0};
+            dst_data_reg <= '{default: 0};
+            dst_valid_reg <= 1'b0;
+        end else begin
+            // Calculate Gray code for current pointer
+            dst_gray_ptr <= dst_ptr ^ (dst_ptr >> 1);
+            
+            // Check if FIFO is empty
+            if (dst_gray_ptr == src_gray_ptr) begin
+                dst_valid_reg <= 1'b0;
+            end else begin
+                // Read data from memory
+                dst_data_reg <= fifo_mem[dst_ptr];
+                dst_valid_reg <= 1'b1;
+                
+                // Update pointer if data is accepted
+                if (dst_valid_reg && dst_ready_i) begin
+                    dst_ptr <= dst_ptr + 1'b1;
+                end
+            end
+            
+            // Output assignments
+            dst_data_o <= dst_data_reg;
+            dst_valid_o <= dst_valid_reg;
+        end
+    end
+
+    // ---------------------------------------------------------
+    // CDC Synchronization for Pointers (Gray Code Crossing)
+    // ---------------------------------------------------------
+    // We use a dual-flop synchronizer for the critical pointer bits
+    // and a multi-stage synchronizer for the full pointer to ensure
+    // stability before using it in the logic.
+    
+    // Synchronize src_gray_ptr into dst domain
+    reg [GRAY_WIDTH-1:0] src_gray_synced_1;
+    reg [GRAY_WIDTH-1:0] src_gray_synced_2;
+    
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_gray_synced_1 <= '{default: 0};
+            src_gray_synced_2 <= '{default: 0};
+        end else begin
+            src_gray_synced_1 <= src_gray_ptr;
+            src_gray_synced_2 <= src_gray_synced_1;
+        end
+    end
+
+    // Synchronize dst_gray_ptr into src domain
+    reg [GRAY_WIDTH-1:0] dst_gray_synced_1;
+    reg [GRAY_WIDTH-1:0] dst_gray_synced_2;
+    
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_gray_synced_1 <= '{default: 0};
+            dst_gray_synced_2 <= '{default: 0};
+        end else begin
+            dst_gray_synced_1 <= dst_gray_ptr;
+            dst_gray_synced_2 <= dst_gray_synced_1;
+        end
+    end
+
+    // Use synchronized pointers for the full comparison logic to ensure
+    // the empty/full detection is stable across clock domains.
+    // Note: In a real implementation, we might need more stages depending on
+    // the specific timing closure, but 2 stages is standard for pointer crossing.
+    // The logic below uses the synchronized versions to determine empty/full.
+    
+    // Re-implement the ready/valid logic using synchronized pointers for safety
+    // This ensures that the decision to accept data is based on a stable view
+    // of the other domain's pointer.
+    
+    reg src_ready_safe;
+    reg dst_valid_safe;
+    
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_ready_safe <= 1'b1;
+        end else begin
+            // Compare synchronized dst pointer with current src pointer
+            if (src_gray_ptr == dst_gray_synced_2) begin
+                src_ready_safe <= 1'b0;
+            end else begin
+                src_ready_safe <= 1'b1;
+            end
+        end
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_valid_safe <= 1'b0;
+        end else begin
+            // Compare synchronized src pointer with current dst pointer
+            if (dst_gray_ptr == src_gray_synced_2) begin
+                dst_valid_safe <= 1'b0;
+            end else begin
+                dst_valid_safe <= 1'b1;
+            end
+        end
+    end
+
+    // Assign final outputs based on safe logic
+    assign src_ready_o = src_ready_safe;
+    assign dst_valid_o = dst_valid_safe;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,239 @@
+```verilog
+`timescale 1ns / 1ps
+
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam LOG_PORTS = $clog2(PORTS);
+    localparam NUM_PORTS = PORTS;
+
+    // State encoding
+    // 0: IDLE
+    // 1: GRANTING (Active grant)
+    // 2: WAITING (Blocked, waiting for release)
+    localparam [1:0] STATE_IDLE = 2'b00;
+    localparam [1:0] STATE_GRANTING = 2'b01;
+    localparam [1:0] STATE_WAITING = 2'b10;
+
+    reg [1:0] state, next_state;
+    reg [LOG_PORTS-1:0] next_index;
+    reg [LOG_PORTS-1:0] current_index;
+    reg [NUM_PORTS-1:0] grant_mask;
+    reg [NUM_PORTS-1:0] ack_mask;
+    reg [NUM_PORTS-1:0] req_mask;
+    reg [NUM_PORTS-1:0] last_granted;
+    reg [NUM_PORTS-1:0] pending_requests;
+
+    // Priority logic based on LSB_HIGH_PRIORITY
+    // If LSB_HIGH_PRIORITY is 1, port 0 is highest. If 0, port NUM_PORTS-1 is highest.
+    // We map the physical port index to a logical priority index for easier rotation.
+    // Logical index 0 = Highest Priority.
+    generate
+        genvar i;
+        for (i = 0; i < NUM_PORTS; i = i + 1) begin : prio_map
+            if (ARB_LSB_HIGH_PRIORITY) begin
+                // Port i maps to logical index i
+                assign req_mask[i] = request[i];
+                assign ack_mask[i] = acknowledge[i];
+            end else begin
+                // Port i maps to logical index (NUM_PORTS - 1 - i)
+                assign req_mask[i] = request[i];
+                assign ack_mask[i] = acknowledge[i];
+            end
+        end
+    endgenerate
+
+    // Priority vector: 1 means this port has the highest priority among active requests
+    reg [LOG_PORTS-1:0] priority_vector;
+    reg [NUM_PORTS-1:0] active_ports;
+
+    // Calculate active ports and priority vector
+    always @(*) begin
+        active_ports = 0;
+        priority_vector = 0;
+        
+        if (ARB_LSB_HIGH_PRIORITY) begin
+            for (i = 0; i < NUM_PORTS; i = i + 1) begin
+                if (req_mask[i]) begin
+                    active_ports = active_ports | (1 << i);
+                    // Find the lowest set bit (highest priority)
+                    if (priority_vector == 0) priority_vector = i;
+                    else if (i < priority_vector) priority_vector = i;
+                end
+            end
+        end else begin
+            for (i = 0; i < NUM_PORTS; i = i + 1) begin
+                if (req_mask[i]) begin
+                    active_ports = active_ports | (1 << i);
+                    // Find the highest set bit (highest priority)
+                    if (priority_vector == 0) priority_vector = i;
+                    else if (i > priority_vector) priority_vector = i;
+                end
+            end
+        end
+    end
+
+    // State Logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= STATE_IDLE;
+            current_index <= 0;
+            last_granted <= 0;
+            grant_mask <= 0;
+            grant_valid <= 0;
+            grant_encoded <= 0;
+        end else begin
+            state <= next_state;
+            current_index <= next_index;
+            last_granted <= grant_mask;
+            grant_mask <= 0;
+            grant_valid <= 0;
+            grant_encoded <= 0;
+        end
+    end
+
+    // Next State and Index Logic
+    always @(*) begin
+        next_state = state;
+        next_index = current_index;
+        grant_mask = 0;
+        grant_valid = 0;
+
+        case (state)
+            STATE_IDLE: begin
+                if (active_ports != 0) begin
+                    next_state = STATE_GRANTING;
+                    // Determine next index based on type
+                    if (ARB_TYPE_ROUND_ROBIN) begin
+                        // Round Robin: Start from last_granted + 1
+                        next_index = last_granted + 1;
+                        if (next_index >= NUM_PORTS) next_index = 0;
+                    end else begin
+                        // Fixed Priority: Start from highest priority port
+                        next_index = priority_vector;
+                    end
+                end
+            end
+
+            STATE_GRANTING: begin
+                // Check if the selected port is requesting
+                if (req_mask[next_index]) begin
+                    // Grant this port
+                    grant_mask = 1 << next_index;
+                    grant_valid = 1;
+                    
+                    // Check if grant is blocked
+                    if (ARB_BLOCK) begin
+                        // Check if any higher priority port (in terms of arbitration logic) is requesting
+                        // and has not been granted yet.
+                        // In Round Robin, "higher priority" effectively means any port that appears earlier in the rotation order 
+                        // that hasn't been served yet, OR simply if there are other requests and we are blocking.
+                        // Standard interpretation for "Blocked": If there are other requests, hold the grant.
+                        // However, the prompt says "If a grant is blocked, hold it until the specified release event."
+                        // Usually, in RR, if you grant port A, and port B (which comes next in RR) requests, 
+                        // and ARB_BLOCK is true, we might need to re-evaluate.
+                        // Let's implement strict blocking: If there are other active requests, do not release grant_valid immediately?
+                        // Or does it mean the grant signal is held?
+                        // Interpretation: The arbiter selects a winner. If ARB_BLOCK is 1, it means we only release the grant 
+                        // when the acknowledge comes back OR when the request is cleared, depending on ARB_BLOCK_ACK.
+                        
+                        // Let's refine the logic based on standard RR with blocking:
+                        // 1. Select winner based on RR.
+                        // 2. If ARB_BLOCK is 1, we enter a "Hold" state if there are other requests?
+                        //    Actually, the prompt implies: "Grant one requester... If a grant is blocked, hold it..."
+                        //    This suggests the grant signal itself might be delayed or the state machine waits.
+                        
+                        // Simpler interpretation for this specific prompt structure:
+                        // The arbiter picks a winner. 
+                        // If ARB_BLOCK == 1: The grant is only considered "final" when acknowledge is received.
+                        // Until then, if the request is still active, we stay in a waiting state?
+                        // Let's implement a state machine where:
+                        // STATE_GRANTING: We assert grant. 
+                        // If ARB_BLOCK is 1, we check if acknowledge is low. If so, we go to STATE_WAITING.
+                        // In STATE_WAITING, we wait for acknowledge to go high.
+                        
+                        if (!ack_mask[next_index]) begin
+                            next_state = STATE_WAITING;
+                        end else begin
+                            // Acknowledge received, move to next round
+                            next_state = STATE_IDLE;
+                            // Update last_granted for next RR cycle
+                            last_granted = next_index;
+                        end
+                    end else begin
+                        // Non-blocking: Grant immediately, move to next round
+                        next_state = STATE_IDLE;
+                        last_granted = next_index;
+                    end
+                end else begin
+                    // Selected port did not request, move to next in sequence
+                    if (ARB_TYPE_ROUND_ROBIN) begin
+                        next_index = next_index + 1;
+                        if (next_index >= NUM_PORTS) next_index = 0;
+                    end else begin
+                        // Fixed priority: Find next highest priority port
+                        // Re-calculate priority_vector excluding the current next_index?
+                        // No, just find the highest priority port among remaining.
+                        // Since we are in a combinational block, we can just re-run the priority logic 
+                        // but ignore the current next_index if it's not requesting.
+                        // Actually, simpler: Just find the highest priority port among ALL active requests.
+                        // If that port is the one we are looking at, we grant. If not, we skip.
+                        // But in Fixed Priority, we always pick the highest priority active port.
+                        // So if req_mask[next_index] is 0, we just need to find the new highest priority.
+                        // We can reuse the priority_vector logic but ensure we don't pick a non-requesting port.
+                        // Since priority_vector was calculated based on req_mask, if req_mask[next_index] is 0,
+                        // then priority_vector must be different (or 0).
+                        // So we just set next_index = priority_vector.
+                        next_index = priority_vector;
+                    end
+                end
+            end
+
+            STATE_WAITING: begin
+                // Waiting for acknowledge
+                if (ack_mask[next_index]) begin
+                    next_state = STATE_IDLE;
+                    last_granted = next_index;
+                end
+                // Else stay in STATE_WAITING
+            end
+
+            default: begin
+                next_state = STATE_IDLE;
+            end
+        endcase
+    end
+
+    // Output Logic
+    always @(*) begin
+        grant = 0;
+        grant_encoded = 0;
+        if (grant_valid) begin
+            grant = grant_mask;
+            // Encode the index of the granted port
+            for (i = 0; i < NUM_PORTS; i = i + 1) begin
+                if (grant_mask[i]) begin
+                    grant_encoded = i;
+                    break;
+                end
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

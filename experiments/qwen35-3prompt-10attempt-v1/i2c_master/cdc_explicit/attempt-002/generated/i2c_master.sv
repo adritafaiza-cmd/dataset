@@ -1,0 +1,775 @@
+```verilog
+`timescale 1ns/1ps
+
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // ------------------------------------------------------------------------
+    // CDC Strategy:
+    // 1. All state machines run on the single clock 'clk'.
+    // 2. Reset is synchronous and active-high.
+    // 3. Handshakes (valid/ready) are resolved within the same clock domain.
+    // 4. Multi-bit data transfers are serialized byte-by-byte to ensure coherence.
+    // 5. Open-drain outputs are driven by a dedicated state machine that samples
+    //    the bus state (scl_i/sda_i) synchronously to detect arbitration/ACKs.
+    // ------------------------------------------------------------------------
+
+    // ------------------------------------------------------------------------
+    // Internal Signals
+    // ------------------------------------------------------------------------
+    reg        busy_int;
+    reg        bus_control_int;
+    reg        bus_active_int;
+    reg        missed_ack_int;
+    
+    // State Machine State
+    reg [3:0]  sm_state;
+    reg [3:0]  sm_next_state;
+    
+    // Command Parsing State
+    reg        cmd_pending;
+    reg        cmd_valid;
+    reg        cmd_ready;
+    reg [6:0]  cmd_address;
+    reg        cmd_start;
+    reg        cmd_read;
+    reg        cmd_write;
+    reg        cmd_write_multiple;
+    reg        cmd_stop;
+    
+    // Data Transfer State
+    reg        data_pending;
+    reg        data_valid;
+    reg        data_ready;
+    reg [7:0]  tx_data;
+    reg        tx_last;
+    reg        rx_data;
+    reg        rx_valid;
+    reg        rx_last;
+    reg        rx_data_reg; // Synchronous storage for received byte
+    
+    // I2C Timing Control
+    reg        scl_count;
+    reg        sda_count;
+    reg        scl_high;
+    reg        sda_high;
+    reg        scl_dir; // 0 = input, 1 = output
+    reg        sda_dir; // 0 = input, 1 = output
+    reg        scl_val; // Current value on SCL line (sampled)
+    reg        sda_val; // Current value on SDA line (sampled)
+    
+    // Timing Parameters
+    localparam SCL_PERIOD = prescale[15:0];
+    localparam SDA_PERIOD = prescale[15:0]; // Assuming same prescale for simplicity or could be separate
+    // Note: In a real design, SDA might need different timing, but using prescale as base period.
+    // We will use a counter that counts up to prescale.
+    
+    reg [15:0] scl_cnt;
+    reg [15:0] sda_cnt;
+    reg        scl_phase; // 0 = low, 1 = high
+    reg        sda_phase; // 0 = low, 1 = high
+    
+    // Arbitration/Ack Detection
+    reg        ack_received;
+    reg        arbitration_lost;
+    reg        stop_detected;
+    
+    // ------------------------------------------------------------------------
+    // State Machine Definition
+    // 0: IDLE
+    // 1: START
+    // 2: ADDRESS_SENT
+    // 3: ACK_CHECK
+    // 4: DATA_TX_START
+    // 5: DATA_TX_BYTE
+    // 6: ACK_CHECK_DATA
+    // 7: DATA_RX_START
+    // 8: DATA_RX_BYTE
+    // 9: ACK_CHECK_RX
+    // 10: STOP
+    // 11: STOP_WAIT
+    // ------------------------------------------------------------------------
+    
+    // ------------------------------------------------------------------------
+    // Combinational Logic for State Next State
+    // ------------------------------------------------------------------------
+    always @(*) begin
+        sm_next_state = sm_state;
+        busy_int = 1'b0;
+        bus_control_int = 1'b0;
+        bus_active_int = 1'b0;
+        missed_ack_int = 1'b0;
+        
+        case (sm_state)
+            4'b0000: // IDLE
+                if (cmd_valid && cmd_ready)
+                    sm_next_state = 4'b0001; // START
+                else
+                    sm_next_state = 4'b0000;
+                busy_int = 1'b0;
+                bus_control_int = 1'b0;
+                bus_active_int = 1'b0;
+                missed_ack_int = 1'b0;
+                
+            4'b0001: // START
+                // Drive START condition
+                scl_dir = 1'b1;
+                sda_dir = 1'b1;
+                scl_high = 1'b1;
+                sda_high = 1'b1;
+                // Wait for SCL low, then SDA low
+                if (scl_cnt >= SCL_PERIOD && scl_high) begin
+                    scl_high = 1'b0;
+                    scl_cnt = 0;
+                end
+                if (scl_cnt >= SCL_PERIOD && !scl_high) begin
+                    sda_high = 1'b0;
+                    sda_cnt = 0;
+                    sm_next_state = 4'b0010; // ADDRESS_SENT
+                end
+                busy_int = 1'b1;
+                bus_control_int = 1'b1;
+                bus_active_int = 1'b1;
+                
+            4'b0010: // ADDRESS_SENT
+                // Drive Address + Read/Write bit
+                scl_dir = 1'b1;
+                sda_dir = 1'b1;
+                scl_high = 1'b1;
+                sda_high = 1'b1;
+                // Wait for SCL low, then SDA low
+                if (scl_cnt >= SCL_PERIOD && scl_high) begin
+                    scl_high = 1'b0;
+                    scl_cnt = 0;
+                end
+                if (scl_cnt >= SCL_PERIOD && !scl_high) begin
+                    sda_high = 1'b0;
+                    sda_cnt = 0;
+                    sm_next_state = 4'b0011; // ACK_CHECK
+                end
+                busy_int = 1'b1;
+                bus_control_int = 1'b1;
+                bus_active_int = 1'b1;
+                
+            4'b0011: // ACK_CHECK
+                // Wait for ACK (SDA should be low during SCL high)
+                scl_dir = 1'b1;
+                sda_dir = 1'b1;
+                scl_high = 1'b1;
+                sda_high = 1'b1;
+                ack_received = 1'b1;
+                arbitration_lost = 1'b0;
+                
+                if (scl_cnt >= SCL_PERIOD && scl_high) begin
+                    scl_high = 1'b0;
+                    scl_cnt = 0;
+                end
+                if (scl_cnt >= SCL_PERIOD && !scl_high) begin
+                    // Check SDA level during SCL high
+                    if (sda_val == 1'b1) begin
+                        ack_received = 1'b0;
+                        missed_ack_int = 1'b1;
+                        arbitration_lost = 1'b1;
+                    end
+                    if (stop_on_idle && arbitration_lost) begin
+                        // If arbitration lost and stop_on_idle, maybe stop? 
+                        // Usually we retry or stop. Let's stop.
+                        sm_next_state = 4'b0012; // STOP_WAIT
+                    end else if (arbitration_lost) begin
+                        // Arbitration lost, retry or stop. 
+                        // For simplicity, if arbitration lost, we stop.
+                        sm_next_state = 4'b0012; // STOP_WAIT
+                    end else begin
+                        sm_next_state = 4'b0100; // DATA_TX_START
+                    end
+                end
+                busy_int = 1'b1;
+                bus_control_int = 1'b1;
+                bus_active_int = 1'b1;
+                
+            4'b0100: // DATA_TX_START
+                // Prepare to send data
+                if (data_valid && data_ready) begin
+                    tx_data = s_axis_data_tdata;
+                    tx_last = s_axis_data_tlast;
+                    data_valid = 1'b0;
+                    data_ready = 1'b0;
+                    sm_next_state = 4'b0101; // DATA_TX_BYTE
+                end else begin
+                    sm_next_state = 4'b0000; // IDLE
+                    busy_int = 1'b0;
+                    bus_control_int = 1'b0;
+                    bus_active_int = 0;
+                end
+                
+            4'b0101: // DATA_TX_BYTE
+                // Send 8 bits
+                scl_dir = 1'b1;
+                sda_dir = 1'b1;
+                scl_high = 1'b1;
+                sda_high = 1'b1;
+                
+                if (scl_cnt >= SCL_PERIOD && scl_high) begin
+                    scl_high = 1'b0;
+                    scl_cnt = 0;
+                end
+                if (scl_cnt >= SCL_PERIOD && !scl_high) begin
+                    // Shift out bit
+                    sda_high = 1'b0;
+                    sda_cnt = 0;
+                    // Shift data
+                    tx_data = {tx_data[6:0], tx_data[7]};
+                    if (sda_cnt >= SDA_PERIOD && !sda_high) begin
+                        // Bit sent, check next bit
+                        if (tx_data[7] == 1'b0) begin
+                            // Next bit is 0, keep SDA low
+                            sda_high = 1'b0;
+                        end else begin
+                            // Next bit is 1, release SDA
+                            sda_high = 1'b1;
+                        end
+                        sda_cnt = 0;
+                    end
+                    if (sda_cnt >= SDA_PERIOD && sda_high) begin
+                        // Bit sent, check if last byte
+                        if (tx_last) begin
+                            // Last byte sent, wait for ACK
+                            sm_next_state = 4'b0110; // ACK_CHECK_DATA
+                        end else begin
+                            // More bytes to send
+                            sm_next_state = 4'b0101; // DATA_TX_BYTE
+                        end
+                    end
+                end
+                busy_int = 1'b1;
+                bus_control_int = 1'b1;
+                bus_active_int = 1'b1;
+                
+            4'b0110: // ACK_CHECK_DATA
+                // Wait for ACK after data byte
+                scl_dir = 1'b1;
+                sda_dir = 1'b1;
+                scl_high = 1'b1;
+                sda_high = 1'b1;
+                ack_received = 1'b1;
+                
+                if (scl_cnt >= SCL_PERIOD && scl_high) begin
+                    scl_high = 1'b0;
+                    scl_cnt = 0;
+                end
+                if (scl_cnt >= SCL_PERIOD && !scl_high) begin
+                    if (sda_val == 1'b1) begin
+                        ack_received = 1'b0;
+                        missed_ack_int = 1'b1;
+                    end
+                    sm_next_state = 4'b0100; // DATA_TX_START (loop for more bytes)
+                end
+                busy_int = 1'b1;
+                bus_control_int = 1'b1;
+                bus_active_int = 1'b1;
+                
+            4'b0102: // DATA_RX_START (Renamed from 4'b0102 to 4'b0102 for clarity, but let's use 4'b0102)
+                // Actually, let's re-number for clarity:
+                // 4'b0102: DATA_RX_START
+                // 4'b0103: DATA_RX_BYTE
+                // 4'b0104: ACK_CHECK_RX
+                // Let's adjust the case above to use correct states.
+                // Re-defining states for clarity in the code below.
+                
+            // Let's restart the state numbering for clarity in the final code block.
+            // 0: IDLE
+            // 1: START
+            // 2: ADDRESS_SENT
+            // 3: ACK_CHECK
+            // 4: DATA_TX_START
+            // 5: DATA_TX_BYTE
+            // 6: ACK_CHECK_DATA
+            // 7: DATA_RX_START
+            // 8: DATA_RX_BYTE
+            // 9: ACK_CHECK_RX
+            // 10: STOP
+            // 11: STOP_WAIT
+            
+            // Re-implementing the case statement with correct states.
+        endcase
+    end
+    
+    // ------------------------------------------------------------------------
+    // Sequential Logic
+    // ------------------------------------------------------------------------
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            sm_state <= 4'b0000;
+            scl_cnt <= 0;
+            sda_cnt <= 0;
+            scl_high <= 1'b0;
+            sda_high <= 1'b0;
+            scl_dir <= 1'b0;
+            sda_dir <= 1'b0;
+            scl_val <= 1'b0;
+            sda_val <= 1'b0;
+            ack_received <= 1'b0;
+            arbitration_lost <= 1'b0;
+            stop_detected <= 1'b0;
+            busy_int <= 1'b0;
+            bus_control_int <= 1'b0;
+            bus_active_int <= 1'b0;
+            missed_ack_int <= 1'b0;
+            cmd_valid <= 1'b0;
+            cmd_ready <= 1'b1;
+            data_valid <= 1'b0;
+            data_ready <= 1'b1;
+            rx_valid <= 1'b0;
+            rx_last <= 1'b0;
+            rx_data_reg <= 0;
+            m_axis_data_tvalid <= 1'b0;
+            m_axis_data_tlast <= 1'b0;
+            m_axis_data_tdata <= 0;
+        end else begin
+            sm_state <= sm_next_state;
+            scl_cnt <= (scl_cnt >= SCL_PERIOD) ? 0 : scl_cnt + 1;
+            sda_cnt <= (sda_cnt >= SDA_PERIOD) ? 0 : sda_cnt + 1;
+            
+            // Output Drivers
+            scl_o <= scl_dir ? scl_high : scl_i;
+            scl_t <= scl_dir ? 1'b1 : 1'b0;
+            sda_o <= sda_dir ? sda_high : sda_i;
+            sda_t <= sda_dir ? 1'b1 : 1'b0;
+            
+            // Status Outputs
+            busy <= busy_int;
+            bus_control <= bus_control_int;
+            bus_active <= bus_active_int;
+            missed_ack <= missed_ack_int;
+            
+            // Handshakes
+            s_axis_cmd_ready <= cmd_ready;
+            s_axis_data_tready <= data_ready;
+            m_axis_data_tvalid <= rx_valid;
+            m_axis_data_tlast <= rx_last;
+            m_axis_data_tdata <= rx_data_reg;
+            
+            // Command Logic
+            if (sm_state == 4'b0000) begin // IDLE
+                if (s_axis_cmd_valid && !cmd_pending) begin
+                    cmd_pending = 1'b1;
+                    cmd_valid = 1'b1;
+                    cmd_ready = 1'b0;
+                    cmd_address <= s_axis_cmd_address;
+                    cmd_start <= s_axis_cmd_start;
+                    cmd_read <= s_axis_cmd_read;
+                    cmd_write <= s_axis_cmd_write;
+                    cmd_write_multiple <= s_axis_cmd_write_multiple;
+                    cmd_stop <= s_axis_cmd_stop;
+                end
+                if (!s_axis_cmd_valid || cmd_pending) begin
+                    cmd_ready = 1'b1;
+                    cmd_pending = 1'b0;
+                    cmd_valid = 1'b0;
+                end
+            end
+            
+            // Data Logic
+            if (sm_state == 4'b0104) begin // DATA_RX_START
+                if (data_valid && data_ready) begin
+                    data_valid = 1'b0;
+                    data_ready = 1'b0;
+                end
+                if (!data_valid && data_ready) begin
+                    data_ready = 1'b1;
+                end
+            end
+            
+            // Received Data Logic
+            if (sm_state == 4'b0109) begin // ACK_CHECK_RX
+                if (ack_received) begin
+                    rx_valid = 1'b1;
+                    rx_last = 1'b1;
+                    m_axis_data_tvalid = 1'b1;
+                    m_axis_data_tlast = 1'b1;
+                    m_axis_data_tdata = rx_data_reg;
+                    sm_next_state = 4'b0000; // IDLE
+                end else begin
+                    // NACK received, stop
+                    sm_next_state = 4'b0000; // IDLE
+                end
+            end
+            
+            if (rx_valid && !m_axis_data_tready) begin
+                m_axis_data_tvalid = 1'b0;
+                m_axis_data_tlast = 1'b0;
+                m_axis_data_tdata = 0;
+            end
+            if (m_axis_data_tready && rx_valid) begin
+                rx_valid = 1'b0;
+                m_axis_data_tvalid = 1'b0;
+                m_axis_data_tlast = 1'b0;
+                m_axis_data_tdata = 0;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------------
+    // I2C Timing and State Machine Implementation
+    // ------------------------------------------------------------------------
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            scl_cnt <= 0;
+            sda_cnt <= 0;
+            scl_high <= 1'b0;
+            sda_high <= 1'b0;
+            scl_dir <= 1'b0;
+            sda_dir <= 1'b0;
+            scl_val <= 1'b0;
+            sda_val <= 1'b0;
+            ack_received <= 1'b0;
+            arbitration_lost <= 1'b0;
+            stop_detected <= 1'b0;
+        end else begin
+            // Sample inputs
+            scl_val <= scl_i;
+            sda_val <= sda_i;
+            
+            // State Machine
+            case (sm_state)
+                4'b0000: // IDLE
+                    scl_dir <= 1'b0;
+                    sda_dir <= 1'b0;
+                    scl_high <= 1'b0;
+                    sda_high <= 1'b0;
+                    scl_cnt <= 0;
+                    sda_cnt <= 0;
+                    ack_received <= 1'b0;
+                    arbitration_lost <= 1'b0;
+                    stop_detected <= 1'b0;
+                    
+                4'b0001: // START
+                    scl_dir <= 1'b1;
+                    sda_dir <= 1'b1;
+                    scl_high <= 1'b1;
+                    sda_high <= 1'b1;
+                    if (scl_cnt >= SCL_PERIOD && scl_high) begin
+                        scl_high <= 1'b0;
+                        scl_cnt <= 0;
+                    end
+                    if (scl_cnt >= SCL_PERIOD && !scl_high) begin
+                        sda_high <= 1'b0;
+                        sda_cnt <= 0;
+                    end
+                    
+                4'b0010: // ADDRESS_SENT
+                    scl_dir <= 1'b1;
+                    sda_dir <= 1'b1;
+                    scl_high <= 1'b1;
+                    sda_high <= 1'b1;
+                    if (scl_cnt >= SCL_PERIOD && scl_high) begin
+                        scl_high <= 1'b0;
+                        scl_cnt <= 0;
+                    end
+                    if (scl_cnt >= SCL_PERIOD && !scl_high) begin
+                        sda_high <= 1'b0;
+                        sda_cnt <= 0;
+                    end
+                    
+                4'b0011: // ACK_CHECK
+                    scl_dir <= 1'b1;
+                    sda_dir <= 1'b1;
+                    scl_high <= 1'b1;
+                    sda_high <= 1'b1;
+                    ack_received <= 1'b1;
+                    arbitration_lost <= 1'b0;
+                    if (scl_cnt >= SCL_PERIOD && scl_high) begin
+                        scl_high <= 1'b0;
+                        scl_cnt <= 0;
+                    end
+                    if (scl_cnt >= SCL_PERIOD && !scl_high) begin
+                        if (sda_val == 1'b1) begin
+                            ack_received <= 1'b0;
+                            arbitration_lost <= 1'b1;
+                        end
+                        if (stop_on_idle && arbitration_lost) begin
+                            sm_next_state <= 4'b0012; // STOP_WAIT
+                        end else if (arbitration_lost) begin
+                            sm_next_state <= 4'b0012; // STOP_WAIT
+                        end else begin
+                            sm_next_state <= 4'b0100; // DATA_TX_START
+                        end
+                    end
+                    
+                4'b0100: // DATA_TX_START
+                    scl_dir <= 1'b1;
+                    sda_dir <= 1'b1;
+                    scl_high <= 1'b1;
+                    sda_high <= 1'b1;
+                    if (data_valid && data_ready) begin
+                        tx_data <= s_axis_data_tdata;
+                        tx_last <= s_axis_data_tlast;
+                        data_valid <= 1'b0;
+                        data_ready <= 1'b0;
+                        sm_next_state <= 4'b0101; // DATA_TX_BYTE
+                    end else begin
+                        sm_next_state <= 4'b0000; // IDLE
+                    end
+                    
+                4'b0101: // DATA_TX_BYTE
+                    scl_dir <= 1'b1;
+                    sda_dir <= 1'b1;
+                    scl_high <= 1'b1;
+                    sda_high <= 1'b1;
+                    if (scl_cnt >= SCL_PERIOD && scl_high) begin
+                        scl_high <= 1'b0;
+                        scl_cnt <= 0;
+                    end
+                    if (scl_cnt >= SCL_PERIOD && !scl_high) begin
+                        sda_high <= 1'b0;
+                        sda_cnt <= 0;
+                        if (sda_cnt >= SDA_PERIOD && !sda_high) begin
+                            // Bit sent, check next bit
+                            if (tx_data[7] == 1'b0) begin
+                                sda_high <= 1'b0;
+                            end else begin
+                                sda_high <= 1'b1;
+                            end
+                            sda_cnt <= 0;
+                        end
+                        if (sda_cnt >= SDA_PERIOD && sda_high) begin
+                            tx_data <= {tx_data[6:0], tx_data[7]};
+                            if (tx_last) begin
+                                sm_next_state <= 4'b0110; // ACK_CHECK_DATA
+                            end else begin
+                                sm_next_state <= 4'b0101; // DATA_TX_BYTE
+                            end
+                        end
+                    end
+                    
+                4'b0110: // ACK_CHECK_DATA
+                    scl_dir <= 1'b1;
+                    sda_dir <= 1'b1;
+                    scl_high <= 1'b1;
+                    sda_high <= 1'b1;
+                    ack_received <= 1'b1;
+                    if (scl_cnt >= SCL_PERIOD && scl_high) begin
+                        scl_high <= 1'b0;
+                        scl_cnt <= 0;
+                    end
+                    if (scl_cnt >= SCL_PERIOD && !scl_high) begin
+                        if (sda_val == 1'b1) begin
+                            ack_received <= 1'b0;
+                            missed_ack_int <= 1'b1;
+                        end
+                        sm_next_state <= 4'b0100; // DATA_TX_START
+                    end
+                    
+                4'b0102: // DATA_RX_START
+                    scl_dir <= 1'b1;
+                    sda_dir <= 1'b1;
+                    scl_high <= 1'b1;
+                    sda_high <= 1'b1;
+                    if (data_valid && data_ready) begin
+                        data_valid <= 1'b0;
+                        data_ready <= 1'b0;
+                        sm_next_state <= 4'b0103; // DATA_RX_BYTE
+                    end else begin
+                        sm_next_state <= 4'b0000; // IDLE
+                    end
+                    
+                4'b0103: // DATA_RX_BYTE
+                    scl_dir <= 1'b1;
+                    sda_dir <= 1'b1;
+                    scl_high <= 1'b1;
+                    sda_high <= 1'b1;
+                    if (scl_cnt >= SCL_PERIOD && scl_high) begin
+                        scl_high <= 1'b0;
+                        scl_cnt <= 0;
+                    end
+                    if (scl_cnt >= SCL_PERIOD && !scl_high) begin
+                        sda_high <= 1'b0;
+                        sda_cnt <= 0;
+                        if (sda_cnt >= SDA_PERIOD && !sda_high) begin
+                            // Sample SDA during SCL high
+                            rx_data_reg <= sda_val;
+                            sda_high <= 1'b1;
+                            sda_cnt <= 0;
+                            if (sda_cnt >= SDA_PERIOD && sda_high) begin
+                                if (rx_data_reg == 0) begin
+                                    sda_high <= 1'b0;
+                                end else begin
+                                    sda_high <= 1'b1;
+                                end
+                                sda_cnt <= 0;
+                            end
+                        end
+                        if (sda_cnt >= SDA_PERIOD && sda_high) begin
+                            rx_data_reg <= {rx_data_reg[6:0], rx_data_reg[7]};
+                            if (rx_data_reg[7] == 1'b0) begin
+                                sda_high <= 1'b0;
+                            end else begin
+                                sda_high <= 1'b1;
+                            end
+                            sda_cnt <= 0;
+                        end
+                        if (sda_cnt >= SDA_PERIOD && sda_high) begin
+                            // Byte received
+                            if (rx_data_reg[7] == 1'b0) begin
+                                sda_high <= 1'b0;
+                            end else begin
+                                sda_high <= 1'b1;
+                            end
+                            sda_cnt <= 0;
+                            sm_next_state <= 4'b0104; // ACK_CHECK_RX
+                        end
+                    end
+                    
+                4'b0104: // ACK_CHECK_RX
+                    scl_dir <= 1'b1;
+                    sda_dir <= 1'b1;
+                    scl_high <= 1'b1;
+                    sda_high <= 1'b1;
+                    ack_received <= 1'b1;
+                    if (scl_cnt >= SCL_PERIOD && scl_high) begin
+                        scl_high <= 1'b0;
+                        scl_cnt <= 0;
+                    end
+                    if (scl_cnt >= SCL_PERIOD && !scl_high) begin
+                        if (sda_val == 1'b1) begin
+                            ack_received <= 1'b0;
+                            missed_ack_int <= 1'b1;
+                        end
+                        if (ack_received) begin
+                            rx_valid <= 1'b1;
+                            rx_last <= 1'b1;
+                            m_axis_data_tvalid <= 1'b1;
+                            m_axis_data_tlast <= 1'b1;
+                            m_axis_data_tdata <= rx_data_reg;
+                            sm_next_state <= 4'b0000; // IDLE
+                        end else begin
+                            sm_next_state <= 4'b0000; // IDLE
+                        end
+                    end
+                    
+                4'b0012: // STOP_WAIT
+                    scl_dir <= 1'b1;
+                    sda_dir <= 1'b1;
+                    scl_high <= 1'b1;
+                    sda_high <= 1'b1;
+                    if (scl_cnt >= SCL_PERIOD && scl_high) begin
+                        scl_high <= 1'b0;
+                        scl_cnt <= 0;
+                    end
+                    if (scl_cnt >= SCL_PERIOD && !scl_high) begin
+                        sda_high <= 1'b1;
+                        sda_cnt <= 0;
+                        if (sda_cnt >= SDA_PERIOD && sda_high) begin
+                            sm_next_state <= 4'b0000; // IDLE
+                        end
+                    end
+                    
+                default:
+                    scl_dir <= 1'b0;
+                    sda_dir <= 1'b0;
+                    scl_high <= 1'b0;
+                    sda_high <= 1'b0;
+                    scl_cnt <= 0;
+                    sda_cnt <= 0;
+            endcase
+        end
+    end
+
+    // ------------------------------------------------------------------------
+    // Handshake Logic for Data
+    // ------------------------------------------------------------------------
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            data_valid <= 1'b0;
+            data_ready <= 1'b1;
+            rx_valid <= 1'b0;
+            rx_last <= 1'b0;
+            m_axis_data_tvalid <= 1'b0;
+            m_axis_data_tlast <= 1'b0;
+            m_axis_data_tdata <= 0;
+        end else begin
+            // Data TX Handshake
+            if (sm_state == 4'b0104) begin // DATA_RX_START
+                if (data_valid && data_ready) begin
+                    data_valid <= 1'b0;
+                    data_ready <= 1'b0;
+                end
+                if (!data_valid && data_ready) begin
+                    data_ready <= 1'b1;
+                end
+            end
+            
+            // Received Data Logic
+            if (sm_state == 4'b0104) begin // ACK_CHECK_RX
+                if (ack_received) begin
+                    rx_valid <= 1'b1;
+                    rx_last <= 1'b1;
+                    m_axis_data_tvalid <= 1'b1;
+                    m_axis_data_tlast <= 1'b1;
+                    m_axis_data_tdata <= rx_data_reg;
+                end else begin
+                    rx_valid <= 1'b0;
+                    m_axis_data_tvalid <= 1'b0;
+                    m_axis_data_tlast <= 1'b0;
+                    m_axis_data_tdata <= 0;
+                end
+            end
+            
+            // Output Data Handshake
+            if (m_axis_data_tvalid && !m_axis_data_tready) begin
+                m_axis_data_tvalid <= 1'b0;
+                m_axis_data_tlast <= 1'b0;
+                m_axis_data_tdata <= 0;
+            end
+            if (m_axis_data_tready && m_axis_data_tvalid) begin
+                m_axis_data_tvalid <= 1'b0;
+                m_axis_data_tlast <= 1'b0;
+                m_axis_data_tdata <= 0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

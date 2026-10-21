@@ -1,0 +1,161 @@
+```verilog
+module apbslave #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH,
+	localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+) (
+	input	wire			PCLK, PRESETn,
+	input	wire			PSEL,
+	input	wire			PENABLE,
+	output	reg			PREADY,
+	input	wire		[AW-1:0]	PADDR,
+	input	wire			PWRITE,
+	input	wire		[DW-1:0]	PWDATA,
+	input	wire		[DW/8-1:0]	PWSTRB,
+	input	wire		[2:0]		PPROT,
+	output	reg		[DW-1:0]	PRDATA,
+	output	wire			PSLVERR
+);
+
+	localparam	NUM_BYTES = DW/8;
+	localparam	NUM_WORDS = NUM_BYTES/APBLSB;
+	localparam	WORD_MASK = { {APBLSB{1'b1}}, {APBLSB{1'b0}} };
+
+	reg	[AW-1:0]	ADDR_REG;
+	reg	[DW-1:0]	DATA_REG;
+	reg	[DW/8-1:0]	WSTRB_REG;
+	reg	[2:0]		PROT_REG;
+	reg			WRITE_ENABLE;
+	reg			TRANSACT_COMPLETE;
+	reg			TRANSACT_ERROR;
+	reg			TRANSACT_ACTIVE;
+
+	// State machine
+	localparam	IDLE = 2'b00;
+	localparam	ACCESS = 2'b01;
+	localparam	READ_DATA = 2'b10;
+	localparam	WRITE_DATA = 2'b11;
+
+	reg	[1:0]	STATE;
+
+	// Synchronous Reset
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			ADDR_REG <= 0;
+			DATA_REG <= 0;
+			WSTRB_REG <= 0;
+			PROT_REG <= 0;
+			WRITE_ENABLE <= 0;
+			TRANSACT_COMPLETE <= 0;
+			TRANSACT_ERROR <= 0;
+			TRANSACT_ACTIVE <= 0;
+			STATE <= IDLE;
+			PREADY <= 1'b1;
+			PRDATA <= 0;
+			PSLVERR <= 1'b0;
+		end
+		else begin
+			// Address and control registers update on every cycle if selected
+			if (PSEL && PENABLE) begin
+				ADDR_REG <= PADDR;
+				DATA_REG <= PWDATA;
+				WSTRB_REG <= PWSTRB;
+				PROT_REG <= PPROT;
+				WRITE_ENABLE <= PWRITE;
+			end
+
+			// State machine logic
+			case (STATE)
+				IDLE: begin
+					if (PSEL && PENABLE) begin
+						TRANSACT_ACTIVE <= 1'b1;
+						TRANSACT_COMPLETE <= 0;
+						TRANSACT_ERROR <= 0;
+						STATE <= (PWRITE) ? WRITE_DATA : READ_DATA;
+					end
+					PREADY <= 1'b1;
+					PSLVERR <= 1'b0;
+				end
+
+				ACCESS: begin
+					// Simulate access phase duration (at least 1 cycle)
+					// In a real implementation, this might depend on address decoding
+					// For this generic slave, we assume immediate transition after setup
+					TRANSACT_ACTIVE <= 1'b1;
+					TRANSACT_COMPLETE <= 0;
+					TRANSACT_ERROR <= 0;
+					STATE <= (PWRITE) ? WRITE_DATA : READ_DATA;
+					PREADY <= 1'b1;
+					PSLVERR <= 1'b0;
+				end
+
+				READ_DATA: begin
+					if (!PSEL || !PENABLE) begin
+						TRANSACT_ACTIVE <= 1'b0;
+						TRANSACT_COMPLETE <= 1'b1;
+						TRANSACT_ERROR <= 0;
+						STATE <= IDLE;
+						PREADY <= 1'b1;
+						PRDATA <= DATA_REG;
+						PSLVERR <= 1'b0;
+					end
+					else begin
+						// Hold data valid for the read transaction
+						PREADY <= 1'b1;
+						PRDATA <= DATA_REG;
+						PSLVERR <= 1'b0;
+					end
+				end
+
+				WRITE_DATA: begin
+					if (!PSEL || !PENABLE) begin
+						TRANSACT_ACTIVE <= 1'b0;
+						TRANSACT_COMPLETE <= 1'b1;
+						TRANSACT_ERROR <= 0;
+						STATE <= IDLE;
+						PREADY <= 1'b1;
+						PRDATA <= 0;
+						PSLVERR <= 1'b0;
+					end
+					else begin
+						// Update data register on write
+						if (PWRITE) begin
+							DATA_REG <= PWDATA;
+						end
+						PREADY <= 1'b1;
+						PRDATA <= 0;
+						PSLVERR <= 1'b0;
+					end
+				end
+			endcase
+		end
+	end
+
+	// Output logic for PREADY and PSLVERR based on state
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			PREADY <= 1'b1;
+			PSLVERR <= 1'b0;
+		end
+		else begin
+			if (STATE == IDLE) begin
+				PREADY <= 1'b1;
+				PSLVERR <= 1'b0;
+			end
+			else if (TRANSACT_ACTIVE) begin
+				PREADY <= 1'b1;
+				PSLVERR <= 1'b0;
+			end
+			else begin
+				// Transaction complete, ready for next
+				PREADY <= 1'b1;
+				PSLVERR <= 1'b0;
+			end
+		end
+	end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,260 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // State encoding
+    localparam IDLE = 2'b00;
+    localparam TX_START = 2'b01;
+    localparam TX_SHIFT = 2'b10;
+    localparam RX_SHIFT = 2'b11;
+
+    reg [1:0] state;
+    reg [N-1:0] tx_data;
+    reg [N-1:0] rx_data;
+    reg [N-1:0] shift_reg;
+    reg tx_en;
+    reg [N-1:0] shift_count;
+    reg [N-1:0] rx_count;
+    reg ssel_active;
+
+    // Internal clock generation for SPI domain
+    // We need to generate a clock that is SPI_2X_CLK_DIV times faster than sclk_i
+    // to handle the bit shifting efficiently.
+    reg [SPI_2X_CLK_DIV - 1:0] sclk_div_cnt;
+    wire sclk_fast;
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i)
+            sclk_div_cnt <= {SPI_2X_CLK_DIV{1'b0}};
+        else
+            sclk_div_cnt <= sclk_div_cnt + 1'b1;
+    end
+
+    assign sclk_fast = (sclk_div_cnt == {SPI_2X_CLK_DIV{1'b0}}) ? 1'b1 : 1'b0;
+
+    // State Machine Logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state <= IDLE;
+            tx_data <= 0;
+            rx_data <= 0;
+            shift_reg <= 0;
+            tx_en <= 0;
+            shift_count <= 0;
+            rx_count <= 0;
+            ssel_active <= 0;
+            di_req_o <= 0;
+            wr_ack_o <= 0;
+            do_valid_o <= 0;
+        end
+        else begin
+            case (state)
+                IDLE: begin
+                    if (wren_i && di_req_o) begin
+                        state <= TX_START;
+                        tx_data <= di_i;
+                        shift_count <= 0;
+                        rx_count <= 0;
+                        ssel_active <= 1;
+                        di_req_o <= 0; // Deassert request after grab
+                        wr_ack_o <= 1; // Acknowledge write
+                    end
+                    else begin
+                        wr_ack_o <= 0;
+                    end
+                end
+
+                TX_START: begin
+                    // Assert chip select
+                    ssel_active <= 1;
+                    // Load shift register with MSB first
+                    shift_reg <= {tx_data[N-1], tx_data[N-2:0]};
+                    state <= TX_SHIFT;
+                    shift_count <= 0;
+                    rx_count <= 0;
+                end
+
+                TX_SHIFT: begin
+                    // Shift out MSB first
+                    spi_mosi_o <= shift_reg[N-1];
+                    spi_sck_o <= 1'b0; // Start low
+                    shift_count <= shift_count + 1'b1;
+                    
+                    if (shift_count == N - 1) begin
+                        // Last bit shifted out
+                        spi_sck_o <= 1'b1; // End high
+                        state <= RX_SHIFT;
+                    end
+                end
+
+                RX_SHIFT: begin
+                    // Capture MISO
+                    spi_miso_i; // Read input
+                    shift_reg <= {spi_miso_i, shift_reg[N-1:N-1]}; // Shift in LSB first effectively for storage
+                    // Actually, standard SPI shift: 
+                    // If we shift MSB out first, we should shift MSB in first to keep alignment?
+                    // Let's standardize: Shift register holds data MSB at index 0 (leftmost).
+                    // On TX_SHIFT: we output shift_reg[N-1] (MSB).
+                    // On RX_SHIFT: we capture spi_miso_i into shift_reg[0] (LSB position relative to next shift).
+                    // So: shift_reg = {spi_miso_i, shift_reg[N-1:1]};
+                    
+                    shift_reg <= {spi_miso_i, shift_reg[N-1:1]};
+                    spi_sck_o <= 1'b0; // Start low
+                    rx_count <= rx_count + 1'b1;
+
+                    if (rx_count == N - 1) begin
+                        // Last bit shifted in
+                        spi_sck_o <= 1'b1; // End high
+                        do_valid_o <= 1;
+                        do_o <= shift_reg;
+                        state <= IDLE;
+                        ssel_active <= 0;
+                        // Deassert chip select after transaction
+                        spi_ssel_o <= 0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Output assignments
+    assign spi_ssel_o = ssel_active;
+    assign spi_sck_o = (state == TX_SHIFT || state == RX_SHIFT) ? spi_sck_o : 1'b0;
+    // Note: spi_sck_o is driven inside the FSM. 
+    // To ensure it's always driven correctly without race conditions in the output logic:
+    // The FSM drives spi_sck_o directly. We just need to make sure the output logic doesn't conflict.
+    // Since spi_sck_o is a reg, we can drive it directly in the always block.
+    // However, to be safe with the "output reg" declaration and potential synthesis tools:
+    // We will rely on the FSM to drive it.
+    
+    // Re-evaluating spi_sck_o drive:
+    // In the FSM above, spi_sck_o is assigned directly.
+    // But wait, in IDLE and TX_START, we need to ensure it's low.
+    // In the case statement above, I assigned spi_sck_o <= 1'b0 inside TX_SHIFT and RX_SHIFT.
+    // I need to ensure it is 0 in IDLE and TX_START as well.
+    
+    // Let's refactor the spi_sck_o assignment to be cleaner.
+    // Actually, the FSM logic inside the case statement handles the toggling.
+    // We just need to make sure the initial state and transitions are correct.
+    // In IDLE: spi_sck_o should be 0.
+    // In TX_START: spi_sck_o should be 0.
+    // In TX_SHIFT: spi_sck_o toggles 0->1->0...
+    // In RX_SHIFT: spi_sck_o toggles 0->1->0...
+    
+    // Corrected FSM logic for spi_sck_o:
+    // It's better to drive spi_sck_o based on state and a counter/toggle logic if needed,
+    // but since we have a specific clock domain (sclk_fast), we can just toggle it.
+    // However, the requirement is simple: generate clock pulses.
+    // Let's simplify the FSM to drive spi_sck_o explicitly.
+
+    reg spi_sck_internal;
+    
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_sck_internal <= 1'b0;
+            ssel_active <= 0;
+            do_valid_o <= 0;
+            di_req_o <= 0;
+            wr_ack_o <= 0;
+        end
+        else begin
+            case (state)
+                IDLE: begin
+                    spi_sck_internal <= 1'b0;
+                    ssel_active <= 0;
+                    if (wren_i && di_req_o) begin
+                        state <= TX_START;
+                        tx_data <= di_i;
+                        shift_count <= 0;
+                        rx_count <= 0;
+                        di_req_o <= 0;
+                        wr_ack_o <= 1;
+                    end
+                    else begin
+                        wr_ack_o <= 0;
+                    end
+                end
+
+                TX_START: begin
+                    spi_sck_internal <= 1'b0;
+                    ssel_active <= 1;
+                    shift_reg <= {tx_data[N-1], tx_data[N-2:0]};
+                    state <= TX_SHIFT;
+                    shift_count <= 0;
+                    rx_count <= 0;
+                end
+
+                TX_SHIFT: begin
+                    spi_mosi_o <= shift_reg[N-1];
+                    if (shift_count == N - 1) begin
+                        spi_sck_internal <= 1'b1; // End high
+                        state <= RX_SHIFT;
+                    end
+                    else begin
+                        spi_sck_internal <= 1'b0; // Start low
+                        shift_count <= shift_count + 1'b1;
+                    end
+                end
+
+                RX_SHIFT: begin
+                    shift_reg <= {spi_miso_i, shift_reg[N-1:1]};
+                    if (rx_count == N - 1) begin
+                        spi_sck_internal <= 1'b1; // End high
+                        do_valid_o <= 1;
+                        do_o <= shift_reg;
+                        state <= IDLE;
+                        ssel_active <= 0;
+                    end
+                    else begin
+                        spi_sck_internal <= 1'b0; // Start low
+                        rx_count <= rx_count + 1'b1;
+                    end
+                end
+            endcase
+        end
+    end
+
+    assign spi_sck_o = spi_sck_internal;
+    assign spi_ssel_o = ssel_active;
+
+    // Di_req_o is an output that requests the next word.
+    // The prompt says "di_req_o requests the next word".
+    // Usually, the master asserts di_req_o when it is ready to accept a new word.
+    // In this design, the master accepts a word when wren_i is high.
+    // So di_req_o should be asserted when the master is in IDLE state and ready.
+    // However, the prompt says "Accept N-bit words on di_i when wren_i is high".
+    // And "di_req_o requests the next word".
+    // This implies a handshake where the master signals it is ready.
+    // Let's assume di_req_o is asserted when the master is idle and waiting for data.
+    
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i)
+            di_req_o <= 0;
+        else if (state == IDLE)
+            di_req_o <= 1;
+        else
+            di_req_o <= 0;
+    end
+
+    // wr_ack_o is already handled in the FSM.
+    // do_valid_o and do_o are handled in the FSM.
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,143 @@
+```verilog
+module axis_register #
+(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI Stream input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI Stream output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser
+);
+
+    // Internal registers for state
+    reg [DATA_WIDTH-1:0]   reg_tdata;
+    reg [KEEP_WIDTH-1:0]   reg_tkeep;
+    reg                    reg_tlast;
+    reg [ID_WIDTH-1:0]     reg_tid;
+    reg [DEST_WIDTH-1:0]   reg_tdest;
+    reg [USER_WIDTH-1:0]   reg_tuser;
+    reg                    reg_valid;
+
+    // Assign output ports directly to internal registers
+    assign m_axis_tdata    = reg_tdata;
+    assign m_axis_tkeep    = reg_tkeep;
+    assign m_axis_tlast    = reg_tlast;
+    assign m_axis_tid      = reg_tid;
+    assign m_axis_tdest    = reg_tdest;
+    assign m_axis_tuser    = reg_tuser;
+    assign m_axis_tvalid   = reg_valid;
+
+    // Handshake logic
+    // Output is ready if:
+    // 1. We have valid data to send (reg_valid is high)
+    // 2. The downstream is ready (m_axis_tready is high)
+    // 3. For REG_TYPE 2 (Skid Buffer), we must not drop a beat. 
+    //    This means we only stop pushing when the buffer is full or downstream is not ready.
+    //    However, the standard definition of a skid buffer in this context usually implies 
+    //    that we hold the data until ready, but we don't drop it. 
+    //    The critical constraint "must not drop a beat when the output stalls" implies 
+    //    that if m_axis_tready is low, we keep reg_valid high and wait.
+    //    If m_axis_tready is high, we can push.
+    //    The only time we stop pushing is if we have no data (rst) or if we are waiting for ready.
+    //    Actually, the standard behavior for a FIFO/Skid buffer is:
+    //    s_axis_tready = reg_valid && m_axis_tready;
+    //    But we must ensure we don't lose data. If m_axis_tready is low, we hold reg_valid.
+    //    If m_axis_tready is high, we update reg_valid based on s_axis_tvalid.
+    
+    // Logic for s_axis_tready:
+    // We are ready to accept new data if we have space (always true for single beat unless we were implementing a multi-beat FIFO, 
+    // but REG_TYPE 2 implies a skid buffer which typically handles one beat at a time but buffers it).
+    // Wait, REG_TYPE 2 description: "skid buffer that must not drop a beat when the output stalls".
+    // This implies a 1-deep buffer or simply holding the current beat.
+    // If it's a 1-deep buffer:
+    //   If m_axis_tready is low, we cannot accept new data even if s_axis_tvalid is high.
+    //   So s_axis_tready = (reg_valid == 0) && m_axis_tready;
+    //   But if reg_valid is 1 and m_axis_tready is 0, we hold.
+    //   If reg_valid is 1 and m_axis_tready is 1, we push and accept new.
+    //   If reg_valid is 0 and m_axis_tready is 1, we accept.
+    //   So s_axis_tready = (reg_valid == 0) || m_axis_tready; -> No, that's wrong.
+    //   Correct logic for a 1-deep buffer (Skid):
+    //   We can accept if we are empty OR if the downstream is ready.
+    //   Wait, if downstream is NOT ready, and we are full, we must NOT accept.
+    //   So s_axis_tready = (reg_valid == 0) || m_axis_tready;
+    //   Let's trace:
+    //   State Empty (reg_valid=0): Downstream Ready? Yes -> Accept. Downstream Ready? No -> Wait (Ready=0).
+    //   State Full (reg_valid=1): Downstream Ready? Yes -> Push (Ready=1). Downstream Ready? No -> Wait (Ready=0).
+    //   So s_axis_tready = (reg_valid == 0) || m_axis_tready;
+    //   Is this correct? 
+    //   If reg_valid=1 (Full) and m_axis_tready=0 -> s_axis_tready = 0. Correct.
+    //   If reg_valid=0 (Empty) and m_axis_tready=0 -> s_axis_tready = 0. Correct.
+    //   If reg_valid=0 (Empty) and m_axis_tready=1 -> s_axis_tready = 1. Correct.
+    //   If reg_valid=1 (Full) and m_axis_tready=1 -> s_axis_tready = 1. Correct.
+    //   This logic holds for a 1-deep buffer.
+    
+    assign s_axis_tready = (reg_valid == 1'b0) || m_axis_tready;
+
+    // Update logic on positive edge of clock
+    always @(posedge clk) begin
+        if (rst) begin
+            reg_tdata    <= 0;
+            reg_tkeep    <= 0;
+            reg_tlast    <= 0;
+            reg_tid      <= 0;
+            reg_tdest    <= 0;
+            reg_tuser    <= 0;
+            reg_valid    <= 0;
+        end else begin
+            // Update data and sidebands if we have valid input and we are ready to accept
+            if (s_axis_tvalid && s_axis_tready) begin
+                reg_tdata    <= s_axis_tdata;
+                reg_tkeep    <= s_axis_tkeep;
+                reg_tlast    <= s_axis_tlast;
+                reg_tid      <= s_axis_tid;
+                reg_tdest    <= s_axis_tdest;
+                reg_tuser    <= s_axis_tuser;
+                reg_valid    <= 1'b1;
+            end else if (m_axis_tready && reg_valid) begin
+                // Push data to output and clear register
+                reg_tdata    <= 0;
+                reg_tkeep    <= 0;
+                reg_tlast    <= 0;
+                reg_tid      <= 0;
+                reg_tdest    <= 0;
+                reg_tuser    <= 0;
+                reg_valid    <= 1'b0;
+            end
+            // If s_axis_tvalid is high but s_axis_tready is low, we hold the data in the register.
+            // If m_axis_tready is high but reg_valid is low, we wait for s_axis_tvalid.
+        end
+    end
+
+endmodule
+```<|im_end|>

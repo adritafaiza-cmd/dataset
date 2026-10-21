@@ -1,0 +1,258 @@
+```verilog
+`timescale 1ns/1ps
+
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam VALID_WIDTH = 1;
+
+    // Source side FIFO (src -> dst)
+    // Stores: sel, enable, write, addr, wdata, strb, prot
+    reg [VALID_WIDTH-1:0] src_fifo_valid;
+    reg [1-1:0] src_fifo_count;
+    reg [1-1:0] src_fifo_full;
+    reg [1-1:0] src_fifo_empty;
+    reg [1-1:0] src_fifo_rdy;
+    reg [1-1:0] src_fifo_wr_en;
+    reg [1-1:0] src_fifo_rd_en;
+    reg [1-1:0] src_fifo_wr_ptr;
+    reg [1-1:0] src_fifo_rd_ptr;
+    reg [1-1:0] src_fifo_data [DEPTH-1:0];
+    reg [1-1:0] src_fifo_wr_mask [DEPTH-1:0];
+    reg [1-1:0] src_fifo_rd_mask [DEPTH-1:0];
+
+    // Destination side FIFO (dst -> src)
+    // Stores: prdata, pslverr
+    reg [VALID_WIDTH-1:0] dst_fifo_valid;
+    reg [1-1:0] dst_fifo_count;
+    reg [1-1:0] dst_fifo_full;
+    reg [1-1:0] dst_fifo_empty;
+    reg [1-1:0] dst_fifo_rdy;
+    reg [1-1:0] dst_fifo_wr_en;
+    reg [1-1:0] dst_fifo_rd_en;
+    reg [1-1:0] dst_fifo_wr_ptr;
+    reg [1-1:0] dst_fifo_rd_ptr;
+    reg [1-1:0] dst_fifo_data [DEPTH-1:0];
+    reg [1-1:0] dst_fifo_wr_mask [DEPTH-1:0];
+    reg [1-1:0] dst_fifo_rd_mask [DEPTH-1:0];
+
+    // Source side registers for current transaction
+    reg [1-1:0] src_sel_reg;
+    reg [1-1:0] src_enable_reg;
+    reg [1-1:0] src_write_reg;
+    reg [ADDR_WIDTH-1:0] src_addr_reg;
+    reg [DATA_WIDTH-1:0] src_wdata_reg;
+    reg [DATA_WIDTH/8-1:0] src_strb_reg;
+    reg [2:0] src_prot_reg;
+    reg [1-1:0] src_transfer_done;
+
+    // Destination side registers for current transaction
+    reg [DATA_WIDTH-1:0] dst_prdata_reg;
+    reg [1-1:0] dst_pslverr_reg;
+    reg [1-1:0] dst_transfer_done;
+
+    // Source side logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_fifo_valid <= 1'b0;
+            src_fifo_count <= 1'b0;
+            src_fifo_full <= 1'b0;
+            src_fifo_empty <= 1'b0;
+            src_fifo_rdy <= 1'b0;
+            src_fifo_wr_en <= 1'b0;
+            src_fifo_rd_en <= 1'b0;
+            src_fifo_wr_ptr <= 1'b0;
+            src_fifo_rd_ptr <= 1'b0;
+            src_fifo_data <= 1'b0;
+            src_fifo_wr_mask <= 1'b0;
+            src_fifo_rd_mask <= 1'b0;
+            src_sel_reg <= 1'b0;
+            src_enable_reg <= 1'b0;
+            src_write_reg <= 1'b0;
+            src_addr_reg <= 1'b0;
+            src_wdata_reg <= 1'b0;
+            src_strb_reg <= 1'b0;
+            src_prot_reg <= 1'b0;
+            src_transfer_done <= 1'b0;
+            src_pready_o <= 1'b0;
+            src_prdata_o <= 1'b0;
+            src_pslverr_o <= 1'b0;
+        end
+        else begin
+            // FIFO Write Logic
+            src_fifo_wr_en <= src_psel_i & src_penable_i & ~src_pwrite_i; // Read request
+            src_fifo_rd_en <= src_psel_i & src_penable_i & src_pwrite_i; // Write request
+
+            if (src_fifo_wr_en) begin
+                src_fifo_wr_ptr <= src_fifo_wr_ptr + 1'b1;
+                src_fifo_data[src_fifo_wr_ptr] <= {src_psel_i, src_penable_i, src_pwrite_i, src_paddr_i, src_pwdata_i, src_pstrb_i, src_pprot_i};
+                src_fifo_wr_mask[src_fifo_wr_ptr] <= 1'b1;
+            end
+
+            if (src_fifo_rd_en) begin
+                src_fifo_rd_ptr <= src_fifo_rd_ptr + 1'b1;
+                src_fifo_rd_mask[src_fifo_rd_ptr] <= 1'b1;
+            end
+
+            // FIFO Full/Empty Logic
+            src_fifo_full <= (src_fifo_wr_ptr == src_fifo_rd_ptr) && (src_fifo_wr_en);
+            src_fifo_empty <= (src_fifo_wr_ptr == src_fifo_rd_ptr) && (~src_fifo_wr_en);
+
+            // FIFO Valid Logic
+            src_fifo_valid <= src_fifo_wr_en | (src_fifo_count > 1'b0);
+
+            // FIFO Ready Logic
+            src_fifo_rdy <= ~src_fifo_full;
+
+            // FIFO Count Logic
+            if (src_fifo_wr_en) begin
+                src_fifo_count <= src_fifo_count + 1'b1;
+            end
+            else if (src_fifo_rd_en) begin
+                src_fifo_count <= src_fifo_count - 1'b1;
+            end
+
+            // Read Data from FIFO
+            if (src_fifo_rd_en) begin
+                src_sel_reg <= src_fifo_data[src_fifo_rd_ptr][0];
+                src_enable_reg <= src_fifo_data[src_fifo_rd_ptr][1];
+                src_write_reg <= src_fifo_data[src_fifo_rd_ptr][2];
+                src_addr_reg <= src_fifo_data[src_fifo_rd_ptr][3+ADDR_WIDTH:3];
+                src_wdata_reg <= src_fifo_data[src_fifo_rd_ptr][3+ADDR_WIDTH+ADDR_WIDTH:3];
+                src_strb_reg <= src_fifo_data[src_fifo_rd_ptr][3+ADDR_WIDTH+ADDR_WIDTH+DATA_WIDTH:3];
+                src_prot_reg <= src_fifo_data[src_fifo_rd_ptr][3+ADDR_WIDTH+ADDR_WIDTH+DATA_WIDTH+DATA_WIDTH/8:3];
+            end
+
+            // Source Ready Logic
+            src_pready_o <= src_fifo_rdy & src_transfer_done;
+
+            // Source Data/Error Logic
+            src_prdata_o <= src_fifo_data[src_fifo_rd_ptr][3+ADDR_WIDTH+ADDR_WIDTH+DATA_WIDTH+DATA_WIDTH/8+2:3+ADDR_WIDTH+ADDR_WIDTH+DATA_WIDTH+DATA_WIDTH/8];
+            src_pslverr_o <= src_fifo_data[src_fifo_rd_ptr][3+ADDR_WIDTH+ADDR_WIDTH+DATA_WIDTH+DATA_WIDTH/8+3:3+ADDR_WIDTH+ADDR_WIDTH+DATA_WIDTH+DATA_WIDTH/8];
+
+            // Transfer Done Logic
+            if (src_fifo_rd_en) begin
+                src_transfer_done <= 1'b0;
+            end
+            else if (src_fifo_rdy & src_transfer_done) begin
+                src_transfer_done <= 1'b1;
+            end
+        end
+    end
+
+    // Destination side logic
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_fifo_valid <= 1'b0;
+            dst_fifo_count <= 1'b0;
+            dst_fifo_full <= 1'b0;
+            dst_fifo_empty <= 1'b0;
+            dst_fifo_rdy <= 1'b0;
+            dst_fifo_wr_en <= 1'b0;
+            dst_fifo_rd_en <= 1'b0;
+            dst_fifo_wr_ptr <= 1'b0;
+            dst_fifo_rd_ptr <= 1'b0;
+            dst_fifo_data <= 1'b0;
+            dst_fifo_wr_mask <= 1'b0;
+            dst_fifo_rd_mask <= 1'b0;
+            dst_prdata_reg <= 1'b0;
+            dst_pslverr_reg <= 1'b0;
+            dst_transfer_done <= 1'b0;
+            dst_psel_o <= 1'b0;
+            dst_penable_o <= 1'b0;
+            dst_pwrite_o <= 1'b0;
+            dst_paddr_o <= 1'b0;
+            dst_pwdata_o <= 1'b0;
+            dst_pstrb_o <= 1'b0;
+            dst_pprot_o <= 1'b0;
+        end
+        else begin
+            // FIFO Write Logic
+            dst_fifo_wr_en <= src_fifo_valid & src_fifo_rdy;
+            dst_fifo_rd_en <= dst_pready_i & dst_transfer_done;
+
+            if (dst_fifo_wr_en) begin
+                dst_fifo_wr_ptr <= dst_fifo_wr_ptr + 1'b1;
+                dst_fifo_data[dst_fifo_wr_ptr] <= {src_sel_reg, src_enable_reg, src_write_reg, src_addr_reg, src_wdata_reg, src_strb_reg, src_prot_reg};
+                dst_fifo_wr_mask[dst_fifo_wr_ptr] <= 1'b1;
+            end
+
+            if (dst_fifo_rd_en) begin
+                dst_fifo_rd_ptr <= dst_fifo_rd_ptr + 1'b1;
+                dst_fifo_rd_mask[dst_fifo_rd_ptr] <= 1'b1;
+            end
+
+            // FIFO Full/Empty Logic
+            dst_fifo_full <= (dst_fifo_wr_ptr == dst_fifo_rd_ptr) && (dst_fifo_wr_en);
+            dst_fifo_empty <= (dst_fifo_wr_ptr == dst_fifo_rd_ptr) && (~dst_fifo_wr_en);
+
+            // FIFO Valid Logic
+            dst_fifo_valid <= dst_fifo_wr_en | (dst_fifo_count > 1'b0);
+
+            // FIFO Ready Logic
+            dst_fifo_rdy <= ~dst_fifo_full;
+
+            // FIFO Count Logic
+            if (dst_fifo_wr_en) begin
+                dst_fifo_count <= dst_fifo_count + 1'b1;
+            end
+            else if (dst_fifo_rd_en) begin
+                dst_fifo_count <= dst_fifo_count - 1'b1;
+            end
+
+            // Read Data from FIFO
+            if (dst_fifo_rd_en) begin
+                dst_prdata_reg <= dst_fifo_data[dst_fifo_rd_ptr][3+ADDR_WIDTH+ADDR_WIDTH+DATA_WIDTH+DATA_WIDTH/8+2:3+ADDR_WIDTH+ADDR_WIDTH+DATA_WIDTH+DATA_WIDTH/8];
+                dst_pslverr_reg <= dst_fifo_data[dst_fifo_rd_ptr][3+ADDR_WIDTH+ADDR_WIDTH+DATA_WIDTH+DATA_WIDTH/8+3:3+ADDR_WIDTH+ADDR_WIDTH+DATA_WIDTH+DATA_WIDTH/8];
+            end
+
+            // Destination Output Logic
+            dst_psel_o <= dst_fifo_data[dst_fifo_rd_ptr][0];
+            dst_penable_o <= dst_fifo_data[dst_fifo_rd_ptr][1];
+            dst_pwrite_o <= dst_fifo_data[dst_fifo_rd_ptr][2];
+            dst_paddr_o <= dst_fifo_data[dst_fifo_rd_ptr][3+ADDR_WIDTH:3];
+            dst_pwdata_o <= dst_fifo_data[dst_fifo_rd_ptr][3+ADDR_WIDTH+ADDR_WIDTH:3];
+            dst_pstrb_o <= dst_fifo_data[dst_fifo_rd_ptr][3+ADDR_WIDTH+ADDR_WIDTH+DATA_WIDTH:3];
+            dst_pprot_o <= dst_fifo_data[dst_fifo_rd_ptr][3+ADDR_WIDTH+ADDR_WIDTH+DATA_WIDTH+DATA_WIDTH/8:3];
+
+            // Transfer Done Logic
+            if (dst_fifo_rd_en) begin
+                dst_transfer_done <= 1'b0;
+            end
+            else if (dst_pready_i & dst_transfer_done) begin
+                dst_transfer_done <= 1'b1;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

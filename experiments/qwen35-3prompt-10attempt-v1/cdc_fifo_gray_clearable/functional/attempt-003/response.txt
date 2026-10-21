@@ -1,0 +1,426 @@
+```verilog
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam GRAY_WIDTH = LOG_DEPTH;
+
+    // Internal signals
+    reg [WIDTH-1:0]   data_mem [0:DEPTH-1];
+    reg               full_reg;
+    reg               empty_reg;
+    reg [LOG_DEPTH-1:0] write_ptr;
+    reg [LOG_DEPTH-1:0] read_ptr;
+    reg               clear_pending_src;
+    reg               clear_pending_dst;
+    reg               src_clear_req;
+    reg               dst_clear_req;
+    reg [LOG_DEPTH-1:0] gray_write_ptr;
+    reg [LOG_DEPTH-1:0] gray_read_ptr;
+
+    // Synchronizers for clear requests
+    reg [SYNC_STAGES-1:0] src_clear_sync;
+    reg [SYNC_STAGES-1:0] dst_clear_sync;
+
+    // Synchronizers for pointers to detect clear completion
+    reg [SYNC_STAGES-1:0] write_ptr_sync;
+    reg [SYNC_STAGES-1:0] read_ptr_sync;
+
+    // Synchronizers for valid/ready handshake
+    reg [SYNC_STAGES-1:0] src_valid_sync;
+    reg [SYNC_STAGES-1:0] dst_ready_sync;
+
+    // Synchronizers for clear pending feedback
+    reg [SYNC_STAGES-1:0] src_clear_pending_sync;
+    reg [SYNC_STAGES-1:0] dst_clear_pending_sync;
+
+    // ---------------------------------------------------------
+    // Source Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            write_ptr      <= '0;
+            data_mem       <= '0;
+            full_reg       <= 1'b0;
+            empty_reg      <= 1'b1;
+            src_clear_req  <= 1'b0;
+            src_clear_pending_o <= 1'b0;
+        end else begin
+            // Handle clear request
+            if (src_clear_i) begin
+                src_clear_req <= 1'b1;
+            end else if (src_clear_pending_o) begin
+                src_clear_req <= 1'b0;
+            end else begin
+                src_clear_req <= 1'b0;
+            end
+
+            // Update pointers and data on write
+            if (src_valid_i && dst_ready_i) begin
+                if (full_reg) begin
+                    // FIFO full, overwrite oldest if clear not pending, else wait
+                    if (src_clear_req) begin
+                        write_ptr <= read_ptr;
+                        empty_reg <= 1'b1;
+                        src_clear_pending_o <= 1'b1;
+                    end else begin
+                        src_ready_o <= 1'b0;
+                    end
+                end else begin
+                    data_mem[write_ptr] <= src_data_i;
+                    write_ptr <= write_ptr + 1'b1;
+                    src_ready_o <= 1'b1;
+                    if (write_ptr == read_ptr) begin
+                        empty_reg <= 1'b1;
+                    end else begin
+                        empty_reg <= 1'b0;
+                    end
+                end
+            end else begin
+                src_ready_o <= 1'b0;
+            end
+
+            // Clear pending logic: high until write_ptr == read_ptr AND no clear req
+            if (src_clear_req) begin
+                src_clear_pending_o <= 1'b1;
+            end else if (write_ptr == read_ptr) begin
+                src_clear_pending_o <= 1'b0;
+            end else begin
+                src_clear_pending_o <= 1'b1;
+            end
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Destination Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            read_ptr      <= '0;
+            data_mem      <= '0; // Note: data_mem is in src domain, this is just for completeness if needed locally, but we read from cross-clock
+            // Actually, data_mem is in src domain. We need to read from it.
+            // The read_ptr is in dst domain.
+            // We need to handle clear request here too.
+            dst_clear_req <= 1'b0;
+            dst_clear_pending_o <= 1'b0;
+            dst_valid_o <= 1'b0;
+        end else begin
+            // Handle clear request
+            if (dst_clear_i) begin
+                dst_clear_req <= 1'b1;
+            end else if (dst_clear_pending_o) begin
+                dst_clear_req <= 1'b0;
+            end else begin
+                dst_clear_req <= 1'b0;
+            end
+
+            // Read data
+            if (dst_ready_i && !dst_clear_req) begin
+                if (empty_reg) begin
+                    dst_valid_o <= 1'b0;
+                end else begin
+                    // Read from memory using read_ptr
+                    // Note: read_ptr is in dst domain, memory is in src domain.
+                    // This is a cross-clock read.
+                    // We need to ensure we read the correct data.
+                    // Since the memory is updated in src domain, and read_ptr is in dst domain,
+                    // we must be careful about the timing.
+                    // Standard async FIFO: read_ptr is in dst domain, write_ptr in src.
+                    // The data is stable when read_ptr == write_ptr (empty) or read_ptr != write_ptr.
+                    // We read data_mem[read_ptr].
+                    dst_data_o <= data_mem[read_ptr];
+                    dst_valid_o <= 1'b1;
+                    read_ptr <= read_ptr + 1'b1;
+                    if (read_ptr == write_ptr) begin
+                        empty_reg <= 1'b1;
+                    end else begin
+                        empty_reg <= 1'b0;
+                    end
+                end
+            end else begin
+                dst_valid_o <= 1'b0;
+            end
+
+            // Clear pending logic: high until read_ptr == write_ptr AND no clear req
+            if (dst_clear_req) begin
+                dst_clear_pending_o <= 1'b1;
+            end else if (read_ptr == write_ptr) begin
+                dst_clear_pending_o <= 1'b0;
+            end else begin
+                dst_clear_pending_o <= 1'b1;
+            end
+        end
+    end
+
+    // ---------------------------------------------------------
+    // CDC: Write Pointer (Src -> Dst)
+    // ---------------------------------------------------------
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            gray_write_ptr <= '0;
+        end else begin
+            if (dst_clear_req) begin
+                gray_write_ptr <= '0;
+            end else begin
+                // Synchronize write_ptr from src to dst
+                if (write_ptr_sync[0]) begin
+                    gray_write_ptr <= write_ptr_sync[1];
+                end else begin
+                    gray_write_ptr <= gray_write_ptr;
+                end
+            end
+        end
+    end
+
+    // ---------------------------------------------------------
+    // CDC: Read Pointer (Dst -> Src)
+    // ---------------------------------------------------------
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            gray_read_ptr <= '0;
+        end else begin
+            if (src_clear_req) begin
+                gray_read_ptr <= '0;
+            end else begin
+                // Synchronize read_ptr from dst to src
+                if (read_ptr_sync[0]) begin
+                    gray_read_ptr <= read_ptr_sync[1];
+                end else begin
+                    gray_read_ptr <= gray_read_ptr;
+                end
+            end
+        end
+    end
+
+    // ---------------------------------------------------------
+    // CDC: Full/Empty Detection
+    // ---------------------------------------------------------
+    // Full: write_ptr == (read_ptr + 1) mod DEPTH
+    // Empty: write_ptr == read_ptr
+    // We need to compare gray pointers.
+    
+    // Calculate full condition in src domain
+    reg full_gray;
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            full_gray <= 1'b0;
+        end else begin
+            if (src_clear_req) begin
+                full_gray <= 1'b0;
+            end else begin
+                // Check if (gray_write_ptr + 1) == gray_read_ptr
+                if (gray_write_ptr == gray_read_ptr) begin
+                    full_gray <= 1'b0;
+                end else if (gray_write_ptr == (gray_read_ptr + 1'b1)) begin
+                    full_gray <= 1'b1;
+                end else begin
+                    full_gray <= 1'b0;
+                end
+            end
+        end
+    end
+
+    // Calculate empty condition in dst domain
+    reg empty_gray;
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            empty_gray <= 1'b1;
+        end else begin
+            if (dst_clear_req) begin
+                empty_gray <= 1'b1;
+            end else begin
+                // Check if gray_read_ptr == gray_write_ptr
+                if (gray_read_ptr == gray_write_ptr) begin
+                    empty_gray <= 1'b1;
+                end else begin
+                    empty_gray <= 1'b0;
+                end
+            end
+        end
+    end
+
+    // ---------------------------------------------------------
+    // CDC: Clear Requests
+    // ---------------------------------------------------------
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_clear_sync <= '{1'b0, 1'b0, 1'b0};
+        end else begin
+            src_clear_sync <= {src_clear_sync[0], src_clear_sync[1], src_clear_sync[2]};
+            src_clear_sync[0] <= src_clear_i;
+        end
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_clear_sync <= '{1'b0, 1'b0, 1'b0};
+        end else begin
+            dst_clear_sync <= {dst_clear_sync[0], dst_clear_sync[1], dst_clear_sync[2]};
+            dst_clear_sync[0] <= dst_clear_i;
+        end
+    end
+
+    // ---------------------------------------------------------
+    // CDC: Pointers for Clear Logic
+    // ---------------------------------------------------------
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            write_ptr_sync <= '{1'b0, 1'b0, 1'b0};
+        end else begin
+            write_ptr_sync <= {write_ptr_sync[0], write_ptr_sync[1], write_ptr_sync[2]};
+            write_ptr_sync[0] <= write_ptr;
+        end
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            read_ptr_sync <= '{1'b0, 1'b0, 1'b0};
+        end else begin
+            read_ptr_sync <= {read_ptr_sync[0], read_ptr_sync[1], read_ptr_sync[2]};
+            read_ptr_sync[0] <= read_ptr;
+        end
+    end
+
+    // ---------------------------------------------------------
+    // CDC: Valid/Ready Handshake
+    // ---------------------------------------------------------
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_valid_sync <= '{1'b0, 1'b0, 1'b0};
+        end else begin
+            src_valid_sync <= {src_valid_sync[0], src_valid_sync[1], src_valid_sync[2]};
+            src_valid_sync[0] <= src_valid_i;
+        end
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_ready_sync <= '{1'b0, 1'b0, 1'b0};
+        end else begin
+            dst_ready_sync <= {dst_ready_sync[0], dst_ready_sync[1], dst_ready_sync[2]};
+            dst_ready_sync[0] <= dst_ready_i;
+        end
+    end
+
+    // ---------------------------------------------------------
+    // CDC: Clear Pending Feedback
+    // ---------------------------------------------------------
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_clear_pending_sync <= '{1'b0, 1'b0, 1'b0};
+        end else begin
+            src_clear_pending_sync <= {src_clear_pending_sync[0], src_clear_pending_sync[1], src_clear_pending_sync[2]};
+            src_clear_pending_sync[0] <= src_clear_pending_o;
+        end
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_clear_pending_sync <= '{1'b0, 1'b0, 1'b0};
+        end else begin
+            dst_clear_pending_sync <= {dst_clear_pending_sync[0], dst_clear_pending_sync[1], dst_clear_pending_sync[2]};
+            dst_clear_pending_sync[0] <= dst_clear_pending_o;
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Final Logic Updates based on CDC
+    // ---------------------------------------------------------
+    // Update full_reg in src domain using synchronized empty_gray
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            full_reg <= 1'b0;
+        end else begin
+            if (src_clear_req) begin
+                full_reg <= 1'b0;
+            end else begin
+                full_reg <= full_gray;
+            end
+        end
+    end
+
+    // Update empty_reg in dst domain using synchronized full_gray
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            empty_reg <= 1'b1;
+        end else begin
+            if (dst_clear_req) begin
+                empty_reg <= 1'b1;
+            end else begin
+                empty_reg <= empty_gray;
+            end
+        end
+    end
+
+    // Update src_ready_o based on synchronized dst_ready_sync and local state
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_ready_o <= 1'b0;
+        end else begin
+            if (src_clear_req) begin
+                src_ready_o <= 1'b0;
+            end else begin
+                if (full_reg) begin
+                    src_ready_o <= 1'b0;
+                end else begin
+                    src_ready_o <= dst_ready_sync[0];
+                end
+            end
+        end
+    end
+
+    // Update dst_valid_o based on synchronized src_valid_sync and local state
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_valid_o <= 1'b0;
+        end else begin
+            if (dst_clear_req) begin
+                dst_valid_o <= 1'b0;
+            end else begin
+                if (empty_reg) begin
+                    dst_valid_o <= 1'b0;
+                end else begin
+                    dst_valid_o <= src_valid_sync[0];
+                end
+            end
+        end
+    end
+
+    // Update clear_pending_o outputs based on synchronized feedback
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_clear_pending_o <= 1'b0;
+        end else begin
+            src_clear_pending_o <= src_clear_pending_sync[0];
+        end
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_clear_pending_o <= 1'b0;
+        end else begin
+            dst_clear_pending_o <= dst_clear_pending_sync[0];
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

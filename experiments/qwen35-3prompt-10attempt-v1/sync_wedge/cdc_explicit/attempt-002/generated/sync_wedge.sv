@@ -1,0 +1,89 @@
+```verilog
+`timescale 1ns/1ps
+
+module sync_wedge #(
+    parameter STAGES = 2
+)(
+    input  wire clk_i,
+    input  wire rst_ni,
+    input  wire en_i,
+    input  wire serial_i,
+    output wire r_edge_o,
+    output wire f_edge_o,
+    output wire serial_o
+);
+
+    // Internal registers for synchronization
+    reg [STAGES-1:0] sync_reg;
+    reg [STAGES-1:0] sync_reg_prev;
+    
+    // Edge detection flags in the destination domain
+    reg r_edge_flag;
+    reg f_edge_flag;
+    
+    // Synchronized serial data
+    reg serial_sync;
+
+    // Generate clock enable for the synchronizer chain
+    // We use a simple shift register approach for synchronization
+    // to ensure structural CDC compliance.
+    
+    // Stage 0
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+            sync_reg[0] <= 1'b0;
+        else
+            sync_reg[0] <= serial_i;
+    end
+
+    // Stages 1 to STAGES-1
+    genvar i;
+    generate
+        for (i = 1; i < STAGES; i = i + 1) begin : sync_stage
+            always @(posedge clk_i or negedge rst_ni) begin
+                if (!rst_ni)
+                    sync_reg[i] <= 1'b0;
+                else
+                    sync_reg[i] <= sync_reg[i-1];
+            end
+        end
+    endgenerate
+
+    // Assign the final synchronized value
+    assign serial_sync = sync_reg[STAGES-1];
+
+    // Edge Detection Logic
+    // We compare the current synchronized value with the previous cycle's value
+    // to detect transitions within the destination clock domain.
+    
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            sync_reg_prev <= 1'b0;
+            r_edge_flag <= 1'b0;
+            f_edge_flag <= 1'b0;
+        end
+        else begin
+            sync_reg_prev <= serial_sync;
+            
+            // Detect Rising Edge (0 -> 1)
+            if (serial_sync && !sync_reg_prev)
+                r_edge_flag <= 1'b1;
+            else
+                r_edge_flag <= 1'b0;
+            
+            // Detect Falling Edge (1 -> 0)
+            if (!serial_sync && sync_reg_prev)
+                f_edge_flag <= 1'b1;
+            else
+                f_edge_flag <= 1'b0;
+        end
+    end
+
+    // Output assignments gated by enable
+    // r_edge_o and f_edge_o pulse for one cycle when an edge is detected
+    assign r_edge_o = en_i && r_edge_flag;
+    assign f_edge_o = en_i && f_edge_flag;
+    assign serial_o = en_i ? serial_sync : 1'b0;
+
+endmodule
+```<|im_end|>

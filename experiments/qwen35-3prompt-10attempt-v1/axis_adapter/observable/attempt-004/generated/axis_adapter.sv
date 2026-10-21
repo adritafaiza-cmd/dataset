@@ -1,0 +1,277 @@
+```verilog
+module axis_adapter #
+(
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    /*
+     * AXI input
+     */
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    localparam S_KEEP_MASK = S_KEEP_ENABLE ? {S_KEEP_WIDTH{1'b1}} : 1'b0;
+    localparam M_KEEP_MASK = M_KEEP_ENABLE ? {M_KEEP_WIDTH{1'b1}} : 1'b0;
+
+    // Calculate the number of source beats required to fill one destination beat
+    localparam S_BEATS_PER_M = M_DATA_WIDTH / S_DATA_WIDTH;
+    
+    // Calculate the number of destination beats required to fill one source beat
+    localparam M_BEATS_PER_S = S_DATA_WIDTH / M_DATA_WIDTH;
+
+    // State machine states
+    typedef enum logic [1:0] {
+        STATE_IDLE,
+        STATE_FILLING_DEST,
+        STATE_WAITING_FOR_S,
+        STATE_FLUSHING_S
+    } state_t;
+
+    state_t current_state, next_state;
+    
+    // Buffers to hold data
+    reg [S_DATA_WIDTH-1:0] s_data_buffer;
+    reg [S_KEEP_WIDTH-1:0] s_keep_buffer;
+    reg [S_DATA_WIDTH-1:0] m_data_buffer;
+    reg [M_KEEP_WIDTH-1:0] m_keep_buffer;
+    
+    // Control signals for buffering
+    reg [S_BEATS_PER_M-1:0] s_beats_to_fill;
+    reg [M_BEATS_PER_S-1:0] m_beats_to_fill;
+    
+    reg s_last_valid;
+    reg m_last_valid;
+    
+    reg [ID_WIDTH-1:0] id_buffer;
+    reg [DEST_WIDTH-1:0] dest_buffer;
+    reg [USER_WIDTH-1:0] user_buffer;
+
+    // Internal valid signals
+    reg s_valid_internal;
+    reg m_valid_internal;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            current_state <= STATE_IDLE;
+            s_data_buffer <= 0;
+            s_keep_buffer <= 0;
+            m_data_buffer <= 0;
+            m_keep_buffer <= 0;
+            s_beats_to_fill <= 0;
+            m_beats_to_fill <= 0;
+            s_last_valid <= 0;
+            m_last_valid <= 0;
+            id_buffer <= 0;
+            dest_buffer <= 0;
+            user_buffer <= 0;
+            s_valid_internal <= 0;
+            m_valid_internal <= 0;
+        end else begin
+            current_state <= next_state;
+            s_data_buffer <= s_data_buffer;
+            s_keep_buffer <= s_keep_buffer;
+            m_data_buffer <= m_data_buffer;
+            m_keep_buffer <= m_keep_buffer;
+            s_beats_to_fill <= s_beats_to_fill;
+            m_beats_to_fill <= m_beats_to_fill;
+            s_last_valid <= s_last_valid;
+            m_last_valid <= m_last_valid;
+            id_buffer <= id_buffer;
+            dest_buffer <= dest_buffer;
+            user_buffer <= user_buffer;
+            s_valid_internal <= s_valid_internal;
+            m_valid_internal <= m_valid_internal;
+        end
+    end
+
+    always @(*) begin
+        next_state = current_state;
+        s_axis_tready = 1'b0;
+        m_axis_tvalid = 1'b0;
+        m_axis_tlast = 1'b0;
+        m_axis_tid = 0;
+        m_axis_tdest = 0;
+        m_axis_tuser = 0;
+        m_axis_tkeep = 0;
+        m_axis_tdata = 0;
+
+        case (current_state)
+            STATE_IDLE: begin
+                if (s_axis_tvalid && m_axis_tready) begin
+                    next_state = STATE_FILLING_DEST;
+                    s_valid_internal = 1;
+                    s_beats_to_fill = S_BEATS_PER_M;
+                    m_beats_to_fill = M_BEATS_PER_S;
+                    s_data_buffer = s_axis_tdata;
+                    s_keep_buffer = s_axis_tkeep;
+                    id_buffer = s_axis_tid;
+                    dest_buffer = s_axis_tdest;
+                    user_buffer = s_axis_tuser;
+                    s_last_valid = s_axis_tlast;
+                    m_last_valid = 0;
+                end
+            end
+
+            STATE_FILLING_DEST: begin
+                // Fill destination beat
+                if (s_beats_to_fill > 0) begin
+                    s_beats_to_fill = s_beats_to_fill - 1;
+                    m_data_buffer = m_data_buffer | (s_data_buffer << (S_DATA_WIDTH * s_beats_to_fill));
+                    m_keep_buffer = m_keep_buffer | (s_keep_buffer << (S_DATA_WIDTH * s_beats_to_fill));
+                    
+                    if (s_beats_to_fill == 0) begin
+                        // Destination beat is full
+                        m_axis_tdata = m_data_buffer;
+                        m_axis_tkeep = m_keep_buffer;
+                        m_axis_tvalid = 1;
+                        m_axis_tlast = m_last_valid;
+                        m_axis_tid = id_buffer;
+                        m_axis_tdest = dest_buffer;
+                        m_axis_tuser = user_buffer;
+                        
+                        // Reset buffers for next destination beat
+                        m_data_buffer = 0;
+                        m_keep_buffer = 0;
+                        m_last_valid = 0;
+                        id_buffer = 0;
+                        dest_buffer = 0;
+                        user_buffer = 0;
+                        
+                        // Check if we need to wait for more source data
+                        if (s_valid_internal) begin
+                            // We have more source data coming, but we just filled a dest beat
+                            // We need to keep consuming source data until we have enough for another dest beat
+                            // or until source is exhausted
+                            if (s_axis_tvalid && m_axis_tready) begin
+                                next_state = STATE_FILLING_DEST;
+                                s_data_buffer = s_axis_tdata;
+                                s_keep_buffer = s_axis_tkeep;
+                                id_buffer = s_axis_tid;
+                                dest_buffer = s_axis_tdest;
+                                user_buffer = s_axis_tuser;
+                                s_last_valid = s_axis_tlast;
+                                s_beats_to_fill = S_BEATS_PER_M; // Reset counter for next dest beat
+                            end else begin
+                                // Source not ready or dest not ready, stay in this state to wait
+                                // But we need to handle the case where we are waiting for source
+                                // Actually, if we just filled a beat, we should check if we have more source
+                                // If not, we go to waiting state
+                                if (!s_axis_tvalid) begin
+                                    next_state = STATE_WAITING_FOR_S;
+                                end
+                            end
+                        end else begin
+                            // No more source data, flush remaining
+                            next_state = STATE_FLUSHING_S;
+                        end
+                    end
+                end else begin
+                    // Should not happen in normal flow, but handle it
+                    next_state = STATE_IDLE;
+                end
+            end
+
+            STATE_WAITING_FOR_S: begin
+                // Wait for source data to arrive
+                if (s_axis_tvalid && m_axis_tready) begin
+                    next_state = STATE_FILLING_DEST;
+                    s_valid_internal = 1;
+                    s_beats_to_fill = S_BEATS_PER_M;
+                    m_beats_to_fill = M_BEATS_PER_S;
+                    s_data_buffer = s_axis_tdata;
+                    s_keep_buffer = s_axis_tkeep;
+                    id_buffer = s_axis_tid;
+                    dest_buffer = s_axis_tdest;
+                    user_buffer = s_axis_tuser;
+                    s_last_valid = s_axis_tlast;
+                    m_last_valid = 0;
+                end
+            end
+
+            STATE_FLUSHING_S: begin
+                // Flush remaining source data
+                if (s_valid_internal && s_axis_tvalid && m_axis_tready) begin
+                    s_data_buffer = s_axis_tdata;
+                    s_keep_buffer = s_axis_tkeep;
+                    id_buffer = s_axis_tid;
+                    dest_buffer = s_axis_tdest;
+                    user_buffer = s_axis_tuser;
+                    s_last_valid = s_axis_tlast;
+                    s_valid_internal = 0;
+                    // Try to fill destination
+                    if (s_beats_to_fill > 0) begin
+                        s_beats_to_fill = s_beats_to_fill - 1;
+                        m_data_buffer = m_data_buffer | (s_data_buffer << (S_DATA_WIDTH * s_beats_to_fill));
+                        m_keep_buffer = m_keep_buffer | (s_keep_buffer << (S_DATA_WIDTH * s_beats_to_fill));
+                        
+                        if (s_beats_to_fill == 0) begin
+                            m_axis_tdata = m_data_buffer;
+                            m_axis_tkeep = m_keep_buffer;
+                            m_axis_tvalid = 1;
+                            m_axis_tlast = m_last_valid;
+                            m_axis_tid = id_buffer;
+                            m_axis_tdest = dest_buffer;
+                            m_axis_tuser = user_buffer;
+                            
+                            m_data_buffer = 0;
+                            m_keep_buffer = 0;
+                            m_last_valid = 0;
+                            id_buffer = 0;
+                            dest_buffer = 0;
+                            user_buffer = 0;
+                            
+                            if (!s_axis_tvalid) begin
+                                next_state = STATE_IDLE;
+                            end
+                        end
+                    end
+                end else begin
+                    next_state = STATE_IDLE;
+                end
+            end
+        endcase
+    end
+
+    // Output assignments
+    assign s_axis_tready = m_axis_tready;
+    assign m_axis_tdata = m_axis_tvalid ? m_axis_tdata : 0;
+    assign m_axis_tkeep = m_axis_tvalid ? m_axis_tkeep : 0;
+    assign m_axis_tvalid = m_axis_tvalid;
+    assign m_axis_tlast = m_axis_tvalid ? m_axis_tlast : 0;
+    assign m_axis_tid = m_axis_tvalid ? m_axis_tid : 0;
+    assign m_axis_tdest = m_axis_tvalid ? m_axis_tdest : 0;
+    assign m_axis_tuser = m_axis_tvalid ? m_axis_tuser : 0;
+
+endmodule
+```<|im_end|>

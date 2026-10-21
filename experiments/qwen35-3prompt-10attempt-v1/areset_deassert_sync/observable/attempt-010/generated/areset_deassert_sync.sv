@@ -1,0 +1,65 @@
+```verilog
+`timescale 1ns/1ps
+
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  wire clk,
+    input  wire async_rst_i,
+    output wire sync_rst_o
+);
+
+    localparam DEASSERT_CHAINS = CHAINS;
+    localparam POLARITY = RST_POL;
+
+    // Internal state to track the deassertion chain
+    reg [DEASSERT_CHAINS-1:0] deassert_chain;
+
+    // Initialize the chain based on polarity
+    // If POLARITY is 1 (active high), we want to count up to release.
+    // If POLARITY is 0 (active low), we want to count down to release.
+    // However, the standard pattern for "release cleanly" usually implies:
+    // 1. Assert immediately on async_rst_i.
+    // 2. Once async_rst_i goes inactive, wait N cycles of clk before releasing.
+    
+    // We use a counter that increments when async_rst_i is inactive (if active high)
+    // or decrements (if active low).
+    
+    always @(posedge clk or posedge async_rst_i) begin
+        if (async_rst_i) begin
+            // Assert reset immediately when async_rst_i is active
+            if (POLARITY) begin
+                // Active High: Reset is 1. Chain counts up.
+                // When async_rst_i is 1, we force the chain to 0 (reset asserted).
+                deassert_chain <= 0;
+            end else begin
+                // Active Low: Reset is 0. Chain counts down.
+                // When async_rst_i is 0, we force the chain to MAX (reset asserted).
+                deassert_chain <= {DEASSERT_CHAINS{1'b1}};
+            end
+        end else begin
+            // async_rst_i is inactive. Start the deassertion delay.
+            if (POLARITY) begin
+                // Active High: async_rst_i is 0.
+                // Increment chain. If it reaches DEASSERT_CHAINS, reset is released (0).
+                if (deassert_chain == DEASSERT_CHAINS - 1)
+                    deassert_chain <= 0; // Reset released
+                else
+                    deassert_chain <= deassert_chain + 1;
+            end else begin
+                // Active Low: async_rst_i is 1.
+                // Decrement chain. If it reaches 0, reset is released (1).
+                if (deassert_chain == 1)
+                    deassert_chain <= {DEASSERT_CHAINS{1'b0}}; // Reset released
+                else
+                    deassert_chain <= deassert_chain - 1;
+            end
+        end
+    end
+
+    // Generate output based on the chain state and polarity
+    assign sync_rst_o = (POLARITY) ? deassert_chain[DEASSERT_CHAINS-1] : ~deassert_chain[DEASSERT_CHAINS-1];
+
+endmodule
+```<|im_end|>

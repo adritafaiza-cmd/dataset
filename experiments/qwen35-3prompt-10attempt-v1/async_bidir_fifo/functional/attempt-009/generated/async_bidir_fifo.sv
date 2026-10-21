@@ -1,0 +1,285 @@
+```verilog
+`timescale 1ns/1ps
+
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam INT_ASIZE = ASIZE;
+  localparam INT_DEPTH = 1 << INT_ASIZE;
+  localparam INT_MASK  = (1 << INT_ASIZE) - 1;
+
+  // Internal pointers and counters
+  reg [INT_ASIZE-1:0] a_wr_ptr;
+  reg [INT_ASIZE-1:0] a_rd_ptr;
+  reg [INT_ASIZE-1:0] b_wr_ptr;
+  reg [INT_ASIZE-1:0] b_rd_ptr;
+
+  // Cross-clock pointers (snapshots)
+  reg [INT_ASIZE-1:0] a_wr_ptr_snap;
+  reg [INT_ASIZE-1:0] a_rd_ptr_snap;
+  reg [INT_ASIZE-1:0] b_wr_ptr_snap;
+  reg [INT_ASIZE-1:0] b_rd_ptr_snap;
+
+  // FIFO Data Memory
+  reg [DSIZE-1:0] mem [0:INT_DEPTH-1];
+
+  // Write Enable Signals (Internal)
+  // a_wr_en: Enable write from side A
+  // b_wr_en: Enable write from side B
+  reg a_wr_en;
+  reg b_wr_en;
+
+  // Read Enable Signals (Internal)
+  // a_rd_en: Enable read from side A
+  // b_rd_en: Enable read from side B
+  reg a_rd_en;
+  reg b_rd_en;
+
+  // Almost Full/Empty Flags (Internal)
+  reg a_afull;
+  reg a_aempty;
+  reg b_afull;
+  reg b_aempty;
+
+  // Full/Empty Flags (Internal)
+  reg a_full;
+  reg a_empty;
+  reg b_full;
+  reg b_empty;
+
+  // Data Registers for Output
+  reg [DSIZE-1:0] a_rdata_reg;
+  reg [DSIZE-1:0] b_rdata_reg;
+
+  // Write Pointer Increment Logic
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_wr_ptr <= 1'b0;
+    else if (a_winc)
+      a_wr_ptr <= a_wr_ptr + 1'b1;
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_wr_ptr <= 1'b0;
+    else if (b_winc)
+      b_wr_ptr <= b_wr_ptr + 1'b1;
+  end
+
+  // Read Pointer Increment Logic
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_rd_ptr <= 1'b0;
+    else if (a_rinc)
+      a_rd_ptr <= a_rd_ptr + 1'b1;
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_rd_ptr <= 1'b0;
+    else if (b_rinc)
+      b_rd_ptr <= b_rd_ptr + 1'b1;
+  end
+
+  // Write Enable Logic
+  // Side A writes if direction is write and FIFO is not full
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_wr_en <= 1'b0;
+    else if (a_winc)
+      a_wr_en <= 1'b1;
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_wr_en <= 1'b0;
+    else if (b_winc)
+      b_wr_en <= 1'b1;
+  end
+
+  // Read Enable Logic
+  // Side A reads if direction is read and FIFO is not empty
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_rd_en <= 1'b0;
+    else if (a_rinc)
+      a_rd_en <= 1'b1;
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_rd_en <= 1'b0;
+    else if (b_rinc)
+      b_rd_en <= 1'b1;
+  end
+
+  // Cross-Clock Pointer Updates
+  // Side A updates its write pointer snapshot based on Side B's write pointer
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_wr_ptr_snap <= 1'b0;
+    else if (a_winc)
+      a_wr_ptr_snap <= b_wr_ptr;
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_wr_ptr_snap <= 1'b0;
+    else if (b_winc)
+      b_wr_ptr_snap <= a_wr_ptr;
+  end
+
+  // Cross-Clock Pointer Updates for Read
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_rd_ptr_snap <= 1'b0;
+    else if (a_rinc)
+      a_rd_ptr_snap <= b_rd_ptr;
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_rd_ptr_snap <= 1'b0;
+    else if (b_rinc)
+      b_rd_ptr_snap <= a_rd_ptr;
+  end
+
+  // Write Data Logic
+  // Side A writes to memory if direction is write
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      mem[0:INT_DEPTH-1] <= 1'b0;
+    else if (a_winc)
+      mem[a_wr_ptr] <= a_wdata;
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      mem[0:INT_DEPTH-1] <= 1'b0;
+    else if (b_winc)
+      mem[b_wr_ptr] <= b_wdata;
+  end
+
+  // Read Data Logic
+  // Side A reads from memory if direction is read
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_rdata_reg <= 1'b0;
+    else if (a_rinc)
+      a_rdata_reg <= mem[a_rd_ptr];
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_rdata_reg <= 1'b0;
+    else if (b_rinc)
+      b_rdata_reg <= mem[b_rd_ptr];
+  end
+
+  // Full/Empty Logic
+  // Side A full if write pointer equals read pointer snapshot
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_full <= 1'b0;
+    else if (a_winc)
+      a_full <= (a_wr_ptr == a_rd_ptr_snap);
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_full <= 1'b0;
+    else if (b_winc)
+      b_full <= (b_wr_ptr == b_rd_ptr_snap);
+  end
+
+  // Almost Full Logic
+  // Side A almost full if write pointer is one less than read pointer snapshot
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_afull <= 1'b0;
+    else if (a_winc)
+      a_afull <= (a_wr_ptr == a_rd_ptr_snap - 1'b1);
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_afull <= 1'b0;
+    else if (b_winc)
+      b_afull <= (b_wr_ptr == b_rd_ptr_snap - 1'b1);
+  end
+
+  // Empty Logic
+  // Side A empty if write pointer equals read pointer snapshot
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_empty <= 1'b0;
+    else if (a_rinc)
+      a_empty <= (a_wr_ptr == a_rd_ptr_snap);
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_empty <= 1'b0;
+    else if (b_rinc)
+      b_empty <= (b_wr_ptr == b_rd_ptr_snap);
+  end
+
+  // Almost Empty Logic
+  // Side A almost empty if write pointer is one more than read pointer snapshot
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_aempty <= 1'b0;
+    else if (a_rinc)
+      a_aempty <= (a_wr_ptr == a_rd_ptr_snap + 1'b1);
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_aempty <= 1'b0;
+    else if (b_rinc)
+      b_aempty <= (b_wr_ptr == b_rd_ptr_snap + 1'b1);
+  end
+
+  // Output Data
+  assign a_rdata = a_rdata_reg;
+  assign b_rdata = b_rdata_reg;
+
+  // Full/Empty Flags
+  assign a_full = a_full;
+  assign a_afull = a_afull;
+  assign a_empty = a_empty;
+  assign a_aempty = a_aempty;
+  assign b_full = b_full;
+  assign b_afull = b_afull;
+  assign b_empty = b_empty;
+  assign b_aempty = b_aempty;
+
+endmodule
+```<|im_end|>

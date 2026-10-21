@@ -1,0 +1,866 @@
+```verilog
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // ==================================================================
+    // Internal Signals
+    // ==================================================================
+    reg        busy_reg;
+    reg        bus_control_reg;
+    reg        bus_active_reg;
+    reg        missed_ack_reg;
+    
+    reg        state;
+    reg        state_next;
+    
+    reg        scl_state; // 0: Low, 1: High
+    reg        sda_state; // 0: Low, 1: High
+    reg        scl_edge;  // 1: Falling edge detected
+    reg        sda_edge;  // 1: Falling edge detected
+    reg        sda_level; // Current level of SDA (after edge detection)
+    
+    reg        [7:0]  tx_data;
+    reg        [7:0]  rx_data;
+    reg        tx_valid;
+    reg        rx_valid;
+    reg        tx_last;
+    reg        rx_last;
+    
+    reg        [7:0]  cmd_address;
+    reg        cmd_start;
+    reg        cmd_read;
+    reg        cmd_write;
+    reg        cmd_write_multiple;
+    reg        cmd_stop;
+    reg        cmd_valid;
+    
+    reg        [15:0] prescale_val;
+    reg        [15:0] prescale_cnt;
+    reg        [15:0] prescale_max;
+    
+    // Timing counters
+    reg        [15:0] scl_cnt;
+    reg        [15:0] sda_cnt;
+    reg        [15:0] wait_cnt;
+    
+    // State Machine Encoding
+    // 0: IDLE
+    // 1: START
+    // 2: ADDR_SENT
+    // 3: ACK_CHECK
+    // 4: DATA_TX
+    // 5: DATA_RX
+    // 6: STOP
+    // 7: STOP_WAIT
+    // 8: ERROR
+    // 9: IDLE_WAIT
+    // 10: WRITE_MULT_ADDR
+    // 11: WRITE_MULT_DATA
+    // 12: WRITE_MULT_ACK
+    // 13: READ_MULT_DATA
+    // 14: READ_MULT_ACK
+    
+    parameter IDLE = 0;
+    parameter START = 1;
+    parameter ADDR_SENT = 2;
+    parameter ACK_CHECK = 3;
+    parameter DATA_TX = 4;
+    parameter DATA_RX = 5;
+    parameter STOP = 6;
+    parameter STOP_WAIT = 7;
+    parameter ERROR = 8;
+    parameter IDLE_WAIT = 9;
+    parameter WRITE_MULT_ADDR = 10;
+    parameter WRITE_MULT_DATA = 11;
+    parameter WRITE_MULT_ACK = 12;
+    parameter READ_MULT_DATA = 13;
+    parameter READ_MULT_ACK = 14;
+
+    // ==================================================================
+    // Prescaler Calculation
+    // ==================================================================
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            prescale_max <= 0;
+        end else begin
+            // prescale[15:14] is multiplier, [13:0] is base. 
+            // Formula: T_high = (prescale[13:0] + 1) * 2 * T_clk
+            // We use a simplified interpretation: 
+            // prescale[15:0] represents the number of clock cycles for SCL high time.
+            // Let's assume prescale[15:0] directly defines the count for SCL high.
+            // To make it robust, we interpret prescale as:
+            // SCL High Time = prescale_val
+            // SCL Low Time = prescale_val
+            // Total Period = 2 * prescale_val
+            // However, standard I2C requires specific ratios. 
+            // Given the prompt "prescale sets SCL timing", we will use it to define the high time.
+            // Let's assume prescale[15:0] is the count for SCL high duration in clk cycles.
+            prescale_max <= prescale;
+        end
+    end
+
+    // ==================================================================
+    // State Machine Logic
+    // ==================================================================
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= IDLE;
+            busy_reg <= 1'b0;
+            bus_control_reg <= 1'b0;
+            bus_active_reg <= 1'b0;
+            missed_ack_reg <= 1'b0;
+            scl_state <= 1'b0;
+            sda_state <= 1'b0;
+            scl_cnt <= 0;
+            sda_cnt <= 0;
+            wait_cnt <= 0;
+            tx_valid <= 1'b0;
+            rx_valid <= 1'b0;
+            tx_last <= 1'b0;
+            rx_last <= 1'b0;
+            tx_data <= 8'h00;
+            rx_data <= 8'h00;
+            cmd_address <= 8'h00;
+            cmd_start <= 1'b0;
+            cmd_read <= 1'b0;
+            cmd_write <= 1'b0;
+            cmd_write_multiple <= 1'b0;
+            cmd_stop <= 1'b0;
+            cmd_valid <= 1'b0;
+            m_axis_data_tvalid <= 1'b0;
+            m_axis_data_tdata <= 8'h00;
+            m_axis_data_tlast <= 1'b0;
+            s_axis_cmd_ready <= 1'b0;
+            s_axis_data_tready <= 1'b0;
+        end else begin
+            // State Transition
+            case (state)
+                IDLE: begin
+                    if (s_axis_cmd_valid && s_axis_cmd_ready) begin
+                        cmd_address <= s_axis_cmd_address;
+                        cmd_start <= s_axis_cmd_start;
+                        cmd_read <= s_axis_cmd_read;
+                        cmd_write <= s_axis_cmd_write;
+                        cmd_write_multiple <= s_axis_cmd_write_multiple;
+                        cmd_stop <= s_axis_cmd_stop;
+                        cmd_valid <= 1'b1;
+                        s_axis_cmd_ready <= 1'b1;
+                        
+                        // Determine next state based on command
+                        if (cmd_start) begin
+                            state <= START;
+                            busy_reg <= 1'b1;
+                            bus_control_reg <= 1'b1;
+                            bus_active_reg <= 1'b1;
+                        end else if (cmd_stop) begin
+                            state <= STOP;
+                            busy_reg <= 1'b1;
+                            bus_control_reg <= 1'b1;
+                            bus_active_reg <= 1'b1;
+                        end else begin
+                            // Default to write single byte if no specific flags
+                            state <= DATA_TX;
+                            busy_reg <= 1'b1;
+                            bus_control_reg <= 1'b1;
+                            bus_active_reg <= 1'b1;
+                        end
+                    end else if (stop_on_idle && !scl_i && !sda_i) begin
+                        // Optional: Auto-stop on idle bus
+                        state <= STOP;
+                        busy_reg <= 1'b1;
+                        bus_control_reg <= 1'b1;
+                        bus_active_reg <= 1'b1;
+                    end else begin
+                        // Wait for valid command or idle bus
+                        if (s_axis_cmd_valid) s_axis_cmd_ready <= 1'b0;
+                        else s_axis_cmd_ready <= 1'b1;
+                        s_axis_data_tready <= 1'b1;
+                        m_axis_data_tvalid <= 1'b0;
+                        missed_ack_reg <= 1'b0;
+                    end
+                end
+
+                START: begin
+                    // Generate Start Condition
+                    if (scl_cnt == prescale_max) begin
+                        scl_state <= 1'b0; // Pull SCL low
+                        scl_cnt <= 0;
+                    end else begin
+                        scl_state <= 1'b1; // Pull SCL high
+                        scl_cnt <= scl_cnt + 1'b1;
+                    end
+                    
+                    // Wait for SCL falling edge
+                    if (scl_i == 1'b0 && scl_state == 1'b1) begin
+                        // SCL falling edge detected
+                        if (sda_i == 1'b1) begin
+                            // Start condition detected (SCL falling, SDA high->low)
+                            // Actually, Start is SDA high->low while SCL is high.
+                            // We need to check SDA level before this edge.
+                            // Simplified: If we are in START state and SCL just fell, check SDA.
+                            // But we need to know if SDA was high before.
+                            // Let's rely on the fact that we drive SDA high before START.
+                            // Re-evaluating flow:
+                            // 1. Drive SDA high.
+                            // 2. Drive SCL high.
+                            // 3. Wait for SCL falling.
+                            // 4. Check SDA. If low, Start.
+                            // This logic is handled in the transition below.
+                        end
+                    end
+                    // Drive SDA high for Start
+                    sda_state <= 1'b1;
+                    sda_cnt <= 0;
+                    
+                    // Wait for SCL falling edge to confirm Start
+                    if (scl_i == 1'b0 && scl_state == 1'b1) begin
+                        // SCL falling edge
+                        if (sda_i == 1'b0) begin
+                            // SDA is low -> Not a start, maybe noise or error
+                            state <= ERROR;
+                        end else begin
+                            // SDA is high -> Start condition met
+                            state <= ADDR_SENT;
+                            // Prepare address byte
+                            // Address + Read Bit (1 for read, 0 for write)
+                            // cmd_read is 1 if reading, 0 if writing.
+                            // I2C address frame: 7-bit addr + 1-bit R/W.
+                            // If cmd_read: addr | 0x01. If cmd_write: addr & 0xFE.
+                            if (cmd_read) begin
+                                tx_data <= cmd_address | 8'h01;
+                            end else begin
+                                tx_data <= cmd_address & 8'hFE;
+                            end
+                            tx_valid <= 1'b1;
+                            tx_last <= 1'b0;
+                            m_axis_data_tvalid <= 1'b0;
+                            m_axis_data_tlast <= 1'b0;
+                        end
+                    end
+                end
+
+                ADDR_SENT: begin
+                    // Send Address Byte
+                    if (scl_cnt == prescale_max) begin
+                        scl_state <= 1'b0;
+                        scl_cnt <= 0;
+                    end else begin
+                        scl_state <= 1'b1;
+                        scl_cnt <= scl_cnt + 1'b1;
+                    end
+                    
+                    // Drive SDA with address bit
+                    sda_state <= tx_data[0];
+                    sda_cnt <= 0;
+                    
+                    if (scl_i == 1'b0 && scl_state == 1'b1) begin
+                        // SCL falling edge
+                        if (sda_i == 1'b1) begin
+                            // ACK received (SDA low)
+                            state <= ACK_CHECK;
+                        end else begin
+                            // NACK received
+                            missed_ack_reg <= 1'b1;
+                            state <= ERROR;
+                        end
+                    end
+                end
+
+                ACK_CHECK: begin
+                    // Wait for ACK/NACK to be stable
+                    if (scl_cnt == prescale_max) begin
+                        scl_state <= 1'b0;
+                        scl_cnt <= 0;
+                    end else begin
+                        scl_state <= 1'b1;
+                        scl_cnt <= scl_cnt + 1'b1;
+                    end
+                    
+                    // Drive SDA low to acknowledge the ACK we just received
+                    // Actually, we just need to wait for the ACK bit to be stable.
+                    // The ACK bit is the 9th bit.
+                    // If we are here, we sent the 8th bit (address).
+                    // Now we wait for the 9th bit (ACK).
+                    // We drive SDA low to acknowledge the ACK we received? 
+                    // No, the slave sends ACK. We just read it.
+                    // We need to wait for the falling edge of SCL after the ACK bit.
+                    
+                    // Let's restructure: 
+                    // 1. Send Addr (8 bits).
+                    // 2. Wait for ACK (9th bit).
+                    // 3. If ACK, proceed.
+                    
+                    // Current logic: We sent Addr. We are waiting for SCL falling edge.
+                    // When SCL falls, we check SDA.
+                    // If SDA is low, it's an ACK.
+                    // If SDA is high, it's a NACK.
+                    
+                    if (scl_i == 1'b0 && scl_state == 1'b1) begin
+                        // SCL falling edge after ACK bit
+                        if (sda_i == 1'b0) begin
+                            // ACK received
+                            if (cmd_read) begin
+                                // Start reading data
+                                state <= DATA_RX;
+                                rx_valid <= 1'b1;
+                                rx_last <= 1'b0;
+                                m_axis_data_tvalid <= 1'b1;
+                                m_axis_data_tdata <= rx_data;
+                                m_axis_data_tlast <= 1'b0;
+                                s_axis_data_tready <= 1'b0; // Wait for data
+                            end else begin
+                                // Start writing data
+                                state <= DATA_TX;
+                                tx_valid <= 1'b1;
+                                tx_last <= 1'b0;
+                                s_axis_data_tready <= 1'b0; // Wait for data
+                            end
+                        end else begin
+                            // NACK received
+                            missed_ack_reg <= 1'b1;
+                            state <= ERROR;
+                        end
+                    end
+                end
+
+                DATA_TX: begin
+                    // Send Data Byte
+                    if (scl_cnt == prescale_max) begin
+                        scl_state <= 1'b0;
+                        scl_cnt <= 0;
+                    end else begin
+                        scl_state <= 1'b1;
+                        scl_cnt <= scl_cnt + 1'b1;
+                    end
+                    
+                    // Drive SDA with data bit
+                    sda_state <= tx_data[0];
+                    sda_cnt <= 0;
+                    
+                    if (scl_i == 1'b0 && scl_state == 1'b1) begin
+                        // SCL falling edge
+                        if (sda_i == 1'b1) begin
+                            // ACK received
+                            if (tx_last) begin
+                                // Last byte sent
+                                if (cmd_write_multiple) begin
+                                    // Continue to next byte in write multiple mode
+                                    // Need to fetch next byte from host
+                                    if (s_axis_data_tvalid && s_axis_data_tready) begin
+                                        tx_data <= s_axis_data_tdata;
+                                        tx_valid <= 1'b1;
+                                        tx_last <= s_axis_data_tlast;
+                                        s_axis_data_tready <= 1'b1;
+                                        state <= DATA_TX;
+                                    end else begin
+                                        // No more data, send STOP
+                                        state <= STOP;
+                                    end
+                                end else begin
+                                    // Single write, send STOP
+                                    state <= STOP;
+                                end
+                            end else begin
+                                // More bytes to send
+                                if (cmd_write_multiple) begin
+                                    if (s_axis_data_tvalid && s_axis_data_tready) begin
+                                        tx_data <= s_axis_data_tdata;
+                                        tx_valid <= 1'b1;
+                                        tx_last <= s_axis_data_tlast;
+                                        s_axis_data_tready <= 1'b1;
+                                        state <= DATA_TX;
+                                    end else begin
+                                        // No more data, send STOP
+                                        state <= STOP;
+                                    end
+                                end else begin
+                                    // Single write, send STOP
+                                    state <= STOP;
+                                end
+                            end
+                        end else begin
+                            // NACK received
+                            missed_ack_reg <= 1'b1;
+                            state <= ERROR;
+                        end
+                    end
+                end
+
+                DATA_RX: begin
+                    // Receive Data Byte
+                    if (scl_cnt == prescale_max) begin
+                        scl_state <= 1'b0;
+                        scl_cnt <= 0;
+                    end else begin
+                        scl_state <= 1'b1;
+                        scl_cnt <= scl_cnt + 1'b1;
+                    end
+                    
+                    // Drive SDA low (NACK) to indicate we are done receiving this byte
+                    // Only if this is the last byte
+                    if (rx_last) begin
+                        sda_state <= 1'b0;
+                    end else begin
+                        sda_state <= 1'b1; // ACK
+                    end
+                    sda_cnt <= 0;
+                    
+                    if (scl_i == 1'b0 && scl_state == 1'b1) begin
+                        // SCL falling edge
+                        if (sda_i == 1'b0) begin
+                            // ACK received (we sent NACK, but slave ACKed? Or we sent ACK and slave ACKed)
+                            // If we sent NACK (rx_last=1) and got ACK (sda_i=0), that's weird but possible.
+                            // If we sent ACK (rx_last=0) and got ACK (sda_i=0), normal.
+                            
+                            if (rx_last) begin
+                                // Last byte received
+                                if (cmd_write_multiple) begin
+                                    // Continue to next byte in write multiple mode
+                                    if (s_axis_data_tvalid && s_axis_data_tready) begin
+                                        rx_data <= s_axis_data_tdata;
+                                        rx_valid <= 1'b1;
+                                        rx_last <= s_axis_data_tlast;
+                                        m_axis_data_tvalid <= 1'b1;
+                                        m_axis_data_tdata <= rx_data;
+                                        m_axis_data_tlast <= s_axis_data_tlast;
+                                        s_axis_data_tready <= 1'b0;
+                                        state <= DATA_RX;
+                                    end else begin
+                                        // No more data, send STOP
+                                        state <= STOP;
+                                    end
+                                end else begin
+                                    // Single read, send STOP
+                                    state <= STOP;
+                                end
+                            end else begin
+                                // More bytes to receive
+                                if (cmd_write_multiple) begin
+                                    if (s_axis_data_tvalid && s_axis_data_tready) begin
+                                        rx_data <= s_axis_data_tdata;
+                                        rx_valid <= 1'b1;
+                                        rx_last <= s_axis_data_tlast;
+                                        m_axis_data_tvalid <= 1'b1;
+                                        m_axis_data_tdata <= rx_data;
+                                        m_axis_data_tlast <= s_axis_data_tlast;
+                                        s_axis_data_tready <= 1'b0;
+                                        state <= DATA_RX;
+                                    end else begin
+                                        // No more data, send STOP
+                                        state <= STOP;
+                                    end
+                                end else begin
+                                    // Single read, send STOP
+                                    state <= STOP;
+                                end
+                            end
+                        end else begin
+                            // NACK received
+                            // This is expected if we sent NACK (rx_last=1)
+                            if (rx_last) begin
+                                // Expected NACK, proceed to STOP
+                                state <= STOP;
+                            end else begin
+                                // Unexpected NACK
+                                missed_ack_reg <= 1'b1;
+                                state <= ERROR;
+                            end
+                        end
+                    end
+                end
+
+                STOP: begin
+                    // Generate Stop Condition
+                    if (scl_cnt == prescale_max) begin
+                        scl_state <= 1'b0;
+                        scl_cnt <= 0;
+                    end else begin
+                        scl_state <= 1'b1;
+                        scl_cnt <= scl_cnt + 1'b1;
+                    end
+                    
+                    // Drive SDA low
+                    sda_state <= 1'b0;
+                    sda_cnt <= 0;
+                    
+                    if (scl_i == 1'b0 && scl_state == 1'b1) begin
+                        // SCL falling edge
+                        if (sda_i == 1'b1) begin
+                            // SDA is high -> Stop condition met
+                            state <= STOP_WAIT;
+                            busy_reg <= 1'b0;
+                            bus_control_reg <= 1'b0;
+                            bus_active_reg <= 1'b0;
+                            missed_ack_reg <= 1'b0;
+                            m_axis_data_tvalid <= 1'b0;
+                            s_axis_data_tready <= 1'b1;
+                        end
+                    end
+                end
+
+                STOP_WAIT: begin
+                    // Wait for bus to be idle
+                    if (scl_i == 1'b0 && sda_i == 1'b0) begin
+                        // Bus idle
+                        state <= IDLE;
+                        s_axis_cmd_ready <= 1'b1;
+                        s_axis_data_tready <= 1'b1;
+                        m_axis_data_tvalid <= 1'b0;
+                        missed_ack_reg <= 1'b0;
+                    end else begin
+                        // Bus not idle, wait
+                        if (s_axis_cmd_valid) s_axis_cmd_ready <= 1'b0;
+                        else s_axis_cmd_ready <= 1'b1;
+                        s_axis_data_tready <= 1'b1;
+                        m_axis_data_tvalid <= 1'b0;
+                        missed_ack_reg <= 1'b0;
+                    end
+                end
+
+                ERROR: begin
+                    // Error state, wait for reset or stop command
+                    if (s_axis_cmd_valid && s_axis_cmd_ready) begin
+                        if (s_axis_cmd_stop) begin
+                            state <= STOP;
+                            busy_reg <= 1'b1;
+                            bus_control_reg <= 1'b1;
+                            bus_active_reg <= 1'b1;
+                            s_axis_cmd_ready <= 1'b1;
+                        end else begin
+                            // Reset command or just wait
+                            state <= IDLE;
+                            busy_reg <= 1'b0;
+                            bus_control_reg <= 1'b0;
+                            bus_active_reg <= 1'b0;
+                            s_axis_cmd_ready <= 1'b1;
+                        end
+                    end else begin
+                        if (s_axis_cmd_valid) s_axis_cmd_ready <= 1'b0;
+                        else s_axis_cmd_ready <= 1'b1;
+                        s_axis_data_tready <= 1'b1;
+                        m_axis_data_tvalid <= 1'b0;
+                        missed_ack_reg <= 1'b0;
+                    end
+                end
+
+                IDLE_WAIT: begin
+                    // Similar to IDLE but maybe for specific recovery
+                    if (s_axis_cmd_valid && s_axis_cmd_ready) begin
+                        // Handle command
+                        if (s_axis_cmd_start) begin
+                            state <= START;
+                            busy_reg <= 1'b1;
+                            bus_control_reg <= 1'b1;
+                            bus_active_reg <= 1'b1;
+                            s_axis_cmd_ready <= 1'b1;
+                        end else if (s_axis_cmd_stop) begin
+                            state <= STOP;
+                            busy_reg <= 1'b1;
+                            bus_control_reg <= 1'b1;
+                            bus_active_reg <= 1'b1;
+                            s_axis_cmd_ready <= 1'b1;
+                        end else begin
+                            state <= DATA_TX;
+                            busy_reg <= 1'b1;
+                            bus_control_reg <= 1'b1;
+                            bus_active_reg <= 1'b1;
+                            s_axis_cmd_ready <= 1'b1;
+                        end
+                    end else begin
+                        if (s_axis_cmd_valid) s_axis_cmd_ready <= 1'b0;
+                        else s_axis_cmd_ready <= 1'b1;
+                        s_axis_data_tready <= 1'b1;
+                        m_axis_data_tvalid <= 1'b0;
+                        missed_ack_reg <= 1'b0;
+                    end
+                end
+
+                WRITE_MULT_ADDR: begin
+                    // Send Write Multiple Address
+                    if (scl_cnt == prescale_max) begin
+                        scl_state <= 1'b0;
+                        scl_cnt <= 0;
+                    end else begin
+                        scl_state <= 1'b1;
+                        scl_cnt <= scl_cnt + 1'b1;
+                    end
+                    
+                    // Address + Write Bit
+                    tx_data <= cmd_address & 8'hFE;
+                    sda_state <= tx_data[0];
+                    sda_cnt <= 0;
+                    
+                    if (scl_i == 1'b0 && scl_state == 1'b1) begin
+                        if (sda_i == 1'b1) begin
+                            // ACK
+                            state <= WRITE_MULT_DATA;
+                            // Fetch next byte
+                            if (s_axis_data_tvalid && s_axis_data_tready) begin
+                                tx_data <= s_axis_data_tdata;
+                                tx_valid <= 1'b1;
+                                tx_last <= s_axis_data_tlast;
+                                s_axis_data_tready <= 1'b0;
+                            end else begin
+                                state <= STOP;
+                            end
+                        end else begin
+                            missed_ack_reg <= 1'b1;
+                            state <= ERROR;
+                        end
+                    end
+                end
+
+                WRITE_MULT_DATA: begin
+                    // Send Data Byte
+                    if (scl_cnt == prescale_max) begin
+                        scl_state <= 1'b0;
+                        scl_cnt <= 0;
+                    end else begin
+                        scl_state <= 1'b1;
+                        scl_cnt <= scl_cnt + 1'b1;
+                    end
+                    
+                    sda_state <= tx_data[0];
+                    sda_cnt <= 0;
+                    
+                    if (scl_i == 1'b0 && scl_state == 1'b1) begin
+                        if (sda_i == 1'b1) begin
+                            // ACK
+                            if (tx_last) begin
+                                state <= STOP;
+                            end else begin
+                                if (s_axis_data_tvalid && s_axis_data_tready) begin
+                                    tx_data <= s_axis_data_tdata;
+                                    tx_valid <= 1'b1;
+                                    tx_last <= s_axis_data_tlast;
+                                    s_axis_data_tready <= 1'b0;
+                                    state <= WRITE_MULT_DATA;
+                                end else begin
+                                    state <= STOP;
+                                end
+                            end
+                        end else begin
+                            missed_ack_reg <= 1'b1;
+                            state <= ERROR;
+                        end
+                    end
+                end
+
+                WRITE_MULT_ACK: begin
+                    // Wait for ACK after Write Multiple Address
+                    if (scl_cnt == prescale_max) begin
+                        scl_state <= 1'b0;
+                        scl_cnt <= 0;
+                    end else begin
+                        scl_state <= 1'b1;
+                        scl_cnt <= scl_cnt + 1'b1;
+                    end
+                    
+                    if (scl_i == 1'b0 && scl_state == 1'b1) begin
+                        if (sda_i == 1'b0) begin
+                            // ACK received
+                            state <= WRITE_MULT_DATA;
+                            if (s_axis_data_tvalid && s_axis_data_tready) begin
+                                tx_data <= s_axis_data_tdata;
+                                tx_valid <= 1'b1;
+                                tx_last <= s_axis_data_tlast;
+                                s_axis_data_tready <= 1'b0;
+                            end else begin
+                                state <= STOP;
+                            end
+                        end else begin
+                            missed_ack_reg <= 1'b1;
+                            state <= ERROR;
+                        end
+                    end
+                end
+
+                READ_MULT_DATA: begin
+                    // Receive Data Byte
+                    if (scl_cnt == prescale_max) begin
+                        scl_state <= 1'b0;
+                        scl_cnt <= 0;
+                    end else begin
+                        scl_state <= 1'b1;
+                        scl_cnt <= scl_cnt + 1'b1;
+                    end
+                    
+                    if (rx_last) begin
+                        sda_state <= 1'b0; // NACK
+                    end else begin
+                        sda_state <= 1'b1; // ACK
+                    end
+                    sda_cnt <= 0;
+                    
+                    if (scl_i == 1'b0 && scl_state == 1'b1) begin
+                        if (sda_i == 1'b0) begin
+                            // ACK
+                            if (rx_last) begin
+                                state <= STOP;
+                            end else begin
+                                if (s_axis_data_tvalid && s_axis_data_tready) begin
+                                    rx_data <= s_axis_data_tdata;
+                                    rx_valid <= 1'b1;
+                                    rx_last <= s_axis_data_tlast;
+                                    m_axis_data_tvalid <= 1'b1;
+                                    m_axis_data_tdata <= rx_data;
+                                    m_axis_data_tlast <= s_axis_data_tlast;
+                                    s_axis_data_tready <= 1'b0;
+                                    state <= READ_MULT_DATA;
+                                end else begin
+                                    state <= STOP;
+                                end
+                            end
+                        end else begin
+                            // NACK
+                            if (rx_last) begin
+                                state <= STOP;
+                            end else begin
+                                missed_ack_reg <= 1'b1;
+                                state <= ERROR;
+                            end
+                        end
+                    end
+                end
+
+                READ_MULT_ACK: begin
+                    // Wait for ACK after Read Multiple Address
+                    if (scl_cnt == prescale_max) begin
+                        scl_state <= 1'b0;
+                        scl_cnt <= 0;
+                    end else begin
+                        scl_state <= 1'b1;
+                        scl_cnt <= scl_cnt + 1'b1;
+                    end
+                    
+                    if (scl_i == 1'b0 && scl_state == 1'b1) begin
+                        if (sda_i == 1'b0) begin
+                            // ACK
+                            state <= READ_MULT_DATA;
+                            if (s_axis_data_tvalid && s_axis_data_tready) begin
+                                rx_data <= s_axis_data_tdata;
+                                rx_valid <= 1'b1;
+                                rx_last <= s_axis_data_tlast;
+                                m_axis_data_tvalid <= 1'b1;
+                                m_axis_data_tdata <= rx_data;
+                                m_axis_data_tlast <= s_axis_data_tlast;
+                                s_axis_data_tready <= 1'b0;
+                            end else begin
+                                state <= STOP;
+                            end
+                        end else begin
+                            missed_ack_reg <= 1'b1;
+                            state <= ERROR;
+                        end
+                    end
+                end
+
+                default: begin
+                    state <= IDLE;
+                end
+            endcase
+        end
+    end
+
+    // ==================================================================
+    // Output Logic
+    // ==================================================================
+    assign busy = busy_reg;
+    assign bus_control = bus_control_reg;
+    assign bus_active = bus_active_reg;
+    assign missed_ack = missed_ack_reg;
+
+    // Open Drain Outputs
+    assign scl_o = scl_state;
+    assign sda_o = sda_state;
+    
+    // Tri-state outputs
+    assign scl_t = (bus_control_reg) ? scl_o : 1'b1;
+    assign sda_t = (bus_control_reg) ? sda_o : 1'b1;
+
+    // Host Interface Outputs
+    assign s_axis_cmd_ready = (state == IDLE || state == STOP_WAIT || state == ERROR) ? 1'b1 : 1'b0;
+    assign s_axis_data_tready = (state == DATA_TX || state == DATA_RX || state == WRITE_MULT_DATA || state == READ_MULT_DATA) ? 1'b0 : 1'b1;
+    
+    assign m_axis_data_tdata = (state == DATA_RX || state == READ_MULT_DATA) ? rx_data : 8'h00;
+    assign m_axis_data_tvalid = (state == DATA_RX || state == READ_MULT_DATA) ? rx_valid : 1'b0;
+    assign m_axis_data_tlast = (state == DATA_RX || state == READ_MULT_DATA) ? rx_last : 1'b0;
+
+    // ==================================================================
+    // Timing Counters
+    // ==================================================================
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            scl_cnt <= 0;
+            sda_cnt <= 0;
+            wait_cnt <= 0;
+        end else begin
+            // SCL Counter
+            if (scl_state == 1'b1) begin
+                if (scl_cnt < prescale_max) begin
+                    scl_cnt <= scl_cnt + 1'b1;
+                end else begin
+                    scl_cnt <= 0;
+                end
+            end else begin
+                scl_cnt <= 0;
+            end
+            
+            // SDA Counter (for stability check if needed, currently unused in main logic)
+            if (sda_state == 1'b1) begin
+                if (sda_cnt < prescale_max) begin
+                    sda_cnt <= sda_cnt + 1'b1;
+                end else begin
+                    sda_cnt <= 0;
+                end
+            end else begin
+                sda_cnt <= 0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

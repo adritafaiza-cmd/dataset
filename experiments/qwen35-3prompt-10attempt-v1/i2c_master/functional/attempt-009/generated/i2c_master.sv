@@ -1,0 +1,799 @@
+```verilog
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // Internal state machine states
+    typedef enum logic [2:0] {
+        STATE_IDLE,
+        STATE_START,
+        STATE_ADDR_WRITE,
+        STATE_ADDR_READ,
+        STATE_DATA_WRITE,
+        STATE_DATA_READ,
+        STATE_STOP,
+        STATE_WAIT_STOP,
+        STATE_ERROR
+    } state_t;
+
+    state_t state, next_state;
+    logic    cmd_valid_reg;
+    logic    cmd_ready_reg;
+    logic    data_valid_reg;
+    logic    data_ready_reg;
+    logic    data_last_reg;
+    logic    data_tdata_reg;
+    
+    logic    scl_next;
+    logic    sda_next;
+    logic    scl_sample;
+    logic    sda_sample;
+    logic    scl_edge;
+    logic    sda_edge;
+    logic    scl_high;
+    logic    sda_high;
+    logic    scl_low;
+    logic    sda_low;
+    
+    logic    [7:0]  tx_data;
+    logic    [7:0]  rx_data;
+    logic    [7:0]  cmd_address;
+    logic    cmd_read;
+    logic    cmd_write;
+    logic    cmd_write_multiple;
+    logic    cmd_stop;
+    logic    cmd_start;
+    
+    logic    [15:0] prescale_val;
+    logic    [15:0] scl_count;
+    logic    [15:0] sda_count;
+    logic    scl_phase; // 0: low, 1: high
+    logic    sda_phase; // 0: low, 1: high
+    
+    logic    ack_received;
+    logic    [7:0]  byte_count;
+    logic    [7:0]  byte_index;
+    logic    stop_requested;
+    logic    bus_held;
+    logic    error_detected;
+    logic    idle_detected;
+
+    // Open drain drivers
+    assign scl_o = scl_t & ~scl_i;
+    assign sda_o = sda_t & ~sda_i;
+
+    // State Machine Logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= STATE_IDLE;
+            scl_count <= 0;
+            sda_count <= 0;
+            scl_phase <= 0;
+            sda_phase <= 0;
+            scl_t <= 1'b1;
+            sda_t <= 1'b1;
+            scl_o <= 1'b1;
+            sda_o <= 1'b1;
+            busy <= 1'b0;
+            bus_control <= 1'b0;
+            bus_active <= 1'b0;
+            missed_ack <= 1'b0;
+            cmd_valid_reg <= 1'b0;
+            data_valid_reg <= 1'b0;
+            data_ready_reg <= 1'b1;
+            data_last_reg <= 1'b0;
+            data_tdata_reg <= 8'h00;
+            scl_count <= 0;
+            sda_count <= 0;
+            byte_count <= 0;
+            byte_index <= 0;
+            stop_requested <= 0;
+            error_detected <= 0;
+            idle_detected <= 0;
+        end else begin
+            state <= next_state;
+            scl_count <= scl_count;
+            sda_count <= sda_count;
+            scl_phase <= scl_phase;
+            sda_phase <= sda_phase;
+            busy <= (state != STATE_IDLE);
+            bus_control <= (state == STATE_IDLE) ? 1'b0 : 1'b1;
+            bus_active <= (state != STATE_IDLE && state != STATE_WAIT_STOP);
+            missed_ack <= (state == STATE_ADDR_WRITE || state == STATE_ADDR_READ || state == STATE_DATA_READ) ? ack_received : 1'b0;
+            
+            // Command Handshake
+            if (s_axis_cmd_valid && !cmd_ready_reg) begin
+                cmd_valid_reg <= 1'b1;
+                cmd_ready_reg <= 1'b1;
+                s_axis_cmd_ready <= 1'b1;
+                cmd_address <= s_axis_cmd_address;
+                cmd_read <= s_axis_cmd_read;
+                cmd_write <= s_axis_cmd_write;
+                cmd_write_multiple <= s_axis_cmd_write_multiple;
+                cmd_stop <= s_axis_cmd_stop;
+                cmd_start <= s_axis_cmd_start;
+                
+                // Transition based on command
+                if (cmd_start) begin
+                    next_state <= STATE_START;
+                end else if (cmd_stop) begin
+                    next_state <= STATE_STOP;
+                end else if (cmd_write) begin
+                    next_state <= STATE_ADDR_WRITE;
+                end else if (cmd_read) begin
+                    next_state <= STATE_ADDR_READ;
+                end else if (cmd_write_multiple) begin
+                    next_state <= STATE_ADDR_WRITE;
+                end else begin
+                    next_state <= STATE_IDLE;
+                end
+            end else begin
+                cmd_valid_reg <= 1'b0;
+                cmd_ready_reg <= 1'b0;
+                s_axis_cmd_ready <= 1'b0;
+            end
+            
+            // Data Handshake (Write)
+            if (s_axis_data_tvalid && !data_ready_reg) begin
+                data_valid_reg <= 1'b1;
+                data_ready_reg <= 1'b1;
+                s_axis_data_tready <= 1'b1;
+                data_tdata_reg <= s_axis_data_tdata;
+                data_last_reg <= s_axis_data_tlast;
+            end else begin
+                data_valid_reg <= 1'b0;
+                data_ready_reg <= 1'b0;
+                s_axis_data_tready <= 1'b0;
+            end
+            
+            // Data Handshake (Read)
+            if (m_axis_data_tready && !data_valid_reg) begin
+                data_valid_reg <= 1'b1;
+                data_ready_reg <= 1'b1;
+                m_axis_data_tready <= 1'b1;
+                m_axis_data_tdata <= rx_data;
+                m_axis_data_tlast <= data_last_reg;
+            end else begin
+                data_valid_reg <= 1'b0;
+                data_ready_reg <= 1'b0;
+                m_axis_data_tready <= 1'b0;
+            end
+        end
+    end
+
+    // I2C Timing Logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            scl_count <= 0;
+            sda_count <= 0;
+            scl_phase <= 0;
+            sda_phase <= 0;
+            scl_t <= 1'b1;
+            sda_t <= 1'b1;
+            scl_o <= 1'b1;
+            sda_o <= 1'b1;
+        end else begin
+            // Sample inputs
+            scl_sample <= scl_i;
+            sda_sample <= sda_i;
+            
+            // Detect edges
+            scl_edge <= (scl_i && !scl_high) || (!scl_i && scl_high);
+            sda_edge <= (sda_i && !sda_high) || (!sda_i && sda_high);
+            
+            scl_high <= scl_i;
+            sda_high <= sda_i;
+            
+            // Update counts based on phase
+            if (scl_phase) begin
+                if (scl_sample) begin
+                    scl_count <= scl_count + 1;
+                    if (scl_count >= prescale_val) begin
+                        scl_count <= 0;
+                        scl_phase <= 0;
+                        scl_t <= 1'b1;
+                        scl_o <= 1'b1;
+                    end
+                end else begin
+                    scl_count <= scl_count + 1;
+                    if (scl_count >= prescale_val) begin
+                        scl_count <= 0;
+                        scl_phase <= 1;
+                        scl_t <= 1'b0;
+                        scl_o <= 1'b0;
+                    end
+                end
+            end else begin
+                if (scl_sample) begin
+                    scl_count <= scl_count + 1;
+                    if (scl_count >= prescale_val) begin
+                        scl_count <= 0;
+                        scl_phase <= 1;
+                        scl_t <= 1'b1;
+                        scl_o <= 1'b1;
+                    end
+                end else begin
+                    scl_count <= scl_count + 1;
+                    if (scl_count >= prescale_val) begin
+                        scl_count <= 0;
+                        scl_phase <= 0;
+                        scl_t <= 1'b0;
+                        scl_o <= 1'b0;
+                    end
+                end
+            end
+            
+            // SDA timing is similar but controlled by state machine
+            if (sda_phase) begin
+                if (sda_sample) begin
+                    sda_count <= sda_count + 1;
+                    if (sda_count >= prescale_val) begin
+                        sda_count <= 0;
+                        sda_phase <= 0;
+                        sda_t <= 1'b1;
+                        sda_o <= 1'b1;
+                    end
+                end else begin
+                    sda_count <= sda_count + 1;
+                    if (sda_count >= prescale_val) begin
+                        sda_count <= 0;
+                        sda_phase <= 1;
+                        sda_t <= 1'b0;
+                        sda_o <= 1'b0;
+                    end
+                end
+            end else begin
+                if (sda_sample) begin
+                    sda_count <= sda_count + 1;
+                    if (sda_count >= prescale_val) begin
+                        sda_count <= 0;
+                        sda_phase <= 1;
+                        sda_t <= 1'b1;
+                        sda_o <= 1'b1;
+                    end
+                end else begin
+                    sda_count <= sda_count + 1;
+                    if (sda_count >= prescale_val) begin
+                        sda_count <= 0;
+                        sda_phase <= 0;
+                        sda_t <= 1'b0;
+                        sda_o <= 1'b0;
+                    end
+                end
+            end
+        end
+    end
+
+    // State Machine Transitions and Control Logic
+    always @(*) begin
+        next_state = state;
+        scl_t = 1'b1;
+        sda_t = 1'b1;
+        scl_o = 1'b1;
+        sda_o = 1'b1;
+        tx_data = 8'h00;
+        rx_data = 8'h00;
+        ack_received = 1'b0;
+        idle_detected = 0;
+        
+        case (state)
+            STATE_IDLE: begin
+                if (cmd_valid_reg) begin
+                    if (cmd_start) begin
+                        next_state = STATE_START;
+                    end else if (cmd_stop) begin
+                        next_state = STATE_STOP;
+                    end else if (cmd_write || cmd_read || cmd_write_multiple) begin
+                        next_state = (cmd_write || cmd_write_multiple) ? STATE_ADDR_WRITE : STATE_ADDR_READ;
+                    end else begin
+                        next_state = STATE_IDLE;
+                    end
+                end
+            end
+            
+            STATE_START: begin
+                // Drive SDA low while SCL is high
+                if (scl_phase) begin
+                    sda_t = 1'b0;
+                    sda_o = 1'b0;
+                    sda_count = 0;
+                    sda_phase = 0;
+                    // Wait for SCL to go low
+                    if (scl_sample && !scl_high) begin
+                        next_state = STATE_ADDR_WRITE;
+                    end
+                end else begin
+                    // SCL is low, keep SDA low
+                    sda_t = 1'b0;
+                    sda_o = 1'b0;
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && scl_high) begin
+                        // SCL went high, SDA is still low -> Start condition detected
+                        next_state = STATE_ADDR_WRITE;
+                    end
+                end
+            end
+            
+            STATE_ADDR_WRITE: begin
+                // Send address (7 bits) + R/W bit (0 for write)
+                if (scl_phase) begin
+                    sda_t = cmd_address[6];
+                    sda_o = cmd_address[6];
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && !scl_high) begin
+                        // SCL went low, sample SDA
+                        if (sda_sample) begin
+                            ack_received = 1'b1;
+                        end else begin
+                            ack_received = 1'b0;
+                            missed_ack = 1'b1;
+                            next_state = STATE_ERROR;
+                        end
+                        if (ack_received) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 8) begin
+                                next_state = STATE_DATA_WRITE;
+                            end
+                        end else begin
+                            next_state = STATE_ERROR;
+                        end
+                    end
+                end else begin
+                    sda_t = cmd_address[6];
+                    sda_o = cmd_address[6];
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && scl_high) begin
+                        // SCL went high, sample SDA
+                        if (sda_sample) begin
+                            ack_received = 1'b1;
+                        end else begin
+                            ack_received = 1'b0;
+                            missed_ack = 1'b1;
+                            next_state = STATE_ERROR;
+                        end
+                        if (ack_received) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 8) begin
+                                next_state = STATE_DATA_WRITE;
+                            end
+                        end else begin
+                            next_state = STATE_ERROR;
+                        end
+                    end
+                end
+            end
+            
+            STATE_ADDR_READ: begin
+                // Send address (7 bits) + R/W bit (1 for read)
+                if (scl_phase) begin
+                    sda_t = cmd_address[6];
+                    sda_o = cmd_address[6];
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && !scl_high) begin
+                        if (sda_sample) begin
+                            ack_received = 1'b1;
+                        end else begin
+                            ack_received = 1'b0;
+                            missed_ack = 1'b1;
+                            next_state = STATE_ERROR;
+                        end
+                        if (ack_received) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 8) begin
+                                next_state = STATE_DATA_READ;
+                            end
+                        end else begin
+                            next_state = STATE_ERROR;
+                        end
+                    end
+                end else begin
+                    sda_t = cmd_address[6];
+                    sda_o = cmd_address[6];
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && scl_high) begin
+                        if (sda_sample) begin
+                            ack_received = 1'b1;
+                        end else begin
+                            ack_received = 1'b0;
+                            missed_ack = 1'b1;
+                            next_state = STATE_ERROR;
+                        end
+                        if (ack_received) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 8) begin
+                                next_state = STATE_DATA_READ;
+                            end
+                        end else begin
+                            next_state = STATE_ERROR;
+                        end
+                    end
+                end
+            end
+            
+            STATE_DATA_WRITE: begin
+                // Send data byte
+                if (scl_phase) begin
+                    sda_t = data_tdata_reg[0];
+                    sda_o = data_tdata_reg[0];
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && !scl_high) begin
+                        if (sda_sample) begin
+                            ack_received = 1'b1;
+                        end else begin
+                            ack_received = 1'b0;
+                            missed_ack = 1'b1;
+                            next_state = STATE_ERROR;
+                        end
+                        if (ack_received) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 8) begin
+                                if (data_last_reg) begin
+                                    next_state = STATE_STOP;
+                                end else begin
+                                    next_state = STATE_DATA_WRITE;
+                                end
+                            end
+                        end else begin
+                            next_state = STATE_ERROR;
+                        end
+                    end
+                end else begin
+                    sda_t = data_tdata_reg[0];
+                    sda_o = data_tdata_reg[0];
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && scl_high) begin
+                        if (sda_sample) begin
+                            ack_received = 1'b1;
+                        end else begin
+                            ack_received = 1'b0;
+                            missed_ack = 1'b1;
+                            next_state = STATE_ERROR;
+                        end
+                        if (ack_received) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 8) begin
+                                if (data_last_reg) begin
+                                    next_state = STATE_STOP;
+                                end else begin
+                                    next_state = STATE_DATA_WRITE;
+                                end
+                            end
+                        end else begin
+                            next_state = STATE_ERROR;
+                        end
+                    end
+                end
+            end
+            
+            STATE_DATA_READ: begin
+                // Receive data byte
+                if (scl_phase) begin
+                    sda_t = 1'b1;
+                    sda_o = 1'b1;
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && !scl_high) begin
+                        if (sda_sample) begin
+                            ack_received = 1'b1;
+                        end else begin
+                            ack_received = 1'b0;
+                            missed_ack = 1'b1;
+                            next_state = STATE_ERROR;
+                        end
+                        if (ack_received) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 8) begin
+                                if (data_last_reg) begin
+                                    next_state = STATE_STOP;
+                                end else begin
+                                    next_state = STATE_DATA_READ;
+                                end
+                            end
+                        end else begin
+                            next_state = STATE_ERROR;
+                        end
+                    end
+                end else begin
+                    sda_t = 1'b1;
+                    sda_o = 1'b1;
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && scl_high) begin
+                        if (sda_sample) begin
+                            ack_received = 1'b1;
+                        end else begin
+                            ack_received = 1'b0;
+                            missed_ack = 1'b1;
+                            next_state = STATE_ERROR;
+                        end
+                        if (ack_received) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 8) begin
+                                if (data_last_reg) begin
+                                    next_state = STATE_STOP;
+                                end else begin
+                                    next_state = STATE_DATA_READ;
+                                end
+                            end
+                        end else begin
+                            next_state = STATE_ERROR;
+                        end
+                    end
+                end
+            end
+            
+            STATE_STOP: begin
+                // Release SDA, wait for SCL high, then drive SDA high
+                if (scl_phase) begin
+                    sda_t = 1'b1;
+                    sda_o = 1'b1;
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && !scl_high) begin
+                        if (sda_sample) begin
+                            ack_received = 1'b1;
+                        end else begin
+                            ack_received = 1'b0;
+                            missed_ack = 1'b1;
+                            next_state = STATE_ERROR;
+                        end
+                        if (ack_received) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 8) begin
+                                if (data_last_reg) begin
+                                    next_state = STATE_IDLE;
+                                end else begin
+                                    next_state = STATE_STOP;
+                                end
+                            end
+                        end else begin
+                            next_state = STATE_ERROR;
+                        end
+                    end
+                end else begin
+                    sda_t = 1'b1;
+                    sda_o = 1'b1;
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && scl_high) begin
+                        if (sda_sample) begin
+                            ack_received = 1'b1;
+                        end else begin
+                            ack_received = 1'b0;
+                            missed_ack = 1'b1;
+                            next_state = STATE_ERROR;
+                        end
+                        if (ack_received) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 8) begin
+                                if (data_last_reg) begin
+                                    next_state = STATE_IDLE;
+                                end else begin
+                                    next_state = STATE_STOP;
+                                end
+                            end
+                        end else begin
+                            next_state = STATE_ERROR;
+                        end
+                    end
+                end
+            end
+            
+            STATE_WAIT_STOP: begin
+                // Wait for stop condition from slave
+                if (scl_phase) begin
+                    sda_t = 1'b1;
+                    sda_o = 1'b1;
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && !scl_high) begin
+                        if (sda_sample) begin
+                            ack_received = 1'b1;
+                        end else begin
+                            ack_received = 1'b0;
+                            missed_ack = 1'b1;
+                            next_state = STATE_ERROR;
+                        end
+                        if (ack_received) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 8) begin
+                                if (data_last_reg) begin
+                                    next_state = STATE_IDLE;
+                                end else begin
+                                    next_state = STATE_WAIT_STOP;
+                                end
+                            end
+                        end else begin
+                            next_state = STATE_ERROR;
+                        end
+                    end
+                end else begin
+                    sda_t = 1'b1;
+                    sda_o = 1'b1;
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && scl_high) begin
+                        if (sda_sample) begin
+                            ack_received = 1'b1;
+                        end else begin
+                            ack_received = 1'b0;
+                            missed_ack = 1'b1;
+                            next_state = STATE_ERROR;
+                        end
+                        if (ack_received) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 8) begin
+                                if (data_last_reg) begin
+                                    next_state = STATE_IDLE;
+                                end else begin
+                                    next_state = STATE_WAIT_STOP;
+                                end
+                            end
+                        end else begin
+                            next_state = STATE_ERROR;
+                        end
+                    end
+                end
+            end
+            
+            STATE_ERROR: begin
+                // Error state, release bus
+                if (scl_phase) begin
+                    sda_t = 1'b1;
+                    sda_o = 1'b1;
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && !scl_high) begin
+                        if (sda_sample) begin
+                            ack_received = 1'b1;
+                        end else begin
+                            ack_received = 1'b0;
+                            missed_ack = 1'b1;
+                            next_state = STATE_ERROR;
+                        end
+                        if (ack_received) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 8) begin
+                                if (data_last_reg) begin
+                                    next_state = STATE_IDLE;
+                                end else begin
+                                    next_state = STATE_ERROR;
+                                end
+                            end
+                        end else begin
+                            next_state = STATE_ERROR;
+                        end
+                    end
+                end else begin
+                    sda_t = 1'b1;
+                    sda_o = 1'b1;
+                    sda_count = 0;
+                    sda_phase = 0;
+                    if (scl_sample && scl_high) begin
+                        if (sda_sample) begin
+                            ack_received = 1'b1;
+                        end else begin
+                            ack_received = 1'b0;
+                            missed_ack = 1'b1;
+                            next_state = STATE_ERROR;
+                        end
+                        if (ack_received) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 8) begin
+                                if (data_last_reg) begin
+                                    next_state = STATE_IDLE;
+                                end else begin
+                                    next_state = STATE_ERROR;
+                                end
+                            end
+                        end else begin
+                            next_state = STATE_ERROR;
+                        end
+                    end
+                end
+            end
+            
+            default: begin
+                next_state = STATE_IDLE;
+            end
+        endcase
+    end
+
+    // Data shift logic for read operations
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rx_data <= 8'h00;
+            byte_index <= 0;
+        end else begin
+            if (state == STATE_DATA_READ && scl_sample && scl_high) begin
+                // Shift in SDA value
+                rx_data <= {rx_data[6:0], sda_sample};
+                byte_index <= byte_index + 1;
+            end
+        end
+    end
+
+    // Idle detection logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            idle_detected <= 0;
+        end else begin
+            if (state == STATE_IDLE && !s_axis_cmd_valid) begin
+                idle_detected <= 1;
+            end else begin
+                idle_detected <= 0;
+            end
+        end
+    end
+
+    // Stop on idle logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            stop_requested <= 0;
+        end else begin
+            if (stop_on_idle && idle_detected) begin
+                stop_requested <= 1;
+            end else begin
+                stop_requested <= 0;
+            end
+        end
+    end
+
+    // Final state update based on stop_on_idle
+    always @(*) begin
+        next_state = state;
+        if (stop_requested && state == STATE_IDLE) begin
+            next_state = STATE_STOP;
+        end
+    end
+
+endmodule
+```<|im_end|>

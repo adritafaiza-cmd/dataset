@@ -1,0 +1,471 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ------------------------------------------------------------------------
+    // CDC Logic: Synchronous Reset Generation
+    // ------------------------------------------------------------------------
+    // Generate safe synchronous resets for both domains based on asynchronous
+    // active-high resets. This ensures no metastability on reset signals.
+    
+    wire s_rst_n;
+    wire m_rst_n;
+    
+    always @(posedge s_clk) begin
+        if (s_rst)
+            s_rst_n <= 1'b1;
+        else
+            s_rst_n <= 1'b0;
+    end
+    
+    always @(posedge m_clk) begin
+        if (m_rst)
+            m_rst_n <= 1'b1;
+        else
+            m_rst_n <= 1'b0;
+    end
+
+    // ------------------------------------------------------------------------
+    // Write Channel (AW -> W -> B)
+    // ------------------------------------------------------------------------
+    // State Machine for Write Address (AW)
+    // States: IDLE, AW_WAIT_READY, AW_VALID
+    
+    typedef enum logic [1:0] {
+        AW_IDLE,
+        AW_WAIT_READY,
+        AW_VALID
+    } aw_state_t;
+
+    aw_state_t s_aw_state, m_aw_state;
+    logic s_aw_state_reg, m_aw_state_reg;
+    
+    // Write Data and Strb buffering
+    logic [DATA_WIDTH-1:0] s_wdata_buf, m_wdata_buf;
+    logic [STRB_WIDTH-1:0] s_wstrb_buf, m_wstrb_buf;
+    logic s_wvalid_buf, m_wvalid_buf;
+    logic s_wready_buf, m_wready_buf;
+    
+    // Write Response buffering
+    logic [1:0] s_bresp_buf, m_bresp_buf;
+    logic s_bvalid_buf, m_bvalid_buf;
+    logic s_bready_buf, m_bready_buf;
+
+    // ------------------------------------------------------------------------
+    // Master Side Write Logic
+    // ------------------------------------------------------------------------
+    // Capture incoming AW/W signals from Slave domain and forward to Master domain
+    // when Master is ready.
+    
+    // AW Channel
+    always @(posedge m_clk) begin
+        if (m_rst_n) begin
+            m_aw_state <= AW_IDLE;
+            m_axil_awaddr <= '0;
+            m_axil_awprot <= '0;
+            m_axil_awvalid <= 1'b0;
+        end else begin
+            case (m_aw_state)
+                AW_IDLE: begin
+                    if (s_axil_awvalid & s_rst_n) begin
+                        m_axil_awaddr <= s_axil_awaddr;
+                        m_axil_awprot <= s_axil_awprot;
+                        m_axil_awvalid <= 1'b1;
+                        m_aw_state <= AW_WAIT_READY;
+                    end
+                end
+                AW_WAIT_READY: begin
+                    if (m_axil_awready) begin
+                        m_axil_awvalid <= 1'b0;
+                        m_aw_state <= AW_VALID;
+                    end
+                end
+                AW_VALID: begin
+                    if (m_axil_awready) begin
+                        m_axil_awvalid <= 1'b0;
+                        m_aw_state <= AW_IDLE;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // W Channel
+    always @(posedge m_clk) begin
+        if (m_rst_n) begin
+            m_wdata_buf <= '0;
+            m_wstrb_buf <= '0;
+            m_wvalid_buf <= 1'b0;
+            m_wready_buf <= 1'b1;
+        end else begin
+            // Capture data if valid and ready from slave
+            if (s_axil_wvalid & s_axil_wready & s_rst_n) begin
+                m_wdata_buf <= s_axil_wdata;
+                m_wstrb_buf <= s_axil_wstrb;
+                m_wvalid_buf <= 1'b1;
+            end else begin
+                m_wvalid_buf <= 1'b0;
+            end
+            
+            // Drive ready to slave if we have data and master is ready
+            if (m_wvalid_buf & m_axil_wready) begin
+                m_wready_buf <= 1'b0;
+            end else begin
+                m_wready_buf <= 1'b1;
+            end
+        end
+    end
+
+    // B Channel
+    always @(posedge m_clk) begin
+        if (m_rst_n) begin
+            m_bresp_buf <= '0;
+            m_bvalid_buf <= 1'b0;
+            m_bready_buf <= 1'b1;
+        end else begin
+            // Capture response if valid and ready from slave
+            if (m_axil_bvalid & m_axil_bready & s_rst_n) begin
+                m_bresp_buf <= m_axil_bresp;
+                m_bvalid_buf <= 1'b1;
+            end else begin
+                m_bvalid_buf <= 1'b0;
+            end
+            
+            // Drive ready to slave if we have response and master is ready
+            if (m_bvalid_buf & s_axil_bready) begin
+                m_bready_buf <= 1'b0;
+            end else begin
+                m_bready_buf <= 1'b1;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------------
+    // Slave Side Write Logic
+    // ------------------------------------------------------------------------
+    // Capture incoming signals from Master domain and forward to Slave domain
+    // when Slave is ready.
+    
+    // AW Channel
+    always @(posedge s_clk) begin
+        if (s_rst_n) begin
+            s_aw_state <= AW_IDLE;
+            s_axil_awready <= 1'b0;
+        end else begin
+            case (s_aw_state)
+                AW_IDLE: begin
+                    if (m_axil_awvalid & m_rst_n) begin
+                        s_axil_awready <= 1'b1;
+                        s_aw_state <= AW_WAIT_READY;
+                    end
+                end
+                AW_WAIT_READY: begin
+                    if (m_axil_awvalid & m_axil_awready & m_rst_n) begin
+                        s_axil_awready <= 1'b0;
+                        s_aw_state <= AW_VALID;
+                    end
+                end
+                AW_VALID: begin
+                    if (m_axil_awvalid & m_axil_awready & m_rst_n) begin
+                        s_axil_awready <= 1'b0;
+                        s_aw_state <= AW_IDLE;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // W Channel
+    always @(posedge s_clk) begin
+        if (s_rst_n) begin
+            s_wdata_buf <= '0;
+            s_wstrb_buf <= '0;
+            s_wvalid_buf <= 1'b0;
+            s_wready_buf <= 1'b1;
+        end else begin
+            // Capture data if valid and ready from master
+            if (m_axil_wvalid & m_axil_wready & m_rst_n) begin
+                s_wdata_buf <= m_axil_wdata;
+                s_wstrb_buf <= m_axil_wstrb;
+                s_wvalid_buf <= 1'b1;
+            end else begin
+                s_wvalid_buf <= 1'b0;
+            end
+            
+            // Drive ready to master if we have data and slave is ready
+            if (s_wvalid_buf & s_axil_wready) begin
+                s_wready_buf <= 1'b0;
+            end else begin
+                s_wready_buf <= 1'b1;
+            end
+        end
+    end
+
+    // B Channel
+    always @(posedge s_clk) begin
+        if (s_rst_n) begin
+            s_bresp_buf <= '0;
+            s_bvalid_buf <= 1'b0;
+            s_bready_buf <= 1'b1;
+        end else begin
+            // Capture response if valid and ready from master
+            if (m_axil_bvalid & m_axil_bready & m_rst_n) begin
+                s_bresp_buf <= m_axil_bresp;
+                s_bvalid_buf <= 1'b1;
+            end else begin
+                s_bvalid_buf <= 1'b0;
+            end
+            
+            // Drive ready to master if we have response and slave is ready
+            if (s_bvalid_buf & s_axil_bready) begin
+                s_bready_buf <= 1'b0;
+            end else begin
+                s_bready_buf <= 1'b1;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------------
+    // Read Channel (AR -> R)
+    // ------------------------------------------------------------------------
+    // State Machine for Read Address (AR)
+    // States: IDLE, AR_WAIT_READY, AR_VALID
+    
+    typedef enum logic [1:0] {
+        AR_IDLE,
+        AR_WAIT_READY,
+        AR_VALID
+    } ar_state_t;
+
+    ar_state_t s_ar_state, m_ar_state;
+    logic s_ar_state_reg, m_ar_state_reg;
+    
+    // Read Data and Resp buffering
+    logic [DATA_WIDTH-1:0] s_rdata_buf, m_rdata_buf;
+    logic [1:0] s_rresp_buf, m_rresp_buf;
+    logic s_rvalid_buf, m_rvalid_buf;
+    logic s_rready_buf, m_rready_buf;
+
+    // ------------------------------------------------------------------------
+    // Master Side Read Logic
+    // ------------------------------------------------------------------------
+    // Capture incoming AR/R signals from Slave domain and forward to Master domain
+    // when Master is ready.
+    
+    // AR Channel
+    always @(posedge m_clk) begin
+        if (m_rst_n) begin
+            m_ar_state <= AR_IDLE;
+            m_axil_araddr <= '0;
+            m_axil_arprot <= '0;
+            m_axil_arvalid <= 1'b0;
+        end else begin
+            case (m_ar_state)
+                AR_IDLE: begin
+                    if (s_axil_arvalid & s_rst_n) begin
+                        m_axil_araddr <= s_axil_araddr;
+                        m_axil_arprot <= s_axil_arprot;
+                        m_axil_arvalid <= 1'b1;
+                        m_ar_state <= AR_WAIT_READY;
+                    end
+                end
+                AR_WAIT_READY: begin
+                    if (m_axil_arready) begin
+                        m_axil_arvalid <= 1'b0;
+                        m_ar_state <= AR_VALID;
+                    end
+                end
+                AR_VALID: begin
+                    if (m_axil_arready) begin
+                        m_axil_arvalid <= 1'b0;
+                        m_ar_state <= AR_IDLE;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // R Channel
+    always @(posedge m_clk) begin
+        if (m_rst_n) begin
+            m_rdata_buf <= '0;
+            m_rresp_buf <= '0;
+            m_rvalid_buf <= 1'b0;
+            m_rready_buf <= 1'b1;
+        end else begin
+            // Capture data if valid and ready from slave
+            if (s_axil_rvalid & s_axil_rready & s_rst_n) begin
+                m_rdata_buf <= s_axil_rdata;
+                m_rresp_buf <= s_axil_rresp;
+                m_rvalid_buf <= 1'b1;
+            end else begin
+                m_rvalid_buf <= 1'b0;
+            end
+            
+            // Drive ready to slave if we have data and master is ready
+            if (m_rvalid_buf & m_axil_rready) begin
+                m_rready_buf <= 1'b0;
+            end else begin
+                m_rready_buf <= 1'b1;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------------
+    // Slave Side Read Logic
+    // ------------------------------------------------------------------------
+    // Capture incoming signals from Master domain and forward to Slave domain
+    // when Slave is ready.
+    
+    // AR Channel
+    always @(posedge s_clk) begin
+        if (s_rst_n) begin
+            s_ar_state <= AR_IDLE;
+            s_axil_arready <= 1'b0;
+        end else begin
+            case (s_ar_state)
+                AR_IDLE: begin
+                    if (m_axil_arvalid & m_rst_n) begin
+                        s_axil_arready <= 1'b1;
+                        s_ar_state <= AR_WAIT_READY;
+                    end
+                end
+                AR_WAIT_READY: begin
+                    if (m_axil_arvalid & m_axil_arready & m_rst_n) begin
+                        s_axil_arready <= 1'b0;
+                        s_ar_state <= AR_VALID;
+                    end
+                end
+                AR_VALID: begin
+                    if (m_axil_arvalid & m_axil_arready & m_rst_n) begin
+                        s_axil_arready <= 1'b0;
+                        s_ar_state <= AR_IDLE;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // R Channel
+    always @(posedge s_clk) begin
+        if (s_rst_n) begin
+            s_rdata_buf <= '0;
+            s_rresp_buf <= '0;
+            s_rvalid_buf <= 1'b0;
+            s_rready_buf <= 1'b1;
+        end else begin
+            // Capture data if valid and ready from master
+            if (m_axil_rvalid & m_axil_rready & m_rst_n) begin
+                s_rdata_buf <= m_axil_rdata;
+                s_rresp_buf <= m_axil_rresp;
+                s_rvalid_buf <= 1'b1;
+            end else begin
+                s_rvalid_buf <= 1'b0;
+            end
+            
+            // Drive ready to master if we have data and slave is ready
+            if (s_rvalid_buf & s_axil_rready) begin
+                s_rready_buf <= 1'b0;
+            end else begin
+                s_rready_buf <= 1'b1;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------------
+    // Output Assignments
+    // ------------------------------------------------------------------------
+    // Assign outputs based on the buffered values in the respective clock domains
+    
+    // Write Channel Outputs
+    s_axil_awready <= s_aw_state == AW_WAIT_READY ? 1'b1 : 1'b0;
+    s_axil_wready  <= s_wready_buf;
+    s_axil_bresp   <= s_bresp_buf;
+    s_axil_bvalid  <= s_bvalid_buf;
+    
+    m_axil_awaddr  <= m_aw_state == AW_VALID ? m_axil_awaddr : '0;
+    m_axil_awprot  <= m_aw_state == AW_VALID ? m_axil_awprot : '0;
+    m_axil_awvalid <= m_aw_state == AW_VALID ? 1'b1 : 1'b0;
+    m_axil_wdata   <= m_wdata_buf;
+    m_axil_wstrb   <= m_wstrb_buf;
+    m_axil_wvalid  <= m_wvalid_buf;
+    m_axil_bready  <= m_bready_buf;
+    
+    m_axil_araddr  <= m_ar_state == AR_VALID ? m_axil_araddr : '0;
+    m_axil_arprot  <= m_ar_state == AR_VALID ? m_axil_arprot : '0;
+    m_axil_arvalid <= m_ar_state == AR_VALID ? 1'b1 : 1'b0;
+    m_axil_rdata   <= m_rdata_buf;
+    m_axil_rresp   <= m_rresp_buf;
+    m_axil_rvalid  <= m_rvalid_buf;
+    m_axil_rready  <= m_rready_buf;
+
+    // Read Channel Outputs
+    s_axil_arready <= s_ar_state == AR_WAIT_READY ? 1'b1 : 1'b0;
+    s_axil_rdata   <= s_rdata_buf;
+    s_axil_rresp   <= s_rresp_buf;
+    s_axil_rvalid  <= s_rvalid_buf;
+    
+    m_axil_awready <= m_aw_state == AW_WAIT_READY ? 1'b1 : 1'b0;
+    m_axil_wready  <= m_wready_buf;
+    m_axil_bresp   <= m_bresp_buf;
+    m_axil_bvalid  <= m_bvalid_buf;
+    
+    m_axil_arready <= m_ar_state == AR_WAIT_READY ? 1'b1 : 1'b0;
+    m_axil_rready  <= m_rready_buf;
+
+endmodule
+```<|im_end|>

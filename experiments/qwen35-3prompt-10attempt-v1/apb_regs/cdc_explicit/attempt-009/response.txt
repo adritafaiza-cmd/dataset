@@ -1,0 +1,332 @@
+```verilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // CDC Strategy:
+  // 1. Use a dedicated internal clock domain (pclk_i) for all state registers.
+  // 2. Use a synchronous reset (preset_ni) that is assumed to be stable relative to pclk_i 
+  //    (or handled by the caller's reset logic). This avoids asynchronous reset hazards 
+  //    inside the module.
+  // 3. All input sampling (req_i, base_addr_i) and output driving (resp_o, reg_q_o) 
+  //    occur on the active edge of pclk_i.
+  // 4. Multi-bit data transfers are synchronous and coherent within the single clock domain.
+  // 5. No cross-clock-domain FIFOs or handshakes are needed as there is only one clock.
+
+  localparam int unsigned ADDR_MASK = (1 << ApbAddrWidth) - 1;
+  localparam int unsigned OFFSET_MASK = (1 << AddrOffset) - 1;
+
+  // Internal state registers
+  reg_data_t [NoApbRegs-1:0] reg_state;
+  
+  // APB Protocol State Machine State
+  // States: IDLE, READ, WRITE
+  typedef enum logic [1:0] {
+    STATE_IDLE,
+    STATE_READ,
+    STATE_WRITE
+  } apb_state_t;
+
+  apb_state_t state_reg;
+  logic       state_next;
+  
+  // Address register to hold the decoded register index
+  logic [NoApbRegs-1:0] addr_idx_reg;
+  logic                 addr_valid_reg;
+  
+  // Write data register
+  reg_data_t            write_data_reg;
+  logic                 write_data_valid_reg;
+
+  // APB Response status
+  logic                 pwrite1; // PWRITE1 signal for APB response
+  logic                 pwrite0; // PWRITE0 signal for APB response
+  logic                 pvalid;  // PVALID signal for APB response
+
+  // Generate APB Response Signals
+  // APB protocol: 
+  // PREADY is handled by the caller (assumed 1'b1 if clock is valid).
+  // PWRITE1/PWRITE0 indicate success/failure.
+  // PVALID indicates the response is ready.
+  
+  assign pwrite1 = (state_reg == STATE_READ) ? 1'b1 : 1'b0;
+  assign pwrite0 = (state_reg == STATE_READ) ? 1'b0 : 1'b1;
+  assign pvalid  = (state_reg != STATE_IDLE);
+
+  // Address decoding logic
+  // Calculate the register index based on base address and offset
+  // addr_idx = ((base_addr + req_addr) >> AddrOffset) & (NoApbRegs - 1)
+  // However, APB usually addresses the register directly. 
+  // Assuming req_i contains the full APB address.
+  // We need to extract the register index from the address.
+  // Let's assume req_i has an address field. Since req_t is a parameter, we assume it has 
+  // an address field compatible with apb_addr_t or similar. 
+  // For this implementation, we assume req_i has a field 'addr' of type apb_addr_t.
+  // If req_t is a struct, we access it as req_i.addr.
+  // If req_t is just logic, this code would fail compilation unless req_t is defined elsewhere.
+  // Given the constraints, we assume req_t is a struct with .addr and .pwrite fields.
+  
+  // To make this generic and compilable without knowing the exact structure of req_t,
+  // we will assume req_t has a member 'addr' of type apb_addr_t.
+  // If req_t is a simple logic vector, this approach won't work directly, but 
+  // the problem statement implies a structured APB interface.
+  // We will use a generic way to access the address if possible, or assume a standard structure.
+  // Since we cannot define the structure, we assume req_i has a field .addr.
+  
+  // Note: In a real scenario, req_t would be defined as:
+  // typedef struct { logic pwrite; apb_addr_t addr; } req_t;
+  // We will proceed with this assumption.
+
+  // Synchronous Reset Logic
+  // Reset all registers and state machine to initial values
+  always_ff @(posedge pclk_i) begin
+    if (!preset_ni) begin
+      reg_state     <= STATE_IDLE;
+      addr_idx_reg  <= 0;
+      addr_valid_reg <= 1'b0;
+      write_data_reg <= '0;
+      write_data_valid_reg <= 1'b0;
+      reg_state     <= STATE_IDLE; // Redundant but safe
+    end else begin
+      // State Machine Logic
+      if (state_reg == STATE_IDLE) begin
+        // Check for valid APB transaction
+        // Assuming req_i.pwrite indicates write, req_i.addr indicates address
+        // We need to check if the address falls within our mapped region.
+        // Base address is base_addr_i.
+        // The register address in APB space is: base_addr_i + (idx * AddrOffset)
+        // We need to find idx such that: base_addr_i <= req_i.addr < base_addr_i + (NoApbRegs * AddrOffset)
+        
+        // Calculate potential index
+        // idx = (req_i.addr - base_addr_i) / AddrOffset
+        // We perform this calculation carefully to avoid negative results if addr < base_addr
+        
+        logic [ApbAddrWidth-1:0] calc_addr;
+        logic [NoApbRegs-1:0] calc_idx;
+        logic addr_in_range;
+        
+        // Check if req_i.addr is within the mapped range
+        // Range start: base_addr_i
+        // Range end: base_addr_i + (NoApbRegs * AddrOffset) - 1
+        
+        // Since we don't know the exact width of req_i.addr, we assume it matches apb_addr_t
+        // and that the testbench ensures alignment.
+        
+        // Simple check: if the lower AddrOffset bits are 0, it's aligned.
+        // Then calculate index.
+        
+        if (req_i.addr[AddrOffset-1:0] == 0) begin
+          // Calculate index
+          // idx = (req_i.addr - base_addr_i) / AddrOffset
+          // We use a simple subtraction and shift.
+          // Note: This assumes req_i.addr >= base_addr_i.
+          // If not, the result will be garbage, but the range check below should catch it.
+          
+          // To be safe against underflow in synthesis tools, we can check range first.
+          // Let's assume the testbench provides valid addresses.
+          
+          // We need to handle the case where NoApbRegs is 0.
+          if (NoApbRegs > 0) begin
+            // Calculate index
+            // idx = (req_i.addr - base_addr_i) >> AddrOffset
+            // We need to ensure the subtraction doesn't wrap around incorrectly if addr < base_addr
+            // But since we are in a single clock domain, we can rely on the testbench.
+            
+            // Let's implement a safe index calculation
+            logic [ApbAddrWidth-1:0] diff;
+            if (req_i.addr >= base_addr_i) begin
+              diff = req_i.addr - base_addr_i;
+              calc_idx = diff >> AddrOffset;
+            end else begin
+              calc_idx = '0;
+            end
+            
+            // Check if index is valid
+            if (calc_idx < NoApbRegs) begin
+              addr_idx_reg <= calc_idx;
+              addr_valid_reg <= 1'b1;
+              
+              // Determine next state
+              if (req_i.pwrite) begin
+                // Write operation
+                // Check if the register is read-only
+                if (ReadOnly[calc_idx] == 1'b0) begin
+                  state_next <= STATE_WRITE;
+                end else begin
+                  // Read-only register, ignore write, stay in IDLE or go to READ?
+                  // APB spec: If write to read-only, PREADY=1, PWRITE1=1, PWRITE0=0, PVALID=1
+                  // So we should respond as if it was a read (success) but ignore the write.
+                  // However, the state machine needs to drive the response.
+                  // If we stay in IDLE, we don't drive PVALID.
+                  // We need to drive PVALID immediately for read-only writes.
+                  // So we can treat it as a successful operation without changing state.
+                  // But we need to ensure the response signals are correct.
+                  // Our response logic uses state_reg. 
+                  // If state_reg is IDLE, pvalid is 0.
+                  // So we must transition to a state that sets pvalid.
+                  // Let's use STATE_READ for successful operations (reads and ignored writes).
+                  state_next <= STATE_READ;
+                end
+              end else begin
+                // Read operation
+                state_next <= STATE_READ;
+              end
+            end else begin
+              // Address out of range
+              // APB spec: PREADY=1, PWRITE1=0, PWRITE0=1, PVALID=1 (Error)
+              // We can force state to READ to generate the error response.
+              state_next <= STATE_READ;
+            end
+          end else begin
+            // No registers, always error
+            state_next <= STATE_READ;
+          end
+        end else begin
+          // Misaligned address
+          // APB spec: PREADY=1, PWRITE1=0, PWRITE0=1, PVALID=1 (Error)
+          state_next <= STATE_READ;
+        end
+      end else if (state_reg == STATE_READ) begin
+        // Read operation
+        // Drive reg_q_o with the data
+        if (addr_valid_reg) begin
+          reg_q_o[addr_idx_reg] <= reg_init_i[addr_idx_reg];
+        end else begin
+          // If address is invalid, drive 0 or keep previous? 
+          // Usually, if address is invalid, we might not drive anything or drive 0.
+          // Let's drive 0 for safety.
+          reg_q_o <= '0;
+        end
+        // After reading, return to IDLE
+        state_next <= STATE_IDLE;
+      end else if (state_reg == STATE_WRITE) begin
+        // Write operation
+        if (addr_valid_reg) begin
+          reg_state[addr_idx_reg] <= write_data_reg;
+        end
+        // After writing, return to IDLE
+        state_next <= STATE_IDLE;
+      end
+    end
+  end
+
+  // Input sampling for address and data
+  // Since everything is in the same clock domain, we can sample directly.
+  // However, to be robust against glitches on the clock edge, we sample in the same block.
+  // The logic above already samples req_i inside the always_ff block.
+  
+  // Write data sampling
+  // We need to capture the write data when the state transitions to WRITE.
+  // But the write data is available on the same clock edge.
+  // We can capture it in the same always_ff block when transitioning to STATE_WRITE.
+  
+  // Let's refactor the always_ff block to handle data capture explicitly.
+  
+  always_ff @(posedge pclk_i) begin
+    if (!preset_ni) begin
+      reg_state     <= STATE_IDLE;
+      addr_idx_reg  <= '0;
+      addr_valid_reg <= 1'b0;
+      write_data_reg <= '0;
+      write_data_valid_reg <= 1'b0;
+      reg_q_o <= '0;
+    end else begin
+      // Address and Data Capture Logic
+      logic [NoApbRegs-1:0] new_idx;
+      logic new_addr_valid;
+      logic new_state;
+      
+      if (state_reg == STATE_IDLE) begin
+        if (NoApbRegs > 0) begin
+          if (req_i.addr[AddrOffset-1:0] == 0) begin
+            if (req_i.addr >= base_addr_i) begin
+              new_idx = (req_i.addr - base_addr_i) >> AddrOffset;
+              if (new_idx < NoApbRegs) begin
+                new_addr_valid = 1'b1;
+                new_idx = new_idx;
+              end else begin
+                new_addr_valid = 1'b0;
+                new_idx = '0;
+              end
+            end else begin
+              new_addr_valid = 1'b0;
+              new_idx = '0;
+            end
+          end else begin
+            new_addr_valid = 1'b0;
+            new_idx = '0;
+          end
+        end else begin
+          new_addr_valid = 1'b0;
+          new_idx = '0;
+        end
+        
+        if (new_addr_valid) begin
+          if (req_i.pwrite) begin
+            // Write
+            if (ReadOnly[new_idx] == 1'b0) begin
+              new_state = STATE_WRITE;
+            end else begin
+              // Read-only, treat as success (like a read)
+              new_state = STATE_READ;
+            end
+          end else begin
+            // Read
+            new_state = STATE_READ;
+          end
+        end else begin
+          // Error condition (misaligned or out of range)
+          new_state = STATE_READ;
+        end
+      end else if (state_reg == STATE_READ) begin
+        // Read operation
+        if (new_addr_valid) begin
+          reg_q_o[new_idx] <= reg_init_i[new_idx];
+        end else begin
+          reg_q_o <= '0;
+        end
+        new_state = STATE_IDLE;
+      end else if (state_reg == STATE_WRITE) begin
+        // Write operation
+        if (new_addr_valid) begin
+          reg_state[new_idx] <= write_data_reg;
+        end
+        new_state = STATE_IDLE;
+      end
+      
+      // Capture write data if transitioning to WRITE
+      if (state_reg == STATE_IDLE && new_state == STATE_WRITE) begin
+        write_data_reg <= req_i.data; // Assuming req_i has a .data field
+        write_data_valid_reg <= 1'b1;
+      end
+      
+      // Update state
+      state_reg <= new_state;
+      addr_idx_reg <= new_idx;
+      addr_valid_reg <= new_addr_valid;
+    end
+  end
+
+  // Output the register file
+  assign reg_q_o = reg_state;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

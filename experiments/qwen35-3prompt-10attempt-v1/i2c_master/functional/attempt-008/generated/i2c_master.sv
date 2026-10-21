@@ -1,0 +1,353 @@
+```verilog
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // ========================================================================
+    // Internal State Machine
+    // ========================================================================
+    typedef enum logic [2:0] {
+        IDLE,
+        START,
+        ADDR_WRITE,
+        ADDR_READ,
+        DATA_WRITE,
+        DATA_READ,
+        ACK_CHECK,
+        STOP,
+        STOP_WAIT,
+        ERROR
+    } state_t;
+
+    state_t state, next_state;
+    logic    cmd_valid_reg;
+    logic    cmd_ready_reg;
+    logic    data_valid_reg;
+    logic    data_ready_reg;
+    logic    data_last_reg;
+    logic    data_tdata_reg;
+    logic    bus_busy;
+    logic    missed_ack_reg;
+    logic    stop_on_idle_reg;
+
+    // Command Buffer
+    logic [7:0] cmd_addr;
+    logic [7:0] cmd_data;
+    logic       cmd_read_flag;
+    logic       cmd_write_flag;
+    logic       cmd_write_multi_flag;
+    logic       cmd_stop_flag;
+    logic       cmd_start_flag;
+    logic       cmd_done;
+
+    // Timing Control
+    logic [15:0] scl_count;
+    logic [15:0] sda_count;
+    logic        scl_high;
+    logic        sda_high;
+    logic        scl_edge;
+    logic        sda_edge;
+    logic        scl_low;
+    logic        sda_low;
+
+    // State Registers
+    logic [7:0] shift_reg;
+    logic       bit_count;
+    logic       ack_received;
+    logic       byte_sent;
+    logic       byte_received;
+
+    // ========================================================================
+    // State Machine Logic
+    // ========================================================================
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= IDLE;
+            cmd_valid_reg <= 1'b0;
+            cmd_ready_reg <= 1'b1;
+            data_valid_reg <= 1'b0;
+            data_ready_reg <= 1'b1;
+            data_last_reg <= 1'b0;
+            data_tdata_reg <= 8'h00;
+            bus_busy <= 1'b0;
+            missed_ack_reg <= 1'b0;
+            stop_on_idle_reg <= stop_on_idle;
+            cmd_done <= 1'b0;
+            scl_count <= 0;
+            sda_count <= 0;
+            scl_high <= 1'b1;
+            sda_high <= 1'b1;
+            shift_reg <= 8'h00;
+            bit_count <= 0;
+            ack_received <= 1'b0;
+            byte_sent <= 1'b0;
+            byte_received <= 1'b0;
+        end else begin
+            state <= next_state;
+            cmd_valid_reg <= s_axis_cmd_valid & s_axis_cmd_ready;
+            cmd_ready_reg <= (state == IDLE) ? 1'b1 : 1'b0;
+            data_valid_reg <= s_axis_data_tvalid & s_axis_data_tready;
+            data_ready_reg <= (state == DATA_WRITE || state == DATA_READ) ? 1'b1 : 1'b0;
+            data_last_reg <= s_axis_data_tlast;
+            data_tdata_reg <= s_axis_data_tdata;
+            bus_busy <= (state != IDLE) ? 1'b1 : 1'b0;
+            missed_ack_reg <= missed_ack;
+            stop_on_idle_reg <= stop_on_idle;
+            cmd_done <= 1'b0;
+        end
+    end
+
+    // ========================================================================
+    // Next State Logic
+    // ========================================================================
+    always @(*) begin
+        next_state = state;
+        missed_ack = 1'b0;
+        bus_control = 1'b0;
+        bus_active = 1'b0;
+
+        case (state)
+            IDLE: begin
+                if (cmd_valid_reg) begin
+                    cmd_addr = s_axis_cmd_address;
+                    cmd_data = s_axis_data_tdata;
+                    cmd_read_flag = s_axis_cmd_read;
+                    cmd_write_flag = s_axis_cmd_write;
+                    cmd_write_multi_flag = s_axis_cmd_write_multiple;
+                    cmd_stop_flag = s_axis_cmd_stop;
+                    cmd_start_flag = s_axis_cmd_start;
+                    next_state = (cmd_read_flag || cmd_write_multi_flag) ? ADDR_READ : ADDR_WRITE;
+                    missed_ack = 1'b0;
+                end
+            end
+
+            START: begin
+                // Drive Start condition
+                scl_high = 1'b0;
+                sda_high = 1'b0;
+                next_state = ADDR_WRITE;
+            end
+
+            ADDR_WRITE: begin
+                if (bit_count == 8) begin
+                    if (ack_received) begin
+                        if (cmd_stop_flag) next_state = STOP;
+                        else if (cmd_write_multi_flag) next_state = DATA_WRITE;
+                        else next_state = DATA_READ;
+                    end else begin
+                        missed_ack = 1'b1;
+                        next_state = ERROR;
+                    end
+                end else begin
+                    next_state = ADDR_WRITE;
+                end
+            end
+
+            ADDR_READ: begin
+                if (bit_count == 8) begin
+                    if (ack_received) begin
+                        if (cmd_stop_flag) next_state = STOP;
+                        else next_state = DATA_READ;
+                    end else begin
+                        missed_ack = 1'b1;
+                        next_state = ERROR;
+                    end
+                end else begin
+                    next_state = ADDR_READ;
+                end
+            end
+
+            DATA_WRITE: begin
+                if (bit_count == 8) begin
+                    if (ack_received) begin
+                        if (cmd_stop_flag) next_state = STOP;
+                        else next_state = DATA_WRITE;
+                    end else begin
+                        missed_ack = 1'b1;
+                        next_state = ERROR;
+                    end
+                end else begin
+                    next_state = DATA_WRITE;
+                end
+            end
+
+            DATA_READ: begin
+                if (bit_count == 8) begin
+                    if (ack_received) begin
+                        if (cmd_stop_flag) next_state = STOP;
+                        else next_state = DATA_READ;
+                    end else begin
+                        missed_ack = 1'b1;
+                        next_state = ERROR;
+                    end
+                end else begin
+                    next_state = DATA_READ;
+                end
+            end
+
+            ACK_CHECK: begin
+                // Wait for ACK/NACK
+                if (sda_low) begin
+                    ack_received = 1'b1;
+                    next_state = (state == ADDR_WRITE) ? DATA_WRITE : DATA_READ;
+                end else begin
+                    missed_ack = 1'b1;
+                    next_state = ERROR;
+                end
+            end
+
+            STOP: begin
+                // Drive Stop condition
+                scl_high = 1'b0;
+                sda_high = 1'b0;
+                next_state = STOP_WAIT;
+            end
+
+            STOP_WAIT: begin
+                if (scl_high && sda_high) begin
+                    next_state = IDLE;
+                end
+            end
+
+            ERROR: begin
+                // Release bus on error
+                scl_high = 1'b0;
+                sda_high = 1'b0;
+                next_state = STOP_WAIT;
+            end
+
+            default: next_state = IDLE;
+        endcase
+    end
+
+    // ========================================================================
+    // Command Handshake
+    // ========================================================================
+    assign s_axis_cmd_ready = cmd_ready_reg;
+    assign s_axis_data_tready = data_ready_reg;
+    assign m_axis_data_tvalid = (state == DATA_READ) && (byte_received == 8) && (m_axis_data_tready);
+    assign m_axis_data_tdata = shift_reg;
+    assign m_axis_data_tlast = (state == DATA_READ) && (byte_received == 8);
+
+    // ========================================================================
+    // I2C Timing Control
+    // ========================================================================
+    always @(posedge clk) begin
+        if (rst) begin
+            scl_count <= 0;
+            sda_count <= 0;
+            scl_high <= 1'b1;
+            sda_high <= 1'b1;
+            scl_edge <= 1'b0;
+            sda_edge <= 1'b0;
+            bit_count <= 0;
+        end else begin
+            // SCL Timing
+            if (scl_count < prescale) begin
+                scl_count <= scl_count + 1'b1;
+            end else begin
+                scl_count <= 0;
+                scl_high <= scl_high ? 1'b0 : 1'b1;
+                scl_edge <= scl_high;
+            end
+
+            // SDA Timing (slower than SCL usually, but here we use same prescale for simplicity or double)
+            // Using prescale * 2 for SDA low/high times to ensure stability
+            if (sda_count < (prescale * 2)) begin
+                sda_count <= sda_count + 1'b1;
+            end else begin
+                sda_count <= 0;
+                sda_high <= sda_high ? 1'b0 : 1'b1;
+                sda_edge <= sda_high;
+            end
+
+            // Bit Counting
+            if (scl_edge) begin
+                bit_count <= bit_count + 1'b1;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Shift Register Logic
+    // ========================================================================
+    always @(posedge clk) begin
+        if (rst) begin
+            shift_reg <= 8'h00;
+            byte_received <= 0;
+        end else begin
+            if (sda_edge && (state == DATA_READ)) begin
+                if (bit_count == 0) begin
+                    shift_reg <= {shift_reg[6:0], 1'b0}; // Shift in LSB first
+                end else if (bit_count == 1) begin
+                    shift_reg <= {shift_reg[6:0], sda_i};
+                end
+                byte_received <= byte_received + 1'b1;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Output Drivers (Open Drain Simulation)
+    // ========================================================================
+    assign scl_o = scl_high;
+    assign sda_o = sda_high;
+    
+    // Simulate open-drain behavior by checking if the line is being driven low
+    // and if the slave is pulling it low (scl_i/sda_i).
+    // In a real design, this would be handled by the physical circuit.
+    // Here we just report the state.
+    assign scl_t = scl_high;
+    assign sda_t = sda_high;
+
+    // ========================================================================
+    // Status Outputs
+    // ========================================================================
+    assign busy = bus_busy;
+    assign bus_control = (state == START) | (state == STOP) | (state == STOP_WAIT);
+    assign bus_active = (state != IDLE);
+    assign missed_ack = missed_ack_reg;
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,385 @@
+```verilog
+`timescale 1ns / 1ps
+
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output reg [WIDTH-1:0] dst_data_o
+);
+
+    // Internal state registers for the two-deep buffer
+    // We need to store the last two incoming data values to ensure ordering
+    // and handle the rate mismatch safely.
+    reg [WIDTH-1:0] buffer_0;
+    reg [WIDTH-1:0] buffer_1;
+    
+    // State machine to track the number of items in the buffer
+    // 0: Empty
+    // 1: One item
+    // 2: Full (2 items)
+    reg [1:0] buffer_count;
+
+    // State for the destination side to ensure ordered delivery
+    // 0: Idle/Reset
+    // 1: Ready to output buffer_0
+    // 2: Ready to output buffer_1
+    reg [1:0] dst_state;
+
+    // Cross-clock logic: Capture source data on destination clock
+    // We use a simple FIFO-like approach where we capture data on dst_clk
+    // when src_valid is high. Since clocks are related, metastability is minimized
+    // by sampling at the edge of dst_clk.
+    
+    // We need to track if we have data available to push to the buffer on dst_clk
+    reg src_valid_sampled;
+    reg src_data_sampled;
+
+    // Logic to update the buffer on dst_clk
+    // This handles the "spill" aspect: data arrives on src_clk, we wait for dst_clk
+    // to move it into our internal storage.
+    
+    // State encoding for dst_state
+    // 0: Empty
+    // 1: Has 1 item
+    // 2: Has 2 items
+    
+    // We will use a simple counter for buffer_count and a state machine for dst_valid
+    
+    // --- Source Side Logic (on src_clk) ---
+    // Generate src_ready based on whether we can accept data.
+    // Since the buffer is 2-deep and we are sampling on dst_clk, 
+    // the "acceptance" logic is slightly complex in a single clock domain.
+    // However, the standard pattern for related clocks with a small buffer is:
+    // 1. On src_clk, assert ready if the buffer (viewed from src perspective) isn't full.
+    // 2. Since we don't know the exact state on dst_clk from src_clk, we assume 
+    //    the buffer is effectively infinite or we rely on the dst side to pull.
+    //    
+    // Correction for strict 2-deep implementation across related clocks:
+    // We must ensure we don't overfill. The safest way is to let the dst side
+    // drive the flow. If dst is not ready, src should not drive.
+    // But src doesn't know dst status directly without a feedback path.
+    // The prompt asks for a "spill buffer". This implies we store data until dst is ready.
+    // 
+    // Implementation Strategy:
+    // 1. On src_clk: If src_valid is high, we tentatively accept data IF we have space.
+    //    Since we can't see dst status on src_clk, we assume the buffer is large enough
+    //    for the mismatch, but strictly limited to 2.
+    //    To do this correctly without knowing dst status, we usually rely on the 
+    //    fact that if dst is slow, the buffer fills up.
+    //    However, a true 2-deep buffer across clocks requires the dst side to signal
+    //    back or we assume the worst case.
+    //    
+    //    Alternative Standard Approach for Related Clocks:
+    //    The "Spill" usually means: Data comes in, we hold it. We only push to dst
+    //    when dst is ready.
+    //    To implement a hard limit of 2:
+    //    We need to know if the buffer is full.
+    //    Since we sample src_valid on dst_clk, we can count how many items we have
+    //    captured on dst_clk.
+    //    But src_ready must be driven on src_clk.
+    //    
+    //    Resolution: 
+    //    We will drive src_ready on src_clk. We will assume that if the buffer is full
+    //    (2 items), we cannot accept more. But how do we know it's full on src_clk?
+    //    We can't know for sure without a handshake from dst.
+    //    However, the problem states "Buffer a short rate mismatch". 
+    //    This implies the buffer absorbs the burst.
+    //    
+    //    Let's refine the architecture:
+    //    We will use a dual-port FIFO concept or a simple shift register.
+    //    Given the constraints and "related clocks", the most robust implementation
+    //    that guarantees ordering and depth is:
+    //    1. On src_clk: Assert src_ready = 1 always? No, that risks overflow.
+    //    2. We need a feedback mechanism. 
+    //    
+    //    Actually, the standard solution for "N-deep buffer between related clocks" 
+    //    where N is small (like 2) and ordering is required:
+    //    We treat the buffer as a FIFO.
+    //    src_ready is asserted if the FIFO is not full.
+    //    Since we can't see the FIFO depth on src_clk, we must rely on the 
+    //    assumption that the burst is short enough to fit in 2, OR we implement
+    //    a "credit" system.
+    //    
+    //    Given the prompt constraints ("Deliver accepted data once in order"),
+    //    let's implement a strict 2-element FIFO.
+    //    To solve the visibility issue: We will assume the system is designed such that
+    //    the source does not burst more than 2 items faster than the destination can consume
+    //    in the worst case, OR we use a "stop" signal.
+    //    
+    //    Wait, there is a specific pattern for this:
+    //    We can sample the "full" status on the destination clock and feed it back?
+    //    No, that adds latency.
+    //    
+    //    Let's reconsider the "Spill" definition. 
+    //    Often, this means: "Hold data for up to 2 cycles of dst_clk".
+    //    If src_valid is high, we store it. We output to dst when dst_ready is high.
+    //    If the buffer is full (2 items), we must stop accepting.
+    //    Since we cannot know if it's full on src_clk, we have two options:
+    //    A) Assume infinite buffer (violates "2-deep").
+    //    B) Use a "stop" signal from dst side propagated to src.
+    //    
+    //    Let's implement Option B implicitly by using the dst_clk to update a "full" flag
+    //    and then... wait, we can't drive src_ready on src_clk based on dst_clk logic directly
+    //    without a register crossing.
+    //    
+    //    Correct Approach for Related Clocks with Hard Depth Limit:
+    //    We must cross the "full" status from dst_clk to src_clk.
+    //    1. On dst_clk, update buffer_count.
+    //    2. If buffer_count == 2, set a "full" flag.
+    //    3. Cross "full" flag to src_clk domain.
+    //    4. On src_clk, if "full" is high, assert src_ready = 0. Else src_ready = 1.
+    //    
+    //    This ensures strict 2-deep limit and ordering.
+
+    // Cross-clock signals
+    reg src_full_flag; // Indicates buffer is full (2 items) as seen by src domain
+    reg dst_full_flag; // Indicates buffer is full (2 items) as seen by dst domain
+
+    // --- Destination Side Logic (on dst_clk) ---
+    // Manage the buffer content and state
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            buffer_0 <= '0;
+            buffer_1 <= '0;
+            buffer_count <= 2'b00;
+            dst_state <= 2'b00;
+            dst_full_flag <= 1'b0;
+        end else begin
+            // Update buffer content based on src_valid_sampled
+            // We sample src_valid on dst_clk to determine if new data arrived
+            // Note: src_valid_sampled is updated in the src domain logic below? 
+            // No, we need to capture src_valid on dst_clk.
+            
+            // Let's restructure: 
+            // We need a register to hold the sampled src_valid from the previous dst_clk cycle?
+            // Actually, simpler: 
+            // We check src_valid_i directly? No, that's async.
+            // We must sample src_valid_i on dst_clk.
+            
+            // Let's define a register for the sampled valid signal
+            // But wait, the logic below handles the state machine.
+            
+            // State Machine for Destination
+            case (dst_state)
+                2'b00: // Empty
+                    if (src_valid_sampled) begin
+                        buffer_0 <= src_data_sampled;
+                        buffer_count <= 2'b01;
+                        dst_state <= 2'b01;
+                    end
+                    else begin
+                        // Stay empty
+                    end
+                    dst_full_flag <= (buffer_count == 2'b10); // 1 item is not full, 2 is full. 
+                    // Wait, if count is 1, full is 0. If count is 2, full is 1.
+                    // Let's fix the full flag logic later.
+                    
+                2'b01: // Has 1 item
+                    if (src_valid_sampled) begin
+                        buffer_1 <= src_data_sampled;
+                        buffer_count <= 2'b10;
+                        dst_state <= 2'b10;
+                    end
+                    else begin
+                        // Stay with 1 item
+                    end
+                    dst_full_flag <= (buffer_count == 2'b10);
+                    
+                2'b10: // Full (2 items)
+                    // Cannot accept more data
+                    // Wait for dst_ready to consume
+                    if (dst_ready_i) begin
+                        dst_valid_o <= 1'b1;
+                        dst_data_o <= buffer_0;
+                        // Shift data
+                        buffer_0 <= buffer_1;
+                        buffer_count <= 2'b01;
+                        dst_state <= 2'b01;
+                    end
+                    else begin
+                        // Hold state
+                        dst_valid_o <= 1'b0;
+                        dst_data_o <= buffer_0; // Hold output
+                    end
+                    dst_full_flag <= 1'b1;
+            endcase
+        end
+    end
+
+    // --- Source Side Logic (on src_clk) ---
+    // We need to sample src_valid_i on dst_clk to know when to push.
+    // But we also need to drive src_ready on src_clk.
+    // To do this, we cross the "full" status from dst to src.
+    
+    // Register to hold the sampled src_valid for the dst logic
+    // Actually, the dst logic needs to know if src_valid was high AT THE MOMENT of dst_clk edge.
+    // So we need a register in the dst domain to capture src_valid_i.
+    // But the dst logic above uses `src_valid_sampled`. Let's define it properly.
+    
+    // We need a register in the dst domain to capture src_valid_i
+    reg src_valid_capture;
+    
+    // We need a register in the src domain to capture the "full" status from dst
+    reg dst_full_capture;
+
+    // Logic to update captures
+    // Note: In a real design, we might need a 2-cycle delay to avoid metastability 
+    // if the clocks are not perfectly aligned, but for "related clocks" and a simple 
+    // spill buffer, single cycle sampling is often accepted if setup/hold are met.
+    // To be safe and professional, we will use a simple cross-clock register.
+    
+    // Update src_valid_capture on dst_clk
+    // This is done inside the dst_clk always block above? 
+    // No, let's separate concerns for clarity.
+    
+    // Revised Plan:
+    // 1. On dst_clk: 
+    //    - Capture src_valid_i into `src_valid_capture`.
+    //    - Update buffer logic using `src_valid_capture`.
+    //    - Determine `dst_full_flag`.
+    // 2. On src_clk:
+    //    - Capture `dst_full_flag` into `dst_full_capture`.
+    //    - Drive `src_ready_o` based on `dst_full_capture`.
+    //    - If `src_valid_i` is high and `src_ready_o` is high, we assume data is accepted.
+    //      But wait, if we accept data on src_clk, how does it get into the buffer?
+    //      The buffer is in the dst_clk domain.
+    //      
+    //      This creates a problem: If src accepts data, but dst hasn't sampled it yet,
+    //      the data is lost or duplicated?
+    //      
+    //      Standard Solution: 
+    //      The "Spill" buffer is usually implemented such that the data is captured
+    //      on the destination clock edge. The source asserts ready only if the buffer
+    //      is not full.
+    //      
+    //      Flow:
+    //      1. Src sends data.
+    //      2. Dst samples data on its clock edge.
+    //      3. Dst updates count.
+    //      4. Dst signals "Full" to Src.
+    //      5. Src sees "Full", stops sending.
+    //      
+    //      So, `src_ready_o` should be 1 if `dst_full_capture` is 0.
+    //      And we must ensure that when `src_valid_i` is high, we don't double count.
+    //      The data is only "accepted" when Dst samples it.
+    //      So, if Src asserts valid, and Dst samples it, it goes in.
+    //      If Dst is full, it won't sample (or will overwrite? No, must not overwrite).
+    //      
+    //      So the condition for Dst to sample is: `src_valid_capture` is high AND buffer is not full.
+    //      But Dst doesn't know if buffer is full until AFTER it samples? 
+    //      No, Dst knows the count BEFORE sampling.
+    //      
+    //      Let's refine the Dst logic:
+    //      If (buffer_count < 2) AND (src_valid_capture == 1):
+    //          Load data.
+    //          Increment count.
+    //      Else:
+    //          Ignore src_valid_capture.
+    //      
+    //      And Src logic:
+    //      src_ready_o = (dst_full_capture == 0);
+      
+    // Let's implement this cleanly.
+
+    // Cross-clock registers
+    reg src_valid_capture;
+    reg dst_full_capture;
+
+    // Update src_valid_capture on dst_clk
+    // We need to ensure this happens before the buffer logic uses it.
+    // We can do this in the same always block.
+    
+    // Update dst_full_capture on src_clk
+    // We need to ensure this happens before src_ready logic uses it.
+
+    // --- Combined Logic ---
+
+    // On dst_clk
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            buffer_0 <= '0;
+            buffer_1 <= '0;
+            buffer_count <= 2'b00;
+            dst_state <= 2'b00;
+            dst_full_flag <= 1'b0;
+            src_valid_capture <= 1'b0;
+        end else begin
+            // Capture src_valid
+            src_valid_capture <= src_valid_i;
+            
+            // Update buffer logic
+            case (dst_state)
+                2'b00: // Empty
+                    if (src_valid_capture) begin
+                        buffer_0 <= src_data_i; // Note: src_data_i is sampled here
+                        buffer_count <= 2'b01;
+                        dst_state <= 2'b01;
+                    end
+                    dst_full_flag <= 1'b0;
+                    
+                2'b01: // Has 1 item
+                    if (src_valid_capture) begin
+                        buffer_1 <= src_data_i;
+                        buffer_count <= 2'b10;
+                        dst_state <= 2'b10;
+                    end
+                    dst_full_flag <= 1'b0;
+                    
+                2'b10: // Full
+                    // Do not accept new data
+                    dst_full_flag <= 1'b1;
+            endcase
+            
+            // Output logic
+            if (dst_state == 2'b10 && dst_ready_i) begin
+                dst_valid_o <= 1'b1;
+                dst_data_o <= buffer_0;
+                // Shift
+                buffer_0 <= buffer_1;
+                buffer_count <= 2'b01;
+                dst_state <= 2'b01;
+            end else if (dst_state == 2'b10) begin
+                dst_valid_o <= 1'b0;
+                dst_data_o <= buffer_0;
+            end else begin
+                dst_valid_o <= 1'b0;
+                dst_data_o <= '0;
+            end
+        end
+    end
+
+    // On src_clk
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_full_capture <= 1'b0;
+            src_ready_o <= 1'b0;
+        end else begin
+            // Capture full status from dst
+            dst_full_capture <= dst_full_flag;
+            
+            // Drive ready
+            // If dst is not full, we are ready to accept.
+            // If dst is full, we are not ready.
+            // Note: We assume the data is only "accepted" when dst samples it.
+            // So if dst is full, src must wait.
+            src_ready_o <= ~dst_full_capture;
+        end
+    end
+
+    // Initial values
+    initial begin
+        dst_data_o = '0;
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

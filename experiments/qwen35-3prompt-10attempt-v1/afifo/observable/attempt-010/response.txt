@@ -1,0 +1,217 @@
+```verilog
+module afifo #(
+	parameter LGFIFO = 3,
+	parameter WIDTH  = 16,
+	parameter NFF    = 2,
+	parameter [0:0] WRITE_ON_POSEDGE = 1'b1,
+	parameter [0:0] OPT_REGISTER_READS = 1'b1
+) (
+	input	wire			i_wclk, i_wr_reset_n, i_wr,
+	input	wire	[WIDTH-1:0]	i_wr_data,
+	output	reg			o_wr_full,
+	input	wire			i_rclk, i_rd_reset_n, i_rd,
+	output	reg	[WIDTH-1:0]	o_rd_data,
+	output	reg			o_rd_empty
+);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam MASK  = DEPTH - 1;
+
+	// Write Pointer (Gray Code)
+	reg [LGFIFO-1:0] wr_gray;
+	reg [LGFIFO-1:0] wr_gray_next;
+	reg [LGFIFO-1:0] wr_ptr;
+
+	// Read Pointer (Gray Code)
+	reg [LGFIFO-1:0] rd_gray;
+	reg [LGFIFO-1:0] rd_gray_next;
+	reg [LGFIFO-1:0] rd_ptr;
+
+	// Counters for Full/Empty logic
+	reg [LGFIFO-1:0] wr_cnt;
+	reg [LGFIFO-1:0] rd_cnt;
+
+	// FIFO Memory
+	reg [WIDTH-1:0] mem [DEPTH-1:0];
+
+	// Write Side Logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_gray <= {1'b0, 1'b0};
+			wr_cnt  <= 0;
+			o_wr_full <= 1'b0;
+		end else if (i_wr) begin
+			// Calculate next Gray code
+			wr_gray_next = wr_gray;
+			wr_gray_next[0] = wr_gray[0] ^ wr_gray[1];
+			wr_gray_next[1] = wr_gray[1] ^ wr_gray[2];
+			// ... propagate XOR for all bits
+			for (integer i = 2; i < LGFIFO; i = i + 1) begin
+				wr_gray_next[i] = wr_gray[i] ^ wr_gray[i+1];
+			end
+
+			// Update counter
+			if (wr_cnt < MASK) begin
+				wr_cnt <= wr_cnt + 1;
+			end
+
+			// Update Gray code pointer based on counter
+			if (wr_cnt == 0) begin
+				wr_gray <= wr_gray_next;
+			end else begin
+				wr_gray <= wr_gray_next;
+			end
+
+			// Write data
+			mem[wr_cnt] <= i_wr_data;
+			
+			// Full flag: (wr_cnt + NFF) >= DEPTH
+			// Using unsigned comparison
+			o_wr_full <= (wr_cnt + NFF) >= DEPTH;
+		end
+	end
+
+	// Read Side Logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_gray <= {1'b0, 1'b0};
+			rd_cnt  <= 0;
+			o_rd_empty <= 1'b1;
+			o_rd_data  <= 0;
+		end else if (i_rd) begin
+			// Calculate next Gray code
+			rd_gray_next = rd_gray;
+			rd_gray_next[0] = rd_gray[0] ^ rd_gray[1];
+			for (integer i = 2; i < LGFIFO; i = i + 1) begin
+				rd_gray_next[i] = rd_gray[i] ^ rd_gray[i+1];
+			end
+
+			// Update counter
+			if (rd_cnt < MASK) begin
+				rd_cnt <= rd_cnt + 1;
+			end
+
+			// Update Gray code pointer based on counter
+			if (rd_cnt == 0) begin
+				rd_gray <= rd_gray_next;
+			end else begin
+				rd_gray <= rd_gray_next;
+			end
+
+			// Read data
+			if (OPT_REGISTER_READS) begin
+				o_rd_data <= mem[rd_cnt];
+			end else begin
+				o_rd_data <= mem[rd_cnt];
+			end
+
+			// Empty flag: (rd_cnt + NFF) <= wr_cnt
+			// Using unsigned comparison
+			o_rd_empty <= (rd_cnt + NFF) <= wr_cnt;
+		end
+	end
+
+	// Cross-domain synchronization for pointers to generate stable flags
+	// We need to compare the Gray-coded pointers across domains.
+	// Since we are using Gray codes, we can compare them directly if we ensure
+	// the comparison logic is stable. However, standard practice is to use
+	// a synchronizer chain for the pointers themselves or use a specific
+	// cross-domain pointer comparison module.
+	// Given the constraints of a single file and standard Verilog, we will implement
+	// a simple pointer synchronizer for the read side to determine full,
+	// and a pointer synchronizer for the write side to determine empty.
+	// Actually, the standard efficient way is to synchronize the pointers
+	// from the other domain.
+
+	// Synchronize Write Pointer (from Write domain) to Read domain for Empty check
+	// We need to pass wr_ptr (binary) or wr_gray (gray) to read domain.
+	// Let's use the binary counter for comparison as it's easier to reason about levels,
+	// but we must convert Gray to Binary in the write domain and send it, OR
+	// convert Binary to Gray in the read domain and compare with Gray.
+	// The most robust method for FIFOs is to send the Binary pointer from Write to Read
+	// and Gray pointer from Read to Write, then convert in the respective domains.
+	// However, to keep it simple and correct within one file without extra modules:
+	// We will synchronize the WR pointer (binary) to the RD domain to calculate Empty.
+	// And synchronize the RD pointer (binary) to the WR domain to calculate Full.
+
+	// Synchronizers for Write Pointer (Binary) to Read Domain
+	reg [LGFIFO-1:0] wr_ptr_sync_1;
+	reg [LGFIFO-1:0] wr_ptr_sync_2;
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			wr_ptr_sync_1 <= 0;
+			wr_ptr_sync_2 <= 0;
+		end else begin
+			wr_ptr_sync_1 <= wr_cnt;
+			wr_ptr_sync_2 <= wr_ptr_sync_1;
+		end
+	end
+
+	// Synchronizers for Read Pointer (Binary) to Write Domain
+	reg [LGFIFO-1:0] rd_ptr_sync_1;
+	reg [LGFIFO-1:0] rd_ptr_sync_2;
+
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			rd_ptr_sync_1 <= 0;
+			rd_ptr_sync_2 <= 0;
+		end else begin
+			rd_ptr_sync_1 <= rd_cnt;
+			rd_ptr_sync_2 <= rd_ptr_sync_1;
+		end
+	end
+
+	// Final Full/Empty Logic using synchronized pointers
+	// Full: (wr_cnt + NFF) >= rd_ptr_sync_2
+	// Empty: (rd_cnt + NFF) <= wr_ptr_sync_2
+
+	// Note: The internal o_wr_full and o_rd_empty in the pointer logic blocks above
+	// were based on the local counters. We need to override them with the cross-domain
+	// logic for the actual output ports, or restructure.
+	// The requirement says "Honor the full/empty flags".
+	// The standard approach:
+	// 1. Calculate local flags based on local pointers (for reset behavior and immediate feedback).
+	// 2. Use synchronized pointers for the final output flags to ensure stability across domains.
+	// However, the prompt implies the outputs are the flags.
+	// Let's refine: The outputs o_wr_full and o_rd_empty must be stable across domains.
+	// Therefore, we calculate them using the synchronized pointers.
+
+	// Re-evaluating the always blocks for outputs:
+	// The previous always blocks updated o_wr_full/o_rd_empty based on local counters.
+	// This is incorrect for cross-domain stability. The outputs must be driven by the
+	// synchronized pointers.
+	// We will move the output logic to separate processes or update the existing ones
+	// to use the synchronized values.
+
+	// Let's rewrite the output logic to use synchronized pointers.
+	// Full: Write domain sees if (wr_cnt + NFF) >= rd_ptr_sync_2
+	// Empty: Read domain sees if (rd_cnt + NFF) <= wr_ptr_sync_2
+
+	// We need to update the output assignments.
+	// Since o_wr_full and o_rd_empty are regs, we can assign them in the clock processes
+	// using the synchronized values.
+
+	// Update Write Side Output Logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			o_wr_full <= 1'b0;
+		end else if (i_wr) begin
+			// Full if (wr_cnt + NFF) >= synchronized_rd_ptr
+			o_wr_full <= (wr_cnt + NFF) >= rd_ptr_sync_2;
+		end
+	end
+
+	// Update Read Side Output Logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			o_rd_empty <= 1'b1;
+		end else if (i_rd) begin
+			// Empty if (rd_cnt + NFF) <= synchronized_wr_ptr
+			o_rd_empty <= (rd_cnt + NFF) <= wr_ptr_sync_2;
+		end
+	end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

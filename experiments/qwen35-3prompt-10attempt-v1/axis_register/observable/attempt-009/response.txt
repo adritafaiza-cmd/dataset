@@ -1,0 +1,224 @@
+```verilog
+module axis_register #
+(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI Stream input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI Stream output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser
+);
+
+    // Internal state registers
+    reg [DATA_WIDTH-1:0] reg_data;
+    reg [KEEP_WIDTH-1:0] reg_keep;
+    reg reg_last;
+    reg [ID_WIDTH-1:0] reg_id;
+    reg [DEST_WIDTH-1:0] reg_dest;
+    reg [USER_WIDTH-1:0] reg_user;
+    reg reg_valid;
+
+    // Control signals
+    wire wire_mode = (REG_TYPE == 0); // Wire
+    wire buffer_mode = (REG_TYPE == 1); // Buffer
+    wire skid_mode = (REG_TYPE == 2); // Skid Buffer
+
+    // Logic to determine if we should accept new data
+    // In skid buffer mode, we always accept if valid and ready, regardless of output ready
+    // In wire/buffer mode, we only accept if output is ready (unless we are just holding state)
+    // However, standard AXI-Stream register behavior:
+    // Wire: Pass through immediately.
+    // Buffer: Store until ready, then pass.
+    // Skid: Store one beat, then pass immediately next cycle regardless of ready (skid).
+    
+    // Determine if we can write to the register
+    wire can_write = (s_axis_tvalid && s_axis_tready);
+    
+    // For Skid Buffer, we write on every valid input, even if output is not ready yet (to clear the input)
+    // But we only output if m_axis_tready is high.
+    // Actually, standard skid buffer logic:
+    // If input valid and ready, store data.
+    // If output ready, output stored data.
+    // The "skid" happens because the output might be ready in the next cycle even if input was ready this cycle.
+    
+    // Let's refine the logic based on REG_TYPE:
+    // 0 (Wire): s_axis_tready = m_axis_tready. Data passes through. No storage needed really, but we use registers to handle the handshake.
+    // 1 (Buffer): Store data. s_axis_tready = m_axis_tready. Only output when ready.
+    // 2 (Skid): Store data. s_axis_tready = 1'b1 (always ready to accept input). Output when m_axis_tready.
+    
+    assign s_axis_tready = 
+        (wire_mode) ? m_axis_tready : 
+        (buffer_mode) ? m_axis_tready : 
+        (skid_mode) ? 1'b1 : 1'b0;
+
+    // Update logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            reg_data <= 0;
+            reg_keep <= 0;
+            reg_last <= 0;
+            reg_id <= 0;
+            reg_dest <= 0;
+            reg_user <= 0;
+            reg_valid <= 0;
+        end else begin
+            // Determine if we update the register
+            wire update_reg = (s_axis_tvalid && s_axis_tready);
+            
+            if (update_reg) begin
+                reg_data <= s_axis_tdata;
+                reg_keep <= s_axis_tkeep;
+                reg_last <= s_axis_tlast;
+                reg_id <= s_axis_tid;
+                reg_dest <= s_axis_tdest;
+                reg_user <= s_axis_tuser;
+                reg_valid <= 1'b1;
+            end else begin
+                // For Wire mode, if we can't write (because output not ready), we don't store, 
+                // but we must ensure the output reflects the input if it was a wire.
+                // However, the register holds the last valid value.
+                // If it's a wire, and input is valid but output not ready, we hold the previous value?
+                // No, a wire should reflect the input. If input is valid and output not ready, 
+                // the wire effectively stalls. The register holds the last valid data.
+                // If input becomes invalid, the register should ideally clear or hold?
+                // Standard behavior: The register holds the last valid transaction.
+                // If s_axis_tvalid is 0, we don't update.
+                // If s_axis_tvalid is 1 and s_axis_tready is 0, we don't update (we are stalled).
+                // So reg_valid remains 1 if we had a valid transaction previously.
+                // Wait, if it's a wire, and input stops, does the output stop? Yes.
+                // If input stops (valid=0), reg_valid should become 0?
+                // Let's assume the register holds the last valid packet.
+                // If new packet arrives and is accepted, update.
+                // If no new packet, keep old.
+                // But if s_axis_tvalid goes low, we should probably clear reg_valid for a wire/buffer 
+                // unless we are in a skid buffer scenario where we might have a pending output.
+                
+                // Refined Logic for Wire/Buffer:
+                // If s_axis_tvalid is 0, we don't have new data. 
+                // If we are in Wire mode, we should ideally not hold data if input is gone?
+                // Actually, the register is the storage. If input is valid, we store.
+                // If input is invalid, we don't store.
+                // The output is valid if reg_valid is 1 AND m_axis_tready is 1.
+                
+                // Special case for Skid Buffer:
+                // We always accept input (s_axis_tready = 1).
+                // We update the register on every valid input.
+                // We output if m_axis_tready is 1.
+                // If m_axis_tready is 0, we hold the data in the register for the next cycle.
+                
+                // Special case for Wire/Buffer:
+                // We only accept input if m_axis_tready is 1.
+                // We update the register only when we accept.
+                // If we don't accept (m_axis_tready=0), we hold the register value.
+                // If s_axis_tvalid becomes 0, we don't update, so reg_valid stays 1?
+                // This means if input stops, output continues with last data until m_axis_tready goes low?
+                // That is incorrect for a simple register. A register should not generate data if there is no input.
+                // Correction: reg_valid should be updated based on s_axis_tvalid.
+                // If s_axis_tvalid is 0, reg_valid becomes 0.
+                // If s_axis_tvalid is 1 and ready, reg_valid becomes 1.
+                
+                // Let's re-evaluate "Wire" behavior.
+                // A wire passes data. If input is valid, output is valid.
+                // If input is invalid, output is invalid.
+                // So reg_valid should follow s_axis_tvalid (if accepted).
+                
+                // Logic:
+                // If (s_axis_tvalid && s_axis_tready) -> Update register, reg_valid = 1.
+                // Else if (!s_axis_tvalid) -> reg_valid = 0.
+                // Else (s_axis_tvalid && !s_axis_tready) -> Hold register, reg_valid = 1 (stall).
+                
+                // Wait, if it's a wire, and input is valid but output not ready, we stall.
+                // If input becomes invalid, we must clear the output.
+                // So:
+                // if (s_axis_tvalid && s_axis_tready) begin
+                //    update registers
+                //    reg_valid = 1
+                // end else if (!s_axis_tvalid) begin
+                //    reg_valid = 0
+                // end else begin
+                //    // s_axis_tvalid is 1, but s_axis_tready is 0
+                //    // We are stalled. Keep current register value and valid flag.
+                // end
+                
+                // This logic works for Buffer and Skid too, with the exception of Skid's ready signal.
+                // For Skid, s_axis_tready is always 1. So we always update if s_axis_tvalid is 1.
+                // And we output if m_axis_tready is 1.
+                
+                // One nuance: If s_axis_tvalid is 0, we set reg_valid = 0.
+                // If s_axis_tvalid is 1 and s_axis_tready is 0 (Buffer mode), we keep reg_valid = 1.
+                // If s_axis_tvalid is 1 and s_axis_tready is 1, we update and set reg_valid = 1.
+                
+                // Is there a case where we want to clear the register even if valid?
+                // Only if the input stream explicitly says "no data" (valid=0).
+                
+                // Let's implement the update logic carefully.
+                
+                if (s_axis_tvalid) begin
+                    if (s_axis_tready) begin
+                        // Accepted
+                        reg_data <= s_axis_tdata;
+                        reg_keep <= s_axis_tkeep;
+                        reg_last <= s_axis_tlast;
+                        reg_id <= s_axis_tid;
+                        reg_dest <= s_axis_tdest;
+                        reg_user <= s_axis_tuser;
+                        reg_valid <= 1'b1;
+                    end else begin
+                        // Stalled (Input valid, Output not ready)
+                        // Keep data, keep valid
+                        // Do nothing to registers
+                    end
+                end else begin
+                    // Input invalid
+                    reg_valid <= 1'b0;
+                    // Data doesn't matter anymore
+                end
+            end
+        end
+    end
+
+    // Output logic
+    always @(*) begin
+        m_axis_tdata = reg_data;
+        m_axis_tkeep = reg_keep;
+        m_axis_tvalid = (reg_valid && m_axis_tready);
+        m_axis_tlast = reg_last;
+        m_axis_tid = reg_id;
+        m_axis_tdest = reg_dest;
+        m_axis_tuser = reg_user;
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,197 @@
+```verilog
+module afifo #(
+	parameter LGFIFO = 3,
+	parameter WIDTH  = 16,
+	parameter NFF    = 2,
+	parameter [0:0]  WRITE_ON_POSEDGE = 1'b1,
+	parameter [0:0]  OPT_REGISTER_READS = 1'b1
+) (
+	input  wire            i_wclk, i_wr_reset_n, i_wr,
+	input  wire [WIDTH-1:0] i_wr_data,
+	output reg             o_wr_full,
+	input  wire            i_rclk, i_rd_reset_n, i_rd,
+	output reg [WIDTH-1:0] o_rd_data,
+	output reg             o_rd_empty
+);
+
+	localparam FIFO_DEPTH = 1 << LGFIFO;
+	localparam GRAY_WIDTH = LGFIFO;
+
+	// Write Pointer (Gray Code)
+	reg [GRAY_WIDTH-1:0] w_ptr_gray;
+	reg [GRAY_WIDTH-1:0] w_ptr_gray_next;
+	
+	// Read Pointer (Gray Code)
+	reg [GRAY_WIDTH-1:0] r_ptr_gray;
+	reg [GRAY_WIDTH-1:0] r_ptr_gray_next;
+
+	// Internal pointers for logic (Binary)
+	reg [GRAY_WIDTH-1:0] w_ptr_bin;
+	reg [GRAY_WIDTH-1:0] r_ptr_bin;
+
+	// Write Enable Logic
+	reg w_en;
+	reg w_en_next;
+
+	// Read Enable Logic
+	reg r_en;
+	reg r_en_next;
+
+	// Full Flag
+	reg full_flag;
+	reg full_flag_next;
+
+	// Empty Flag
+	reg empty_flag;
+	reg empty_flag_next;
+
+	// Write Data Register
+	reg [WIDTH-1:0] w_data_reg;
+
+	// Read Data Register
+	reg [WIDTH-1:0] r_data_reg;
+
+	// Write Pointer Register (Binary)
+	reg [GRAY_WIDTH-1:0] w_ptr_reg;
+	reg [GRAY_WIDTH-1:0] w_ptr_reg_next;
+
+	// Read Pointer Register (Binary)
+	reg [GRAY_WIDTH-1:0] r_ptr_reg;
+	reg [GRAY_WIDTH-1:0] r_ptr_reg_next;
+
+	// Write Enable State Machine
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			w_en <= 1'b0;
+		end else begin
+			if (WRITE_ON_POSEDGE) begin
+				w_en_next = i_wr;
+			end else begin
+				w_en_next = i_wr;
+			end
+			w_en <= w_en_next;
+		end
+	end
+
+	// Read Enable State Machine
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			r_en <= 1'b0;
+		end else begin
+			r_en_next = i_rd;
+			r_en <= r_en_next;
+		end
+	end
+
+	// Write Pointer Logic (Binary)
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			w_ptr_reg <= {GRAY_WIDTH{1'b0}};
+		end else begin
+			w_ptr_reg_next = w_ptr_reg;
+			if (w_en) begin
+				w_ptr_reg_next = w_ptr_reg + 1'b1;
+			end
+			w_ptr_reg <= w_ptr_reg_next;
+		end
+	end
+
+	// Read Pointer Logic (Binary)
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			r_ptr_reg <= {GRAY_WIDTH{1'b0}};
+		end else begin
+			r_ptr_reg_next = r_ptr_reg;
+			if (r_en) begin
+				r_ptr_reg_next = r_ptr_reg + 1'b1;
+			end
+			r_ptr_reg <= r_ptr_reg_next;
+		end
+	end
+
+	// Write Pointer Gray Code Generation
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			w_ptr_gray <= {GRAY_WIDTH{1'b0}};
+		end else begin
+			w_ptr_gray_next = w_ptr_gray;
+			if (w_en) begin
+				w_ptr_gray_next = w_ptr_gray ^ (1 << (w_ptr_reg[GRAY_WIDTH-1:0] & 1'b1));
+			end
+			w_ptr_gray <= w_ptr_gray_next;
+		end
+	end
+
+	// Read Pointer Gray Code Generation
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			r_ptr_gray <= {GRAY_WIDTH{1'b0}};
+		end else begin
+			r_ptr_gray_next = r_ptr_gray;
+			if (r_en) begin
+				r_ptr_gray_next = r_ptr_gray ^ (1 << (r_ptr_reg[GRAY_WIDTH-1:0] & 1'b1));
+			end
+			r_ptr_gray <= r_ptr_gray_next;
+		end
+	end
+
+	// Full Flag Logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			full_flag <= 1'b0;
+		end else begin
+			full_flag_next = full_flag;
+			if (w_en) begin
+				full_flag_next = (w_ptr_reg == (FIFO_DEPTH - 1));
+			end
+			full_flag <= full_flag_next;
+		end
+	end
+
+	// Empty Flag Logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			empty_flag <= 1'b1;
+		end else begin
+			empty_flag_next = empty_flag;
+			if (r_en) begin
+				empty_flag_next = (r_ptr_reg == 0);
+			end
+			empty_flag <= empty_flag_next;
+		end
+	end
+
+	// Write Data Register
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			w_data_reg <= {WIDTH{1'b0}};
+		end else begin
+			w_data_reg_next = w_data_reg;
+			if (w_en && !full_flag) begin
+				w_data_reg_next = i_wr_data;
+			end
+			w_data_reg <= w_data_reg_next;
+		end
+	end
+
+	// Read Data Register
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			r_data_reg <= {WIDTH{1'b0}};
+		end else begin
+			r_data_reg_next = r_data_reg;
+			if (r_en && !empty_flag) begin
+				r_data_reg_next = w_data_reg;
+			end
+			r_data_reg <= r_data_reg_next;
+		end
+	end
+
+	// Output Assignments
+	assign o_wr_full = full_flag;
+	assign o_rd_data = r_data_reg;
+	assign o_rd_empty = empty_flag;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

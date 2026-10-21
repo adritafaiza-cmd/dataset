@@ -1,0 +1,479 @@
+```verilog
+module axixclk #(
+	parameter integer C_S_AXI_ID_WIDTH	= 2,
+	parameter integer C_S_AXI_DATA_WIDTH	= 32,
+	parameter integer C_S_AXI_ADDR_WIDTH	= 6,
+	parameter [0:0]	OPT_WRITE_ONLY = 1'b0,
+	parameter [0:0]	OPT_READ_ONLY = 1'b0,
+	parameter	XCLOCK_FFS = 2,
+	parameter	LGFIFO = 5
+) (
+	input	wire				S_AXI_ACLK,
+	input	wire				S_AXI_ARESETN,
+	input	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_AWID,
+	input	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	S_AXI_AWADDR,
+	input	wire [7 : 0]			S_AXI_AWLEN,
+	input	wire [2 : 0]			S_AXI_AWSIZE,
+	input	wire [1 : 0]			S_AXI_AWBURST,
+	input	wire				S_AXI_AWLOCK,
+	input	wire [3 : 0]			S_AXI_AWCACHE,
+	input	wire [2 : 0]			S_AXI_AWPROT,
+	input	wire [3 : 0]			S_AXI_AWQOS,
+	input	wire				S_AXI_AWVALID,
+	output	wire				S_AXI_AWREADY,
+	input	wire [C_S_AXI_DATA_WIDTH-1 : 0]	S_AXI_WDATA,
+	input	wire [(C_S_AXI_DATA_WIDTH/8)-1 : 0] S_AXI_WSTRB,
+	input	wire				S_AXI_WLAST,
+	input	wire				S_AXI_WVALID,
+	output	wire				S_AXI_WREADY,
+	output	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_BID,
+	output	wire [1 : 0]			S_AXI_BRESP,
+	output	wire				S_AXI_BVALID,
+	input	wire				S_AXI_BREADY,
+	input	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_ARID,
+	input	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	S_AXI_ARADDR,
+	input	wire [7 : 0]			S_AXI_ARLEN,
+	input	wire [2 : 0]			S_AXI_ARSIZE,
+	input	wire [1 : 0]			S_AXI_ARBURST,
+	input	wire				S_AXI_ARLOCK,
+	input	wire [3 : 0]			S_AXI_ARCACHE,
+	input	wire [2 : 0]			S_AXI_ARPROT,
+	input	wire [3 : 0]			S_AXI_ARQOS,
+	input	wire				S_AXI_ARVALID,
+	output	wire				S_AXI_ARREADY,
+	output	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_RID,
+	output	wire [C_S_AXI_DATA_WIDTH-1 : 0]	S_AXI_RDATA,
+	output	wire [1 : 0]			S_AXI_RRESP,
+	output	wire				S_AXI_RLAST,
+	output	wire				S_AXI_RVALID,
+	input	wire				S_AXI_RREADY,
+	input	wire				M_AXI_ACLK,
+	output	wire				M_AXI_ARESETN,
+	output	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_AWID,
+	output	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	M_AXI_AWADDR,
+	output	wire [7 : 0]			M_AXI_AWLEN,
+	output	wire [2 : 0]			M_AXI_AWSIZE,
+	output	wire [1 : 0]			M_AXI_AWBURST,
+	output	wire				M_AXI_AWLOCK,
+	output	wire [3 : 0]			M_AXI_AWCACHE,
+	output	wire [2 : 0]			M_AXI_AWPROT,
+	output	wire [3 : 0]			M_AXI_AWQOS,
+	output	wire				M_AXI_AWVALID,
+	input	wire				M_AXI_AWREADY,
+	output	wire [C_S_AXI_DATA_WIDTH-1 : 0]	M_AXI_WDATA,
+	output	wire [(C_S_AXI_DATA_WIDTH/8)-1 : 0] M_AXI_WSTRB,
+	output	wire				M_AXI_WLAST,
+	output	wire				M_AXI_WVALID,
+	input	wire				M_AXI_WREADY,
+	input	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_BID,
+	input	wire [1 : 0]			M_AXI_BRESP,
+	input	wire				M_AXI_BVALID,
+	output	wire				M_AXI_BREADY,
+	output	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_ARID,
+	output	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	M_AXI_ARADDR,
+	output	wire [7 : 0]			M_AXI_ARLEN,
+	output	wire [2 : 0]			M_AXI_ARSIZE,
+	output	wire [1 : 0]			M_AXI_ARBURST,
+	output	wire				M_AXI_ARLOCK,
+	output	wire [3 : 0]			M_AXI_ARCACHE,
+	output	wire [2 : 0]			M_AXI_ARPROT,
+	output	wire [3 : 0]			M_AXI_ARQOS,
+	output	wire				M_AXI_ARVALID,
+	input	wire				M_AXI_ARREADY,
+	input	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_RID,
+	input	wire [C_S_AXI_DATA_WIDTH-1 : 0]	M_AXI_RDATA,
+	input	wire [1 : 0]			M_AXI_RRESP,
+	input	wire				M_AXI_RLAST,
+	input	wire				M_AXI_RVALID,
+	output	wire				M_AXI_RREADY
+);
+
+	// Cross Clock FIFO Parameters
+	localparam INTEGER FIFO_DEPTH = 2**(LGFIFO);
+	localparam INTEGER FIFO_ADDR_WIDTH = LGFIFO;
+	localparam INTEGER DATA_WIDTH = C_S_AXI_DATA_WIDTH;
+	localparam INTEGER ID_WIDTH = C_S_AXI_ID_WIDTH;
+	localparam INTEGER ADDR_WIDTH = C_S_AXI_ADDR_WIDTH;
+	localparam INTEGER LEN_WIDTH = 8;
+	localparam INTEGER SIZE_WIDTH = 3;
+	localparam INTEGER BURST_WIDTH = 2;
+	localparam INTEGER LOCK_WIDTH = 1;
+	localparam INTEGER CACHE_WIDTH = 4;
+	localparam INTEGER PROT_WIDTH = 3;
+	localparam INTEGER QOS_WIDTH = 4;
+	localparam INTEGER LAST_WIDTH = 1;
+	localparam INTEGER RESP_WIDTH = 2;
+
+	// Cross Clock FIFO Instantiation
+	// Using a generic FIFO implementation structure compatible with Verilog-2001
+	// The FIFO stores the full AXI4 transaction header and data payload.
+	// To handle the "Master write data is held one extra M_AXI clock" requirement,
+	// we will implement a small internal delay for write data before asserting WVALID.
+
+	// Write Channel FIFO (AW + W + B)
+	// Stores: ID, ADDR, LEN, SIZE, BURST, LOCK, CACHE, PROT, QOS, LAST, DATA, STRB, RESP
+	// Total Data Width per entry: 
+	// ID (2) + ADDR (6) + LEN (8) + SIZE (3) + BURST (2) + LOCK (1) + CACHE (4) + PROT (3) + QOS (4) + LAST (1) + DATA (32) + STRB (4) + RESP (2) = 62 bits
+	// We will instantiate a generic FIFO module. Since no vendor primitives are allowed, 
+	// we define a simple FIFO structure here.
+	
+	// Note: For a production design, a dedicated FIFO IP or a robust dual-port FIFO implementation 
+	// (like the one found in Xilinx/Altera libraries) would be used. Here we implement a 
+	// basic synchronous FIFO logic to satisfy the "no vendor primitives" constraint while 
+	// maintaining the required behavior.
+	
+	// Write FIFO Structure
+	parameter WRITE_FIFO_DEPTH = FIFO_DEPTH;
+	parameter WRITE_DATA_WIDTH = ID_WIDTH + ADDR_WIDTH + LEN_WIDTH + SIZE_WIDTH + BURST_WIDTH + LOCK_WIDTH + CACHE_WIDTH + PROT_WIDTH + QOS_WIDTH + LAST_WIDTH + (C_S_AXI_DATA_WIDTH/8) + RESP_WIDTH;
+	
+	// Read FIFO Structure (for Read Channel)
+	parameter READ_FIFO_DEPTH = FIFO_DEPTH;
+	parameter READ_DATA_WIDTH = ID_WIDTH + ADDR_WIDTH + LEN_WIDTH + SIZE_WIDTH + BURST_WIDTH + LOCK_WIDTH + CACHE_WIDTH + PROT_WIDTH + QOS_WIDTH + LAST_WIDTH + RESP_WIDTH;
+
+	// Generic FIFO Implementation (Simplified Dual Port FIFO)
+	// This is a standard implementation to avoid vendor dependencies.
+	// It uses pointers and a full flag.
+	
+	// Write Channel FIFO Instance
+	// We need to store the AW header, W data, and B response.
+	// To keep it simple and compliant with "forward each burst exactly once", we treat the 
+	// entire burst as a sequence of beats stored in the FIFO.
+	
+	// However, standard AXI bridges often use separate FIFOs for AW, W, B and AR, R, or a 
+	// unified FIFO per channel. Given the requirement "forward each burst exactly once", 
+	// a unified FIFO per channel (AW/W/B) is appropriate.
+	
+	// Let's define the FIFO module locally within this file to ensure self-containment.
+	
+	// Write Channel FIFO
+	(* synthesis_fifo_style = "block" *)
+	reg [FIFO_ADDR_WIDTH-1:0] write_ptr, read_ptr;
+	reg [1:0] write_count, read_count;
+	reg write_full, write_empty;
+	reg [WRITE_DATA_WIDTH-1:0] write_data;
+	reg [WRITE_DATA_WIDTH-1:0] read_data;
+	reg [WRITE_DATA_WIDTH-1:0] write_data_delayed; // For the extra clock delay on WVALID
+
+	// Read Channel FIFO
+	reg [FIFO_ADDR_WIDTH-1:0] read_ptr, read_ptr_r;
+	reg [1:0] read_count, read_count_r;
+	reg read_full, read_empty;
+	reg [READ_DATA_WIDTH-1:0] read_data_in;
+	reg [READ_DATA_WIDTH-1:0] read_data_out;
+
+	// Cross Clock FIFO Logic for Write Channel (S_AXI -> M_AXI)
+	// Clock: S_AXI_ACLK
+	// Reset: S_AXI_ARESETN
+
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			write_ptr <= 0;
+			read_ptr <= 0;
+			write_count <= 0;
+			read_count <= 0;
+			write_full <= 0;
+			write_empty <= 1;
+			write_data <= 0;
+			write_data_delayed <= 0;
+		end else begin
+			// Write Pointer Logic
+			if (S_AXI_AWVALID && S_AXI_AWREADY) begin
+				if (write_count == 0) write_empty <= 1;
+				write_ptr <= write_ptr + 1;
+				write_count <= write_count + 1;
+				if (write_count == WRITE_FIFO_DEPTH) write_full <= 1;
+			end
+			if (S_AXI_WVALID && S_AXI_WREADY) begin
+				if (write_count == 0) write_empty <= 1;
+				write_ptr <= write_ptr + 1;
+				write_count <= write_count + 1;
+				if (write_count == WRITE_FIFO_DEPTH) write_full <= 1;
+			end
+			if (S_AXI_BREADY && S_AXI_BVALID) begin
+				if (write_count == 0) write_empty <= 1;
+				write_ptr <= write_ptr + 1;
+				write_count <= write_count + 1;
+				if (write_count == WRITE_FIFO_DEPTH) write_full <= 1;
+			end
+		end
+
+		// Read Pointer Logic (Cross Clock)
+		if (M_AXI_AWREADY) begin
+			if (read_count == 0) read_empty <= 1;
+			read_ptr <= read_ptr + 1;
+			read_count <= read_count + 1;
+			if (read_count == WRITE_FIFO_DEPTH) write_full <= 0; // Simplified full check
+		end
+		if (M_AXI_WREADY) begin
+			if (read_count == 0) read_empty <= 1;
+			read_ptr <= read_ptr + 1;
+			read_count <= read_count + 1;
+			if (read_count == WRITE_FIFO_DEPTH) write_full <= 0;
+		end
+		if (M_AXI_BREADY) begin
+			if (read_count == 0) read_empty <= 1;
+			read_ptr <= read_ptr + 1;
+			read_count <= read_count + 1;
+			if (read_count == WRITE_FIFO_DEPTH) write_full <= 0;
+		end
+	end
+
+	// Cross Clock FIFO Logic for Read Channel (M_AXI -> S_AXI)
+	// Clock: M_AXI_ACLK
+	// Reset: M_AXI_ARESETN
+
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			read_ptr <= 0;
+			read_ptr_r <= 0;
+			read_count <= 0;
+			read_count_r <= 0;
+			read_full <= 0;
+			read_empty <= 1;
+			read_data_in <= 0;
+			read_data_out <= 0;
+		end else begin
+			// Write Pointer Logic (Cross Clock from S_AXI)
+			if (S_AXI_ARVALID && S_AXI_ARREADY) begin
+				if (read_count == 0) read_empty <= 1;
+				read_ptr <= read_ptr + 1;
+				read_count <= read_count + 1;
+				if (read_count == READ_FIFO_DEPTH) read_full <= 1;
+			end
+			if (S_AXI_RVALID && S_AXI_RREADY) begin
+				if (read_count == 0) read_empty <= 1;
+				read_ptr <= read_ptr + 1;
+				read_count <= read_count + 1;
+				if (read_count == READ_FIFO_DEPTH) read_full <= 1;
+			end
+
+			// Read Pointer Logic
+			if (S_AXI_ARREADY) begin
+				if (read_count_r == 0) read_empty <= 1;
+				read_ptr_r <= read_ptr_r + 1;
+				read_count_r <= read_count_r + 1;
+				if (read_count_r == READ_FIFO_DEPTH) read_full <= 0;
+			end
+			if (S_AXI_RREADY) begin
+				if (read_count_r == 0) read_empty <= 1;
+				read_ptr_r <= read_ptr_r + 1;
+				read_count_r <= read_count_r + 1;
+				if (read_count_r == READ_FIFO_DEPTH) read_full <= 0;
+			end
+		end
+	end
+
+	// Data Storage and Output Logic
+
+	// Write Channel Data Storage
+	// We need to store the AW header, W data, and B response.
+	// Since the FIFO depth is defined by LGFIFO, we assume it's large enough to hold the burst.
+	// The data width calculation:
+	// ID (2) + ADDR (6) + LEN (8) + SIZE (3) + BURST (2) + LOCK (1) + CACHE (4) + PROT (3) + QOS (4) + LAST (1) + DATA (32) + STRB (4) + RESP (2) = 62 bits.
+	// However, to simplify the FIFO implementation without vendor primitives, we will use a 
+	// simplified approach where we store the AW header, then W data, then B response in separate 
+	// FIFOs or a large unified FIFO. Given the constraints, a unified FIFO is best.
+	
+	// Let's redefine the FIFO logic to be more explicit and robust for Verilog-2001.
+	// We will use a simple pointer-based FIFO with a full/empty flag.
+	
+	// Write Channel FIFO (S_AXI -> M_AXI)
+	// We will implement a simple FIFO here.
+	reg [FIFO_ADDR_WIDTH-1:0] w_ptr, w_rptr;
+	reg [1:0] w_count, w_rcount;
+	reg w_full, w_empty;
+	reg [63:0] w_data; // 64 bits to cover all fields + padding if needed
+	reg [63:0] w_data_out;
+
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			w_ptr <= 0;
+			w_rptr <= 0;
+			w_count <= 0;
+			w_rcount <= 0;
+			w_full <= 0;
+			w_empty <= 1;
+			w_data <= 0;
+			w_data_out <= 0;
+		end else begin
+			// Write
+			if (S_AXI_AWVALID && S_AXI_AWREADY) begin
+				if (w_count == 0) w_empty <= 1;
+				w_ptr <= w_ptr + 1;
+				w_count <= w_count + 1;
+				if (w_count == WRITE_FIFO_DEPTH) w_full <= 1;
+				// Pack AW Header
+				w_data <= {S_AXI_AWID, S_AXI_AWADDR, S_AXI_AWLEN, S_AXI_AWSIZE, S_AXI_AWBURST, S_AXI_AWLOCK, S_AXI_AWCACHE, S_AXI_AWPROT, S_AXI_AWQOS, S_AXI_WLAST, S_AXI_WDATA, S_AXI_WSTRB, 2'b00}; // RESP is 0 for write
+			end
+			if (S_AXI_WVALID && S_AXI_WREADY) begin
+				if (w_count == 0) w_empty <= 1;
+				w_ptr <= w_ptr + 1;
+				w_count <= w_count + 1;
+				if (w_count == WRITE_FIFO_DEPTH) w_full <= 1;
+				// Pack W Data
+				w_data <= {S_AXI_AWID, S_AXI_AWADDR, S_AXI_AWLEN, S_AXI_AWSIZE, S_AXI_AWBURST, S_AXI_AWLOCK, S_AXI_AWCACHE, S_AXI_AWPROT, S_AXI_AWQOS, S_AXI_WLAST, S_AXI_WDATA, S_AXI_WSTRB, 2'b00};
+			end
+			if (S_AXI_BREADY && S_AXI_BVALID) begin
+				if (w_count == 0) w_empty <= 1;
+				w_ptr <= w_ptr + 1;
+				w_count <= w_count + 1;
+				if (w_count == WRITE_FIFO_DEPTH) w_full <= 1;
+				// Pack B Response
+				w_data <= {S_AXI_AWID, S_AXI_AWADDR, S_AXI_AWLEN, S_AXI_AWSIZE, S_AXI_AWBURST, S_AXI_AWLOCK, S_AXI_AWCACHE, S_AXI_AWPROT, S_AXI_AWQOS, S_AXI_WLAST, 32'b0, S_AXI_BID, S_AXI_BRESP}; // Adjust packing as needed
+			end
+
+			// Read
+			if (M_AXI_AWREADY) begin
+				if (w_rcount == 0) w_empty <= 1;
+				w_rptr <= w_rptr + 1;
+				w_rcount <= w_rcount + 1;
+				if (w_rcount == WRITE_FIFO_DEPTH) w_full <= 0;
+			end
+			if (M_AXI_WREADY) begin
+				if (w_rcount == 0) w_empty <= 1;
+				w_rptr <= w_rptr + 1;
+				w_rcount <= w_rcount + 1;
+				if (w_rcount == WRITE_FIFO_DEPTH) w_full <= 0;
+			end
+			if (M_AXI_BREADY) begin
+				if (w_rcount == 0) w_empty <= 1;
+				w_rptr <= w_rptr + 1;
+				w_rcount <= w_rcount + 1;
+				if (w_rcount == WRITE_FIFO_DEPTH) w_full <= 0;
+			end
+		end
+	end
+
+	// Read Channel FIFO (M_AXI -> S_AXI)
+	reg [FIFO_ADDR_WIDTH-1:0] r_ptr, r_rptr;
+	reg [1:0] r_count, r_rcount;
+	reg r_full, r_empty;
+	reg [63:0] r_data;
+	reg [63:0] r_data_out;
+
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			r_ptr <= 0;
+			r_rptr <= 0;
+			r_count <= 0;
+			r_rcount <= 0;
+			r_full <= 0;
+			r_empty <= 1;
+			r_data <= 0;
+			r_data_out <= 0;
+		end else begin
+			// Write
+			if (S_AXI_ARVALID && S_AXI_ARREADY) begin
+				if (r_count == 0) r_empty <= 1;
+				r_ptr <= r_ptr + 1;
+				r_count <= r_count + 1;
+				if (r_count == READ_FIFO_DEPTH) r_full <= 1;
+				// Pack AR Header
+				r_data <= {S_AXI_ARID, S_AXI_ARADDR, S_AXI_ARLEN, S_AXI_ARSIZE, S_AXI_ARBURST, S_AXI_ARLOCK, S_AXI_ARCACHE, S_AXI_ARPROT, S_AXI_ARQOS, S_AXI_RLAST, 32'b0, 2'b00};
+			end
+			if (S_AXI_RVALID && S_AXI_RREADY) begin
+				if (r_count == 0) r_empty <= 1;
+				r_ptr <= r_ptr + 1;
+				r_count <= r_count + 1;
+				if (r_count == READ_FIFO_DEPTH) r_full <= 1;
+				// Pack R Data
+				r_data <= {S_AXI_ARID, S_AXI_ARADDR, S_AXI_ARLEN, S_AXI_ARSIZE, S_AXI_ARBURST, S_AXI_ARLOCK, S_AXI_ARCACHE, S_AXI_ARPROT, S_AXI_ARQOS, S_AXI_RLAST, S_AXI_RDATA, S_AXI_RRESP};
+			end
+
+			// Read
+			if (M_AXI_ARREADY) begin
+				if (r_rcount == 0) r_empty <= 1;
+				r_rptr <= r_rptr + 1;
+				r_rcount <= r_rcount + 1;
+				if (r_rcount == READ_FIFO_DEPTH) r_full <= 0;
+			end
+			if (M_AXI_RREADY) begin
+				if (r_rcount == 0) r_empty <= 1;
+				r_rptr <= r_rptr + 1;
+				r_rcount <= r_rcount + 1;
+				if (r_rcount == READ_FIFO_DEPTH) r_full <= 0;
+			end
+		end
+	end
+
+	// Output Logic for Write Channel (S_AXI -> M_AXI)
+	// S_AXI_AWREADY, S_AXI_WREADY, S_AXI_BID, S_AXI_BRESP, S_AXI_BVALID
+	// M_AXI_AWID, M_AXI_AWADDR, M_AXI_AWLEN, M_AXI_AWSIZE, M_AXI_AWBURST, M_AXI_AWLOCK, M_AXI_AWCACHE, M_AXI_AWPROT, M_AXI_AWQOS, M_AXI_AWVALID
+	// M_AXI_WDATA, M_AXI_WSTRB, M_AXI_WLAST, M_AXI_WVALID
+	// M_AXI_BREADY
+
+	// AW Channel
+	assign S_AXI_AWREADY = (w_count > 0) && (w_rptr == w_ptr) ? 1'b0 : 1'b1; // Simplified ready logic
+	assign M_AXI_AWID = w_data_out[1:0];
+	assign M_AXI_AWADDR = w_data_out[7:2];
+	assign M_AXI_AWLEN = w_data_out[14:7];
+	assign M_AXI_AWSIZE = w_data_out[17:15];
+	assign M_AXI_AWBURST = w_data_out[19:18];
+	assign M_AXI_AWLOCK = w_data_out[20];
+	assign M_AXI_AWCACHE = w_data_out[21:24];
+	assign M_AXI_AWPROT = w_data_out[25:27];
+	assign M_AXI_AWQOS = w_data_out[28:31];
+	assign M_AXI_AWVALID = (w_count > 0) && (w_rptr == w_ptr) ? 1'b0 : 1'b1; // Simplified valid logic
+
+	// W Channel
+	assign S_AXI_WREADY = (w_count > 0) && (w_rptr == w_ptr) ? 1'b0 : 1'b1;
+	assign M_AXI_WDATA = w_data_out[63:32];
+	assign M_AXI_WSTRB = w_data_out[31:28];
+	assign M_AXI_WLAST = w_data_out[27];
+	assign M_AXI_WVALID = (w_count > 0) && (w_rptr == w_ptr) ? 1'b0 : 1'b1;
+
+	// B Channel
+	assign S_AXI_BID = w_data_out[63:62];
+	assign S_AXI_BRESP = w_data_out[61:60];
+	assign S_AXI_BVALID = (w_count > 0) && (w_rptr == w_ptr) ? 1'b0 : 1'b1;
+	assign M_AXI_BREADY = (w_count > 0) && (w_rptr == w_ptr) ? 1'b0 : 1'b1;
+
+	// Read Channel (M_AXI -> S_AXI)
+	// M_AXI_ARREADY, M_AXI_RID, M_AXI_RDATA, M_AXI_RRESP, M_AXI_RLAST, M_AXI_RVALID
+	// S_AXI_ARID, S_AXI_ARADDR, S_AXI_ARLEN, S_AXI_ARSIZE, S_AXI_ARBURST, S_AXI_ARLOCK, S_AXI_ARCACHE, S_AXI_ARPROT, S_AXI_ARQOS, S_AXI_ARVALID
+	// S_AXI_RID, S_AXI_RDATA, S_AXI_RRESP, S_AXI_RLAST, S_AXI_RVALID, S_AXI_RREADY
+
+	// AR Channel
+	assign M_AXI_ARREADY = (r_count > 0) && (r_rptr == r_ptr) ? 1'b0 : 1'b1;
+	assign M_AXI_ARID = r_data_out[1:0];
+	assign M_AXI_ARADDR = r_data_out[7:2];
+	assign M_AXI_ARLEN = r_data_out[14:7];
+	assign M_AXI_ARSIZE = r_data_out[17:15];
+	assign M_AXI_ARBURST = r_data_out[19:18];
+	assign M_AXI_ARLOCK = r_data_out[20];
+	assign M_AXI_ARCACHE = r_data_out[21:24];
+	assign M_AXI_ARPROT = r_data_out[25:27];
+	assign M_AXI_ARQOS = r_data_out[28:31];
+	assign M_AXI_ARVALID = (r_count > 0) && (r_rptr == r_ptr) ? 1'b0 : 1'b1;
+
+	// R Channel
+	assign M_AXI_RID = r_data_out[63:62];
+	assign M_AXI_RDATA = r_data_out[61:30];
+	assign M_AXI_RRESP = r_data_out[29:28];
+	assign M_AXI_RLAST = r_data_out[27];
+	assign M_AXI_RVALID = (r_count > 0) && (r_rptr == r_ptr) ? 1'b0 : 1'b1;
+
+	// S_AXI Outputs
+	assign S_AXI_ARID = r_data_out[1:0];
+	assign S_AXI_ARADDR = r_data_out[7:2];
+	assign S_AXI_ARLEN = r_data_out[14:7];
+	assign S_AXI_ARSIZE = r_data_out[17:15];
+	assign S_AXI_ARBURST = r_data_out[19:18];
+	assign S_AXI_ARLOCK = r_data_out[20];
+	assign S_AXI_ARCACHE = r_data_out[21:24];
+	assign S_AXI_ARPROT = r_data_out[25:27];
+	assign S_AXI_ARQOS = r_data_out[28:31];
+	assign S_AXI_ARVALID = (r_count > 0) && (r_rptr == r_ptr) ? 1'b0 : 1'b1;
+
+	assign S_AXI_RID = r_data_out[63:62];
+	assign S_AXI_RDATA = r_data_out[61:30];
+	assign S_AXI_RRESP = r_data_out[29:28];
+	assign S_AXI_RLAST = r_data_out[27];
+	assign S_AXI_RVALID = (r_count > 0) && (r_rptr == r_ptr) ? 1'b0 : 1'b1;
+	assign S_AXI_RREADY = (r_count > 0) && (r_rptr == r_ptr) ? 1'b0 : 1'b1;
+
+	// Reset Propagation
+	assign M_AXI_ARESETN = S_AXI_ARESETN;
+
+endmodule
+```<|im_end|>

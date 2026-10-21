@@ -1,0 +1,584 @@
+```verilog
+`timescale 1ns/1ps
+
+module uart_top (
+    wb_clk_i,
+    wb_rst_i, wb_adr_i, wb_dat_i, wb_dat_o, wb_we_i, wb_stb_i, wb_cyc_i, wb_ack_o, wb_sel_i,
+    int_o,
+    stx_pad_o, srx_pad_i,
+    rts_pad_o, cts_pad_i, dtr_pad_o, dsr_pad_i, ri_pad_i, dcd_pad_i
+);
+
+    // -----------------------------------------------------------------------
+    // Internal Clocks and Resets
+    // -----------------------------------------------------------------------
+    // We use a synchronous baud rate generator clock derived from the Wishbone clock.
+    // To ensure CDC safety, all state machines are synchronous to wb_clk_i.
+    // The baud rate is generated using a counter that toggles the TX/RX sampling.
+    
+    parameter WB_CLK_FREQ = 50_000_000; // 50 MHz (Assumed for baud calculation)
+    parameter BAUD_RATE   = 9600;       // Default baud rate
+    parameter DIVIDER     = (WB_CLK_FREQ / BAUD_RATE) - 1; // Integer divider
+    
+    // Internal registers for baud generation
+    reg [31:0] baud_counter;
+    reg        baud_tick;
+    
+    // -----------------------------------------------------------------------
+    // Wishbone Slave Interface
+    // -----------------------------------------------------------------------
+    // Register Map (16-bit address space):
+    // 0x00: Control Register (R/W)
+    // 0x04: Line Control Register (R/W)
+    // 0x08: Modem Control Register (R/W)
+    // 0x0C: Interrupt Enable Register (R/W)
+    // 0x10: Interrupt Status Register (R)
+    // 0x14: Line Status Register (R)
+    // 0x18: IER/LSR combined for simplicity in this constrained implementation
+    // 0x1C: FIFO Control (R/W)
+    // 0x20: FIFO Status (R)
+    // 0x24: Baud Rate Generator Divisor (R/W) - Simplified 16-bit divisor
+    // 0x28: Data Register (R/W) - TX
+    // 0x2C: Data Register (R/W) - RX
+    
+    reg [7:0]  ctrl_reg;
+    reg [7:0]  line_ctrl_reg;
+    reg [7:0]  modem_ctrl_reg;
+    reg [7:0]  int_enable_reg;
+    reg [7:0]  int_status_reg;
+    reg [7:0]  line_status_reg;
+    reg [7:0]  fifo_ctrl_reg;
+    reg [7:0]  fifo_status_reg;
+    reg [15:0] baud_divisor_reg;
+    reg [7:0]  tx_data_reg;
+    reg [7:0]  rx_data_reg;
+    
+    // FIFOs
+    // TX FIFO: Depth 16
+    reg [15:0] tx_fifo_data [0:15];
+    reg [4:0]  tx_fifo_count;
+    reg        tx_fifo_full;
+    reg        tx_fifo_empty;
+    
+    // RX FIFO: Depth 16
+    reg [15:0] rx_fifo_data [0:15];
+    reg [4:0]  rx_fifo_count;
+    reg        rx_fifo_full;
+    reg        rx_fifo_empty;
+    
+    // -----------------------------------------------------------------------
+    // Internal State and Signals
+    // -----------------------------------------------------------------------
+    reg        tx_busy;
+    reg        rx_busy;
+    reg        tx_enable;
+    reg        rx_enable;
+    reg        tx_rts;
+    reg        rx_cts;
+    reg        tx_dtr;
+    reg        rx_dsr;
+    reg        tx_ri;
+    reg        rx_dcd;
+    
+    reg [7:0]  rx_shift_reg;
+    reg        rx_start_detected;
+    reg        rx_bit_count;
+    reg        rx_error;
+    reg        rx_frame_error;
+    reg        rx_parity_error;
+    reg        rx_overrun;
+    reg        rx_break;
+    
+    reg        tx_shift_reg;
+    reg        tx_bit_count;
+    
+    // -----------------------------------------------------------------------
+    // Wishbone Logic
+    // -----------------------------------------------------------------------
+    assign wb_dat_o = wb_cyc_i && wb_stb_i ? wb_dat_i : 8'b0; // Read data comes from wb_dat_i
+    assign wb_ack_o = wb_cyc_i && wb_stb_i ? 1'b1 : 1'b0;
+    
+    // Address decoding
+    reg [7:0] addr_sel;
+    assign addr_sel = wb_adr_i[3:0];
+    
+    // Write Logic
+    reg [7:0] write_data;
+    reg        write_enable;
+    
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            ctrl_reg <= 8'd0;
+            line_ctrl_reg <= 8'd0;
+            modem_ctrl_reg <= 8'd0;
+            int_enable_reg <= 8'd0;
+            int_status_reg <= 8'd0;
+            line_status_reg <= 8'd0;
+            fifo_ctrl_reg <= 8'd0;
+            fifo_status_reg <= 8'd0;
+            baud_divisor_reg <= 16'd0;
+            tx_data_reg <= 8'd0;
+            rx_data_reg <= 8'd0;
+            tx_fifo_count <= 5'd0;
+            rx_fifo_count <= 5'd0;
+            tx_fifo_full <= 1'b0;
+            rx_fifo_full <= 1'b0;
+            tx_fifo_empty <= 1'b1;
+            rx_fifo_empty <= 1'b1;
+            tx_busy <= 1'b0;
+            rx_busy <= 1'b0;
+            tx_enable <= 1'b0;
+            rx_enable <= 1'b0;
+            tx_rts <= 1'b1;
+            rx_cts <= 1'b1;
+            tx_dtr <= 1'b1;
+            rx_dsr <= 1'b1;
+            tx_ri <= 1'b0;
+            rx_dcd <= 1'b0;
+            rx_shift_reg <= 8'd0;
+            rx_start_detected <= 1'b0;
+            rx_bit_count <= 8'd0;
+            rx_error <= 1'b0;
+            rx_frame_error <= 1'b0;
+            rx_parity_error <= 1'b0;
+            rx_overrun <= 1'b0;
+            rx_break <= 1'b0;
+            tx_shift_reg <= 8'd0;
+            tx_bit_count <= 8'd0;
+            write_data <= 8'd0;
+            write_enable <= 1'b0;
+        end else begin
+            // Read Data Output
+            case (addr_sel)
+                4'h0: wb_dat_o <= ctrl_reg;
+                4'h4: wb_dat_o <= line_ctrl_reg;
+                4'h8: wb_dat_o <= modem_ctrl_reg;
+                4'hC: wb_dat_o <= int_enable_reg;
+                4'h10: wb_dat_o <= int_status_reg;
+                4'h14: wb_dat_o <= line_status_reg;
+                4'h18: wb_dat_o <= int_status_reg; // Alias
+                4'h1C: wb_dat_o <= fifo_ctrl_reg;
+                4'h20: wb_dat_o <= fifo_status_reg;
+                4'h24: wb_dat_o <= baud_divisor_reg;
+                4'h28: wb_dat_o <= tx_data_reg;
+                4'h2C: wb_dat_o <= rx_data_reg;
+                default: wb_dat_o <= 8'd0;
+            endcase
+            
+            // Write Logic
+            if (wb_cyc_i && wb_stb_i && wb_we_i) begin
+                write_enable <= 1'b1;
+                write_data <= wb_dat_i;
+            end else begin
+                write_enable <= 1'b0;
+            end
+        end
+    end
+    
+    // -----------------------------------------------------------------------
+    // Baud Rate Generator
+    // -----------------------------------------------------------------------
+    // Simple synchronous counter. In a real design, this would be a PLL or dedicated hardware.
+    // Here we simulate the baud tick generation.
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            baud_counter <= 32'd0;
+            baud_tick <= 1'b0;
+        end else begin
+            if (baud_counter == baud_divisor_reg) begin
+                baud_counter <= 32'd0;
+                baud_tick <= 1'b1;
+            end else begin
+                baud_counter <= baud_counter + 32'd1;
+                baud_tick <= 1'b0;
+            end
+        end
+    end
+    
+    // -----------------------------------------------------------------------
+    // TX Logic
+    // -----------------------------------------------------------------------
+    // TX State Machine
+    // States: IDLE, SHIFTING
+    reg [1:0] tx_state;
+    parameter TX_IDLE = 2'd0;
+    parameter TX_SHIFTING = 2'd1;
+    
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            tx_state <= TX_IDLE;
+            tx_shift_reg <= 8'd0;
+            tx_bit_count <= 8'd0;
+            tx_busy <= 1'b0;
+            tx_enable <= 1'b0;
+        end else begin
+            // State Logic
+            if (tx_state == TX_IDLE) begin
+                if (tx_enable) begin
+                    tx_state <= TX_SHIFTING;
+                    tx_shift_reg <= write_data;
+                    tx_bit_count <= 8'd0;
+                    tx_busy <= 1'b1;
+                end
+            end else if (tx_state == TX_SHIFTING) begin
+                if (tx_bit_count < 8) begin
+                    tx_bit_count <= tx_bit_count + 8'd1;
+                    // Shift out MSB first
+                    tx_shift_reg <= {tx_shift_reg[6:0], 1'b0};
+                end else begin
+                    tx_state <= TX_IDLE;
+                    tx_busy <= 1'b0;
+                    tx_enable <= 1'b0;
+                end
+            end
+        end
+    end
+    
+    // TX Output Logic
+    assign stx_pad_o = (tx_state == TX_SHIFTING) ? tx_shift_reg[0] : 1'b0;
+    
+    // TX FIFO Logic
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            tx_fifo_count <= 5'd0;
+            tx_fifo_full <= 1'b0;
+            tx_fifo_empty <= 1'b1;
+        end else begin
+            if (tx_state == TX_IDLE && tx_enable) begin
+                if (tx_fifo_count < 15) begin
+                    tx_fifo_data[tx_fifo_count] <= write_data;
+                    tx_fifo_count <= tx_fifo_count + 5'd1;
+                    tx_fifo_empty <= 1'b0;
+                end
+            end
+            if (tx_state == TX_SHIFTING) begin
+                if (tx_fifo_count > 0) begin
+                    tx_fifo_count <= tx_fifo_count - 5'd1;
+                    if (tx_fifo_count == 0) begin
+                        tx_fifo_empty <= 1'b1;
+                    end
+                end
+            end
+            if (tx_fifo_count == 16) begin
+                tx_fifo_full <= 1'b1;
+            end else begin
+                tx_fifo_full <= 1'b0;
+            end
+        end
+    end
+    
+    // TX Interrupt Logic
+    // INT = (TX Empty) & (TX Interrupt Enabled)
+    // Note: In 16550, TXE is set when FIFO is empty.
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            int_status_reg <= 8'd0;
+        end else begin
+            // TXE bit is bit 5 in LSR (Line Status Register)
+            // We update LSR based on FIFO status
+            if (tx_fifo_empty) begin
+                line_status_reg[5] <= 1'b1;
+            end else begin
+                line_status_reg[5] <= 1'b0;
+            end
+            
+            // Update Interrupt Status Register
+            // Bit 5: TXE
+            if (tx_fifo_empty) begin
+                int_status_reg[5] <= 1'b1;
+            end else begin
+                int_status_reg[5] <= 1'b0;
+            end
+        end
+    end
+    
+    // -----------------------------------------------------------------------
+    // RX Logic
+    // -----------------------------------------------------------------------
+    // RX State Machine
+    // States: IDLE, START, DATA, STOP
+    reg [1:0] rx_state;
+    parameter RX_IDLE = 2'd0;
+    parameter RX_START = 2'd1;
+    parameter RX_DATA = 2'd2;
+    parameter RX_STOP = 2'd3;
+    
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            rx_state <= RX_IDLE;
+            rx_shift_reg <= 8'd0;
+            rx_bit_count <= 8'd0;
+            rx_start_detected <= 1'b0;
+            rx_busy <= 1'b0;
+            rx_enable <= 1'b0;
+            rx_error <= 1'b0;
+            rx_frame_error <= 1'b0;
+            rx_parity_error <= 1'b0;
+            rx_overrun <= 1'b0;
+            rx_break <= 1'b0;
+        end else begin
+            // State Logic
+            if (rx_state == RX_IDLE) begin
+                if (rx_enable && baud_tick) begin
+                    // Sample start bit
+                    if (srx_pad_i == 1'b0) begin
+                        rx_state <= RX_START;
+                        rx_start_detected <= 1'b1;
+                        rx_bit_count <= 8'd0;
+                        rx_shift_reg <= 8'd0;
+                        rx_error <= 1'b0;
+                        rx_frame_error <= 1'b0;
+                        rx_parity_error <= 1'b0;
+                        rx_overrun <= 1'b0;
+                        rx_break <= 1'b0;
+                    end
+                end
+            end else if (rx_state == RX_START) begin
+                if (rx_bit_count < 8) begin
+                    rx_bit_count <= rx_bit_count + 8'd1;
+                    rx_shift_reg <= {rx_shift_reg[6:0], srx_pad_i};
+                end else begin
+                    rx_state <= RX_DATA;
+                    rx_bit_count <= 8'd0;
+                end
+            end else if (rx_state == RX_DATA) begin
+                if (rx_bit_count < 8) begin
+                    rx_bit_count <= rx_bit_count + 8'd1;
+                    rx_shift_reg <= {rx_shift_reg[6:0], srx_pad_i};
+                end else begin
+                    rx_state <= RX_STOP;
+                    rx_bit_count <= 8'd0;
+                end
+            end else if (rx_state == RX_STOP) begin
+                if (rx_bit_count < 8) begin
+                    rx_bit_count <= rx_bit_count + 8'd1;
+                end else begin
+                    // Stop bit received
+                    if (srx_pad_i == 1'b0) begin
+                        rx_error <= 1'b1; // Framing error
+                    end
+                    rx_state <= RX_IDLE;
+                    rx_start_detected <= 1'b0;
+                    
+                    // Check for overrun
+                    if (rx_fifo_full) begin
+                        rx_overrun <= 1'b1;
+                    end
+                    
+                    // Move data to FIFO
+                    if (rx_fifo_count < 15) begin
+                        rx_fifo_data[rx_fifo_count] <= rx_shift_reg;
+                        rx_fifo_count <= rx_fifo_count + 5'd1;
+                        rx_fifo_empty <= 1'b0;
+                    end
+                    
+                    // Clear error flags after processing
+                    rx_error <= 1'b0;
+                    rx_frame_error <= 1'b0;
+                    rx_parity_error <= 1'b0;
+                    rx_break <= 1'b0;
+                end
+            end
+        end
+    end
+    
+    // RX Output Logic
+    assign rx_data_reg = rx_shift_reg;
+    
+    // RX FIFO Logic
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            rx_fifo_count <= 5'd0;
+            rx_fifo_full <= 1'b0;
+            rx_fifo_empty <= 1'b1;
+        end else begin
+            if (rx_state == RX_IDLE && rx_enable) begin
+                if (rx_fifo_count < 15) begin
+                    rx_fifo_data[rx_fifo_count] <= rx_shift_reg;
+                    rx_fifo_count <= rx_fifo_count + 5'd1;
+                    rx_fifo_empty <= 1'b0;
+                end
+            end
+            if (rx_state == RX_DATA) begin
+                if (rx_fifo_count < 15) begin
+                    rx_fifo_data[rx_fifo_count] <= rx_shift_reg;
+                    rx_fifo_count <= rx_fifo_count + 5'd1;
+                    rx_fifo_empty <= 1'b0;
+                end
+            end
+            if (rx_fifo_count == 16) begin
+                rx_fifo_full <= 1'b1;
+            end else begin
+                rx_fifo_full <= 1'b0;
+            end
+        end
+    end
+    
+    // RX Interrupt Logic
+    // INT = (RX Data Available) & (RX Interrupt Enabled)
+    // Also set error bits in LSR and ISR
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            int_status_reg <= 8'd0;
+            line_status_reg <= 8'd0;
+        end else begin
+            // RXRDY bit is bit 0 in LSR
+            if (rx_fifo_count > 0) begin
+                line_status_reg[0] <= 1'b1;
+            end else begin
+                line_status_reg[0] <= 1'b0;
+            end
+            
+            // Error bits
+            if (rx_error) line_status_reg[1] <= 1'b1; // OE
+            if (rx_frame_error) line_status_reg[2] <= 1'b1; // FE
+            if (rx_parity_error) line_status_reg[3] <= 1'b1; // PE
+            if (rx_overrun) line_status_reg[4] <= 1'b1; // OE (Overrun)
+            if (rx_break) line_status_reg[6] <= 1'b1; // BRK
+            
+            // Update Interrupt Status Register
+            if (rx_fifo_count > 0) int_status_reg[0] <= 1'b1;
+            else int_status_reg[0] <= 1'b0;
+            
+            if (rx_error) int_status_reg[1] <= 1'b1;
+            if (rx_frame_error) int_status_reg[2] <= 1'b1;
+            if (rx_parity_error) int_status_reg[3] <= 1'b1;
+            if (rx_overrun) int_status_reg[4] <= 1'b1;
+            if (rx_break) int_status_reg[6] <= 1'b1;
+        end
+    end
+    
+    // -----------------------------------------------------------------------
+    // Modem Control Logic
+    // -----------------------------------------------------------------------
+    // RTS = !tx_rts (Active Low)
+    // DTR = !tx_dtr (Active Low)
+    // CTS = rx_cts (Active High)
+    // DSR = rx_dsr (Active High)
+    // RI = tx_ri (Active High)
+    // DCD = rx_dcd (Active High)
+    
+    assign rts_pad_o = tx_rts;
+    assign dtr_pad_o = tx_dtr;
+    assign cts_pad_i = rx_cts;
+    assign dsr_pad_i = rx_dsr;
+    assign ri_pad_i = tx_ri;
+    assign dcd_pad_i = rx_dcd;
+    
+    // Modem Control Register Logic
+    // Bit 0: RTS (1 = Enable RTS, 0 = Disable RTS)
+    // Bit 1: DTR (1 = Enable DTR, 0 = Disable DTR)
+    // Bit 2: Auto RTS (1 = Auto RTS, 0 = Manual RTS)
+    // Bit 3: Auto DTR (1 = Auto DTR, 0 = Manual DTR)
+    // Bit 4: Out 1 (1 = Output 1, 0 = Output 0)
+    // Bit 5: Loopback (1 = Loopback, 0 = Normal)
+    // Bit 6: Auto Flow Control (1 = Enable, 0 = Disable)
+    // Bit 7: Reserved
+    
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            tx_rts <= 1'b1;
+            tx_dtr <= 1'b1;
+            tx_ri <= 1'b0;
+            rx_cts <= 1'b1;
+            rx_dsr <= 1'b1;
+            rx_dcd <= 1'b0;
+        end else begin
+            // Simple logic for demonstration
+            // If Auto RTS is enabled (bit 2), RTS follows TX busy status
+            if (modem_ctrl_reg[2]) begin
+                tx_rts <= (tx_busy) ? 1'b0 : 1'b1; // Active Low output
+            end else begin
+                tx_rts <= modem_ctrl_reg[0];
+            end
+            
+            // If Auto DTR is enabled (bit 3), DTR follows TX busy status
+            if (modem_ctrl_reg[3]) begin
+                tx_dtr <= (tx_busy) ? 1'b0 : 1'b1;
+            end else begin
+                tx_dtr <= modem_ctrl_reg[1];
+            end
+            
+            // Loopback mode
+            if (modem_ctrl_reg[5]) begin
+                // In loopback, RX sees TX output
+                // This is a simplified simulation of loopback
+                // In real hardware, this would route stx_pad_o to srx_pad_i internally
+                // For this model, we just set flags
+                rx_cts <= 1'b1;
+                rx_dsr <= 1'b1;
+                rx_dcd <= 1'b0;
+                tx_ri <= 1'b0;
+            end else begin
+                // Normal operation
+                rx_cts <= 1'b1; // Default high
+                rx_dsr <= 1'b1; // Default high
+                rx_dcd <= 1'b0; // Default low
+                tx_ri <= 1'b0; // Default low
+            end
+        end
+    end
+    
+    // -----------------------------------------------------------------------
+    // Control Logic
+    // -----------------------------------------------------------------------
+    // Bit 0: Enable RX
+    // Bit 1: Enable TX
+    // Bit 2: Enable FIFO RX
+    // Bit 3: Enable FIFO TX
+    // Bit 4: Enable Auto RTS
+    // Bit 5: Enable Auto DTR
+    // Bit 6: Enable Auto Flow Control
+    // Bit 7: Enable Loopback
+    
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            tx_enable <= 1'b0;
+            rx_enable <= 1'b0;
+            fifo_ctrl_reg <= 8'd0;
+        end else begin
+            if (ctrl_reg[0]) rx_enable <= 1'b1;
+            else rx_enable <= 1'b0;
+            
+            if (ctrl_reg[1]) tx_enable <= 1'b1;
+            else tx_enable <= 1'b0;
+            
+            fifo_ctrl_reg <= ctrl_reg;
+        end
+    end
+    
+    // -----------------------------------------------------------------------
+    // Interrupt Output
+    // -----------------------------------------------------------------------
+    // INT = (INT Enable) & (INT Status)
+    // We combine all enabled interrupt bits
+    assign int_o = (int_enable_reg & int_status_reg) != 8'd0;
+    
+    // -----------------------------------------------------------------------
+    // Write Data Assignment
+    // -----------------------------------------------------------------------
+    // This is a combinational assignment to drive the write_data register
+    // based on the address and write enable.
+    // Since we use a synchronous process for the register update, we can use a
+    // separate combinational block to determine what value to write.
+    
+    always @(*) begin
+        write_data = 8'd0;
+        if (wb_cyc_i && wb_stb_i && wb_we_i) begin
+            case (wb_adr_i[3:0])
+                4'h0: write_data = wb_dat_i; // Control
+                4'h4: write_data = wb_dat_i; // Line Control
+                4'h8: write_data = wb_dat_i; // Modem Control
+                4'hC: write_data = wb_dat_i; // Interrupt Enable
+                4'h1C: write_data = wb_dat_i; // FIFO Control
+                4'h24: write_data = wb_dat_i[7:0]; // Baud Divisor (low byte)
+                4'h28: write_data = wb_dat_i; // TX Data
+                4'h2C: write_data = wb_dat_i; // RX Data (Write to FIFO)
+                default: write_data = 8'd0;
+            endcase
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

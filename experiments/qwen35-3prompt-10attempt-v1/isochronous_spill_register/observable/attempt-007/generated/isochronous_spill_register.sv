@@ -1,0 +1,159 @@
+```verilog
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output reg [WIDTH-1:0] dst_data_o
+);
+
+    // 2-deep FIFO state machine
+    typedef enum logic [1:0] {
+        STATE_IDLE,
+        STATE_FILL,
+        STATE_EMPTY,
+        STATE_FULL
+    } fsm_state_t;
+
+    fsm_state_t state_reg, state_next;
+    logic [1:0] count_reg, count_next;
+    logic [WIDTH-1:0] data_reg;
+    logic src_valid_reg;
+    logic dst_valid_reg;
+    logic dst_ready_reg;
+
+    // Synchronize src_valid to dst_clk
+    logic src_valid_synced;
+    always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_valid_synced <= 1'b0;
+        else
+            src_valid_synced <= src_valid_i;
+    end
+
+    // Synchronize dst_ready to src_clk
+    logic dst_ready_synced;
+    always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ready_synced <= 1'b0;
+        else
+            dst_ready_synced <= dst_ready_i;
+    end
+
+    // State and Count Next State Logic
+    always_comb begin
+        state_next = state_reg;
+        count_next = count_reg;
+        dst_valid_reg = 1'b0;
+        src_ready_o = 1'b0;
+        dst_data_o = 0;
+
+        case (state_reg)
+            STATE_IDLE: begin
+                if (src_valid_synced && dst_ready_synced) begin
+                    state_next = STATE_FILL;
+                    count_next = 1;
+                    src_ready_o = 1'b1;
+                end
+            end
+
+            STATE_FILL: begin
+                if (src_valid_synced && dst_ready_synced) begin
+                    state_next = STATE_FILL;
+                    count_next = count_reg + 1;
+                    src_ready_o = 1'b1;
+                end else if (src_valid_synced) begin
+                    state_next = STATE_FILL;
+                    count_next = count_reg + 1;
+                    src_ready_o = 1'b1;
+                end else if (dst_ready_synced) begin
+                    state_next = STATE_FILL;
+                    count_next = count_reg - 1;
+                    src_ready_o = 1'b0;
+                end else begin
+                    state_next = STATE_FILL;
+                    count_next = count_reg;
+                    src_ready_o = 1'b0;
+                end
+            end
+
+            STATE_EMPTY: begin
+                if (src_valid_synced && dst_ready_synced) begin
+                    state_next = STATE_FILL;
+                    count_next = 1;
+                    src_ready_o = 1'b1;
+                end
+            end
+
+            STATE_FULL: begin
+                if (src_valid_synced && dst_ready_synced) begin
+                    state_next = STATE_FILL;
+                    count_next = count_reg - 1;
+                    src_ready_o = 1'b1;
+                end else if (src_valid_synced) begin
+                    state_next = STATE_FULL;
+                    count_next = count_reg;
+                    src_ready_o = 1'b1;
+                end else if (dst_ready_synced) begin
+                    state_next = STATE_FILL;
+                    count_next = count_reg - 1;
+                    src_ready_o = 1'b0;
+                end else begin
+                    state_next = STATE_FULL;
+                    count_next = count_reg;
+                    src_ready_o = 1'b0;
+                end
+            end
+        endcase
+    end
+
+    // State and Count Registers
+    always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            state_reg <= STATE_IDLE;
+            count_reg <= 2'b00;
+            data_reg <= 0;
+            src_valid_reg <= 1'b0;
+            dst_valid_reg <= 1'b0;
+            dst_ready_reg <= 1'b0;
+        end else begin
+            state_reg <= state_next;
+            count_reg <= count_next;
+            src_valid_reg <= src_valid_synced;
+            dst_valid_reg <= dst_ready_synced;
+            dst_ready_reg <= src_valid_synced;
+        end
+    end
+
+    // Data Register
+    always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            data_reg <= 0;
+        end else if (state_reg == STATE_FILL && count_reg == 1 && src_valid_synced && dst_ready_synced) begin
+            data_reg <= src_data_i;
+        end
+    end
+
+    // Output Logic
+    always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_valid_o <= 1'b0;
+            dst_data_o <= 0;
+        end else if (state_reg == STATE_FILL && count_reg == 1 && src_valid_synced && dst_ready_synced) begin
+            dst_valid_o <= 1'b1;
+            dst_data_o <= data_reg;
+        end else begin
+            dst_valid_o <= 1'b0;
+            dst_data_o <= 0;
+        end
+    end
+
+endmodule
+```<|im_end|>

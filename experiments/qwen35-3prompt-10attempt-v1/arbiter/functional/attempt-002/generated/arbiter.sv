@@ -1,0 +1,139 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam LOG_PORTS = $clog2(PORTS);
+    localparam NUM_PORTS = 1 << LOG_PORTS;
+
+    // State encoding
+    // 0: Idle
+    // 1: Granting (Round Robin or Fixed)
+    // 2: Blocked (Waiting for Ack)
+    parameter IDLE = 2'b00;
+    parameter GRANTING = 2'b01;
+    parameter BLOCKED = 2'b10;
+
+    reg [1:0] state;
+    reg [LOG_PORTS-1:0] next_state;
+    reg [LOG_PORTS-1:0] rr_index; // Round Robin index
+    reg [LOG_PORTS-1:0] fixed_priority; // Fixed priority mask (LSB high if ARB_LSB_HIGH_PRIORITY)
+    reg [LOG_PORTS-1:0] last_granted; // For Round Robin rotation
+    reg [LOG_PORTS-1:0] current_winner;
+    reg [LOG_PORTS-1:0] next_winner;
+    reg [LOG_PORTS-1:0] next_grant;
+    reg grant_valid_reg;
+
+    // Generate fixed priority mask based on LSB_HIGH_PRIORITY
+    // If LSB_HIGH_PRIORITY is 1, bit 0 is highest priority.
+    // If LSB_HIGH_PRIORITY is 0, bit (PORTS-1) is highest priority.
+    generate
+        if (ARB_LSB_HIGH_PRIORITY)
+            genvar i;
+            begin : gen_fixed_priority
+                for (i = 0; i < PORTS; i = i + 1)
+                    fixed_priority[i] = 1;
+            end
+        else
+            genvar i;
+            begin : gen_fixed_priority
+                for (i = 0; i < PORTS; i = i + 1)
+                    fixed_priority[i] = (i == (PORTS - 1)) ? 1 : 0;
+            end
+    endgenerate
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= IDLE;
+            rr_index <= 0;
+            last_granted <= 0;
+            grant_valid_reg <= 0;
+            next_grant <= 0;
+            next_winner <= 0;
+        end else begin
+            state <= next_state;
+            rr_index <= next_winner; // Update RR index to the winner for next cycle
+            grant_valid_reg <= grant_valid_reg;
+            next_grant <= next_grant;
+            next_winner <= next_winner;
+        end
+    end
+
+    always @(*) begin
+        next_state = IDLE;
+        next_grant = 0;
+        next_winner = 0;
+        grant_valid_reg = 0;
+
+        if (state == IDLE) begin
+            // Find winner
+            if (ARB_TYPE_ROUND_ROBIN) begin
+                // Round Robin Logic
+                // Find first requestor starting from rr_index
+                next_winner = 0;
+                for (int i = 0; i < PORTS; i = i + 1) begin
+                    int idx = (rr_index + i) % PORTS;
+                    if (request[idx]) begin
+                        next_winner = idx;
+                        break;
+                    end
+                end
+                // Update rr_index to the next port after the winner for next cycle
+                rr_index = (next_winner + 1) % PORTS;
+            end else begin
+                // Fixed Priority Logic
+                // Iterate from highest priority to lowest
+                next_winner = 0;
+                for (int i = 0; i < PORTS; i = i + 1) begin
+                    if (request[i] && fixed_priority[i]) begin
+                        next_winner = i;
+                        break;
+                    end
+                end
+            end
+
+            if (next_winner != 0) begin
+                next_state = (ARB_BLOCK && ARB_BLOCK_ACK) ? BLOCKED : GRANTING;
+                next_grant = 1 << next_winner;
+                grant_valid_reg = 1;
+            end
+        end else if (state == GRANTING) begin
+            // If block is enabled and ack is not received, stay in GRANTING
+            // If block is disabled or ack is received, go to IDLE
+            if (ARB_BLOCK && ARB_BLOCK_ACK && acknowledge[next_winner]) begin
+                next_state = BLOCKED;
+            end else begin
+                next_state = IDLE;
+            end
+            next_grant = 1 << next_winner;
+            grant_valid_reg = 1;
+        end else if (state == BLOCKED) begin
+            // Wait for acknowledge
+            if (acknowledge[next_winner]) begin
+                next_state = IDLE;
+            end
+            next_grant = 1 << next_winner;
+            grant_valid_reg = 1;
+        end
+    end
+
+    // Output assignments
+    grant = next_grant;
+    grant_encoded = next_winner;
+
+endmodule
+```<|im_end|>

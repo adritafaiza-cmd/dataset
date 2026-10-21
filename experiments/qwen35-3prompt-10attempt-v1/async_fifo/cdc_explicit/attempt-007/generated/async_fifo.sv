@@ -1,0 +1,424 @@
+```verilog
+`timescale 1ns/1ps
+
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam INT_ASIZE = ASIZE;
+    localparam INT_DEPTH = 1 << ASIZE;
+    localparam INT_HALF_DEPTH = INT_DEPTH / 2;
+
+    // Write domain signals
+    reg [INT_ASIZE-1:0] wptr;
+    reg [INT_ASIZE-1:0] wptr_next;
+    reg [INT_ASIZE-1:0] wgray;
+    reg [INT_ASIZE-1:0] wgray_next;
+    reg wfull_reg;
+    reg awfull_reg;
+    reg [INT_ASIZE-1:0] wcount;
+
+    // Read domain signals
+    reg [INT_ASIZE-1:0] rptr;
+    reg [INT_ASIZE-1:0] rptr_next;
+    reg [INT_ASIZE-1:0] rgray;
+    reg [INT_ASIZE-1:0] rgray_next;
+    reg rempty_reg;
+    reg arempty_reg;
+    reg [INT_ASIZE-1:0] rcount;
+
+    // Cross-domain pointers (Gray encoded)
+    wire [INT_ASIZE-1:0] wptr_gray;
+    wire [INT_ASIZE-1:0] rptr_gray;
+
+    // FIFO Memory
+    reg [DSIZE-1:0] mem [0:INT_DEPTH-1];
+
+    // --- Write Domain Logic ---
+
+    // Reset Logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= 1'b0;
+            wfull_reg <= 1'b0;
+            awfull_reg <= 1'b0;
+            wcount <= 1'b0;
+        end else begin
+            // Pointer update logic
+            if (winc && !wfull_reg) begin
+                wptr_next = wptr + 1'b1;
+                // Check for overflow (Full condition)
+                if (wptr_next == 1'b0) begin
+                    wfull_reg <= 1'b1;
+                    awfull_reg <= 1'b1;
+                end else begin
+                    wfull_reg <= 1'b0;
+                    // Almost full: depth - 1
+                    if (wptr_next == INT_DEPTH - 1)
+                        awfull_reg <= 1'b1;
+                    else
+                        awfull_reg <= 1'b0;
+                end
+            end else begin
+                wptr_next = wptr;
+                wfull_reg <= 1'b0;
+                awfull_reg <= 1'b0;
+            end
+            wptr <= wptr_next;
+        end
+    end
+
+    // Gray Code Generation for Write Pointer
+    always @(*) begin
+        wgray_next = wptr;
+        if (wptr[INT_ASIZE-1:1] != wptr[INT_ASIZE-1:1] + 1'b1)
+            wgray_next[0] = ~wptr[0];
+        else
+            wgray_next[0] = wptr[0];
+        wgray_next = wgray_next; // Simplified logic below is more robust for CDC
+    end
+
+    // Robust Gray Code Generation
+    always @(*) begin
+        wgray_next = wptr;
+        if (wptr[INT_ASIZE-1:1] != wptr[INT_ASIZE-1:1] + 1'b1)
+            wgray_next[0] = ~wptr[0];
+        else
+            wgray_next[0] = wptr[0];
+    end
+
+    // Memory Write (Registered on write clock)
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            // Clear memory on reset
+            for (int i = 0; i < INT_DEPTH; i = i + 1)
+                mem[i] <= 1'b0;
+        end else if (winc && !wfull_reg) begin
+            mem[wptr] <= wdata;
+        end
+    end
+
+    // --- Read Domain Logic ---
+
+    // Reset Logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= 1'b0;
+            rempty_reg <= 1'b1;
+            arempty_reg <= 1'b0;
+            rcount <= 1'b0;
+        end else begin
+            // Pointer update logic
+            if (rinc && !rempty_reg) begin
+                rptr_next = rptr + 1'b1;
+                // Check for underflow (Empty condition)
+                if (rptr_next == 1'b0) begin
+                    rempty_reg <= 1'b1;
+                    arempty_reg <= 1'b0;
+                end else begin
+                    rempty_reg <= 1'b0;
+                    // Almost empty: depth - 1
+                    if (rptr_next == INT_DEPTH - 1)
+                        arempty_reg <= 1'b1;
+                    else
+                        arempty_reg <= 1'b0;
+                end
+            end else begin
+                rptr_next = rptr;
+                rempty_reg <= 1'b1;
+                arempty_reg <= 1'b0;
+            end
+            rptr <= rptr_next;
+        end
+    end
+
+    // Gray Code Generation for Read Pointer
+    always @(*) begin
+        rgray_next = rptr;
+        if (rptr[INT_ASIZE-1:1] != rptr[INT_ASIZE-1:1] + 1'b1)
+            rgray_next[0] = ~rptr[0];
+        else
+            rgray_next[0] = rptr[0];
+    end
+
+    // Memory Read (Combinational based on read pointer)
+    assign rdata = mem[rptr];
+
+    // --- Cross Domain Pointer Transfer ---
+
+    // Write Pointer to Read Domain (Gray to Binary)
+    always @(*) begin
+        wgray = wptr; // Internal Gray
+        wptr_gray = wgray;
+        // Gray to Binary conversion
+        wptr_gray[INT_ASIZE-1] = wgray[INT_ASIZE-1];
+        for (int i = INT_ASIZE-2; i >= 0; i = i - 1) begin
+            wptr_gray[i] = wgray[i] ^ wptr_gray[i+1];
+        end
+    end
+
+    // Read Pointer to Write Domain (Gray to Binary)
+    always @(*) begin
+        rgray = rptr; // Internal Gray
+        rptr_gray = rgray;
+        // Gray to Binary conversion
+        rptr_gray[INT_ASIZE-1] = rgray[INT_ASIZE-1];
+        for (int i = INT_ASIZE-2; i >= 0; i = i - 1) begin
+            rptr_gray[i] = rgray[i] ^ rptr_gray[i+1];
+        end
+    end
+
+    // --- Full/Empty Logic in Cross Domain ---
+
+    // Calculate count difference
+    // wcount tracks the number of items written since last read pointer update
+    // rcount tracks the number of items read since last write pointer update
+    // However, a simpler and more robust method for full/empty is comparing the binary pointers directly
+    // with a safety margin.
+
+    // Write Domain Full/Empty Logic
+    // Full: wptr_gray >= rptr_gray
+    // Empty: wptr_gray < rptr_gray
+    // We use the binary pointers transferred across domains.
+    
+    // Note: Due to CDC, we cannot rely on exact equality checks for empty/full without hysteresis or counters.
+    // The standard approach is to use the counters (wcount, rcount) or a specific full/empty logic.
+    // Given the requirement for safety, we will implement the counter-based approach which is robust.
+    
+    // Re-implementing Full/Empty using counters for maximum safety against metastability
+    // wcount increments on write, decrements on read (transferred)
+    // rcount increments on read, decrements on write (transferred)
+    
+    // Actually, the most standard and safe implementation for async FIFOs uses the Gray pointers
+    // to generate the full/empty signals directly in the respective domains, but requires careful handling.
+    // Let's use the counter method which is explicitly safe for CDC tools.
+    
+    // Write Domain Counters
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wcount <= 1'b0;
+        end else if (winc && !wfull_reg) begin
+            wcount <= wcount + 1'b1;
+        end else if (rinc && !rempty_reg) begin
+            // Read happened, decrement count
+            if (wcount > 1'b0)
+                wcount <= wcount - 1'b1;
+        end
+    end
+
+    // Read Domain Counters
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rcount <= 1'b0;
+        end else if (rinc && !rempty_reg) begin
+            rcount <= rcount + 1'b1;
+        end else if (winc && !wfull_reg) begin
+            // Write happened, decrement count
+            if (rcount > 1'b0)
+                rcount <= rcount - 1'b1;
+        end
+    end
+
+    // Generate Full/Empty signals based on counters
+    // Full: wcount >= INT_HALF_DEPTH (for almost full) and wcount >= INT_DEPTH (for full)
+    // Empty: rcount == 0 (for empty) and rcount <= INT_HALF_DEPTH (for almost empty)
+    
+    // However, the counter method has a race condition if not synchronized perfectly.
+    // The most reliable method for "Full" and "Empty" in async FIFOs is:
+    // Full: wptr_gray >= rptr_gray
+    // Empty: wptr_gray < rptr_gray
+    // But to avoid the "lag" issue mentioned in the prompt ("full and empty can lag"),
+    // we use the counter approach with a specific threshold logic that is widely accepted.
+    
+    // Let's stick to the pointer comparison for Full/Empty as it's the classic Gray code FIFO method,
+    // but we must ensure the logic is stable.
+    // Full: wptr_gray >= rptr_gray
+    // Empty: wptr_gray < rptr_gray
+    
+    // To handle the "lag" and ensure safety, we will use the counter values to drive the signals
+    // but derived from the stable binary pointers.
+    
+    // Revised Strategy: Use the binary pointers (wptr_gray, rptr_gray) to determine status.
+    // This is the standard way. The "lag" mentioned in the prompt is inherent to async FIFOs
+    // when using simple pointers, but the prompt says "full and empty can lag", implying we don't need
+    // to eliminate it, just handle it safely.
+    
+    // Full Logic (Write Domain):
+    // wfull is high when wptr_gray >= rptr_gray
+    // awfull is high when wptr_gray >= rptr_gray - 1 (i.e., depth - 1)
+    
+    // Empty Logic (Read Domain):
+    // rempty is high when wptr_gray < rptr_gray
+    // arempty is high when wptr_gray <= rptr_gray + 1 (i.e., depth - 1)
+    
+    // Let's implement this logic.
+    
+    // Write Domain Full/Almost Full
+    assign wfull = (wptr_gray >= rptr_gray);
+    assign awfull = (wptr_gray >= (rptr_gray - 1));
+
+    // Read Domain Empty/Almost Empty
+    assign rempty = (wptr_gray < rptr_gray);
+    assign arempty = (wptr_gray <= (rptr_gray + 1));
+
+    // FALLTHROUGH Logic
+    // If FALLTHROUGH is TRUE, rdata should present the current oldest unread word.
+    // This means rdata should be updated whenever the read pointer moves OR when a new word is written?
+    // No, "rdata presents the current oldest unread word without requiring an additional registered-read cycle."
+    // This implies that if FALLTHROUGH is true, rdata is combinational with respect to the read pointer?
+    // But the prompt says: "`rdata` is one read-clock sample."
+    // This is a contradiction if we interpret "one read-clock sample" strictly as registered.
+    // However, "FALLTHROUGH does not select a combinational memory read" suggests we still register it.
+    // The key is: "rdata presents the current oldest unread word".
+    // If FALLTHROUGH is TRUE, we want rdata to reflect the data at rptr immediately after rptr updates?
+    // Or does it mean we don't wait for the next rinc?
+    // Standard interpretation: 
+    // If FALLTHROUGH: rdata is updated on every read clock edge regardless of rinc, OR it is updated immediately when rptr changes.
+    // Given "rdata is one read-clock sample", it must be registered.
+    // The behavior "without requiring an additional registered-read cycle" usually means:
+    // If FALLTHROUGH: rdata is updated on the rising edge of rclk if rinc is high (standard) OR if rinc is low but rptr changed?
+    // Actually, the most common interpretation of FALLTHROUGH in this context is:
+    // When FALLTHROUGH is TRUE, the read data is valid immediately after the read pointer advances, 
+    // effectively allowing the data to be available for the next cycle without waiting for a specific "read" pulse if the pointer moved.
+    // BUT, the constraint "rdata is one read-clock sample" forces us to register it.
+    // So, if FALLTHROUGH is TRUE, we update rdata on every rising edge of rclk if the read pointer has advanced?
+    // Or simply, we update rdata on every rising edge of rclk?
+    // Let's re-read: "rdata presents the current oldest unread word without requiring an additional registered-read cycle."
+    // This implies that if a write happens and fills the FIFO, and then a read happens, the data is ready.
+    // The "FALLTHROUGH" feature typically allows the read data to be valid even if rinc is not asserted, 
+    // provided the read pointer has moved.
+    // Implementation:
+    // If FALLTHROUGH: rdata is updated on every rising edge of rclk (if rptr changes or just always?).
+    // If not FALLTHROUGH: rdata is updated only when rinc is high and read occurs.
+    
+    // Let's refine the logic based on "rdata is one read-clock sample".
+    // We need a register for rdata.
+    // If FALLTHROUGH: Update rdata on every rising edge of rclk? 
+    // No, that would violate "one read-clock sample" if we update it constantly.
+    // It likely means: The data is available in the pipeline stage immediately.
+    // Let's assume the standard behavior:
+    // If FALLTHROUGH: rdata is updated on the rising edge of rclk whenever rinc is high OR when the read pointer advances?
+    // Actually, a common implementation for FALLTHROUGH is:
+    // rdata is updated on the rising edge of rclk if rinc is high.
+    // If FALLTHROUGH is TRUE, we also update rdata if rinc is low but the read pointer has advanced?
+    // No, the read pointer only advances on rinc.
+    // Perhaps FALLTHROUGH means: rdata is updated on the rising edge of rclk regardless of rinc?
+    // That would make it a continuous stream.
+    // Let's look at the constraint: "rdata presents the current oldest unread word".
+    // If FALLTHROUGH is TRUE, we want rdata to be the data at rptr.
+    // If FALLTHROUGH is FALSE, we want rdata to be the data at rptr ONLY after a successful read (rinc).
+    
+    // Implementation Plan:
+    // Register rdata.
+    // If FALLTHROUGH: Update rdata on every rising edge of rclk (if rptr changes? or always?).
+    // If we update always, it might be unstable if rptr doesn't change.
+    // Let's assume: If FALLTHROUGH, update rdata on every rising edge of rclk.
+    // If not FALLTHROUGH, update rdata only when rinc is high and read occurs.
+    
+    // Wait, "rdata is one read-clock sample" implies it's registered.
+    // "FALLTHROUGH does not select a combinational memory read" implies we don't read mem[rptr] directly to output.
+    // So:
+    // reg [DSIZE-1:0] rdata_reg;
+    // if (FALLTHROUGH) begin
+    //    always @(posedge rclk or negedge rrst_n) begin
+    //       if (!rrst_n) rdata_reg <= 1'b0;
+    //       else rdata_reg <= mem[rptr]; // Update every cycle
+    //    end
+    // end else begin
+    //    always @(posedge rclk or negedge rrst_n) begin
+    //       if (!rrst_n) rdata_reg <= 1'b0;
+    //       else if (rinc && !rempty_reg) rdata_reg <= mem[rptr]; // Update only on read
+    //    end
+    // end
+    
+    // However, updating every cycle in FALLTHROUGH mode might cause issues if rptr doesn't change?
+    // No, it's just reading the same value. It's safe.
+    // But wait, if rinc is low, rptr doesn't change. So mem[rptr] is constant.
+    // So updating every cycle is fine.
+    
+    // Let's reconsider the "without requiring an additional registered-read cycle" phrase.
+    // This usually means that if you have a write, then a read, the data is available immediately in the next clock.
+    // If FALLTHROUGH is FALSE, you might need to assert rinc to get the data.
+    // If FALLTHROUGH is TRUE, the data is available as soon as the read pointer moves.
+    // Since the read pointer moves on rinc, the effect is similar.
+    // The difference is: If FALLTHROUGH is TRUE, do we need to assert rinc to get the data?
+    // If rinc is low, rptr doesn't move. So rdata doesn't change.
+    // So the only way to get new data is to assert rinc.
+    // Unless... FALLTHROUGH means we don't need to wait for the read cycle to complete?
+    // Maybe it means: rdata is updated on the rising edge of rclk if rinc is high.
+    // If FALLTHROUGH is TRUE, rdata is updated on the rising edge of rclk if rinc is high OR if rinc was high in the previous cycle?
+    // No, that's too complex.
+    
+    // Let's go with the most logical interpretation for "FALLTHROUGH" in async FIFOs:
+    // It allows the read data to be valid immediately after the read pointer advances, 
+    // without needing a separate "read" pulse to latch the data again.
+    // But since the read pointer advances on rinc, and rinc is an input, 
+    // the data is already latched in the read domain logic.
+    // The only ambiguity is whether rdata is updated on every clock edge or only on read edges.
+    // Given "rdata is one read-clock sample", it must be registered.
+    // If FALLTHROUGH is TRUE, we update rdata on every rising edge of rclk.
+    // If FALLTHROUGH is FALSE, we update rdata only when rinc is high and read occurs.
+    
+    // Wait, if FALLTHROUGH is TRUE, and rinc is low, rptr doesn't change.
+    // So mem[rptr] is constant.
+    // So updating rdata every cycle is just holding the value.
+    // This seems correct.
+    
+    // One more check: "rdata presents the current oldest unread word".
+    // If FALLTHROUGH is TRUE, rdata should be mem[rptr].
+    // If FALLTHROUGH is FALSE, rdata should be mem[rptr] ONLY after a read operation.
+    // This implies that if FALLTHROUGH is FALSE, and we have data in the FIFO but rinc is low,
+    // rdata might hold old data (from before the last read).
+    // If FALLTHROUGH is TRUE, rdata is always mem[rptr].
+    
+    // So the logic is:
+    // if (FALLTHROUGH) rdata <= mem[rptr] on every rclk.
+    // else rdata <= mem[rptr] only on rclk when rinc is high and read occurs.
+    
+    // But wait, if FALLTHROUGH is FALSE, and rinc is low, rdata holds the last read value.
+    // This is the standard behavior.
+    // If FALLTHROUGH is TRUE, rdata is always the current head of the FIFO.
+    
+    // Let's implement this.
+    
+    reg [DSIZE-1:0] rdata_reg;
+    
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rdata_reg <= 1'b0;
+        end else if (FALLTHROUGH) begin
+            // Update every cycle to reflect current rptr
+            rdata_reg <= mem[rptr];
+        end else begin
+            // Update only on successful read
+            if (rinc && !rempty_reg) begin
+                rdata_reg <= mem[rptr];
+            end
+        end
+    end
+
+    // Final Output Assignments
+    assign wfull = (wptr_gray >= rptr_gray);
+    assign awfull = (wptr_gray >= (rptr_gray - 1));
+    assign rempty = (wptr_gray < rptr_gray);
+    assign arempty = (wptr_gray <= (rptr_gray + 1));
+    assign rdata = rdata_reg;
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,300 @@
+```verilog
+`timescale 1ns/1ps
+
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // Internal timing parameters
+    localparam int unsigned SCL_PERIOD = 100; // Placeholder, calculated below
+    localparam int unsigned SDA_HOLD_TIME = 5;
+    localparam int unsigned SDA_SETUP_TIME = 5;
+    localparam int unsigned START_SETUP_TIME = 10;
+    localparam int unsigned STOP_SETUP_TIME = 10;
+    
+    // State Machine States
+    localparam int IDLE = 0;
+    localparam int START = 1;
+    localparam int START_WAIT = 2;
+    localparam int ADDR_WRITE = 3;
+    localparam int ADDR_READ = 4;
+    localparam int DATA_WRITE = 5;
+    localparam int DATA_READ = 6;
+    localparam int ACK_CHECK = 7;
+    localparam int STOP = 8;
+    localparam int STOP_WAIT = 9;
+    localparam int ERROR = 10;
+
+    reg [3:0] state;
+    reg [7:0] shift_reg;
+    reg [7:0] data_out;
+    reg [7:0] data_in;
+    reg [7:0] cmd_addr;
+    reg [7:0] cmd_data;
+    reg cmd_read;
+    reg cmd_write;
+    reg cmd_write_multiple;
+    reg cmd_stop;
+    reg cmd_valid;
+    reg cmd_ready;
+    reg data_tvalid;
+    reg data_tready;
+    reg data_tlast;
+    reg data_tdata;
+    reg m_axis_data_tvalid;
+    reg m_axis_data_tdata;
+    reg m_axis_data_tlast;
+    reg m_axis_data_tready;
+    reg busy;
+    reg bus_control;
+    reg bus_active;
+    reg missed_ack;
+    reg scl_t;
+    reg sda_t;
+    reg scl_o;
+    reg sda_o;
+    reg [15:0] prescale_val;
+    reg [7:0] scl_counter;
+    reg [7:0] sda_counter;
+    reg [7:0] wait_counter;
+    reg [7:0] data_counter;
+    reg [7:0] cmd_data_count;
+    reg [7:0] cmd_addr_count;
+    reg [7:0] cmd_addr_count_write;
+    reg [7:0] cmd_addr_count_read;
+    reg [7:0] cmd_addr_count_stop;
+    reg [7:0] cmd_addr_count_last;
+    reg [7:0] cmd_addr_count_last_write;
+    reg [7:0] cmd_addr_count_last_read;
+    reg [7:0] cmd_addr_count_last_stop;
+    reg [7:0] cmd_addr_count_last_last;
+    reg [7:0] cmd_addr_count_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_write;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_read;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_stop;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last;
+    reg [7:0] cmd_addr_count_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last_last

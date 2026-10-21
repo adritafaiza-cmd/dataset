@@ -1,0 +1,587 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam LOG_PORTS = $clog2(PORTS);
+    localparam LOG_BLOCK_ACK = $clog2(ARB_BLOCK_ACK + 1);
+
+    // State encoding
+    // 0: IDLE
+    // 1: GRANTING (Grant issued, waiting for ack or request drop)
+    parameter IDLE = 2'd0;
+    parameter GRANTING = 2'd1;
+
+    reg [1:0] state;
+    reg [LOG_PORTS-1:0] current_grant;
+    reg [LOG_PORTS-1:0] round_robin_ptr;
+    reg [LOG_BLOCK_ACK-1:0] block_ack_count;
+    reg [PORTS-1:0] last_request;
+    reg [PORTS-1:0] grant_mask;
+
+    // Priority calculation logic
+    function [LOG_PORTS-1:0] calc_priority;
+        input [PORTS-1:0] req;
+        input [LOG_PORTS-1:0] ptr;
+        input [LOG_BLOCK_ACK-1:0] ack_cnt;
+        reg [PORTS-1:0] candidates;
+        reg [LOG_PORTS-1:0] best_idx;
+        reg [LOG_PORTS-1:0] best_score;
+        integer i;
+
+        candidates = req;
+        best_idx = ptr;
+        best_score = 0;
+
+        for (i = 0; i < PORTS; i = i + 1) begin
+            if (candidates[i]) begin
+                // Calculate score based on round robin pointer and LSB priority
+                // If ARB_LSB_HIGH_PRIORITY is 1, lower index is better.
+                // If ARB_LSB_HIGH_PRIORITY is 0, higher index is better.
+                // We add the round_robin_ptr to break ties or select next.
+                
+                reg [LOG_PORTS-1:0] score;
+                
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    // Lower index wins. 
+                    // Score = ptr + (PORTS - i) * large_factor? 
+                    // Simpler: Compare (ptr + i) vs (ptr + best_idx)
+                    // Actually, standard RR: (ptr + i) % PORTS. 
+                    // To select the "best" among active ones with RR:
+                    // We want the one with the smallest (ptr + i) % PORTS? 
+                    // No, usually RR means we start at ptr and go up.
+                    // Let's define score as: (ptr + i) % PORTS.
+                    // If LSB_HIGH_PRIORITY=1, we want the smallest index among ties? 
+                    // The prompt says "LSB wins ties". This usually applies to fixed priority.
+                    // For RR, the "tie" is the rotation order.
+                    
+                    // Re-reading: "ARB_LSB_HIGH_PRIORITY selects whether the LSB wins ties."
+                    // This implies a comparison mechanism.
+                    // Let's implement a generic priority selector that respects LSB/MSB.
+                    
+                    // Strategy: 
+                    // 1. Find all active ports.
+                    // 2. If RR, sort them by (ptr + i) % PORTS.
+                    // 3. If Fixed, sort them by i (with LSB/MSB preference).
+                    
+                    // Let's simplify the score logic:
+                    // Score = (ptr + i) % PORTS.
+                    // If multiple have same score (impossible in RR unless PORTS=1), pick LSB/MSB.
+                    // But wait, if we iterate i from 0 to PORTS-1, we naturally find the first one.
+                    // To make it robust:
+                    
+                    score = (ptr + i) % PORTS;
+                end else begin
+                    // Fixed priority logic embedded here? 
+                    // If ARB_TYPE_ROUND_ROBIN is 0, we ignore ptr.
+                    // If ARB_TYPE_ROUND_ROBIN is 1, we use ptr.
+                    
+                    if (ARB_TYPE_ROUND_ROBIN) begin
+                        score = (ptr + i) % PORTS;
+                    end else begin
+                        // Fixed priority. 
+                        // If LSB_HIGH_PRIORITY=1, smaller i is better.
+                        // If LSB_HIGH_PRIORITY=0, larger i is better.
+                        if (ARB_LSB_HIGH_PRIORITY) begin
+                            score = i;
+                        end else begin
+                            score = PORTS - 1 - i;
+                        end
+                    end
+                end
+
+                // Compare scores
+                // We want the "best" score.
+                // In RR, lower score (closer to ptr) is better.
+                // In Fixed LSB, lower score (smaller i) is better.
+                // In Fixed MSB, higher score (larger i) is better -> so we inverted score above.
+                
+                if (score < best_score) begin
+                    best_score = score;
+                    best_idx = i;
+                end else if (score == best_score) begin
+                    // Tie breaker? 
+                    // In RR, scores are unique modulo PORTS for distinct i.
+                    // In Fixed, scores are unique.
+                    // So no tie possible if logic is correct.
+                end
+            end
+        end
+        
+        calc_priority = best_idx;
+    endfunction
+
+    // State Register
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= IDLE;
+            current_grant <= 0;
+            round_robin_ptr <= 0;
+            block_ack_count <= 0;
+            grant_mask <= 0;
+        end else begin
+            state <= state;
+            current_grant <= current_grant;
+            round_robin_ptr <= round_robin_ptr;
+            block_ack_count <= block_ack_count;
+            grant_mask <= grant_mask;
+        end
+    end
+
+    // Combinational Logic for State Transition and Grant Calculation
+    always @(*) begin
+        reg [LOG_PORTS-1:0] next_grant;
+        reg [LOG_PORTS-1:0] next_ptr;
+        reg [LOG_BLOCK_ACK-1:0] next_ack_cnt;
+        reg next_state;
+        reg next_grant_valid;
+        reg next_block;
+
+        next_state = IDLE;
+        next_grant_valid = 0;
+        next_block = ARB_BLOCK;
+        next_grant = 0;
+        next_ptr = round_robin_ptr;
+        next_ack_cnt = block_ack_count;
+
+        // Determine if we are in block mode
+        if (ARB_BLOCK) begin
+            next_block = 1;
+        end
+
+        // Calculate Priority
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            next_ptr = round_robin_ptr;
+        end
+
+        // Find the winner
+        // We need to handle the case where no request is active.
+        if (request == 0) begin
+            next_state = IDLE;
+            next_grant_valid = 0;
+            next_grant = 0;
+            // If not blocking, reset pointer to 0? Or keep it? 
+            // Usually reset to 0 on idle.
+            if (!next_block) next_ptr = 0;
+        end else begin
+            // Calculate priority index
+            [LOG_PORTS-1:0] winner_idx = calc_priority(request, next_ptr, next_ack_cnt);
+            
+            next_grant = 1 << winner_idx;
+            next_grant_valid = 1;
+            next_state = GRANTING;
+            
+            // Update round robin pointer for next time
+            if (ARB_TYPE_ROUND_ROBIN) begin
+                next_ptr = (next_ptr + 1) % PORTS;
+            end
+        end
+
+        // Handle Block Acknowledge Logic
+        if (next_state == GRANTING) begin
+            if (next_block) begin
+                // Check if acknowledge is received for the granted port
+                if (acknowledge[winner_idx]) begin
+                    // Ack received
+                    if (next_ack_cnt == 0) begin
+                        // First ack, reset count
+                        next_ack_cnt = LOG_BLOCK_ACK - 1;
+                    end else begin
+                        next_ack_cnt = next_ack_cnt - 1;
+                    end
+                    // If count reaches 0, we might release grant if request drops?
+                    // Spec: "hold the grant until acknowledge ... or until request drops"
+                    // If ARB_BLOCK_ACK is nonzero, we count acks.
+                    // If ARB_BLOCK_ACK is 1, we need 1 ack.
+                    // If ARB_BLOCK_ACK > 1, we need multiple? 
+                    // Usually ARB_BLOCK_ACK=1 means "wait for one ack".
+                    // Let's assume ARB_BLOCK_ACK is the number of acks required to release.
+                    if (next_ack_cnt == 0) begin
+                        // All acks received. 
+                        // Check if request is still high.
+                        if (request[winner_idx]) begin
+                            // Request still high, keep grant? 
+                            // Spec: "hold ... until acknowledge ... OR until request drops"
+                            // If ack is done but request is still high, do we keep grant?
+                            // "Hold until acknowledge" implies the transaction is done.
+                            // If request is still high, maybe we keep it for next cycle?
+                            // But if ack is done, the master is done.
+                            // Let's assume if ack_cnt == 0, we are done with this grant cycle.
+                            // However, if request is still high, we might need to re-grant?
+                            // Standard behavior: If ack received, grant is released.
+                            // If request is still high, next cycle will re-grant.
+                            // But the spec says "hold ... until request drops".
+                            // This implies if request is high, we hold even after ack?
+                            // That seems odd. Usually ack means "I got it".
+                            // Let's interpret: 
+                            // If ARB_BLOCK_ACK > 0:
+                            //   Wait for ARB_BLOCK_ACK pulses of acknowledge.
+                            //   If request drops before that, release immediately.
+                            //   If ack count reaches 0, release immediately (transaction done).
+                            //   Wait, if request is still high after ack, do we hold?
+                            //   "Hold ... until acknowledge ... OR until request drops".
+                            //   This is an OR condition. 
+                            //   Condition A: Acknowledge received (count down to 0).
+                            //   Condition B: Request drops.
+                            //   If either happens, release.
+                            //   So if ack count reaches 0, we release.
+                            //   If request drops, we release.
+                            //   So we only hold if (ack_count > 0) AND (request is high).
+                            
+                            // Let's refine the logic inside the loop.
+                            // We need to track if we are currently holding due to block.
+                        end
+                    end
+                end else begin
+                    // Ack not received yet
+                    if (next_ack_cnt == 0) begin
+                        // First cycle of blocking, start counting
+                        next_ack_cnt = LOG_BLOCK_ACK - 1;
+                    end else begin
+                        next_ack_cnt = next_ack_cnt - 1;
+                    end
+                end
+            end else begin
+                // Not blocking
+                next_ack_cnt = 0;
+            end
+        end
+
+        // Finalize State and Outputs
+        if (next_state == IDLE) begin
+            next_grant_valid = 0;
+            next_grant = 0;
+            if (!next_block) next_ptr = 0;
+        end else if (next_state == GRANTING) begin
+            // Check release conditions
+            // 1. Request dropped
+            if (request == 0) begin
+                next_state = IDLE;
+                next_grant_valid = 0;
+                next_grant = 0;
+                if (!next_block) next_ptr = 0;
+            end 
+            // 2. Acknowledge received (if blocking)
+            else if (next_block && acknowledge[current_grant]) begin
+                if (next_ack_cnt == 0) begin
+                    // All acks received
+                    next_state = IDLE;
+                    next_grant_valid = 0;
+                    next_grant = 0;
+                    if (!next_block) next_ptr = 0;
+                end else begin
+                    // Still waiting for acks
+                    // Keep grant valid
+                end
+            end
+            // 3. If not blocking and ack received, release immediately
+            else if (!next_block && acknowledge[current_grant]) begin
+                next_state = IDLE;
+                next_grant_valid = 0;
+                next_grant = 0;
+            end
+        end
+
+        // Assign outputs
+        grant = next_grant;
+        grant_valid = next_grant_valid;
+        grant_encoded = next_grant_valid ? next_grant : 0; // Ensure 0 when invalid
+        // Wait, grant_encoded should be the index. 
+        // If next_grant is 1<<idx, then grant_encoded is idx.
+        // But if next_grant_valid is 0, grant_encoded should be 0 or don't care?
+        // Spec: "grant_valid and grant_encoded must match grant".
+        // This phrasing is slightly ambiguous. 
+        // It likely means: grant_encoded represents the port index of 'grant'.
+        // If grant_valid is 0, grant_encoded can be 0.
+        
+        // Re-evaluating "grant_encoded must match grant"
+        // If grant = 4'b0010 (Port 1), grant_encoded should be 1.
+        // If grant = 0, grant_encoded = 0.
+        
+        if (next_grant_valid) begin
+            grant_encoded = $clog2(next_grant); // Assuming power of 2 PORTS
+        end else begin
+            grant_encoded = 0;
+        end
+    end
+
+    // Helper to extract index from one-hot
+    assign grant_encoded = (grant_valid) ? $clog2(grant) : 0;
+
+    // Re-implementing the priority logic cleanly inside the comb block to avoid function overhead in synthesis if needed,
+    // but functions are fine in Verilog-2001.
+    // Let's rewrite the comb logic inline for clarity and robustness.
+
+    reg [LOG_PORTS-1:0] winner_idx;
+    reg [LOG_PORTS-1:0] temp_ptr;
+    reg [PORTS-1:0] temp_req;
+    reg [LOG_BLOCK_ACK-1:0] temp_ack_cnt;
+    reg [LOG_PORTS-1:0] temp_score;
+    reg [LOG_PORTS-1:0] best_score;
+    reg best_idx;
+
+    always @(*) begin
+        winner_idx = 0;
+        temp_ptr = round_robin_ptr;
+        temp_req = request;
+        temp_ack_cnt = block_ack_cnt; // Need to capture current ack_cnt for priority calc? 
+        // Actually, priority calc depends on current state of request and ptr.
+        // The ack_cnt affects the "score" only if we consider it part of the tie-breaking? 
+        // No, ack_cnt is for the block logic, not priority selection.
+        // Priority selection is purely based on request and ptr.
+        
+        // Reset variables
+        best_idx = 0;
+        best_score = 0;
+
+        if (request == 0) begin
+            winner_idx = 0;
+        end else begin
+            // Determine if RR or Fixed
+            if (ARB_TYPE_ROUND_ROBIN) begin
+                temp_ptr = round_robin_ptr;
+            end else begin
+                temp_ptr = 0; // Dummy
+            end
+
+            // Iterate to find best
+            for (int i = 0; i < PORTS; i = i + 1) begin
+                if (temp_req[i]) begin
+                    reg [LOG_PORTS-1:0] score;
+                    
+                    if (ARB_TYPE_ROUND_ROBIN) begin
+                        score = (temp_ptr + i) % PORTS;
+                    end else begin
+                        if (ARB_LSB_HIGH_PRIORITY) begin
+                            score = i;
+                        end else begin
+                            score = PORTS - 1 - i;
+                        end
+                    end
+
+                    if (score < best_score) begin
+                        best_score = score;
+                        best_idx = i;
+                    end
+                end
+            end
+            winner_idx = best_idx;
+        end
+
+        // Block Logic
+        reg next_state_val;
+        reg next_grant_valid_val;
+        reg next_grant_val;
+        reg next_ptr_val;
+        reg next_ack_cnt_val;
+        reg next_block_val;
+
+        next_block_val = ARB_BLOCK;
+        next_state_val = IDLE;
+        next_grant_valid_val = 0;
+        next_grant_val = 0;
+        next_ptr_val = round_robin_ptr;
+        next_ack_cnt_val = block_ack_cnt;
+
+        if (request == 0) begin
+            next_state_val = IDLE;
+            next_grant_valid_val = 0;
+            next_grant_val = 0;
+            if (!next_block_val) next_ptr_val = 0;
+        end else begin
+            // Grant active
+            next_state_val = GRANTING;
+            next_grant_valid_val = 1;
+            next_grant_val = 1 << winner_idx;
+            
+            // Update RR pointer
+            if (ARB_TYPE_ROUND_ROBIN) begin
+                next_ptr_val = (round_robin_ptr + 1) % PORTS;
+            end
+
+            // Block Ack Logic
+            if (next_block_val) begin
+                if (acknowledge[winner_idx]) begin
+                    if (next_ack_cnt_val == 0) begin
+                        // First ack
+                        next_ack_cnt_val = LOG_BLOCK_ACK - 1;
+                    end else begin
+                        next_ack_cnt_val = next_ack_cnt_val - 1;
+                    end
+                    
+                    // Check if we should release
+                    if (next_ack_cnt_val == 0) begin
+                        // All acks received
+                        next_state_val = IDLE;
+                        next_grant_valid_val = 0;
+                        next_grant_val = 0;
+                        if (!next_block_val) next_ptr_val = 0;
+                    end
+                end else begin
+                    // No ack yet
+                    if (next_ack_cnt_val == 0) begin
+                        next_ack_cnt_val = LOG_BLOCK_ACK - 1;
+                    end
+                end
+            end else begin
+                // Not blocking
+                next_ack_cnt_val = 0;
+                if (acknowledge[winner_idx]) begin
+                    next_state_val = IDLE;
+                    next_grant_valid_val = 0;
+                    next_grant_val = 0;
+                end
+            end
+        end
+
+        // Assign outputs
+        grant = next_grant_val;
+        grant_valid = next_grant_valid_val;
+        grant_encoded = next_grant_valid_val ? winner_idx : 0;
+        
+        // Update registers
+        state <= next_state_val;
+        round_robin_ptr <= next_ptr_val;
+        block_ack_count <= next_ack_cnt_val;
+    end
+
+    // Fix: The previous block had 'always @(*)' with assignments to state, which is illegal in Verilog-2001 
+    // if mixed with procedural assignments in the same block or if not careful.
+    // Better structure:
+    // 1. State Register (Sequential)
+    // 2. Combinational Logic for Next State and Outputs (Always @*)
+    
+    // Re-writing the module structure properly.
+
+    reg [1:0] state_reg;
+    reg [LOG_PORTS-1:0] rr_ptr_reg;
+    reg [LOG_BLOCK_ACK-1:0] ack_cnt_reg;
+
+    // Sequential Logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state_reg <= IDLE;
+            rr_ptr_reg <= 0;
+            ack_cnt_reg <= 0;
+        end else begin
+            state_reg <= state_next;
+            rr_ptr_reg <= rr_ptr_next;
+            ack_cnt_reg <= ack_cnt_next;
+        end
+    end
+
+    // Combinational Logic
+    always @(*) begin
+        state_next = IDLE;
+        rr_ptr_next = rr_ptr_reg;
+        ack_cnt_next = ack_cnt_reg;
+        grant = 0;
+        grant_valid = 0;
+        grant_encoded = 0;
+
+        if (request == 0) begin
+            state_next = IDLE;
+            grant_valid = 0;
+            grant = 0;
+            if (!ARB_BLOCK) rr_ptr_next = 0;
+        end else begin
+            // Calculate Winner
+            [LOG_PORTS-1:0] w_idx;
+            [LOG_PORTS-1:0] s_val;
+            [LOG_PORTS-1:0] b_s;
+            reg b_idx;
+
+            if (ARB_TYPE_ROUND_ROBIN) begin
+                s_val = (rr_ptr_reg + 0) % PORTS; // Base
+                b_idx = 0;
+                b_s = s_val;
+                
+                for (int i = 0; i < PORTS; i = i + 1) begin
+                    if (request[i]) begin
+                        s_val = (rr_ptr_reg + i) % PORTS;
+                        if (s_val < b_s) begin
+                            b_s = s_val;
+                            b_idx = i;
+                        end
+                    end
+                end
+                w_idx = b_idx;
+            end else begin
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    // Find lowest index
+                    w_idx = PORTS; // Init with max
+                    for (int i = 0; i < PORTS; i = i + 1) begin
+                        if (request[i]) begin
+                            if (i < w_idx) w_idx = i;
+                        end
+                    end
+                end else begin
+                    // Find highest index
+                    w_idx = -1;
+                    for (int i = PORTS-1; i >= 0; i = i - 1) begin
+                        if (request[i]) begin
+                            w_idx = i;
+                            break;
+                        end
+                    end
+                end
+            end
+
+            grant = 1 << w_idx;
+            grant_valid = 1;
+            grant_encoded = w_idx;
+            state_next = GRANTING;
+
+            // Update RR pointer
+            if (ARB_TYPE_ROUND_ROBIN) begin
+                rr_ptr_next = (rr_ptr_reg + 1) % PORTS;
+            end
+
+            // Block Logic
+            if (ARB_BLOCK) begin
+                if (acknowledge[w_idx]) begin
+                    if (ack_cnt_reg == 0) begin
+                        ack_cnt_next = LOG_BLOCK_ACK - 1;
+                    end else begin
+                        ack_cnt_next = ack_cnt_reg - 1;
+                    end
+
+                    if (ack_cnt_next == 0) begin
+                        state_next = IDLE;
+                        grant_valid = 0;
+                        grant = 0;
+                        if (!ARB_BLOCK) rr_ptr_next = 0;
+                    end
+                end else begin
+                    if (ack_cnt_reg == 0) begin
+                        ack_cnt_next = LOG_BLOCK_ACK - 1;
+                    end
+                end
+            end else begin
+                ack_cnt_next = 0;
+                if (acknowledge[w_idx]) begin
+                    state_next = IDLE;
+                    grant_valid = 0;
+                    grant = 0;
+                end
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,346 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  wire        src_rst_ni,
+  input  wire        src_clk_i,
+  input  wire        src_valid_i,
+  input  wire        dst_rst_ni,
+  input  wire        dst_clk_i,
+  input  wire        dst_ready_i,
+  output reg         src_ready_o,
+  output reg         dst_valid_o,
+  output reg [WIDTH-1:0] dst_data_o
+);
+
+  // ---------------------------------------------------------
+  // Source Domain Logic
+  // ---------------------------------------------------------
+  // State Machine for Source Side
+  // States:
+  //   IDLE       : Waiting for valid
+  //   WAIT_READY : Waiting for ready (holding data)
+  //   SEND_RESET : Sending reset message (if enabled)
+  
+  localparam IDLE = 2'b00;
+  localparam WAIT_READY = 2'b01;
+  localparam SEND_RESET = 2'b10;
+
+  reg [1:0] src_state;
+  reg [WIDTH-1:0] src_data_reg;
+  reg src_reset_msg_valid;
+
+  // Reset logic for source domain
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_state <= IDLE;
+      src_data_reg <= '0;
+      src_reset_msg_valid <= 1'b0;
+      src_ready_o <= 1'b1;
+    end else begin
+      case (src_state)
+        IDLE: begin
+          if (src_valid_i) begin
+            if (SEND_RESET_MSG) begin
+              src_state <= SEND_RESET;
+              src_data_reg <= RESET_MSG;
+              src_reset_msg_valid <= 1'b1;
+            end else begin
+              src_state <= WAIT_READY;
+              src_data_reg <= src_data_i;
+              src_reset_msg_valid <= 1'b0;
+            end
+          end
+          src_ready_o <= 1'b1;
+        end
+
+        WAIT_READY: begin
+          if (src_reset_msg_valid) begin
+            src_state <= IDLE;
+            src_reset_msg_valid <= 1'b0;
+          end
+          src_ready_o <= 1'b1;
+        end
+
+        SEND_RESET: begin
+          src_ready_o <= 1'b1;
+          if (src_reset_msg_valid) begin
+            src_state <= IDLE;
+            src_reset_msg_valid <= 1'b0;
+          end
+        end
+
+        default: begin
+          src_state <= IDLE;
+          src_ready_o <= 1'b1;
+        end
+      endcase
+    end
+  end
+
+  // ---------------------------------------------------------
+  // Destination Domain Logic
+  // ---------------------------------------------------------
+  // State Machine for Destination Side
+  // States:
+  //   IDLE       : Waiting for valid
+  //   WAIT_VALID : Waiting for valid (holding ready)
+  //   WAIT_READY : Waiting for ready (holding data)
+  //   SEND_RESET : Sending reset message (if enabled)
+  
+  localparam IDLE = 3'b000;
+  localparam WAIT_VALID = 3'b001;
+  localparam WAIT_READY = 3'b010;
+  localparam SEND_RESET = 3'b100;
+
+  reg [2:0] dst_state;
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_reset_msg_valid;
+  reg dst_valid_reg; // Internal valid to ensure stability
+
+  // Reset logic for destination domain
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_state <= IDLE;
+      dst_data_reg <= '0;
+      dst_reset_msg_valid <= 1'b0;
+      dst_valid_o <= 1'b0;
+    end else begin
+      case (dst_state)
+        IDLE: begin
+          if (dst_valid_reg) begin
+            if (SEND_RESET_MSG) begin
+              dst_state <= SEND_RESET;
+              dst_data_reg <= RESET_MSG;
+              dst_reset_msg_valid <= 1'b1;
+            end else begin
+              dst_state <= WAIT_READY;
+              dst_data_reg <= dst_data_reg; // Hold data
+              dst_reset_msg_valid <= 1'b0;
+            end
+          end
+          dst_valid_o <= 1'b0;
+        end
+
+        WAIT_VALID: begin
+          if (dst_valid_reg) begin
+            dst_state <= WAIT_READY;
+            dst_data_reg <= dst_data_reg; // Hold data
+            dst_reset_msg_valid <= 1'b0;
+          end
+          dst_valid_o <= 1'b0;
+        end
+
+        WAIT_READY: begin
+          if (dst_reset_msg_valid) begin
+            dst_state <= IDLE;
+            dst_reset_msg_valid <= 1'b0;
+          end
+          dst_valid_o <= 1'b0;
+        end
+
+        SEND_RESET: begin
+          dst_valid_o <= 1'b0;
+          if (dst_reset_msg_valid) begin
+            dst_state <= IDLE;
+            dst_reset_msg_valid <= 1'b0;
+          end
+        end
+
+        default: begin
+          dst_state <= IDLE;
+          dst_valid_o <= 1'b0;
+        end
+      endcase
+    end
+  end
+
+  // ---------------------------------------------------------
+  // CDC Handshake Logic (4-Phase)
+  // ---------------------------------------------------------
+  // Phase 1: src_valid_i -> src_valid_reg (sync to src domain)
+  // Phase 2: src_valid_reg -> dst_valid_reg (sync to dst domain)
+  // Phase 3: dst_valid_reg -> dst_valid_o (output to dst)
+  // Phase 4: dst_ready_i -> src_ready_o (sync to src domain)
+
+  // Source Domain: Capture src_valid_i
+  reg src_valid_reg;
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      src_valid_reg <= 1'b0;
+    else
+      src_valid_reg <= src_valid_i;
+  end
+
+  // Destination Domain: Capture src_valid_reg
+  reg dst_valid_reg;
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      dst_valid_reg <= 1'b0;
+    else
+      dst_valid_reg <= src_valid_reg;
+  end
+
+  // Source Domain: Capture dst_ready_i
+  reg dst_ready_reg;
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_ready_reg <= 1'b1;
+    else
+      dst_ready_reg <= dst_ready_i;
+  end
+
+  // Destination Domain: Capture dst_ready_i
+  reg dst_ready_reg_dst;
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      dst_ready_reg_dst <= 1'b1;
+    else
+      dst_ready_reg_dst <= dst_ready_i;
+  end
+
+  // ---------------------------------------------------------
+  // Handshake Control Logic
+  // ---------------------------------------------------------
+  // src_ready_o logic
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      src_ready_o <= 1'b1;
+    else begin
+      if (src_state == IDLE) begin
+        src_ready_o <= 1'b1;
+      end else if (src_state == WAIT_READY) begin
+        src_ready_o <= dst_ready_reg;
+      end else if (src_state == SEND_RESET) begin
+        src_ready_o <= 1'b1;
+      end
+    end
+  end
+
+  // dst_valid_o logic
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      dst_valid_o <= 1'b0;
+    else begin
+      if (dst_state == IDLE) begin
+        dst_valid_o <= 1'b0;
+      end else if (dst_state == WAIT_VALID) begin
+        dst_valid_o <= 1'b1;
+      end else if (dst_state == WAIT_READY) begin
+        dst_valid_o <= dst_ready_reg_dst;
+      end else if (dst_state == SEND_RESET) begin
+        dst_valid_o <= 1'b0;
+      end
+    end
+  end
+
+  // State transitions for Source
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      src_state <= IDLE;
+    else begin
+      case (src_state)
+        IDLE: begin
+          if (src_valid_i) begin
+            if (SEND_RESET_MSG)
+              src_state <= SEND_RESET;
+            else
+              src_state <= WAIT_READY;
+          end
+        end
+        WAIT_READY: begin
+          if (dst_ready_reg) begin
+            if (src_reset_msg_valid)
+              src_state <= IDLE;
+            else
+              src_state <= IDLE; // Handshake complete, go back to idle
+          end
+        end
+        SEND_RESET: begin
+          if (src_reset_msg_valid)
+            src_state <= IDLE;
+        end
+        default:
+          src_state <= IDLE;
+      endcase
+    end
+  end
+
+  // State transitions for Destination
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      dst_state <= IDLE;
+    else begin
+      case (dst_state)
+        IDLE: begin
+          if (dst_valid_reg) begin
+            if (SEND_RESET_MSG)
+              dst_state <= SEND_RESET;
+            else
+              dst_state <= WAIT_READY;
+          end
+        end
+        WAIT_VALID: begin
+          if (dst_valid_reg) begin
+            dst_state <= WAIT_READY;
+          end
+        end
+        WAIT_READY: begin
+          if (dst_ready_reg_dst) begin
+            if (dst_reset_msg_valid)
+              dst_state <= IDLE;
+            else
+              dst_state <= IDLE; // Handshake complete, go back to idle
+          end
+        end
+        SEND_RESET: begin
+          if (dst_reset_msg_valid)
+            dst_state <= IDLE;
+        end
+        default:
+          dst_state <= IDLE;
+      endcase
+    end
+  end
+
+  // ---------------------------------------------------------
+  // Data Output Logic
+  // ---------------------------------------------------------
+  // dst_data_o is driven by dst_data_reg, which is updated when the handshake completes
+  // in the source domain and then propagated to destination.
+  
+  // We need to capture the data in the source domain when the handshake is accepted
+  // and then transfer it to the destination domain.
+  
+  // Source domain: Capture data when valid and ready
+  reg [WIDTH-1:0] src_data_capture;
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      src_data_capture <= '0;
+    else begin
+      if (src_state == IDLE && src_valid_i) begin
+        src_data_capture <= src_data_i;
+      end
+    end
+  end
+
+  // Destination domain: Capture data from source
+  // This ensures the data is stable in the destination domain before being output
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      dst_data_reg <= '0;
+    else begin
+      if (dst_state == WAIT_READY && dst_ready_reg_dst) begin
+        dst_data_reg <= src_data_capture;
+      end
+    end
+  end
+
+  // Final assignment for dst_data_o
+  assign dst_data_o = dst_data_reg;
+
+endmodule
+```<|im_end|>

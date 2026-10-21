@@ -1,0 +1,57 @@
+```verilog
+`timescale 1ns / 1ps
+
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  wire        clk,
+    input  wire        async_rst_i,
+    output reg         sync_rst_o
+);
+
+    localparam DEASSERT_DEPTH = CHAINS;
+
+    // Internal state to track the number of consecutive clock cycles
+    // where the reset condition has been met (or not met, depending on polarity).
+    reg [DEASSERT_DEPTH - 1:0] deassert_count;
+
+    // Logic to determine if the reset should be asserted based on async_rst_i
+    // and the configured polarity.
+    // If RST_POL is 1 (active high), we care when async_rst_i is 1.
+    // If RST_POL is 0 (active low), we care when async_rst_i is 0.
+    wire rst_active;
+    assign rst_active = (RST_POL == 1'b1) ? async_rst_i : (~async_rst_i);
+
+    // Synchronizer logic
+    // We count the number of clock cycles where the reset is active.
+    // Once the reset becomes inactive, we count down the chain.
+    // The output is asserted only when the count is zero.
+    
+    always @(posedge clk) begin
+        if (rst_active) begin
+            // Reset is active: increment the counter.
+            // If the counter is already at max, it stays there.
+            if (deassert_count == DEASSERT_DEPTH - 1'b1) begin
+                deassert_count <= deassert_count;
+            end else begin
+                deassert_count <= deassert_count + 1'b1;
+            end
+        end else begin
+            // Reset is inactive: decrement the counter.
+            // If the counter is zero, it stays zero (reset released).
+            if (deassert_count == 0) begin
+                deassert_count <= 0;
+            end else begin
+                deassert_count <= deassert_count - 1'b1;
+            end
+        end
+    end
+
+    // Output assignment
+    // If the counter is zero, the reset is released (sync_rst_o = 0).
+    // Otherwise, the reset is asserted (sync_rst_o = 1).
+    assign sync_rst_o = (deassert_count == 0) ? 1'b0 : 1'b1;
+
+endmodule
+```<|im_end|>

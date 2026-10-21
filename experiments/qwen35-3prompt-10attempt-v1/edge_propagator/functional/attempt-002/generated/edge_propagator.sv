@@ -1,0 +1,47 @@
+```systemverilog
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  // State to track the last value of edge_i sampled in the TX domain
+  logic tx_edge_prev;
+  
+  // State to track the last value of edge_o sampled in the RX domain
+  logic rx_edge_prev;
+
+  // TX Domain: Sample edge_i and detect rising edges
+  // We use a flip-flop to store the previous value of edge_i
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      tx_edge_prev <= 1'b0;
+    end else begin
+      tx_edge_prev <= edge_i;
+    end
+  end
+
+  // RX Domain: Detect rising edges from the TX domain signal and propagate them
+  // We sample the current state of tx_edge_prev and compare it with rx_edge_prev
+  // to detect a transition in the TX domain.
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      edge_o <= 1'b0;
+      rx_edge_prev <= 1'b0;
+    end else begin
+      // Detect if a rising edge occurred in the TX domain
+      if (tx_edge_prev && !rx_edge_prev) begin
+        edge_o <= 1'b1;
+        rx_edge_prev <= 1'b1;
+      end else begin
+        edge_o <= 1'b0;
+        rx_edge_prev <= tx_edge_prev;
+      end
+    end
+  end
+
+endmodule
+```<|im_end|>

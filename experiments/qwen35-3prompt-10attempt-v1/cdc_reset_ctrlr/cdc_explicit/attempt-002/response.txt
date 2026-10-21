@@ -1,0 +1,276 @@
+```verilog
+`timescale 1ns/1ps
+
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  wire a_clk_i,
+    input  wire a_rst_ni,
+    input  wire a_clear_i,
+    output reg  a_clear_o,
+    input  wire a_clear_ack_i,
+    output reg  a_isolate_o,
+    input  wire a_isolate_ack_i,
+    input  wire b_clk_i,
+    input  wire b_rst_ni,
+    input  wire b_clear_i,
+    output reg  b_clear_o,
+    input  wire b_clear_ack_i,
+    output reg  b_isolate_o,
+    input  wire b_isolate_ack_i
+);
+
+    localparam STATE_IDLE = 2'b00;
+    localparam STATE_ISOLATING = 2'b01;
+    localparam STATE_CLEARING = 2'b10;
+    localparam STATE_DONE = 2'b11;
+
+    // State machine for the control logic (runs on a_clk_i)
+    // State encodes the global progress of the reset sequence.
+    // We use a single state machine to coordinate both domains to ensure
+    // atomicity of the "Isolate then Clear" sequence.
+    
+    reg [1:0] state_a;
+    reg [1:0] next_state_a;
+    
+    // Signals to track peer status in domain A
+    // These are sampled from domain B via CDC flip-flops
+    reg [1:0] b_status_a; // 00:Idle, 01:Isolating, 10:Clearing, 11:Done
+    reg [1:0] b_clear_req_a; // 1 if b requested clear
+    reg [1:0] b_isolate_req_a; // 1 if b requested isolate (internal flag)
+    
+    // Signals to track peer status in domain B
+    // These are sampled from domain A via CDC flip-flops
+    reg [1:0] a_status_b; // 00:Idle, 01:Isolating, 10:Clearing, 11:Done
+    reg [1:0] a_clear_req_b; // 1 if a requested clear
+    reg [1:0] a_isolate_req_b; // 1 if a requested isolate (internal flag)
+
+    // CDC Flip-Flops for Domain B -> A (Crossing b_clk to a_clk)
+    // We need to capture b's state and requests safely.
+    // Using a simple 2-stage synchronizer for the status/request signals.
+    wire [1:0] b_status_a_sync1;
+    wire [1:0] b_status_a_sync2;
+    wire [1:0] b_clear_req_a_sync1;
+    wire [1:0] b_clear_req_a_sync2;
+    wire [1:0] b_isolate_req_a_sync1;
+    wire [1:0] b_isolate_req_a_sync2;
+
+    // CDC Flip-Flops for Domain A -> B (Crossing a_clk to b_clk)
+    wire [1:0] a_status_b_sync1;
+    wire [1:0] a_status_b_sync2;
+    wire [1:0] a_clear_req_b_sync1;
+    wire [1:0] a_clear_req_b_sync2;
+    wire [1:0] a_isolate_req_b_sync1;
+    wire [1:0] a_isolate_req_b_sync2;
+
+    // ------------------------------------------------------------------
+    // CDC Synchronizers: b -> a
+    // ------------------------------------------------------------------
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            b_status_a_sync1 <= 2'b00;
+            b_clear_req_a_sync1 <= 2'b00;
+            b_isolate_req_a_sync1 <= 2'b00;
+        end else begin
+            b_status_a_sync1 <= {b_status_a[1], b_status_a[0]};
+            b_clear_req_a_sync1 <= {b_clear_req_a[1], b_clear_req_a[0]};
+            b_isolate_req_a_sync1 <= {b_isolate_req_a[1], b_isolate_req_a[0]};
+        end
+    end
+
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            b_status_a_sync2 <= 2'b00;
+            b_clear_req_a_sync2 <= 2'b00;
+            b_isolate_req_a_sync2 <= 2'b00;
+        end else begin
+            b_status_a_sync2 <= b_status_a_sync1;
+            b_clear_req_a_sync2 <= b_clear_req_a_sync1;
+            b_isolate_req_a_sync2 <= b_isolate_req_a_sync1;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // CDC Synchronizers: a -> b
+    // ------------------------------------------------------------------
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            a_status_b_sync1 <= 2'b00;
+            a_clear_req_b_sync1 <= 2'b00;
+            a_isolate_req_b_sync1 <= 2'b00;
+        end else begin
+            a_status_b_sync1 <= {a_status_b[1], a_status_b[0]};
+            a_clear_req_b_sync1 <= {a_clear_req_b[1], a_clear_req_b[0]};
+            a_isolate_req_b_sync1 <= {a_isolate_req_b[1], a_isolate_req_b[0]};
+        end
+    end
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            a_status_b_sync2 <= 2'b00;
+            a_clear_req_b_sync2 <= 2'b00;
+            a_isolate_req_b_sync2 <= 2'b00;
+        end else begin
+            a_status_b_sync2 <= a_status_b_sync1;
+            a_clear_req_b_sync2 <= a_clear_req_b_sync1;
+            a_isolate_req_b_sync2 <= a_isolate_req_b_sync1;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Internal State Logic (Domain A)
+    // ------------------------------------------------------------------
+    // State encoding:
+    // 00: IDLE - Waiting for request
+    // 01: ISOLATING - Isolate outputs high, waiting for peer isolate ack
+    // 10: CLEARING - Clear outputs high, waiting for peer clear ack
+    // 11: DONE - Reset released, returning to idle
+
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            state_a <= STATE_IDLE;
+        else
+            state_a <= next_state_a;
+    end
+
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            b_status_a <= 2'b00;
+            b_clear_req_a <= 2'b00;
+            b_isolate_req_a <= 2'b00;
+        end else begin
+            // Update local view of B's state
+            b_status_a <= b_status_a_sync2;
+            b_clear_req_a <= b_clear_req_a_sync2;
+            b_isolate_req_a <= b_isolate_req_a_sync2;
+        end
+    end
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            a_status_b <= 2'b00;
+            a_clear_req_b <= 2'b00;
+            a_isolate_req_b <= 2'b00;
+        end else begin
+            // Update local view of A's state
+            a_status_b <= a_status_b_sync2;
+            a_clear_req_b <= a_clear_req_b_sync2;
+            a_isolate_req_b <= a_isolate_req_b_sync2;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Next State Logic
+    // ------------------------------------------------------------------
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            next_state_a <= STATE_IDLE;
+        else
+            next_state_a = next_state_a_calc;
+    end
+
+    reg [1:0] next_state_a_calc;
+
+    always @(*) begin
+        next_state_a_calc = STATE_IDLE;
+        
+        case (state_a)
+            STATE_IDLE: begin
+                // Check if either domain requested clear
+                if (a_clear_i || b_clear_req_a) begin
+                    // Transition to Isolating
+                    next_state_a_calc = STATE_ISOLATING;
+                end
+            end
+
+            STATE_ISOLATING: begin
+                // Wait for both isolate acks
+                if (a_isolate_ack_i && b_isolate_ack_i) begin
+                    // Transition to Clearing
+                    next_state_a_calc = STATE_CLEARING;
+                end
+            end
+
+            STATE_CLEARING: begin
+                // Wait for both clear acks
+                if (a_clear_ack_i && b_clear_ack_i) begin
+                    // Transition to Done
+                    next_state_a_calc = STATE_DONE;
+                end
+            end
+
+            STATE_DONE: begin
+                // Wait for both clear inputs to go inactive (release)
+                // AND peer status indicates it is done/idle
+                if (!a_clear_i && !b_clear_req_a && 
+                   a_status_b == 2'b00 && b_status_a == 2'b00) begin
+                    next_state_a_calc = STATE_IDLE;
+                end
+            end
+        endcase
+    end
+
+    // ------------------------------------------------------------------
+    // Output Logic
+    // ------------------------------------------------------------------
+    // Drive outputs based on state and peer acknowledgments
+    
+    // Isolate Outputs: High during ISOLATING state
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            a_isolate_o <= 1'b0;
+        else
+            a_isolate_o <= (state_a == STATE_ISOLATING) ? 1'b1 : 1'b0;
+    end
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            b_isolate_o <= 1'b0;
+        else
+            b_isolate_o <= (state_a == STATE_ISOLATING) ? 1'b1 : 1'b0;
+    end
+
+    // Clear Outputs: High during CLEARING state
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            a_clear_o <= 1'b0;
+        else
+            a_clear_o <= (state_a == STATE_CLEARING) ? 1'b1 : 1'b0;
+    end
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            b_clear_o <= 1'b0;
+        else
+            b_clear_o <= (state_a == STATE_CLEARING) ? 1'b1 : 1'b0;
+    end
+
+    // ------------------------------------------------------------------
+    // Internal Request/Status Registers (Domain A)
+    // ------------------------------------------------------------------
+    // These hold the request status for the duration of the handshake
+    // to ensure the state machine sees the request even if the input toggles.
+    
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            a_clear_req_b <= 2'b00;
+            a_isolate_req_b <= 2'b00;
+        end else begin
+            a_clear_req_b <= a_clear_req_b_sync2;
+            a_isolate_req_b <= a_isolate_req_b_sync2;
+        end
+    end
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            b_clear_req_a <= 2'b00;
+            b_isolate_req_a <= 2'b00;
+        end else begin
+            b_clear_req_a <= b_clear_req_a_sync2;
+            b_isolate_req_a <= b_isolate_req_a_sync2;
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

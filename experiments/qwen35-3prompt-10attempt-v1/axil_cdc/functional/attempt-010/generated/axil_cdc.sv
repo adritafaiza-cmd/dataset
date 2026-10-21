@@ -1,0 +1,550 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // -----------------------------------------------------------------------
+    // Internal Signals
+    // -----------------------------------------------------------------------
+    wire s_aw_valid, s_w_valid, s_ar_valid, s_r_valid;
+    wire s_aw_ready, s_w_ready, s_ar_ready, s_r_ready;
+    wire s_b_valid, s_r_valid_out;
+
+    wire m_aw_valid, m_w_valid, m_ar_valid, m_r_valid;
+    wire m_aw_ready, m_w_ready, m_ar_ready, m_r_ready;
+    wire m_b_valid, m_r_valid_in;
+
+    reg   s_aw_addr, s_aw_prot, s_w_data, s_w_strb;
+    reg   s_ar_addr, s_ar_prot;
+    reg   s_b_resp;
+    reg   s_r_data, s_r_resp;
+
+    reg   m_aw_addr, m_aw_prot, m_w_data, m_w_strb;
+    reg   m_ar_addr, m_ar_prot;
+    reg   m_b_resp;
+    reg   m_r_data, m_r_resp;
+
+    // CDC State Machines
+    // Write Channel
+    reg s_w_state, m_w_state;
+    reg s_w_valid_reg, m_w_valid_reg;
+    reg s_w_data_reg, s_w_strb_reg;
+    reg m_w_data_reg, m_w_strb_reg;
+    reg s_w_ready_reg, m_w_ready_reg;
+
+    // Read Channel
+    reg s_r_state, m_r_state;
+    reg s_r_valid_reg, m_r_valid_reg;
+    reg s_r_addr_reg, s_r_prot_reg;
+    reg m_r_addr_reg, m_r_prot_reg;
+    reg s_r_data_reg, s_r_resp_reg;
+    reg m_r_data_reg, m_r_resp_reg;
+    reg s_r_ready_reg, m_r_ready_reg;
+
+    // Write Response Channel
+    reg s_b_state, m_b_state;
+    reg s_b_valid_reg, m_b_valid_reg;
+    reg s_b_resp_reg;
+    reg m_b_resp_reg;
+    reg s_b_ready_reg, m_b_ready_reg;
+
+    // Address/Protobuf Registers for CDC
+    reg s_aw_addr_reg, s_aw_prot_reg;
+    reg s_ar_addr_reg, s_ar_prot_reg;
+    reg m_aw_addr_reg, m_aw_prot_reg;
+    reg m_ar_addr_reg, m_ar_prot_reg;
+
+    // -----------------------------------------------------------------------
+    // Write Channel Logic (Slave -> Master)
+    // -----------------------------------------------------------------------
+    // Slave Side Write State Machine
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_w_state <= 1'b0;
+            s_w_valid_reg <= 1'b0;
+            s_w_ready_reg <= 1'b0;
+        end else begin
+            s_w_state <= s_w_state;
+            s_w_valid_reg <= s_w_valid_reg;
+            s_w_ready_reg <= s_w_ready_reg;
+        end
+    end
+
+    // Master Side Write State Machine
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_w_state <= 1'b0;
+            m_w_valid_reg <= 1'b0;
+            m_w_ready_reg <= 1'b0;
+        end else begin
+            m_w_state <= m_w_state;
+            m_w_valid_reg <= m_w_valid_reg;
+            m_w_ready_reg <= m_w_ready_reg;
+        end
+    end
+
+    // Slave Logic
+    assign s_axil_awready = (s_w_state == 1'b1) ? 1'b1 : 1'b0;
+    assign s_axil_wready = (s_w_state == 1'b1) ? 1'b1 : 1'b0;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_aw_addr_reg <= 1'b0;
+            s_aw_prot_reg <= 1'b0;
+            s_w_data_reg <= 1'b0;
+            s_w_strb_reg <= 1'b0;
+        end else begin
+            s_aw_addr_reg <= s_aw_addr_reg;
+            s_aw_prot_reg <= s_aw_prot_reg;
+            s_w_data_reg <= s_w_data_reg;
+            s_w_strb_reg <= s_w_strb_reg;
+        end
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_w_valid_reg <= 1'b0;
+        end else begin
+            if (s_axil_awvalid && s_axil_awready) begin
+                s_w_valid_reg <= 1'b1;
+                s_aw_addr_reg <= s_axil_awaddr;
+                s_aw_prot_reg <= s_axil_awprot;
+            end else if (s_axil_wvalid && s_axil_wready) begin
+                s_w_valid_reg <= 1'b1;
+                s_w_data_reg <= s_axil_wdata;
+                s_w_strb_reg <= s_axil_wstrb;
+            end else begin
+                s_w_valid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // Master Logic
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_aw_addr_reg <= 1'b0;
+            m_aw_prot_reg <= 1'b0;
+            m_w_data_reg <= 1'b0;
+            m_w_strb_reg <= 1'b0;
+            m_w_valid_reg <= 1'b0;
+        end else begin
+            m_aw_addr_reg <= m_aw_addr_reg;
+            m_aw_prot_reg <= m_aw_prot_reg;
+            m_w_data_reg <= m_w_data_reg;
+            m_w_strb_reg <= m_w_strb_reg;
+            m_w_valid_reg <= m_w_valid_reg;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_w_ready_reg <= 1'b0;
+        end else begin
+            if (m_axil_awready) begin
+                m_w_ready_reg <= 1'b1;
+            end else if (m_axil_wready) begin
+                m_w_ready_reg <= 1'b1;
+            end else begin
+                m_w_ready_reg <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_w_state <= 1'b0;
+        end else begin
+            if (m_w_valid_reg && m_w_ready_reg) begin
+                m_w_state <= 1'b1;
+            end else begin
+                m_w_state <= 1'b0;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Read Channel Logic (Slave -> Master)
+    // -----------------------------------------------------------------------
+    // Slave Side Read State Machine
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_r_state <= 1'b0;
+            s_r_valid_reg <= 1'b0;
+            s_r_ready_reg <= 1'b0;
+        end else begin
+            s_r_state <= s_r_state;
+            s_r_valid_reg <= s_r_valid_reg;
+            s_r_ready_reg <= s_r_ready_reg;
+        end
+    end
+
+    // Master Side Read State Machine
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_r_state <= 1'b0;
+            m_r_valid_reg <= 1'b0;
+            m_r_ready_reg <= 1'b0;
+        end else begin
+            m_r_state <= m_r_state;
+            m_r_valid_reg <= m_r_valid_reg;
+            m_r_ready_reg <= m_r_ready_reg;
+        end
+    end
+
+    // Slave Logic
+    assign s_axil_arready = (s_r_state == 1'b1) ? 1'b1 : 1'b0;
+    assign s_axil_rready = (s_r_state == 1'b1) ? 1'b1 : 1'b0;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_ar_addr_reg <= 1'b0;
+            s_ar_prot_reg <= 1'b0;
+        end else begin
+            s_ar_addr_reg <= s_ar_addr_reg;
+            s_ar_prot_reg <= s_ar_prot_reg;
+        end
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_r_valid_reg <= 1'b0;
+        end else begin
+            if (s_axil_arvalid && s_axil_arready) begin
+                s_r_valid_reg <= 1'b1;
+                s_ar_addr_reg <= s_axil_araddr;
+                s_ar_prot_reg <= s_axil_arprot;
+            end else begin
+                s_r_valid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // Master Logic
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_ar_addr_reg <= 1'b0;
+            m_ar_prot_reg <= 1'b0;
+            m_r_addr_reg <= 1'b0;
+            m_r_prot_reg <= 1'b0;
+            m_r_valid_reg <= 1'b0;
+        end else begin
+            m_ar_addr_reg <= m_ar_addr_reg;
+            m_ar_prot_reg <= m_ar_prot_reg;
+            m_r_addr_reg <= m_r_addr_reg;
+            m_r_prot_reg <= m_r_prot_reg;
+            m_r_valid_reg <= m_r_valid_reg;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_r_ready_reg <= 1'b0;
+        end else begin
+            if (m_axil_arready) begin
+                m_r_ready_reg <= 1'b1;
+            end else if (m_axil_rready) begin
+                m_r_ready_reg <= 1'b1;
+            end else begin
+                m_r_ready_reg <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_r_state <= 1'b0;
+        end else begin
+            if (m_r_valid_reg && m_r_ready_reg) begin
+                m_r_state <= 1'b1;
+            end else begin
+                m_r_state <= 1'b0;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Write Response Channel Logic (Master -> Slave)
+    // -----------------------------------------------------------------------
+    // Master Side Response State Machine
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_b_state <= 1'b0;
+            m_b_valid_reg <= 1'b0;
+            m_b_ready_reg <= 1'b0;
+        end else begin
+            m_b_state <= m_b_state;
+            m_b_valid_reg <= m_b_valid_reg;
+            m_b_ready_reg <= m_b_ready_reg;
+        end
+    end
+
+    // Slave Side Response State Machine
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_b_state <= 1'b0;
+            s_b_valid_reg <= 1'b0;
+            s_b_ready_reg <= 1'b0;
+        end else begin
+            s_b_state <= s_b_state;
+            s_b_valid_reg <= s_b_valid_reg;
+            s_b_ready_reg <= s_b_ready_reg;
+        end
+    end
+
+    // Master Logic
+    assign m_axil_bready = (m_b_state == 1'b1) ? 1'b1 : 1'b0;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_b_resp_reg <= 1'b0;
+            m_b_valid_reg <= 1'b0;
+        end else begin
+            m_b_resp_reg <= m_b_resp_reg;
+            m_b_valid_reg <= m_b_valid_reg;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_b_ready_reg <= 1'b0;
+        end else begin
+            if (m_axil_bready) begin
+                m_b_ready_reg <= 1'b1;
+            end else begin
+                m_b_ready_reg <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_b_state <= 1'b0;
+        end else begin
+            if (m_b_valid_reg && m_b_ready_reg) begin
+                m_b_state <= 1'b1;
+            end else begin
+                m_b_state <= 1'b0;
+            end
+        end
+    end
+
+    // Slave Logic
+    assign s_axil_bready = (s_b_state == 1'b1) ? 1'b1 : 1'b0;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_b_resp_reg <= 1'b0;
+            s_b_valid_reg <= 1'b0;
+        end else begin
+            s_b_resp_reg <= s_b_resp_reg;
+            s_b_valid_reg <= s_b_valid_reg;
+        end
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_b_ready_reg <= 1'b0;
+        end else begin
+            if (s_axil_bready) begin
+                s_b_ready_reg <= 1'b1;
+            end else begin
+                s_b_ready_reg <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_b_state <= 1'b0;
+        end else begin
+            if (s_b_valid_reg && s_b_ready_reg) begin
+                s_b_state <= 1'b1;
+            end else begin
+                s_b_state <= 1'b0;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Data Forwarding and Output Generation
+    // -----------------------------------------------------------------------
+
+    // Write Channel Forwarding
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_aw_addr <= 1'b0;
+            s_aw_prot <= 1'b0;
+            s_w_data <= 1'b0;
+            s_w_strb <= 1'b0;
+        end else begin
+            s_aw_addr <= s_aw_addr_reg;
+            s_aw_prot <= s_aw_prot_reg;
+            s_w_data <= s_w_data_reg;
+            s_w_strb <= s_w_strb_reg;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_aw_addr <= 1'b0;
+            m_aw_prot <= 1'b0;
+            m_w_data <= 1'b0;
+            m_w_strb <= 1'b0;
+        end else begin
+            m_aw_addr <= m_aw_addr_reg;
+            m_aw_prot <= m_aw_prot_reg;
+            m_w_data <= m_w_data_reg;
+            m_w_strb <= m_w_strb_reg;
+        end
+    end
+
+    assign m_axil_awaddr = m_aw_addr;
+    assign m_axil_awprot = m_aw_prot;
+    assign m_axil_awvalid = m_w_state;
+    assign m_axil_wdata = m_w_data;
+    assign m_axil_wstrb = m_w_strb;
+    assign m_axil_wvalid = m_w_valid_reg;
+    assign s_axil_awready = (s_w_state == 1'b1) ? 1'b1 : 1'b0;
+    assign s_axil_wready = (s_w_state == 1'b1) ? 1'b1 : 1'b0;
+
+    // Read Channel Forwarding
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_ar_addr <= 1'b0;
+            s_ar_prot <= 1'b0;
+        end else begin
+            s_ar_addr <= s_ar_addr_reg;
+            s_ar_prot <= s_ar_prot_reg;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_ar_addr <= 1'b0;
+            m_ar_prot <= 1'b0;
+        end else begin
+            m_ar_addr <= m_ar_addr_reg;
+            m_ar_prot <= m_ar_prot_reg;
+        end
+    end
+
+    assign m_axil_araddr = m_ar_addr;
+    assign m_axil_arprot = m_ar_prot;
+    assign m_axil_arvalid = m_r_state;
+    assign s_axil_arready = (s_r_state == 1'b1) ? 1'b1 : 1'b0;
+
+    // Read Data Forwarding
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_r_data <= 1'b0;
+            s_r_resp <= 1'b0;
+        end else begin
+            s_r_data <= s_r_data_reg;
+            s_r_resp <= s_r_resp_reg;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_r_data <= 1'b0;
+            m_r_resp <= 1'b0;
+        end else begin
+            m_r_data <= m_r_data_reg;
+            m_r_resp <= m_r_resp_reg;
+        end
+    end
+
+    assign s_axil_rdata = s_r_data;
+    assign s_axil_rresp = s_r_resp;
+    assign s_axil_rvalid = s_r_state;
+    assign s_axil_rready = (s_r_state == 1'b1) ? 1'b1 : 1'b0;
+
+    assign m_axil_rdata = m_r_data;
+    assign m_axil_rresp = m_r_resp;
+    assign m_axil_rvalid = m_r_valid_reg;
+    assign m_axil_rready = (m_r_state == 1'b1) ? 1'b1 : 1'b0;
+
+    // Write Response Forwarding
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_b_resp <= 1'b0;
+            s_b_valid <= 1'b0;
+        end else begin
+            s_b_resp <= s_b_resp_reg;
+            s_b_valid <= s_b_valid_reg;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_b_resp <= 1'b0;
+            m_b_valid <= 1'b0;
+        end else begin
+            m_b_resp <= m_b_resp_reg;
+            m_b_valid <= m_b_valid_reg;
+        end
+    end
+
+    assign s_axil_bresp = s_b_resp;
+    assign s_axil_bvalid = s_b_valid;
+    assign s_axil_bready = (s_b_state == 1'b1) ? 1'b1 : 1'b0;
+
+    assign m_axil_bresp = m_b_resp;
+    assign m_axil_bvalid = m_b_valid;
+    assign m_axil_bready = (m_b_state == 1'b1) ? 1'b1 : 1'b0;
+
+endmodule
+```<|im_end|>

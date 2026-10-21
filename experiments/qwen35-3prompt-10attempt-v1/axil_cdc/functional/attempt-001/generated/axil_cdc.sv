@@ -1,0 +1,432 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // -----------------------------------------------------------------------
+    // Internal Signals
+    // -----------------------------------------------------------------------
+    wire s_aw_valid, s_w_valid, s_ar_valid, s_r_valid;
+    wire s_aw_ready, s_w_ready, s_ar_ready, s_r_ready;
+    wire s_b_valid, s_r_valid_out; // s_r_valid_out is the internal trigger for read response
+    
+    wire m_aw_valid, m_w_valid, m_ar_valid, m_r_valid;
+    wire m_aw_ready, m_w_ready, m_ar_ready, m_r_ready;
+    wire m_b_valid, m_r_valid_in; // m_r_valid_in is the internal trigger for read response
+    
+    reg [ADDR_WIDTH-1:0] s_aw_addr, s_ar_addr;
+    reg [2:0] s_aw_prot, s_ar_prot;
+    reg [DATA_WIDTH-1:0] s_w_data, s_w_strb;
+    reg [DATA_WIDTH-1:0] s_r_data;
+    reg [1:0] s_b_resp, s_r_resp;
+    
+    reg [ADDR_WIDTH-1:0] m_aw_addr, m_ar_addr;
+    reg [2:0] m_aw_prot, m_ar_prot;
+    reg [DATA_WIDTH-1:0] m_w_data, m_w_strb;
+    reg [DATA_WIDTH-1:0] m_r_data;
+    reg [1:0] m_b_resp, m_r_resp;
+    
+    // CDC State Machines
+    // Write Channel
+    reg s_w_state, m_w_state;
+    reg s_w_valid_reg, m_w_valid_reg;
+    reg s_w_ready_reg, m_w_ready_reg;
+    reg [DATA_WIDTH-1:0] s_w_data_reg, m_w_data_reg;
+    reg [STRB_WIDTH-1:0] s_w_strb_reg, m_w_strb_reg;
+    
+    // Read Channel (Write phase)
+    reg s_ar_state, m_ar_state;
+    reg s_ar_valid_reg, m_ar_valid_reg;
+    reg s_ar_ready_reg, m_ar_ready_reg;
+    reg [ADDR_WIDTH-1:0] s_ar_addr_reg, m_ar_addr_reg;
+    reg [2:0] s_ar_prot_reg, m_ar_prot_reg;
+    
+    // Read Channel (Read Response)
+    reg s_r_state, m_r_state;
+    reg s_r_valid_reg, m_r_valid_reg;
+    reg s_r_ready_reg, m_r_ready_reg;
+    reg [DATA_WIDTH-1:0] s_r_data_reg, m_r_data_reg;
+    reg [1:0] s_r_resp_reg, m_r_resp_reg;
+    
+    // Write Response
+    reg s_b_state, m_b_state;
+    reg s_b_valid_reg, m_b_valid_reg;
+    reg s_b_ready_reg, m_b_ready_reg;
+    reg [1:0] s_b_resp_reg, m_b_resp_reg;
+
+    // -----------------------------------------------------------------------
+    // CDC Logic: Write Address Channel
+    // -----------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_aw_state <= 1'b0;
+            s_aw_addr <= '0;
+            s_aw_prot <= '0;
+            s_aw_valid_reg <= 1'b0;
+            s_aw_ready_reg <= 1'b1;
+        end else begin
+            s_aw_state <= s_aw_state;
+            s_aw_addr <= s_aw_addr;
+            s_aw_prot <= s_aw_prot;
+            
+            if (s_aw_state == 1'b0) begin
+                if (s_axil_awvalid && s_axil_awready) begin
+                    s_aw_valid_reg <= 1'b1;
+                    s_aw_addr <= s_axil_awaddr;
+                    s_aw_prot <= s_axil_awprot;
+                end else begin
+                    s_aw_valid_reg <= 1'b0;
+                end
+            end else begin
+                s_aw_valid_reg <= 1'b0;
+            end
+            
+            s_axil_awready <= (s_aw_state == 1'b0) ? 1'b1 : (s_aw_valid_reg ? 1'b0 : 1'b1);
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_aw_state <= 1'b0;
+            m_aw_addr <= '0;
+            m_aw_prot <= '0;
+            m_aw_valid_reg <= 1'b0;
+            m_aw_ready_reg <= 1'b1;
+        end else begin
+            m_aw_state <= m_aw_state;
+            m_aw_addr <= m_aw_addr;
+            m_aw_prot <= m_aw_prot;
+            
+            if (m_aw_state == 1'b0) begin
+                if (m_axil_awready) begin
+                    m_aw_valid_reg <= 1'b1;
+                    m_aw_addr <= s_aw_addr;
+                    m_aw_prot <= s_aw_prot;
+                end else begin
+                    m_aw_valid_reg <= 1'b0;
+                end
+            end else begin
+                m_aw_valid_reg <= 1'b0;
+            end
+            
+            m_axil_awready <= (m_aw_state == 1'b0) ? 1'b1 : (m_aw_valid_reg ? 1'b0 : 1'b1);
+        end
+    end
+
+    assign s_axil_awaddr = s_aw_state == 1'b0 ? s_axil_awaddr : s_aw_addr;
+    assign s_axil_awprot = s_aw_state == 1'b0 ? s_axil_awprot : s_aw_prot;
+    assign s_axil_awvalid = s_aw_state == 1'b0 ? s_axil_awvalid : s_aw_valid_reg;
+    assign s_axil_awready = s_axil_awready; // Driven by s_clk logic above
+
+    assign m_axil_awaddr = m_aw_state == 1'b0 ? m_axil_awaddr : m_aw_addr;
+    assign m_axil_awprot = m_aw_state == 1'b0 ? m_axil_awprot : m_aw_prot;
+    assign m_axil_awvalid = m_aw_state == 1'b0 ? m_axil_awvalid : m_aw_valid_reg;
+    assign m_axil_awready = m_axil_awready; // Driven by m_clk logic above
+
+    // -----------------------------------------------------------------------
+    // CDC Logic: Write Data Channel
+    // -----------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_w_state <= 1'b0;
+            s_w_valid_reg <= 1'b0;
+            s_w_ready_reg <= 1'b1;
+            s_w_data_reg <= '0;
+            s_w_strb_reg <= '0;
+        end else begin
+            s_w_state <= s_w_state;
+            
+            if (s_w_state == 1'b0) begin
+                if (s_axil_wvalid && s_axil_wready) begin
+                    s_w_valid_reg <= 1'b1;
+                    s_w_data_reg <= s_axil_wdata;
+                    s_w_strb_reg <= s_axil_wstrb;
+                end else begin
+                    s_w_valid_reg <= 1'b0;
+                end
+            end else begin
+                s_w_valid_reg <= 1'b0;
+            end
+            
+            s_axil_wready <= (s_w_state == 1'b0) ? 1'b1 : (s_w_valid_reg ? 1'b0 : 1'b1);
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_w_state <= 1'b0;
+            m_w_valid_reg <= 1'b0;
+            m_w_ready_reg <= 1'b1;
+            m_w_data_reg <= '0;
+            m_w_strb_reg <= '0;
+        end else begin
+            m_w_state <= m_w_state;
+            
+            if (m_w_state == 1'b0) begin
+                if (m_axil_wready) begin
+                    m_w_valid_reg <= 1'b1;
+                    m_w_data_reg <= s_w_data_reg;
+                    m_w_strb_reg <= s_w_strb_reg;
+                end else begin
+                    m_w_valid_reg <= 1'b0;
+                end
+            end else begin
+                m_w_valid_reg <= 1'b0;
+            end
+            
+            m_axil_wready <= (m_w_state == 1'b0) ? 1'b1 : (m_w_valid_reg ? 1'b0 : 1'b1);
+        end
+    end
+
+    assign s_axil_wdata = s_w_state == 1'b0 ? s_axil_wdata : s_w_data_reg;
+    assign s_axil_wstrb = s_w_state == 1'b0 ? s_axil_wstrb : s_w_strb_reg;
+    assign s_axil_wvalid = s_w_state == 1'b0 ? s_axil_wvalid : s_w_valid_reg;
+    assign s_axil_wready = s_axil_wready;
+
+    assign m_axil_wdata = m_w_state == 1'b0 ? m_axil_wdata : m_w_data_reg;
+    assign m_axil_wstrb = m_w_state == 1'b0 ? m_axil_wstrb : m_w_strb_reg;
+    assign m_axil_wvalid = m_w_state == 1'b0 ? m_axil_wvalid : m_w_valid_reg;
+    assign m_axil_wready = m_axil_wready;
+
+    // -----------------------------------------------------------------------
+    // CDC Logic: Write Response Channel
+    // -----------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_b_state <= 1'b0;
+            s_b_valid_reg <= 1'b0;
+            s_b_ready_reg <= 1'b1;
+            s_b_resp_reg <= '0;
+        end else begin
+            s_b_state <= s_b_state;
+            
+            if (s_b_state == 1'b0) begin
+                if (s_axil_bready && m_axil_bvalid) begin
+                    s_b_valid_reg <= 1'b1;
+                    s_b_resp_reg <= m_axil_bresp;
+                end else begin
+                    s_b_valid_reg <= 1'b0;
+                end
+            end else begin
+                s_b_valid_reg <= 1'b0;
+            end
+            
+            s_axil_bvalid <= (s_b_state == 1'b0) ? 1'b0 : s_b_valid_reg;
+            s_axil_bresp <= (s_b_state == 1'b0) ? '0 : s_b_resp_reg;
+            s_axil_bready <= (s_b_state == 1'b0) ? 1'b1 : (s_b_valid_reg ? 1'b0 : 1'b1);
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_b_state <= 1'b0;
+            m_b_valid_reg <= 1'b0;
+            m_b_ready_reg <= 1'b1;
+            m_b_resp_reg <= '0;
+        end else begin
+            m_b_state <= m_b_state;
+            
+            if (m_b_state == 1'b0) begin
+                if (m_axil_bready && s_axil_bvalid) begin
+                    m_b_valid_reg <= 1'b1;
+                    m_b_resp_reg <= s_axil_bresp;
+                end else begin
+                    m_b_valid_reg <= 1'b0;
+                end
+            end else begin
+                m_b_valid_reg <= 1'b0;
+            end
+            
+            m_axil_bvalid <= (m_b_state == 1'b0) ? 1'b0 : m_b_valid_reg;
+            m_axil_bresp <= (m_b_state == 1'b0) ? '0 : m_b_resp_reg;
+            m_axil_bready <= (m_b_state == 1'b0) ? 1'b1 : (m_b_valid_reg ? 1'b0 : 1'b1);
+        end
+    end
+
+    assign s_axil_bready = s_axil_bready;
+    assign m_axil_bready = m_axil_bready;
+
+    // -----------------------------------------------------------------------
+    // CDC Logic: Read Address Channel
+    // -----------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_ar_state <= 1'b0;
+            s_ar_valid_reg <= 1'b0;
+            s_ar_ready_reg <= 1'b1;
+            s_ar_addr_reg <= '0;
+            s_ar_prot_reg <= '0;
+        end else begin
+            s_ar_state <= s_ar_state;
+            
+            if (s_ar_state == 1'b0) begin
+                if (s_axil_arvalid && s_axil_arready) begin
+                    s_ar_valid_reg <= 1'b1;
+                    s_ar_addr_reg <= s_axil_araddr;
+                    s_ar_prot_reg <= s_axil_arprot;
+                end else begin
+                    s_ar_valid_reg <= 1'b0;
+                end
+            end else begin
+                s_ar_valid_reg <= 1'b0;
+            end
+            
+            s_axil_arready <= (s_ar_state == 1'b0) ? 1'b1 : (s_ar_valid_reg ? 1'b0 : 1'b1);
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_ar_state <= 1'b0;
+            m_ar_valid_reg <= 1'b0;
+            m_ar_ready_reg <= 1'b1;
+            m_ar_addr_reg <= '0;
+            m_ar_prot_reg <= '0;
+        end else begin
+            m_ar_state <= m_ar_state;
+            
+            if (m_ar_state == 1'b0) begin
+                if (m_axil_arready) begin
+                    m_ar_valid_reg <= 1'b1;
+                    m_ar_addr_reg <= s_ar_addr_reg;
+                    m_ar_prot_reg <= s_ar_prot_reg;
+                end else begin
+                    m_ar_valid_reg <= 1'b0;
+                end
+            end else begin
+                m_ar_valid_reg <= 1'b0;
+            end
+            
+            m_axil_arready <= (m_ar_state == 1'b0) ? 1'b1 : (m_ar_valid_reg ? 1'b0 : 1'b1);
+        end
+    end
+
+    assign s_axil_araddr = s_ar_state == 1'b0 ? s_axil_araddr : s_ar_addr_reg;
+    assign s_axil_arprot = s_ar_state == 1'b0 ? s_axil_arprot : s_ar_prot_reg;
+    assign s_axil_arvalid = s_ar_state == 1'b0 ? s_axil_arvalid : s_ar_valid_reg;
+    assign s_axil_arready = s_axil_arready;
+
+    assign m_axil_araddr = m_ar_state == 1'b0 ? m_axil_araddr : m_ar_addr_reg;
+    assign m_axil_arprot = m_ar_state == 1'b0 ? m_axil_arprot : m_ar_prot_reg;
+    assign m_axil_arvalid = m_ar_state == 1'b0 ? m_axil_arvalid : m_ar_valid_reg;
+    assign m_axil_arready = m_axil_arready;
+
+    // -----------------------------------------------------------------------
+    // CDC Logic: Read Response Channel
+    // -----------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_r_state <= 1'b0;
+            s_r_valid_reg <= 1'b0;
+            s_r_ready_reg <= 1'b1;
+            s_r_data_reg <= '0;
+            s_r_resp_reg <= '0;
+        end else begin
+            s_r_state <= s_r_state;
+            
+            if (s_r_state == 1'b0) begin
+                if (s_axil_rready && m_axil_rvalid) begin
+                    s_r_valid_reg <= 1'b1;
+                    s_r_data_reg <= m_axil_rdata;
+                    s_r_resp_reg <= m_axil_rresp;
+                end else begin
+                    s_r_valid_reg <= 1'b0;
+                end
+            end else begin
+                s_r_valid_reg <= 1'b0;
+            end
+            
+            s_axil_rvalid <= (s_r_state == 1'b0) ? 1'b0 : s_r_valid_reg;
+            s_axil_rdata <= (s_r_state == 1'b0) ? '0 : s_r_data_reg;
+            s_axil_rresp <= (s_r_state == 1'b0) ? '0 : s_r_resp_reg;
+            s_axil_rready <= (s_r_state == 1'b0) ? 1'b1 : (s_r_valid_reg ? 1'b0 : 1'b1);
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_r_state <= 1'b0;
+            m_r_valid_reg <= 1'b0;
+            m_r_ready_reg <= 1'b1;
+            m_r_data_reg <= '0;
+            m_r_resp_reg <= '0;
+        end else begin
+            m_r_state <= m_r_state;
+            
+            if (m_r_state == 1'b0) begin
+                if (m_axil_rready && s_axil_rvalid) begin
+                    m_r_valid_reg <= 1'b1;
+                    m_r_data_reg <= s_axil_rdata;
+                    m_r_resp_reg <= s_axil_rresp;
+                end else begin
+                    m_r_valid_reg <= 1'b0;
+                end
+            end else begin
+                m_r_valid_reg <= 1'b0;
+            end
+            
+            m_axil_rvalid <= (m_r_state == 1'b0) ? 1'b0 : m_r_valid_reg;
+            m_axil_rdata <= (m_r_state == 1'b0) ? '0 : m_r_data_reg;
+            m_axil_rresp <= (m_r_state == 1'b0) ? '0 : m_r_resp_reg;
+            m_axil_rready <= (m_r_state == 1'b0) ? 1'b1 : (m_r_valid_reg ? 1'b0 : 1'b1);
+        end
+    end
+
+    assign s_axil_rready = s_axil_rready;
+    assign m_axil_rready = m_axil_rready;
+
+endmodule
+```<|im_end|>

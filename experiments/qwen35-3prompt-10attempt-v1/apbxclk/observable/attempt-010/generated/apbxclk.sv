@@ -1,0 +1,317 @@
+```verilog
+`timescale 1ns/1ps
+
+module apbxclk #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	parameter [0:0]	OPT_REGISTERED = 1'b0,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH
+) (
+	input	wire			S_APB_PCLK, S_PRESETn,
+	input	wire			S_APB_PSEL,
+	input	wire			S_APB_PENABLE,
+	output	reg			S_APB_PREADY,
+	input	wire	[AW-1:0]	S_APB_PADDR,
+	input	wire			S_APB_PWRITE,
+	input	wire	[DW-1:0]	S_APB_PWDATA,
+	input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+	input	wire	[2:0]		S_APB_PPROT,
+	output	wire	[DW-1:0]	S_APB_PRDATA,
+	output	wire			S_APB_PSLVERR,
+	input	wire			M_APB_PCLK,
+	output	reg			M_PRESETn,
+	output	reg			M_APB_PSEL,
+	output	reg			M_APB_PENABLE,
+	input	wire			M_APB_PREADY,
+	output	wire	[AW-1:0]	M_APB_PADDR,
+	output	wire			M_APB_PWRITE,
+	output	wire	[DW-1:0]	M_APB_PWDATA,
+	output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+	output	wire	[2:0]		M_APB_PPROT,
+	input	wire	[DW-1:0]	M_APB_PRDATA,
+	input	wire			M_APB_PSLVERR
+);
+
+	localparam	AW = C_APB_ADDR_WIDTH;
+	localparam	DW = C_APB_DATA_WIDTH;
+	localparam	STRB_WIDTH = DW/8;
+
+	// Internal signals for state machine and data buffering
+	reg [AW-1:0]		i_addr;
+	reg [DW-1:0]		i_wdata;
+	reg [STRB_WIDTH-1:0]	i_wstrb;
+	reg [2:0]		i_prot;
+	reg			i_write;
+	reg			i_sel;
+	reg			i_enable;
+	reg			i_ready;
+	reg			i_err;
+	reg			i_rdata;
+	reg			i_slverr;
+
+	// State machine states
+	localparam	IDLE = 2'b00;
+	localparam	TRANSFERRING = 2'b01;
+	localparam	AWAITING_MASTER = 2'b10;
+	localparam	AWAITING_SLAVE = 2'b11;
+
+	reg [1:0]		state;
+	reg			hold_req;
+	reg			hold_resp;
+	reg			hold_addr;
+	reg			hold_write;
+	reg			hold_wdata;
+	reg			hold_wstrb;
+	reg			hold_prot;
+	reg			hold_rdata;
+	reg			hold_slverr;
+	reg			hold_sel;
+	reg			hold_enable;
+	reg			hold_ready;
+	reg			hold_err;
+
+	// Clock domain crossing registers for Slave side (Master -> Slave direction)
+	// These capture the request from the Master clock domain and hold it for the Slave clock domain
+	reg [AW-1:0]		cross_addr;
+	reg [DW-1:0]		cross_wdata;
+	reg [STRB_WIDTH-1:0]	cross_wstrb;
+	reg [2:0]		cross_prot;
+	reg			cross_write;
+	reg			cross_sel;
+	reg			cross_enable;
+	reg			cross_ready;
+	reg			cross_err;
+
+	// Clock domain crossing registers for Master side (Slave -> Master direction)
+	// These capture the response from the Slave clock domain and hold it for the Master clock domain
+	reg [DW-1:0]		cross_rdata;
+	reg			cross_slverr;
+	reg			cross_sel_m;
+	reg			cross_enable_m;
+	reg			cross_ready_m;
+	reg			cross_err_m;
+
+	// State machine for the bridge logic
+	reg [1:0]		bridge_state;
+
+	// Reset logic
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			M_PRESETn <= 1'b0;
+		end else begin
+			M_PRESETn <= 1'b1;
+		end
+	end
+
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			S_APB_PREADY <= 1'b1;
+		end else begin
+			S_APB_PREADY <= 1'b1;
+		end
+	end
+
+	// Clock domain crossing: Master signals to Slave side
+	// Capture Master signals on Slave clock edge
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			cross_addr <= 12'd0;
+			cross_wdata <= 32'd0;
+			cross_wstrb <= 4'd0;
+			cross_prot <= 3'd0;
+			cross_write <= 1'b0;
+			cross_sel <= 1'b0;
+			cross_enable <= 1'b0;
+			cross_ready <= 1'b1;
+			cross_err <= 1'b0;
+		end else begin
+			cross_addr <= M_APB_PADDR;
+			cross_wdata <= M_APB_PWDATA;
+			cross_wstrb <= M_APB_PWSTRB;
+			cross_prot <= M_APB_PPROT;
+			cross_write <= M_APB_PWRITE;
+			cross_sel <= M_APB_PSEL;
+			cross_enable <= M_APB_PENABLE;
+			cross_ready <= M_APB_PREADY;
+			cross_err <= M_APB_PSLVERR;
+		end
+	end
+
+	// Clock domain crossing: Slave signals to Master side
+	// Capture Slave signals on Master clock edge
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			cross_rdata <= 32'd0;
+			cross_slverr <= 1'b0;
+			cross_sel_m <= 1'b0;
+			cross_enable_m <= 1'b0;
+			cross_ready_m <= 1'b1;
+			cross_err_m <= 1'b0;
+		end else begin
+			cross_rdata <= S_APB_PRDATA;
+			cross_slverr <= S_APB_PSLVERR;
+			cross_sel_m <= S_APB_PSEL;
+			cross_enable_m <= S_APB_PENABLE;
+			cross_ready_m <= S_APB_PREADY;
+			cross_err_m <= S_APB_PSLVERR;
+		end
+	end
+
+	// Bridge state machine logic
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			bridge_state <= IDLE;
+			hold_req <= 1'b0;
+			hold_resp <= 1'b0;
+			hold_addr <= 12'd0;
+			hold_write <= 1'b0;
+			hold_wdata <= 32'd0;
+			hold_wstrb <= 4'd0;
+			hold_prot <= 3'd0;
+			hold_rdata <= 32'd0;
+			hold_slverr <= 1'b0;
+			hold_sel <= 1'b0;
+			hold_enable <= 1'b0;
+			hold_ready <= 1'b1;
+			hold_err <= 1'b0;
+		end else begin
+			// State machine logic
+			case (bridge_state)
+				IDLE: begin
+					if (cross_sel && cross_enable && !cross_ready) begin
+						// Start transfer
+						hold_addr <= cross_addr;
+						hold_write <= cross_write;
+						hold_wdata <= cross_wdata;
+						hold_wstrb <= cross_wstrb;
+						hold_prot <= cross_prot;
+						hold_sel <= cross_sel;
+						hold_enable <= cross_enable;
+						hold_ready <= 1'b0; // Indicate busy to master
+						hold_err <= cross_err;
+						hold_req <= 1'b1;
+						hold_resp <= 1'b0;
+						bridge_state <= TRANSFERRING;
+					end else if (cross_sel && cross_enable && cross_ready) begin
+						// Immediate response (if slave is ready immediately)
+						hold_addr <= cross_addr;
+						hold_write <= cross_write;
+						hold_wdata <= cross_wdata;
+						hold_wstrb <= cross_wstrb;
+						hold_prot <= cross_prot;
+						hold_sel <= cross_sel;
+						hold_enable <= cross_enable;
+						hold_ready <= 1'b1;
+						hold_err <= cross_err;
+						hold_req <= 1'b1;
+						hold_resp <= 1'b1;
+						bridge_state <= AWAITING_MASTER;
+					end else begin
+						hold_req <= 1'b0;
+						hold_resp <= 1'b0;
+						hold_addr <= 12'd0;
+						hold_write <= 1'b0;
+						hold_wdata <= 32'd0;
+						hold_wstrb <= 4'd0;
+						hold_prot <= 3'd0;
+						hold_rdata <= 32'd0;
+						hold_slverr <= 1'b0;
+						hold_sel <= 1'b0;
+						hold_enable <= 1'b0;
+						hold_ready <= 1'b1;
+						hold_err <= 1'b0;
+					end
+				end
+
+				TRANSFERRING: begin
+					// Wait for slave to be ready
+					if (cross_sel && cross_enable && cross_ready) begin
+						// Slave is ready, capture response
+						hold_rdata <= cross_rdata;
+						hold_slverr <= cross_slverr;
+						hold_resp <= 1'b1;
+						bridge_state <= AWAITING_SLAVE;
+					end else begin
+						// Still waiting for slave
+						hold_resp <= 1'b0;
+					end
+				end
+
+				AWAITING_SLAVE: begin
+					// Wait for slave to provide response
+					if (cross_sel && cross_enable && cross_ready) begin
+						// Slave provided response, now wait for master to acknowledge
+						hold_rdata <= cross_rdata;
+						hold_slverr <= cross_slverr;
+						hold_resp <= 1'b1;
+						bridge_state <= AWAITING_MASTER;
+					end else begin
+						// Still waiting for slave
+						hold_resp <= 1'b0;
+					end
+				end
+
+				AWAITING_MASTER: begin
+					// Wait for master to acknowledge
+					if (cross_sel && cross_enable && cross_ready) begin
+						// Master acknowledged, reset state
+						hold_req <= 1'b0;
+						hold_resp <= 1'b0;
+						hold_addr <= 12'd0;
+						hold_write <= 1'b0;
+						hold_wdata <= 32'd0;
+						hold_wstrb <= 4'd0;
+						hold_prot <= 3'd0;
+						hold_rdata <= 32'd0;
+						hold_slverr <= 1'b0;
+						hold_sel <= 1'b0;
+						hold_enable <= 1'b0;
+						hold_ready <= 1'b1;
+						hold_err <= 1'b0;
+						bridge_state <= IDLE;
+					end else begin
+						// Still waiting for master
+						hold_resp <= 1'b1;
+					end
+				end
+			endcase
+		end
+	end
+
+	// Output logic for Slave side (Master -> Slave direction)
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			M_APB_PADDR <= 12'd0;
+			M_APB_PWRITE <= 1'b0;
+			M_APB_PWDATA <= 32'd0;
+			M_APB_PWSTRB <= 4'd0;
+			M_APB_PPROT <= 3'd0;
+		end else begin
+			M_APB_PSEL <= hold_sel;
+			M_APB_PENABLE <= hold_enable;
+			M_APB_PADDR <= hold_addr;
+			M_APB_PWRITE <= hold_write;
+			M_APB_PWDATA <= hold_wdata;
+			M_APB_PWSTRB <= hold_wstrb;
+			M_APB_PPROT <= hold_prot;
+		end
+	end
+
+	// Output logic for Master side (Slave -> Master direction)
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			S_APB_PREADY <= 1'b1;
+			S_APB_PRDATA <= 32'd0;
+			S_APB_PSLVERR <= 1'b0;
+		end else begin
+			S_APB_PREADY <= hold_ready;
+			S_APB_PRDATA <= hold_rdata;
+			S_APB_PSLVERR <= hold_slverr;
+		end
+	end
+
+endmodule
+```<|im_end|>

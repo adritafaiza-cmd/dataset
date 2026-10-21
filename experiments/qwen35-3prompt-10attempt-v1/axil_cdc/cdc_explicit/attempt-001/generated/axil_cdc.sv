@@ -1,0 +1,544 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // -----------------------------------------------------------------------
+    // Internal Signals
+    // -----------------------------------------------------------------------
+    wire s_rst_n;
+    wire m_rst_n;
+    wire s_valid_aw, s_valid_w, s_valid_ar;
+    wire m_valid_aw, m_valid_w, m_valid_ar;
+    wire s_ready_aw, s_ready_w, s_ready_ar;
+    wire m_ready_aw, m_ready_w, m_ready_ar;
+    wire s_valid_b, m_valid_b;
+    wire s_ready_b, m_ready_b;
+    wire s_valid_r, m_valid_r;
+    wire s_ready_r, m_ready_r;
+
+    // State machines for Write Channel
+    reg [1:0] s_state_write; // 0: Idle, 1: Waiting for Slave Ready, 2: Waiting for Master Ready
+    reg [1:0] m_state_write; // 0: Idle, 1: Waiting for Slave Ready, 2: Waiting for Master Ready
+    reg [ADDR_WIDTH-1:0] s_addr_write;
+    reg [2:0] s_prot_write;
+    reg [DATA_WIDTH-1:0] s_data_write;
+    reg [STRB_WIDTH-1:0] s_strb_write;
+    reg [1:0] s_resp_write;
+
+    // State machines for Read Channel
+    reg [1:0] s_state_read; // 0: Idle, 1: Waiting for Slave Ready, 2: Waiting for Master Ready
+    reg [1:0] m_state_read; // 0: Idle, 1: Waiting for Slave Ready, 2: Waiting for Master Ready
+    reg [ADDR_WIDTH-1:0] s_addr_read;
+    reg [2:0] s_prot_read;
+    reg [1:0] s_resp_read;
+
+    // -----------------------------------------------------------------------
+    // CDC Logic: Reset Synchronizers
+    // -----------------------------------------------------------------------
+    reg s_rst_sync;
+    reg m_rst_sync;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_rst_sync <= 1'b1;
+        else
+            s_rst_sync <= s_rst_sync;
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_rst_sync <= 1'b1;
+        else
+            m_rst_sync <= m_rst_sync;
+    end
+
+    // -----------------------------------------------------------------------
+    // CDC Logic: Handshake Signal Synchronizers (2-stage)
+    // -----------------------------------------------------------------------
+    // Slave Side: Convert Master Ready to Slave Ready
+    reg s_ready_aw_sync1, s_ready_aw_sync2;
+    reg s_ready_w_sync1, s_ready_w_sync2;
+    reg s_ready_ar_sync1, s_ready_ar_sync2;
+    reg s_ready_b_sync1, s_ready_b_sync2;
+    reg s_ready_r_sync1, s_ready_r_sync2;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_ready_aw_sync1 <= 1'b0;
+            s_ready_aw_sync2 <= 1'b0;
+            s_ready_w_sync1 <= 1'b0;
+            s_ready_w_sync2 <= 1'b0;
+            s_ready_ar_sync1 <= 1'b0;
+            s_ready_ar_sync2 <= 1'b0;
+            s_ready_b_sync1 <= 1'b0;
+            s_ready_b_sync2 <= 1'b0;
+            s_ready_r_sync1 <= 1'b0;
+            s_ready_r_sync2 <= 1'b0;
+        end else begin
+            s_ready_aw_sync1 <= m_axil_awready;
+            s_ready_aw_sync2 <= s_ready_aw_sync1;
+            s_ready_w_sync1 <= m_axil_wready;
+            s_ready_w_sync2 <= s_ready_w_sync1;
+            s_ready_ar_sync1 <= m_axil_arready;
+            s_ready_ar_sync2 <= s_ready_ar_sync1;
+            s_ready_b_sync1 <= m_axil_bready;
+            s_ready_b_sync2 <= s_ready_b_sync1;
+            s_ready_r_sync1 <= m_axil_rready;
+            s_ready_r_sync2 <= s_ready_r_sync1;
+        end
+    end
+
+    // Master Side: Convert Slave Ready to Master Ready
+    reg m_ready_aw_sync1, m_ready_aw_sync2;
+    reg m_ready_w_sync1, m_ready_w_sync2;
+    reg m_ready_ar_sync1, m_ready_ar_sync2;
+    reg m_ready_b_sync1, m_ready_b_sync2;
+    reg m_ready_r_sync1, m_ready_r_sync2;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_ready_aw_sync1 <= 1'b0;
+            m_ready_aw_sync2 <= 1'b0;
+            m_ready_w_sync1 <= 1'b0;
+            m_ready_w_sync2 <= 1'b0;
+            m_ready_ar_sync1 <= 1'b0;
+            m_ready_ar_sync2 <= 1'b0;
+            m_ready_b_sync1 <= 1'b0;
+            m_ready_b_sync2 <= 1'b0;
+            m_ready_r_sync1 <= 1'b0;
+            m_ready_r_sync2 <= 1'b0;
+        end else begin
+            m_ready_aw_sync1 <= s_axil_awready;
+            m_ready_aw_sync2 <= m_ready_aw_sync1;
+            m_ready_w_sync1 <= s_axil_wready;
+            m_ready_w_sync2 <= m_ready_w_sync1;
+            m_ready_ar_sync1 <= s_axil_arready;
+            m_ready_ar_sync2 <= m_ready_ar_sync1;
+            m_ready_b_sync1 <= s_axil_bready;
+            m_ready_b_sync2 <= m_ready_b_sync1;
+            m_ready_r_sync1 <= s_axil_rready;
+            m_ready_r_sync2 <= m_ready_r_sync1;
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // CDC Logic: Valid Signal Synchronizers (2-stage)
+    // -----------------------------------------------------------------------
+    // Slave Side: Convert Master Valid to Slave Valid
+    reg s_valid_aw_sync1, s_valid_aw_sync2;
+    reg s_valid_w_sync1, s_valid_w_sync2;
+    reg s_valid_ar_sync1, s_valid_ar_sync2;
+    reg s_valid_b_sync1, s_valid_b_sync2;
+    reg s_valid_r_sync1, s_valid_r_sync2;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_valid_aw_sync1 <= 1'b0;
+            s_valid_aw_sync2 <= 1'b0;
+            s_valid_w_sync1 <= 1'b0;
+            s_valid_w_sync2 <= 1'b0;
+            s_valid_ar_sync1 <= 1'b0;
+            s_valid_ar_sync2 <= 1'b0;
+            s_valid_b_sync1 <= 1'b0;
+            s_valid_b_sync2 <= 1'b0;
+            s_valid_r_sync1 <= 1'b0;
+            s_valid_r_sync2 <= 1'b0;
+        end else begin
+            s_valid_aw_sync1 <= m_axil_awvalid;
+            s_valid_aw_sync2 <= s_valid_aw_sync1;
+            s_valid_w_sync1 <= m_axil_wvalid;
+            s_valid_w_sync2 <= s_valid_w_sync1;
+            s_valid_ar_sync1 <= m_axil_arvalid;
+            s_valid_ar_sync2 <= s_valid_ar_sync1;
+            s_valid_b_sync1 <= m_axil_bvalid;
+            s_valid_b_sync2 <= s_valid_b_sync1;
+            s_valid_r_sync1 <= m_axil_rvalid;
+            s_valid_r_sync2 <= s_valid_r_sync1;
+        end
+    end
+
+    // Master Side: Convert Slave Valid to Master Valid
+    reg m_valid_aw_sync1, m_valid_aw_sync2;
+    reg m_valid_w_sync1, m_valid_w_sync2;
+    reg m_valid_ar_sync1, m_valid_ar_sync2;
+    reg m_valid_b_sync1, m_valid_b_sync2;
+    reg m_valid_r_sync1, m_valid_r_sync2;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_valid_aw_sync1 <= 1'b0;
+            m_valid_aw_sync2 <= 1'b0;
+            m_valid_w_sync1 <= 1'b0;
+            m_valid_w_sync2 <= 1'b0;
+            m_valid_ar_sync1 <= 1'b0;
+            m_valid_ar_sync2 <= 1'b0;
+            m_valid_b_sync1 <= 1'b0;
+            m_valid_b_sync2 <= 1'b0;
+            m_valid_r_sync1 <= 1'b0;
+            m_valid_r_sync2 <= 1'b0;
+        end else begin
+            m_valid_aw_sync1 <= s_axil_awvalid;
+            m_valid_aw_sync2 <= m_valid_aw_sync1;
+            m_valid_w_sync1 <= s_axil_wvalid;
+            m_valid_w_sync2 <= m_valid_w_sync1;
+            m_valid_ar_sync1 <= s_axil_arvalid;
+            m_valid_ar_sync2 <= m_valid_ar_sync1;
+            m_valid_b_sync1 <= s_axil_bvalid;
+            m_valid_b_sync2 <= m_valid_b_sync1;
+            m_valid_r_sync1 <= s_axil_rvalid;
+            m_valid_r_sync2 <= m_valid_r_sync1;
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Write Channel Logic (Slave Side)
+    // -----------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_state_write <= 2'b00;
+            s_addr_write <= 32'h0;
+            s_prot_write <= 3'h0;
+            s_data_write <= 32'h0;
+            s_strb_write <= 4'h0;
+            s_resp_write <= 2'b00;
+        end else begin
+            case (s_state_write)
+                2'b00: // Idle
+                    if (s_valid_aw_sync2 && s_ready_aw_sync2) begin
+                        s_state_write <= 2'b01;
+                        s_addr_write <= s_axil_awaddr;
+                        s_prot_write <= s_axil_awprot;
+                    end
+                    if (s_valid_w_sync2 && s_ready_w_sync2) begin
+                        s_state_write <= 2'b01;
+                        s_data_write <= s_axil_wdata;
+                        s_strb_write <= s_axil_wstrb;
+                    end
+                    s_axil_awready <= (s_state_write == 2'b00) ? 1'b0 : (s_valid_aw_sync2 && s_ready_aw_sync2);
+                    s_axil_wready <= (s_state_write == 2'b00) ? 1'b0 : (s_valid_w_sync2 && s_ready_w_sync2);
+                    s_axil_bvalid <= 1'b0;
+                    s_axil_bresp <= 2'b00;
+
+                2'b01: // Waiting for Master Ready
+                    if (s_valid_aw_sync2 && s_ready_aw_sync2) begin
+                        s_state_write <= 2'b10;
+                    end
+                    if (s_valid_w_sync2 && s_ready_w_sync2) begin
+                        s_state_write <= 2'b10;
+                    end
+                    if (m_ready_aw_sync2) begin
+                        s_state_write <= 2'b11;
+                        m_axil_awaddr <= s_addr_write;
+                        m_axil_awprot <= s_prot_write;
+                        m_axil_awvalid <= 1'b1;
+                    end
+                    if (m_ready_w_sync2) begin
+                        s_state_write <= 2'b11;
+                        m_axil_wdata <= s_data_write;
+                        m_axil_wstrb <= s_strb_write;
+                        m_axil_wvalid <= 1'b1;
+                    end
+                    s_axil_awready <= 1'b1;
+                    s_axil_wready <= 1'b1;
+
+                2'b10: // Waiting for Slave Ready (Master Side)
+                    if (m_ready_aw_sync2) begin
+                        s_state_write <= 2'b11;
+                        m_axil_awaddr <= s_addr_write;
+                        m_axil_awprot <= s_prot_write;
+                        m_axil_awvalid <= 1'b1;
+                    end
+                    if (m_ready_w_sync2) begin
+                        s_state_write <= 2'b11;
+                        m_axil_wdata <= s_data_write;
+                        m_axil_wstrb <= s_strb_write;
+                        m_axil_wvalid <= 1'b1;
+                    end
+                    s_axil_awready <= 1'b1;
+                    s_axil_wready <= 1'b1;
+
+                2'b11: // Waiting for Slave Response
+                    if (m_valid_b_sync2) begin
+                        s_state_write <= 2'b00;
+                        s_axil_bvalid <= 1'b1;
+                        s_axil_bresp <= m_axil_bresp;
+                        m_axil_bready <= 1'b1;
+                    end
+                    if (m_ready_b_sync2) begin
+                        s_state_write <= 2'b00;
+                        s_axil_bvalid <= 1'b1;
+                        s_axil_bresp <= m_axil_bresp;
+                        m_axil_bready <= 1'b1;
+                    end
+                    s_axil_awready <= 1'b1;
+                    s_axil_wready <= 1'b1;
+            endcase
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Read Channel Logic (Slave Side)
+    // -----------------------------------------------------------------------
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_state_read <= 2'b00;
+            s_addr_read <= 32'h0;
+            s_prot_read <= 3'h0;
+            s_resp_read <= 2'b00;
+        end else begin
+            case (s_state_read)
+                2'b00: // Idle
+                    if (s_valid_ar_sync2 && s_ready_ar_sync2) begin
+                        s_state_read <= 2'b01;
+                        s_addr_read <= s_axil_araddr;
+                        s_prot_read <= s_axil_arprot;
+                    end
+                    s_axil_arready <= (s_state_read == 2'b00) ? 1'b0 : (s_valid_ar_sync2 && s_ready_ar_sync2);
+                    s_axil_rvalid <= 1'b0;
+                    s_axil_rdata <= 32'h0;
+                    s_axil_rresp <= 2'b00;
+
+                2'b01: // Waiting for Master Ready
+                    if (m_ready_ar_sync2) begin
+                        s_state_read <= 2'b10;
+                        m_axil_araddr <= s_addr_read;
+                        m_axil_arprot <= s_prot_read;
+                        m_axil_arvalid <= 1'b1;
+                    end
+                    s_axil_arready <= 1'b1;
+
+                2'b10: // Waiting for Slave Ready (Master Side)
+                    if (m_ready_ar_sync2) begin
+                        s_state_read <= 2'b11;
+                        m_axil_araddr <= s_addr_read;
+                        m_axil_arprot <= s_prot_read;
+                        m_axil_arvalid <= 1'b1;
+                    end
+                    s_axil_arready <= 1'b1;
+
+                2'b11: // Waiting for Slave Response
+                    if (m_valid_r_sync2) begin
+                        s_state_read <= 2'b00;
+                        s_axil_rvalid <= 1'b1;
+                        s_axil_rdata <= m_axil_rdata;
+                        s_axil_rresp <= m_axil_rresp;
+                        m_axil_rready <= 1'b1;
+                    end
+                    if (m_ready_r_sync2) begin
+                        s_state_read <= 2'b00;
+                        s_axil_rvalid <= 1'b1;
+                        s_axil_rdata <= m_axil_rdata;
+                        s_axil_rresp <= m_axil_rresp;
+                        m_axil_rready <= 1'b1;
+                    end
+                    s_axil_arready <= 1'b1;
+            endcase
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Write Channel Logic (Master Side)
+    // -----------------------------------------------------------------------
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_state_write <= 2'b00;
+        end else begin
+            case (m_state_write)
+                2'b00: // Idle
+                    if (s_valid_aw_sync2 && s_ready_aw_sync2) begin
+                        m_state_write <= 2'b01;
+                        m_addr_write <= s_axil_awaddr;
+                        m_prot_write <= s_axil_awprot;
+                    end
+                    if (s_valid_w_sync2 && s_ready_w_sync2) begin
+                        m_state_write <= 2'b01;
+                        m_data_write <= s_axil_wdata;
+                        m_strb_write <= s_axil_wstrb;
+                    end
+                    m_axil_awvalid <= (m_state_write == 2'b00) ? 1'b0 : (s_valid_aw_sync2 && s_ready_aw_sync2);
+                    m_axil_wvalid <= (m_state_write == 2'b00) ? 1'b0 : (s_valid_w_sync2 && s_ready_w_sync2);
+                    m_axil_bready <= 1'b0;
+
+                2'b01: // Waiting for Slave Ready
+                    if (s_valid_aw_sync2 && s_ready_aw_sync2) begin
+                        m_state_write <= 2'b10;
+                    end
+                    if (s_valid_w_sync2 && s_ready_w_sync2) begin
+                        m_state_write <= 2'b10;
+                    end
+                    if (m_ready_aw_sync2) begin
+                        m_state_write <= 2'b11;
+                        m_axil_awaddr <= m_addr_write;
+                        m_axil_awprot <= m_prot_write;
+                        m_axil_awvalid <= 1'b1;
+                    end
+                    if (m_ready_w_sync2) begin
+                        m_state_write <= 2'b11;
+                        m_axil_wdata <= m_data_write;
+                        m_axil_wstrb <= m_strb_write;
+                        m_axil_wvalid <= 1'b1;
+                    end
+                    m_axil_awready <= 1'b1;
+                    m_axil_wready <= 1'b1;
+
+                2'b10: // Waiting for Slave Ready (Master Side)
+                    if (m_ready_aw_sync2) begin
+                        m_state_write <= 2'b11;
+                        m_axil_awaddr <= m_addr_write;
+                        m_axil_awprot <= m_prot_write;
+                        m_axil_awvalid <= 1'b1;
+                    end
+                    if (m_ready_w_sync2) begin
+                        m_state_write <= 2'b11;
+                        m_axil_wdata <= m_data_write;
+                        m_axil_wstrb <= m_strb_write;
+                        m_axil_wvalid <= 1'b1;
+                    end
+                    m_axil_awready <= 1'b1;
+                    m_axil_wready <= 1'b1;
+
+                2'b11: // Waiting for Slave Response
+                    if (m_valid_b_sync2) begin
+                        m_state_write <= 2'b00;
+                        m_axil_bready <= 1'b1;
+                    end
+                    if (m_ready_b_sync2) begin
+                        m_state_write <= 2'b00;
+                        m_axil_bready <= 1'b1;
+                    end
+                    m_axil_awready <= 1'b1;
+                    m_axil_wready <= 1'b1;
+            endcase
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Read Channel Logic (Master Side)
+    // -----------------------------------------------------------------------
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_state_read <= 2'b00;
+        end else begin
+            case (m_state_read)
+                2'b00: // Idle
+                    if (s_valid_ar_sync2 && s_ready_ar_sync2) begin
+                        m_state_read <= 2'b01;
+                        m_addr_read <= s_axil_araddr;
+                        m_prot_read <= s_axil_arprot;
+                    end
+                    m_axil_arvalid <= (m_state_read == 2'b00) ? 1'b0 : (s_valid_ar_sync2 && s_ready_ar_sync2);
+                    m_axil_rready <= 1'b0;
+
+                2'b01: // Waiting for Slave Ready
+                    if (m_ready_ar_sync2) begin
+                        m_state_read <= 2'b10;
+                        m_axil_araddr <= m_addr_read;
+                        m_axil_arprot <= m_prot_read;
+                        m_axil_arvalid <= 1'b1;
+                    end
+                    m_axil_arready <= 1'b1;
+
+                2'b10: // Waiting for Slave Ready (Master Side)
+                    if (m_ready_ar_sync2) begin
+                        m_state_read <= 2'b11;
+                        m_axil_araddr <= m_addr_read;
+                        m_axil_arprot <= m_prot_read;
+                        m_axil_arvalid <= 1'b1;
+                    end
+                    m_axil_arready <= 1'b1;
+
+                2'b11: // Waiting for Slave Response
+                    if (m_valid_r_sync2) begin
+                        m_state_read <= 2'b00;
+                        m_axil_rready <= 1'b1;
+                    end
+                    if (m_ready_r_sync2) begin
+                        m_state_read <= 2'b00;
+                        m_axil_rready <= 1'b1;
+                    end
+                    m_axil_arready <= 1'b1;
+            endcase
+        end
+    end
+
+    // -----------------------------------------------------------------------
+    // Output Assignments
+    // -----------------------------------------------------------------------
+    assign s_axil_awready = (s_state_write == 2'b00) ? 1'b0 : (s_valid_aw_sync2 && s_ready_aw_sync2);
+    assign s_axil_wready = (s_state_write == 2'b00) ? 1'b0 : (s_valid_w_sync2 && s_ready_w_sync2);
+    assign s_axil_bresp = (s_state_write == 2'b11) ? m_axil_bresp : 2'b00;
+    assign s_axil_bvalid = (s_state_write == 2'b11) ? m_valid_b_sync2 : 1'b0;
+    assign s_axil_arready = (s_state_read == 2'b00) ? 1'b0 : (s_valid_ar_sync2 && s_ready_ar_sync2);
+    assign s_axil_rdata = (s_state_read == 2'b11) ? m_axil_rdata : 32'h0;
+    assign s_axil_rresp = (s_state_read == 2'b11) ? m_axil_rresp : 2'b00;
+    assign s_axil_rvalid = (s_state_read == 2'b11) ? m_valid_r_sync2 : 1'b0;
+
+    assign m_axil_awaddr = (m_state_write == 2'b11) ? m_addr_write : s_axil_awaddr;
+    assign m_axil_awprot = (m_state_write == 2'b11) ? m_prot_write : s_axil_awprot;
+    assign m_axil_awvalid = (m_state_write == 2'b11) ? 1'b1 : (s_valid_aw_sync2 && s_ready_aw_sync2);
+    assign m_axil_wdata = (m_state_write == 2'b11) ? m_data_write : s_axil_wdata;
+    assign m_axil_wstrb = (m_state_write == 2'b11) ? m_strb_write : s_axil_wstrb;
+    assign m_axil_wvalid = (m_state_write == 2'b11) ? 1'b1 : (s_valid_w_sync2 && s_ready_w_sync2);
+    assign m_axil_bready = (m_state_write == 2'b11) ? 1'b1 : 1'b0;
+
+    assign m_axil_araddr = (m_state_read == 2'b11) ? m_addr_read : s_axil_araddr;
+    assign m_axil_arprot = (m_state_read == 2'b11) ? m_prot_read : s_axil_arprot;
+    assign m_axil_arvalid = (m_state_read == 2'b11) ? 1'b1 : (s_valid_ar_sync2 && s_ready_ar_sync2);
+    assign m_axil_rready = (m_state_read == 2'b11) ? 1'b1 : (s_valid_r_sync2 && s_ready_r_sync2);
+
+endmodule
+```<|im_end|>

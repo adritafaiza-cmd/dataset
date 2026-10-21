@@ -1,0 +1,253 @@
+```verilog
+`timescale 1ns/1ps
+
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam ADDR_WIDTH = ASIZE;
+    localparam CAPACITY   = 1 << ASIZE;
+
+    // Write side registers (wclk domain)
+    reg [ADDR_WIDTH-1:0] wptr;
+    reg [ADDR_WIDTH-1:0] wptr_gray;
+    reg [ADDR_WIDTH-1:0] wptr_next;
+    reg [ADDR_WIDTH-1:0] wptr_next_gray;
+    reg                 wfull_reg;
+    reg                 wfull_next;
+
+    // Read side registers (rclk domain)
+    reg [ADDR_WIDTH-1:0] rptr;
+    reg [ADDR_WIDTH-1:0] rptr_gray;
+    reg [ADDR_WIDTH-1:0] rptr_next;
+    reg [ADDR_WIDTH-1:0] rptr_next_gray;
+    reg                 rempty_reg;
+    reg                 rempty_next;
+    reg [DSIZE-1:0]     rdata_reg;
+    reg [DSIZE-1:0]     rdata_next;
+
+    // Cross-domain pointers (stored in opposite domains)
+    wire [ADDR_WIDTH-1:0] wptr_gray_cross;
+    wire [ADDR_WIDTH-1:0] rptr_gray_cross;
+
+    // Write Pointer Logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= 1'b0;
+            wptr_gray <= 1'b0;
+            wfull_reg <= 1'b0;
+        end else begin
+            wptr <= wptr_next;
+            wptr_gray <= wptr_next_gray;
+            wfull_reg <= wfull_next;
+        end
+    end
+
+    // Write Pointer Next Logic
+    always @* begin
+        wptr_next = wptr;
+        wptr_next_gray = wptr_gray;
+        wfull_next = wfull_reg;
+
+        if (!wrst_n) begin
+            wptr_next = 1'b0;
+            wptr_next_gray = 1'b0;
+            wfull_next = 1'b0;
+        end else if (winc) begin
+            wptr_next = wptr + 1'b1;
+            // Gray code conversion for cross-domain pointer
+            wptr_next_gray = {wptr_next[ADDR_WIDTH-1], wptr_next[ADDR_WIDTH-1] ^ wptr_next[ADDR_WIDTH-2:0]};
+            
+            // Full detection: pointer wraps around
+            if (wptr == (CAPACITY - 1)) begin
+                wfull_next = 1'b1;
+            end
+        end
+    end
+
+    // Read Pointer Logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= 1'b0;
+            rptr_gray <= 1'b0;
+            rempty_reg <= 1'b1;
+            rdata_reg <= 1'b0;
+        end else begin
+            rptr <= rptr_next;
+            rptr_gray <= rptr_next_gray;
+            rempty_reg <= rempty_next;
+            rdata_reg <= rdata_next;
+        end
+    end
+
+    // Read Pointer Next Logic
+    always @* begin
+        rptr_next = rptr;
+        rptr_next_gray = rptr_gray;
+        rempty_next = rempty_reg;
+        rdata_next = rdata_reg;
+
+        if (!rrst_n) begin
+            rptr_next = 1'b0;
+            rptr_next_gray = 1'b0;
+            rempty_next = 1'b1;
+            rdata_next = 1'b0;
+        end else if (rinc) begin
+            rptr_next = rptr + 1'b1;
+            // Gray code conversion for cross-domain pointer
+            rptr_next_gray = {rptr_next[ADDR_WIDTH-1], rptr_next[ADDR_WIDTH-1] ^ rptr_next[ADDR_WIDTH-2:0]};
+            
+            // Empty detection: pointer wraps around
+            if (rptr == (CAPACITY - 1)) begin
+                rempty_next = 1'b1;
+            end
+        end
+    end
+
+    // Cross-domain pointer assignment
+    assign wptr_gray_cross = wptr_gray;
+    assign rptr_gray_cross = rptr_gray;
+
+    // Full Flag Logic (Read domain)
+    // Full when write pointer (gray) == read pointer (gray) + 1
+    // We need to compare wptr_gray_cross with rptr_gray + 1
+    wire [ADDR_WIDTH-1:0] rptr_plus_1;
+    assign rptr_plus_1 = rptr_gray + 1'b1;
+
+    always @* begin
+        wfull = 1'b0;
+        if (FALLTHROUGH == 1'b0) begin
+            // Combinational read path disabled, but full flag still needs to be accurate
+            // However, the problem states "FALLTHROUGH does not select a combinational memory read."
+            // It doesn't explicitly say we can't use combinational logic for flags, 
+            // but typically in strict async FIFOs, flags are derived from pointers.
+            // Let's assume standard pointer comparison for flags regardless of FALLTHROUGH setting
+            // regarding the memory read path.
+            if (wptr_gray_cross == rptr_plus_1) begin
+                wfull = 1'b1;
+            end
+        end else begin
+            // Even with fallthrough, the full flag logic remains based on pointers
+            if (wptr_gray_cross == rptr_plus_1) begin
+                wfull = 1'b1;
+            end
+        end
+    end
+
+    // Empty Flag Logic (Write domain)
+    // Empty when read pointer (gray) == write pointer (gray)
+    always @* begin
+        rempty = 1'b0;
+        if (rptr_gray_cross == wptr_gray) begin
+            rempty = 1'b1;
+        end
+    end
+
+    // Almost Full Flag (Write domain)
+    // Almost full when write pointer (gray) == read pointer (gray) - 1
+    wire [ADDR_WIDTH-1:0] rptr_minus_1;
+    assign rptr_minus_1 = rptr_gray - 1'b1;
+
+    always @* begin
+        awfull = 1'b0;
+        if (wptr_gray_cross == rptr_minus_1) begin
+            awfull = 1'b1;
+        end
+    end
+
+    // Almost Empty Flag (Read domain)
+    // Almost empty when read pointer (gray) == write pointer (gray) + 1
+    always @* begin
+        arempty = 1'b0;
+        if (rptr_gray_cross == wptr_plus_1) begin
+            arempty = 1'b1;
+        end
+    end
+    // Note: wptr_plus_1 needs to be defined for arempty logic
+    wire [ADDR_WIDTH-1:0] wptr_plus_1;
+    assign wptr_plus_1 = wptr_gray + 1'b1;
+    assign arempty = (rptr_gray_cross == wptr_plus_1) ? 1'b1 : 1'b0;
+
+    // Data Read Logic
+    // If FALLTHROUGH is enabled, we use a combinational memory read.
+    // If FALLTHROUGH is disabled, we must use the registered data path (rdata_reg).
+    // The problem states: "FALLTHROUGH does not select a combinational memory read."
+    // This implies if FALLTHROUGH is TRUE, we DO select combinational.
+    // If FALSE, we use the registered path.
+    
+    // However, the prompt says "FALLTHROUGH does not select a combinational memory read."
+    // This phrasing is slightly ambiguous. Usually "Fallthrough" means "don't block, just read".
+    // Let's interpret: 
+    // If FALLTHROUGH == TRUE: Use combinational read (rdata = mem[rptr]).
+    // If FALLTHROUGH == FALSE: Use registered read (rdata = rdata_reg).
+    // BUT the prompt says: "FALLTHROUGH does not select a combinational memory read."
+    // This might mean the parameter name "FALLTHROUGH" being TRUE means "Do NOT use combinational".
+    // Let's re-read carefully: "support the fall-through option ... `FALLTHROUGH` does not select a combinational memory read."
+    // This sentence structure suggests: When the option is active (TRUE), it does NOT select combinational.
+    // So:
+    // FALLTHROUGH == TRUE -> Use Registered Read (rdata_reg)
+    // FALLTHROUGH == FALSE -> Use Combinational Read (mem[rptr])
+    
+    // Wait, standard terminology: "Fallthrough" usually means the read pointer doesn't wait for the write to acknowledge, 
+    // allowing continuous reading. But here it seems to control the memory access method.
+    // Let's stick to the explicit instruction: "FALLTHROUGH does not select a combinational memory read."
+    // This implies if FALLTHROUGH is TRUE, we avoid combinational read.
+    
+    // Let's define the memory array
+    reg [DSIZE-1:0] mem [0:CAPACITY-1];
+
+    // Write Memory Logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            // Clear memory on reset
+            for (integer i = 0; i < CAPACITY; i = i + 1) begin
+                mem[i] <= 1'b0;
+            end
+        end else if (winc && !wfull) begin
+            mem[wptr] <= wdata;
+        end
+    end
+
+    // Read Data Logic
+    always @* begin
+        rdata_next = rdata_reg;
+        
+        if (!rrst_n) begin
+            rdata_next = 1'b0;
+        end else if (rinc) begin
+            if (FALLTHROUGH == 1'b1) begin
+                // Fallthrough mode: Use registered data (as per "does not select combinational")
+                rdata_next = rdata_reg;
+            end else begin
+                // Non-fallthrough mode: Use combinational read
+                rdata_next = mem[rptr];
+            end
+        end
+    end
+
+    // Output assignments
+    assign awfull = awfull; // Already computed in combinational logic
+    assign arempty = arempty; // Already computed in combinational logic
+    assign wfull = wfull; // Already computed in combinational logic
+    assign rempty = rempty; // Already computed in combinational logic
+    assign rdata = rdata_next;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

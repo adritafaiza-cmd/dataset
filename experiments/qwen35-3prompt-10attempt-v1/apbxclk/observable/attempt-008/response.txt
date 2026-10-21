@@ -1,0 +1,414 @@
+```verilog
+`timescale 1ns/1ps
+
+module apbxclk #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	parameter [0:0]	OPT_REGISTERED = 1'b0,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH
+) (
+	input	wire			S_APB_PCLK, S_PRESETn,
+	input	wire			S_APB_PSEL,
+	input	wire			S_APB_PENABLE,
+	output	reg			S_APB_PREADY,
+	input	wire	[AW-1:0]	S_APB_PADDR,
+	input	wire			S_APB_PWRITE,
+	input	wire	[DW-1:0]	S_APB_PWDATA,
+	input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+	input	wire	[2:0]		S_APB_PPROT,
+	output	wire	[DW-1:0]	S_APB_PRDATA,
+	output	wire			S_APB_PSLVERR,
+	input	wire			M_APB_PCLK,
+	output	reg			M_PRESETn,
+	output	reg			M_APB_PSEL,
+	output	reg			M_APB_PENABLE,
+	input	wire			M_APB_PREADY,
+	output	wire	[AW-1:0]	M_APB_PADDR,
+	output	wire			M_APB_PWRITE,
+	output	wire	[DW-1:0]	M_APB_PWDATA,
+	output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+	output	wire	[2:0]		M_APB_PPROT,
+	input	wire	[DW-1:0]	M_APB_PRDATA,
+	input	wire			M_APB_PSLVERR
+);
+
+	localparam	AW = C_APB_ADDR_WIDTH;
+	localparam	DW = C_APB_DATA_WIDTH;
+	localparam	STRB_WIDTH = DW/8;
+
+	// State Machine for Slave Side (Master Interface)
+	// States: IDLE, REQ_PENDING, DATA_WAITING, RESP_WAITING
+	localparam	IDLE = 2'b00;
+	localparam	REQ_PENDING = 2'b01;
+	localparam	DATA_WAITING = 2'b10;
+	localparam	RESP_WAITING = 2'b11;
+
+	reg [1:0]	s_state;
+	reg [AW-1:0]	s_addr;
+	reg s_write;
+	reg [DW-1:0]	s_wdata;
+	reg [STRB_WIDTH-1:0]	s_wstrb;
+	reg [2:0]	s_prot;
+	reg [DW-1:0]	s_rdata;
+	reg s_err;
+	reg s_req_valid;
+	reg s_req_ready;
+	reg s_resp_valid;
+	reg s_resp_ready;
+
+	// State Machine for Master Side (Slave Interface)
+	// States: IDLE, REQ_PENDING, DATA_WAITING, RESP_WAITING
+	localparam	IDLE_M = 2'b00;
+	localparam	REQ_PENDING_M = 2'b01;
+	localparam	DATA_WAITING_M = 2'b10;
+	localparam	RESP_WAITING_M = 2'b11;
+
+	reg [1:0]	m_state;
+	reg [AW-1:0]	m_addr;
+	reg m_write;
+	reg [DW-1:0]	m_wdata;
+	reg [STRB_WIDTH-1:0]	m_wstrb;
+	reg [2:0]	m_prot;
+	reg [DW-1:0]	m_rdata;
+	reg m_err;
+	reg m_req_valid;
+	reg m_req_ready;
+	reg m_resp_valid;
+	reg m_resp_ready;
+
+	// Cross-domain signals
+	// Slave -> Master (Request)
+	reg [AW-1:0]	c_addr;
+	reg c_write;
+	reg [DW-1:0]	c_wdata;
+	reg [STRB_WIDTH-1:0]	c_wstrb;
+	reg [2:0]	c_prot;
+	reg c_req_valid;
+	reg c_req_ready;
+
+	// Master -> Slave (Response)
+	reg [DW-1:0]	c_rdata;
+	reg c_err;
+	reg c_resp_valid;
+	reg c_resp_ready;
+
+	// Clock Domain Crossing Registers (Slave side capturing Master signals)
+	reg [AW-1:0]	m_addr_reg;
+	reg m_write_reg;
+	reg [DW-1:0]	m_wdata_reg;
+	reg [STRB_WIDTH-1:0]	m_wstrb_reg;
+	reg [2:0]	m_prot_reg;
+	reg m_err_reg;
+	reg m_rdata_reg;
+	reg m_req_valid_reg;
+	reg m_req_ready_reg;
+	reg m_resp_valid_reg;
+	reg m_resp_ready_reg;
+
+	// Clock Domain Crossing Registers (Master side capturing Slave signals)
+	reg [AW-1:0]	s_addr_reg;
+	reg s_write_reg;
+	reg [DW-1:0]	s_wdata_reg;
+	reg [STRB_WIDTH-1:0]	s_wstrb_reg;
+	reg [2:0]	s_prot_reg;
+	reg s_err_reg;
+	reg s_rdata_reg;
+	reg s_req_valid_reg;
+	reg s_req_ready_reg;
+	reg s_resp_valid_reg;
+	reg s_resp_ready_reg;
+
+	// ------------------------------------------------------------------
+	// Slave Side Logic (Running on S_APB_PCLK)
+	// ------------------------------------------------------------------
+
+	// Reset Logic
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_state <= IDLE;
+			s_addr <= 12'd0;
+			s_write <= 1'b0;
+			s_wdata <= {DW{1'b0}};
+			s_wstrb <= {STRB_WIDTH{1'b0}};
+			s_prot <= 3'd0;
+			s_rdata <= {DW{1'b0}};
+			s_err <= 1'b0;
+			s_req_valid <= 1'b0;
+			s_req_ready <= 1'b1;
+			s_resp_valid <= 1'b0;
+			s_resp_ready <= 1'b0;
+			S_APB_PREADY <= 1'b0;
+			S_APB_PSLVERR <= 1'b0;
+		end
+		else begin
+			// State Machine
+			case (s_state)
+				IDLE: begin
+					if (s_req_valid && s_req_ready) begin
+						s_state <= REQ_PENDING;
+						s_addr <= s_addr_reg;
+						s_write <= s_write_reg;
+						s_wdata <= s_wdata_reg;
+						s_wstrb <= s_wstrb_reg;
+						s_prot <= s_prot_reg;
+						s_req_valid <= 1'b0;
+						s_req_ready <= 1'b1;
+					end
+				end
+
+				REQ_PENDING: begin
+					// Wait for data phase
+					if (s_resp_valid && s_resp_ready) begin
+						s_state <= DATA_WAITING;
+						s_rdata <= s_rdata_reg;
+						s_err <= s_err_reg;
+						s_resp_valid <= 1'b0;
+						s_resp_ready <= 1'b1;
+					end
+				end
+
+				DATA_WAITING: begin
+					// Wait for response phase
+					if (s_resp_valid && s_resp_ready) begin
+						s_state <= RESP_WAITING;
+						s_rdata <= s_rdata_reg;
+						s_err <= s_err_reg;
+						s_resp_valid <= 1'b0;
+						s_resp_ready <= 1'b1;
+					end
+				end
+
+				RESP_WAITING: begin
+					// Wait for response phase
+					if (s_resp_valid && s_resp_ready) begin
+						s_state <= IDLE;
+						s_rdata <= s_rdata_reg;
+						s_err <= s_err_reg;
+						s_resp_valid <= 1'b0;
+						s_resp_ready <= 1'b1;
+					end
+				end
+			endcase
+
+			// Output Logic
+			S_APB_PREADY <= (s_state == IDLE) ? 1'b1 : 1'b0;
+			S_APB_PSLVERR <= (s_state == RESP_WAITING && s_err) ? 1'b1 : 1'b0;
+			S_APB_PRDATA <= s_rdata;
+		end
+	end
+
+	// Cross-domain Request Generation (Slave -> Master)
+	// Capture Master signals on Slave clock
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_addr_reg <= 12'd0;
+			m_write_reg <= 1'b0;
+			m_wdata_reg <= {DW{1'b0}};
+			m_wstrb_reg <= {STRB_WIDTH{1'b0}};
+			m_prot_reg <= 3'd0;
+			m_err_reg <= 1'b0;
+			m_rdata_reg <= {DW{1'b0}};
+			m_req_valid_reg <= 1'b0;
+			m_req_ready_reg <= 1'b1;
+			m_resp_valid_reg <= 1'b0;
+			m_resp_ready_reg <= 1'b0;
+		end
+		else begin
+			m_addr_reg <= M_APB_PADDR;
+			m_write_reg <= M_APB_PWRITE;
+			m_wdata_reg <= M_APB_PWDATA;
+			m_wstrb_reg <= M_APB_PWSTRB;
+			m_prot_reg <= M_APB_PPROT;
+			m_err_reg <= M_APB_PSLVERR;
+			m_rdata_reg <= M_APB_PRDATA;
+			m_req_valid_reg <= M_APB_PSEL & M_APB_PENABLE;
+			m_req_ready_reg <= M_APB_PREADY;
+			m_resp_valid_reg <= M_APB_PSEL & M_APB_PENABLE & M_APB_PREADY;
+			m_resp_ready_reg <= 1'b0; // Handled by state machine
+		end
+	end
+
+	// Cross-domain Response Generation (Slave -> Master)
+	// Capture Slave signals on Master clock
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_addr_reg <= 12'd0;
+			s_write_reg <= 1'b0;
+			s_wdata_reg <= {DW{1'b0}};
+			s_wstrb_reg <= {STRB_WIDTH{1'b0}};
+			s_prot_reg <= 3'd0;
+			s_err_reg <= 1'b0;
+			s_rdata_reg <= {DW{1'b0}};
+			s_req_valid_reg <= 1'b0;
+			s_req_ready_reg <= 1'b1;
+			s_resp_valid_reg <= 1'b0;
+			s_resp_ready_reg <= 1'b0;
+		end
+		else begin
+			s_addr_reg <= S_APB_PADDR;
+			s_write_reg <= S_APB_PWRITE;
+			s_wdata_reg <= S_APB_PWDATA;
+			s_wstrb_reg <= S_APB_PWSTRB;
+			s_prot_reg <= S_APB_PPROT;
+			s_err_reg <= S_APB_PSLVERR;
+			s_rdata_reg <= S_APB_PRDATA;
+			s_req_valid_reg <= S_APB_PSEL & S_APB_PENABLE;
+			s_req_ready_reg <= S_APB_PREADY;
+			s_resp_valid_reg <= S_APB_PSEL & S_APB_PENABLE & S_APB_PREADY;
+			s_resp_ready_reg <= 1'b0; // Handled by state machine
+		end
+	end
+
+	// ------------------------------------------------------------------
+	// Master Side Logic (Running on M_APB_PCLK)
+	// ------------------------------------------------------------------
+
+	// Reset Logic
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_state <= IDLE_M;
+			m_addr <= 12'd0;
+			m_write <= 1'b0;
+			m_wdata <= {DW{1'b0}};
+			m_wstrb <= {STRB_WIDTH{1'b0}};
+			m_prot <= 3'd0;
+			m_rdata <= {DW{1'b0}};
+			m_err <= 1'b0;
+			m_req_valid <= 1'b0;
+			m_req_ready <= 1'b1;
+			m_resp_valid <= 1'b0;
+			m_resp_ready <= 1'b0;
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			M_PRESETn <= 1'b1;
+		end
+		else begin
+			// State Machine
+			case (m_state)
+				IDLE_M: begin
+					if (m_req_valid && m_req_ready) begin
+						m_state <= REQ_PENDING;
+						m_addr <= m_addr_reg;
+						m_write <= m_write_reg;
+						m_wdata <= m_wdata_reg;
+						m_wstrb <= m_wstrb_reg;
+						m_prot <= m_prot_reg;
+						m_req_valid <= 1'b0;
+						m_req_ready <= 1'b1;
+					end
+				end
+
+				REQ_PENDING: begin
+					// Wait for data phase
+					if (m_resp_valid && m_resp_ready) begin
+						m_state <= DATA_WAITING;
+						m_rdata <= m_rdata_reg;
+						m_err <= m_err_reg;
+						m_resp_valid <= 1'b0;
+						m_resp_ready <= 1'b1;
+					end
+				end
+
+				DATA_WAITING: begin
+					// Wait for response phase
+					if (m_resp_valid && m_resp_ready) begin
+						m_state <= RESP_WAITING;
+						m_rdata <= m_rdata_reg;
+						m_err <= m_err_reg;
+						m_resp_valid <= 1'b0;
+						m_resp_ready <= 1'b1;
+					end
+				end
+
+				RESP_WAITING: begin
+					// Wait for response phase
+					if (m_resp_valid && m_resp_ready) begin
+						m_state <= IDLE_M;
+						m_rdata <= m_rdata_reg;
+						m_err <= m_err_reg;
+						m_resp_valid <= 1'b0;
+						m_resp_ready <= 1'b1;
+					end
+				end
+			endcase
+
+			// Output Logic
+			M_APB_PSEL <= (m_state != IDLE_M) ? 1'b1 : 1'b0;
+			M_APB_PENABLE <= (m_state != IDLE_M) ? 1'b1 : 1'b0;
+			M_APB_PREADY <= 1'b0; // Slave will drive this
+			M_APB_PADDR <= m_addr;
+			M_APB_PWRITE <= m_write;
+			M_APB_PWDATA <= m_wdata;
+			M_APB_PWSTRB <= m_wstrb;
+			M_APB_PPROT <= m_prot;
+			M_APB_PSLVERR <= (m_state == RESP_WAITING && m_err) ? 1'b1 : 1'b0;
+			M_PRESETn <= 1'b1;
+		end
+	end
+
+	// Cross-domain Request Generation (Master -> Slave)
+	// Capture Slave signals on Master clock
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_addr_reg <= 12'd0;
+			s_write_reg <= 1'b0;
+			s_wdata_reg <= {DW{1'b0}};
+			s_wstrb_reg <= {STRB_WIDTH{1'b0}};
+			s_prot_reg <= 3'd0;
+			s_err_reg <= 1'b0;
+			s_rdata_reg <= {DW{1'b0}};
+			s_req_valid_reg <= 1'b0;
+			s_req_ready_reg <= 1'b1;
+			s_resp_valid_reg <= 1'b0;
+			s_resp_ready_reg <= 1'b0;
+		end
+		else begin
+			s_addr_reg <= S_APB_PADDR;
+			s_write_reg <= S_APB_PWRITE;
+			s_wdata_reg <= S_APB_PWDATA;
+			s_wstrb_reg <= S_APB_PWSTRB;
+			s_prot_reg <= S_APB_PPROT;
+			s_err_reg <= S_APB_PSLVERR;
+			s_rdata_reg <= S_APB_PRDATA;
+			s_req_valid_reg <= S_APB_PSEL & S_APB_PENABLE;
+			s_req_ready_reg <= S_APB_PREADY;
+			s_resp_valid_reg <= S_APB_PSEL & S_APB_PENABLE & S_APB_PREADY;
+			s_resp_ready_reg <= 1'b0; // Handled by state machine
+		end
+	end
+
+	// Cross-domain Response Generation (Master -> Slave)
+	// Capture Master signals on Slave clock
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_addr_reg <= 12'd0;
+			m_write_reg <= 1'b0;
+			m_wdata_reg <= {DW{1'b0}};
+			m_wstrb_reg <= {STRB_WIDTH{1'b0}};
+			m_prot_reg <= 3'd0;
+			m_err_reg <= 1'b0;
+			m_rdata_reg <= {DW{1'b0}};
+			m_req_valid_reg <= 1'b0;
+			m_req_ready_reg <= 1'b1;
+			m_resp_valid_reg <= 1'b0;
+			m_resp_ready_reg <= 1'b0;
+		end
+		else begin
+			m_addr_reg <= M_APB_PADDR;
+			m_write_reg <= M_APB_PWRITE;
+			m_wdata_reg <= M_APB_PWDATA;
+			m_wstrb_reg <= M_APB_PWSTRB;
+			m_prot_reg <= M_APB_PPROT;
+			m_err_reg <= M_APB_PSLVERR;
+			m_rdata_reg <= M_APB_PRDATA;
+			m_req_valid_reg <= M_APB_PSEL & M_APB_PENABLE;
+			m_req_ready_reg <= M_APB_PREADY;
+			m_resp_valid_reg <= M_APB_PSEL & M_APB_PENABLE & M_APB_PREADY;
+			m_resp_ready_reg <= 1'b0; // Handled by state machine
+		end
+	end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

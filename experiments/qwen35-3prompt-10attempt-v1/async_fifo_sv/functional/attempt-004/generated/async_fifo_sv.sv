@@ -1,0 +1,146 @@
+```systemverilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam INT_WIDTH = ADDR_WIDTH + 1;
+    localparam MAX_DEPTH = 2**ADDR_WIDTH;
+    localparam SYNC_DEPTH = 1 << SYNC_STAGES;
+
+    // Write Domain Signals
+    reg [INT_WIDTH-1:0] w_ptr;
+    reg [INT_WIDTH-1:0] w_gray;
+    reg [INT_WIDTH-1:0] w_gray_synced;
+    reg w_full_reg;
+    reg w_full_synced;
+
+    // Read Domain Signals
+    reg [INT_WIDTH-1:0] r_ptr;
+    reg [INT_WIDTH-1:0] r_gray;
+    reg [INT_WIDTH-1:0] r_gray_synced;
+    reg r_empty_reg;
+    reg r_empty_synced;
+
+    // Internal Memory
+    reg [DATA_WIDTH-1:0] mem [0:MAX_DEPTH-1];
+
+    // Write Logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            w_ptr <= 0;
+            w_full_reg <= 0;
+        end else begin
+            if (winc && !w_full_reg) begin
+                w_ptr <= w_ptr + 1;
+                mem[w_ptr] <= wdata;
+            end
+        end
+    end
+
+    // Gray Code Generation for Write Pointer
+    always @(*) begin
+        w_gray = w_ptr;
+        w_gray[ADDR_WIDTH] = w_gray[ADDR_WIDTH-1] ^ w_gray[ADDR_WIDTH-2];
+    end
+
+    // Write Pointer Synchronization
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            w_gray_synced <= 0;
+        else
+            w_gray_synced <= w_gray;
+    end
+
+    // Full Flag Logic (Write Domain)
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            w_full_reg <= 0;
+        else if (winc && !w_full_reg) begin
+            if (w_ptr == MAX_DEPTH - 1)
+                w_full_reg <= 1;
+        end
+    end
+
+    // Full Flag Synchronization (Crossing to Read Domain)
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            w_full_synced <= 0;
+        else
+            w_full_synced <= w_gray_synced[ADDR_WIDTH];
+    end
+
+    // Read Logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            r_ptr <= 0;
+            r_empty_reg <= 1;
+        end else begin
+            if (rinc && !r_empty_reg) begin
+                r_ptr <= r_ptr + 1;
+                r_empty_reg <= (r_ptr == 0) ? 1 : 0;
+            end
+        end
+    end
+
+    // Gray Code Generation for Read Pointer
+    always @(*) begin
+        r_gray = r_ptr;
+        r_gray[ADDR_WIDTH] = r_gray[ADDR_WIDTH-1] ^ r_gray[ADDR_WIDTH-2];
+    end
+
+    // Read Pointer Synchronization
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            r_gray_synced <= 0;
+        else
+            r_gray_synced <= r_gray;
+    end
+
+    // Empty Flag Logic (Read Domain)
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            r_empty_reg <= 1;
+        else if (rinc && !r_empty_reg) begin
+            if (r_ptr == 0)
+                r_empty_reg <= 1;
+        end
+    end
+
+    // Empty Flag Synchronization (Crossing to Write Domain)
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            r_empty_synced <= 1;
+        else
+            r_empty_synced <= r_gray_synced[ADDR_WIDTH];
+    end
+
+    // Data Output (Sampled on Read Clock)
+    assign rdata = mem[r_ptr];
+
+    // Full Output (Synced to Read Domain)
+    assign wfull = w_full_synced;
+
+    // Empty Output (Synced to Write Domain)
+    assign rempty = r_empty_synced;
+
+    // Address Outputs (Debug pointers, unsynchronized but valid in respective domains)
+    assign waddr = w_ptr;
+    assign raddr = r_ptr;
+
+endmodule
+```<|im_end|>

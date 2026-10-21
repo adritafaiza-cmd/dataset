@@ -1,0 +1,305 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // ========================================================================
+    // Clock Domain Crossing (CDC) Strategy:
+    // 1. PCLK Domain: State machine, data buffering, and handshake logic.
+    // 2. SCLK Domain: SPI shift register and timing generation.
+    // 3. Reset Domain: Use a multi-cycle reset synchronizer for both domains.
+    // ========================================================================
+
+    // ------------------------------------------------------------------------
+    // Synchronizers for Reset and Control Signals
+    // ------------------------------------------------------------------------
+    
+    // Synchronize rst_i to PCLK domain (2-stage)
+    reg pclk_rst_sync_1, pclk_rst_sync_2;
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            pclk_rst_sync_1 <= 1'b1;
+            pclk_rst_sync_2 <= 1'b1;
+        end else begin
+            pclk_rst_sync_1 <= rst_i;
+            pclk_rst_sync_2 <= pclk_rst_sync_1;
+        end
+    end
+
+    // Synchronize rst_i to SCLK domain (2-stage)
+    reg sclk_rst_sync_1, sclk_rst_sync_2;
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sclk_rst_sync_1 <= 1'b1;
+            sclk_rst_sync_2 <= 1'b1;
+        end else begin
+            sclk_rst_sync_1 <= rst_i;
+            sclk_rst_sync_2 <= sclk_rst_sync_1;
+        end
+    end
+
+    // Synchronize wren_i to SCLK domain (2-stage)
+    reg sclk_wren_sync_1, sclk_wren_sync_2;
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sclk_wren_sync_1 <= 1'b1;
+            sclk_wren_sync_2 <= 1'b1;
+        end else begin
+            sclk_wren_sync_1 <= wren_i;
+            sclk_wren_sync_2 <= sclk_wren_sync_1;
+        end
+    end
+
+    // ------------------------------------------------------------------------
+    // PCLK Domain: State Machine and Data Handling
+    // ------------------------------------------------------------------------
+
+    // State encoding
+    localparam IDLE = 2'b00;
+    localparam SHIFTING = 2'b01;
+    localparam DONE = 2'b10;
+
+    reg [1:0] pclk_state;
+    reg [N-1:0] pclk_data_reg;
+    reg pclk_shift_enable;
+    reg pclk_done_flag;
+    reg pclk_wr_ack;
+    reg pclk_di_req;
+
+    // State Machine
+    always @(posedge pclk_i or posedge pclk_rst_sync_2) begin
+        if (pclk_rst_sync_2) begin
+            pclk_state <= IDLE;
+            pclk_data_reg <= 0;
+            pclk_shift_enable <= 1'b0;
+            pclk_done_flag <= 1'b0;
+            pclk_wr_ack <= 1'b0;
+            pclk_di_req <= 1'b0;
+        end else begin
+            case (pclk_state)
+                IDLE: begin
+                    if (pclk_rst_sync_2 && wren_i) begin
+                        pclk_state <= SHIFTING;
+                        pclk_data_reg <= di_i;
+                        pclk_shift_enable <= 1'b1;
+                        pclk_wr_ack <= 1'b1; // Acknowledge write immediately on entry
+                        pclk_di_req <= 1'b0;
+                    end
+                end
+                SHIFTING: begin
+                    pclk_shift_enable <= 1'b1;
+                    pclk_done_flag <= 1'b0;
+                    // Wait for shift completion flag from SCLK domain
+                    if (sclk_shift_done) begin
+                        pclk_state <= DONE;
+                        pclk_shift_enable <= 1'b0;
+                        pclk_done_flag <= 1'b1;
+                        pclk_wr_ack <= 1'b0; // Clear ack after shift done
+                    end
+                end
+                DONE: begin
+                    pclk_shift_enable <= 1'b0;
+                    if (pclk_done_flag) begin
+                        pclk_state <= IDLE;
+                        pclk_done_flag <= 1'b0;
+                        pclk_di_req <= 1'b1; // Request next word
+                    end
+                end
+            endcase
+        end
+    end
+
+    // ------------------------------------------------------------------------
+    // SCLK Domain: SPI Shift Register and Timing
+    // ------------------------------------------------------------------------
+
+    // Shift register depth
+    localparam SPI_DEPTH = N;
+    reg [SPI_DEPTH-1:0] sclk_shift_reg;
+    reg [SPI_DEPTH-1:0] sclk_miso_reg;
+    reg sclk_shift_done;
+    reg sclk_ssel;
+    reg sclk_sck;
+    reg sclk_mosi;
+    reg [SPI_DEPTH-1:0] sclk_count;
+
+    // Initialize shift register on reset
+    always @(posedge sclk_i or posedge sclk_rst_sync_2) begin
+        if (sclk_rst_sync_2) begin
+            sclk_shift_reg <= {N{1'b0}};
+            sclk_miso_reg <= {N{1'b0}};
+            sclk_shift_done <= 1'b0;
+            sclk_ssel <= 1'b1;
+            sclk_sck <= 1'b0;
+            sclk_mosi <= 1'b0;
+            sclk_count <= 0;
+        end else begin
+            // Shift logic
+            if (pclk_shift_enable && sclk_count < SPI_DEPTH) begin
+                // Shift in new bit from MSB
+                sclk_shift_reg[sclk_count] <= pclk_data_reg[N-1-sclk_count];
+                sclk_mosi <= pclk_data_reg[N-1-sclk_count];
+                sclk_count <= sclk_count + 1'b1;
+            end else if (sclk_count == SPI_DEPTH) begin
+                // Shift complete
+                sclk_shift_done <= 1'b1;
+                sclk_count <= 0;
+                sclk_shift_reg <= {N{1'b0}};
+                sclk_mosi <= 1'b0;
+            end
+        end
+    end
+
+    // Clock generation with optional division
+    // If SPI_2X_CLK_DIV is 2, we toggle SCK every 2 SCLK cycles
+    // If SPI_2X_CLK_DIV is 1, we toggle SCK every 1 SCLK cycle
+    always @(posedge sclk_i or posedge sclk_rst_sync_2) begin
+        if (sclk_rst_sync_2) begin
+            sclk_sck <= 1'b0;
+        end else begin
+            if (sclk_shift_done) begin
+                sclk_sck <= 1'b0;
+            end else begin
+                // Simple counter for clock division
+                reg [1:0] sclk_div_counter;
+                always @(posedge sclk_i or posedge sclk_rst_sync_2) begin
+                    if (sclk_rst_sync_2) sclk_div_counter <= 0;
+                    else sclk_div_counter <= sclk_div_counter + 1'b1;
+                end
+                // Toggle SCK based on counter
+                if (sclk_div_counter == SPI_2X_CLK_DIV - 1'b1) begin
+                    sclk_sck <= ~sclk_sck;
+                    sclk_div_counter <= 0;
+                end
+            end
+        end
+    end
+
+    // Chip Select Logic
+    // Active low, asserted when shifting, deasserted when done
+    always @(posedge sclk_i or posedge sclk_rst_sync_2) begin
+        if (sclk_rst_sync_2) begin
+            sclk_ssel <= 1'b1;
+        end else begin
+            if (sclk_shift_done) begin
+                sclk_ssel <= 1'b1;
+            end else begin
+                sclk_ssel <= 1'b0;
+            end
+        end
+    end
+
+    // MISO Capture Logic
+    // Capture MISO bit when SCK is high (or falling edge depending on mode, assuming standard CPOL=0, CPHA=0)
+    // Assuming standard SPI: Sample on rising edge of SCK, Shift on falling edge.
+    // However, to be robust and simple, we sample MISO when SCK is high.
+    always @(posedge sclk_i or posedge sclk_rst_sync_2) begin
+        if (sclk_rst_sync_2) begin
+            sclk_miso_reg <= {N{1'b0}};
+        end else begin
+            if (sclk_shift_done) begin
+                sclk_miso_reg <= {N{1'b0}};
+            end else begin
+                // Shift MISO in opposite direction to MOSI
+                // If we shifted MOSI in at index 0, we want MISO at index 0 to be the last bit received
+                // Standard approach: Shift MISO into the register as we shift MOSI out
+                // But since we are capturing during the shift, let's capture on the rising edge of SCK
+                // and store it in the corresponding position.
+                // To align with MOSI shift direction (MSB first), MISO should also be MSB first.
+                if (sclk_count < SPI_DEPTH) begin
+                    sclk_miso_reg[sclk_count] <= spi_miso_i;
+                end
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------------
+    // Output Drivers (PCLK Domain)
+    // ------------------------------------------------------------------------
+
+    // Assign SCLK and SSEL outputs from SCLK domain to PCLK domain safely
+    // Since these are single-bit signals, a 2-stage synchronizer is sufficient.
+    reg pclk_sclk_sync_1, pclk_sclk_sync_2;
+    reg pclk_ssel_sync_1, pclk_ssel_sync_2;
+
+    always @(posedge pclk_i or posedge pclk_rst_sync_2) begin
+        if (pclk_rst_sync_2) begin
+            pclk_sclk_sync_1 <= 1'b0;
+            pclk_sclk_sync_2 <= 1'b0;
+            pclk_ssel_sync_1 <= 1'b1;
+            pclk_ssel_sync_2 <= 1'b1;
+        end else begin
+            pclk_sclk_sync_1 <= sclk_sck;
+            pclk_sclk_sync_2 <= pclk_sclk_sync_1;
+            pclk_ssel_sync_1 <= sclk_ssel;
+            pclk_ssel_sync_2 <= pclk_ssel_sync_1;
+        end
+    end
+
+    assign spi_sck_o = pclk_sclk_sync_2;
+    assign spi_ssel_o = pclk_ssel_sync_2;
+
+    // MOSI Output
+    // Drive MOSI from PCLK domain. Since SCLK domain drives the actual pin,
+    // we need to drive the pin from PCLK domain. The SCLK domain logic above
+    // actually drives the internal state. We need to drive the physical pin `spi_mosi_o`.
+    // The SCLK domain logic `sclk_mosi` is the value to be driven.
+    // We synchronize `sclk_mosi` to PCLK and drive it.
+    reg pclk_mosi_sync_1, pclk_mosi_sync_2;
+    always @(posedge pclk_i or posedge pclk_rst_sync_2) begin
+        if (pclk_rst_sync_2) begin
+            pclk_mosi_sync_1 <= 1'b0;
+            pclk_mosi_sync_2 <= 1'b0;
+        end else begin
+            pclk_mosi_sync_1 <= sclk_mosi;
+            pclk_mosi_sync_2 <= pclk_mosi_sync_1;
+        end
+    end
+    assign spi_mosi_o = pclk_mosi_sync_2;
+
+    // DO Output and Valid
+    // Synchronize MISO data and valid flag to PCLK domain
+    reg [N-1:0] pclk_do_sync_1, pclk_do_sync_2;
+    reg pclk_do_valid_sync_1, pclk_do_valid_sync_2;
+
+    always @(posedge pclk_i or posedge pclk_rst_sync_2) begin
+        if (pclk_rst_sync_2) begin
+            pclk_do_sync_1 <= {N{1'b0}};
+            pclk_do_sync_2 <= {N{1'b0}};
+            pclk_do_valid_sync_1 <= 1'b0;
+            pclk_do_valid_sync_2 <= 1'b0;
+        end else begin
+            pclk_do_sync_1 <= sclk_miso_reg;
+            pclk_do_sync_2 <= pclk_do_sync_1;
+            pclk_do_valid_sync_1 <= sclk_shift_done;
+            pclk_do_valid_sync_2 <= pclk_do_valid_sync_1;
+        end
+    end
+
+    assign do_o = pclk_do_sync_2;
+    assign do_valid_o = pclk_do_valid_sync_2;
+
+    // WR_ACK Output
+    assign wr_ack_o = pclk_wr_ack;
+
+    // DI_REQ Output
+    assign di_req_o = pclk_di_req;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

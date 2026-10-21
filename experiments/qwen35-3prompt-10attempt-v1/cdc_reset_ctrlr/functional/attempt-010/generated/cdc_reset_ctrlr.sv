@@ -1,0 +1,222 @@
+```verilog
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  a_clk_i,
+    input  a_rst_ni,
+    input  a_clear_i,
+    output a_clear_o,
+    input  a_clear_ack_i,
+    output a_isolate_o,
+    input  a_isolate_ack_i,
+    input  b_clk_i,
+    input  b_rst_ni,
+    input  b_clear_i,
+    output b_clear_o,
+    input  b_clear_ack_i,
+    output b_isolate_o
+);
+
+    // ------------------------------------------------------------------
+    // Synchronizers for asynchronous signals crossing domains
+    // ------------------------------------------------------------------
+
+    // Domain A -> Domain B
+    wire b_sync_a_clear_i;
+    wire b_sync_a_clear_ack_i;
+    wire b_sync_a_isolate_ack_i;
+    wire b_sync_a_isolate_req_i; // Internal flag to track if A requested isolate
+
+    // Domain B -> Domain A
+    wire a_sync_b_clear_i;
+    wire a_sync_b_clear_ack_i;
+    wire a_sync_b_isolate_ack_i;
+    wire a_sync_b_isolate_req_i; // Internal flag to track if B requested isolate
+
+    // Synchronizer logic for A signals crossing to B
+    genvar i;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : sync_a_to_b
+            wire sync_stage;
+            if (i == 0)
+                sync_stage = a_clear_i;
+            else
+                sync_stage = sync_stage;
+
+            assign b_sync_a_clear_i = sync_stage;
+
+            if (i == 0)
+                sync_stage = a_clear_ack_i;
+            else
+                sync_stage = sync_stage;
+
+            assign b_sync_a_clear_ack_i = sync_stage;
+
+            if (i == 0)
+                sync_stage = a_isolate_ack_i;
+            else
+                sync_stage = sync_stage;
+
+            assign b_sync_a_isolate_ack_i = sync_stage;
+        end
+    endgenerate
+
+    // Synchronizer logic for B signals crossing to A
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : sync_b_to_a
+            wire sync_stage;
+            if (i == 0)
+                sync_stage = b_clear_i;
+            else
+                sync_stage = sync_stage;
+
+            assign a_sync_b_clear_i = sync_stage;
+
+            if (i == 0)
+                sync_stage = b_clear_ack_i;
+            else
+                sync_stage = sync_stage;
+
+            assign a_sync_b_clear_ack_i = sync_stage;
+
+            if (i == 0)
+                sync_stage = b_isolate_ack_i;
+            else
+                sync_stage = sync_stage;
+
+            assign a_sync_b_isolate_ack_i = sync_stage;
+        end
+    endgenerate
+
+    // ------------------------------------------------------------------
+    // State Machine Logic
+    // ------------------------------------------------------------------
+
+    // State Encoding
+    // IDLE: Normal operation
+    // ISOLATE_REQ: One or both sides requested clear, isolating both domains
+    // ISOLATE_ACK: Isolation complete, waiting for clear request propagation
+    // CLEAR_REQ: Clear requested, clearing both domains
+    // CLEAR_ACK: Clear complete, waiting for release
+    // RELEASE: Releasing isolation and clear
+
+    localparam [1:0] IDLE = 2'b00;
+    localparam [1:0] ISOLATE_REQ = 2'b01;
+    localparam [1:0] ISOLATE_ACK = 2'b10;
+    localparam [1:0] CLEAR_REQ = 2'b11;
+    localparam [1:0] CLEAR_ACK = 2'b00; // Reuse IDLE for simplicity after full cycle, but logic handles transition
+
+    reg [1:0] state, next_state;
+    reg a_isolate_req_int;
+    reg b_isolate_req_int;
+    reg a_clear_req_int;
+    reg b_clear_req_int;
+
+    // Internal flags to track handshake completion
+    reg a_isolate_done;
+    reg b_isolate_done;
+    reg a_clear_done;
+    reg b_clear_done;
+
+    // ------------------------------------------------------------------
+    // Sequential Logic
+    // ------------------------------------------------------------------
+
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            state <= IDLE;
+            a_isolate_req_int <= 1'b0;
+            b_isolate_req_int <= 1'b0;
+            a_clear_req_int <= 1'b0;
+            b_clear_req_int <= 1'b0;
+            a_isolate_done <= 1'b0;
+            b_isolate_done <= 1'b0;
+            a_clear_done <= 1'b0;
+            b_clear_done <= 1'b0;
+        end else begin
+            state <= next_state;
+            a_isolate_req_int <= a_clear_i;
+            b_isolate_req_int <= b_clear_i;
+            a_clear_req_int <= a_clear_i;
+            b_clear_req_int <= b_clear_i;
+            
+            // Handshake completion tracking
+            if (a_isolate_ack_i) a_isolate_done <= 1'b1;
+            else a_isolate_done <= 1'b0;
+
+            if (b_isolate_ack_i) b_isolate_done <= 1'b1;
+            else b_isolate_done <= 1'b0;
+
+            if (a_clear_ack_i) a_clear_done <= 1'b1;
+            else a_clear_done <= 1'b0;
+
+            if (b_clear_ack_i) b_clear_done <= 1'b1;
+            else b_clear_done <= 1'b0;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Combinational Logic for Next State and Outputs
+    // ------------------------------------------------------------------
+
+    always @(*) begin
+        next_state = state;
+        a_clear_o = 1'b0;
+        b_clear_o = 1'b0;
+        a_isolate_o = 1'b0;
+        b_isolate_o = 1'b0;
+
+        case (state)
+            IDLE: begin
+                // Check if any side requested clear
+                if (a_clear_req_int || b_clear_req_int) begin
+                    // Transition to Isolate Request phase
+                    next_state = ISOLATE_REQ;
+                    // Raise isolate outputs immediately upon request detection
+                    a_isolate_o = 1'b1;
+                    b_isolate_o = 1'b1;
+                end
+            end
+
+            ISOLATE_REQ: begin
+                // Wait for both sides to acknowledge isolation
+                if (a_isolate_done && b_isolate_done) begin
+                    next_state = ISOLATE_ACK;
+                    // Now raise clear outputs
+                    a_clear_o = 1'b1;
+                    b_clear_o = 1'b1;
+                end
+            end
+
+            ISOLATE_ACK: begin
+                // Wait for both sides to acknowledge clear
+                if (a_clear_done && b_clear_done) begin
+                    next_state = CLEAR_ACK;
+                    // Release isolate outputs
+                    a_isolate_o = 1'b0;
+                    b_isolate_o = 1'b0;
+                end
+            end
+
+            CLEAR_ACK: begin
+                // Wait for both sides to release clear
+                if (a_clear_done && b_clear_done) begin
+                    next_state = IDLE;
+                    // Release clear outputs
+                    a_clear_o = 1'b0;
+                    b_clear_o = 1'b0;
+                end
+            end
+
+            default: begin
+                next_state = IDLE;
+                a_clear_o = 1'b0;
+                b_clear_o = 1'b0;
+                a_isolate_o = 1'b0;
+                b_isolate_o = 1'b0;
+            end
+        endcase
+    end
+
+endmodule
+```<|im_end|>

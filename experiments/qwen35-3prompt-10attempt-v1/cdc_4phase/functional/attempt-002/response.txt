@@ -1,0 +1,186 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain state machine
+  // States: IDLE, WAIT_DST_READY, WAIT_SRC_VALID
+  localparam IDLE = 2'b00;
+  localparam WAIT_DST_READY = 2'b01;
+  localparam WAIT_SRC_VALID = 2'b10;
+
+  reg [1:0] src_state;
+  wire src_state_next;
+  wire src_valid_next;
+  wire src_data_next;
+  wire src_ready_next;
+  wire src_valid_curr;
+  wire src_data_curr;
+
+  // Destination domain state machine
+  // States: IDLE, WAIT_SRC_VALID, WAIT_SRC_READY
+  localparam DST_IDLE = 2'b00;
+  localparam DST_WAIT_SRC_VALID = 2'b01;
+  localparam DST_WAIT_SRC_READY = 2'b10;
+
+  reg [1:0] dst_state;
+  wire dst_state_next;
+  wire dst_valid_next;
+  wire dst_data_next;
+  wire dst_ready_next;
+  wire dst_valid_curr;
+  wire dst_data_curr;
+
+  // --- Source Domain Logic ---
+
+  // Current values for combinational next-state logic
+  assign src_valid_curr = src_valid_i;
+  assign src_data_curr = src_data_i;
+
+  always_comb begin
+    src_state_next = src_state;
+    src_valid_next = 1'b0;
+    src_data_next = src_data_i;
+    src_ready_next = 1'b0;
+
+    case (src_state)
+      IDLE: begin
+        if (src_valid_i) begin
+          src_state_next = WAIT_DST_READY;
+          src_valid_next = 1'b1;
+          src_data_next = src_data_i;
+          src_ready_next = 1'b1;
+        end else begin
+          src_ready_next = 1'b1;
+        end
+      end
+
+      WAIT_DST_READY: begin
+        if (dst_ready_i) begin
+          src_state_next = WAIT_SRC_VALID;
+          src_valid_next = 1'b0;
+          src_data_next = src_data_i;
+          src_ready_next = 1'b0;
+        end else begin
+          src_ready_next = 1'b0;
+        end
+      end
+
+      WAIT_SRC_VALID: begin
+        if (src_valid_i) begin
+          src_state_next = WAIT_DST_READY;
+          src_valid_next = 1'b1;
+          src_data_next = src_data_i;
+          src_ready_next = 1'b1;
+        end else begin
+          src_ready_next = 1'b1;
+        end
+      end
+
+      default: begin
+        src_state_next = IDLE;
+        src_valid_next = 1'b0;
+        src_data_next = src_data_i;
+        src_ready_next = 1'b1;
+      end
+    endcase
+  end
+
+  // --- Destination Domain Logic ---
+
+  // Current values for combinational next-state logic
+  assign dst_valid_curr = dst_valid_o;
+  assign dst_data_curr = dst_data_o;
+
+  always_comb begin
+    dst_state_next = dst_state;
+    dst_valid_next = 1'b0;
+    dst_data_next = dst_data_i; // Default to input data if not in transfer state
+    dst_ready_next = 1'b0;
+
+    // Handle Reset Message Logic
+    if (SEND_RESET_MSG && !dst_rst_ni) begin
+      dst_state_next = DST_IDLE;
+      dst_valid_next = 1'b1;
+      dst_data_next = RESET_MSG;
+      dst_ready_next = 1'b1;
+    end
+    else if (dst_state == DST_IDLE) begin
+      if (src_valid_i) begin
+        dst_state_next = DST_WAIT_SRC_READY;
+        dst_valid_next = 1'b1;
+        dst_data_next = src_data_i;
+        dst_ready_next = 1'b0;
+      end else begin
+        dst_ready_next = 1'b1;
+      end
+    end
+    else if (dst_state == DST_WAIT_SRC_READY) begin
+      if (src_ready_i) begin
+        dst_state_next = DST_WAIT_SRC_VALID;
+        dst_valid_next = 1'b0;
+        dst_data_next = src_data_i;
+        dst_ready_next = 1'b1;
+      end else begin
+        dst_ready_next = 1'b0;
+      end
+    end
+    else if (dst_state == DST_WAIT_SRC_VALID) begin
+      if (src_valid_i) begin
+        dst_state_next = DST_WAIT_SRC_READY;
+        dst_valid_next = 1'b1;
+        dst_data_next = src_data_i;
+        dst_ready_next = 1'b0;
+      end else begin
+        dst_ready_next = 1'b1;
+      end
+    end
+    else begin
+      dst_state_next = DST_IDLE;
+      dst_valid_next = 1'b0;
+      dst_data_next = dst_data_i;
+      dst_ready_next = 1'b1;
+    end
+  end
+
+  // --- Registers ---
+
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_state <= IDLE;
+    end else begin
+      src_state <= src_state_next;
+    end
+  end
+
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_state <= DST_IDLE;
+    end else begin
+      dst_state <= dst_state_next;
+    end
+  end
+
+  // --- Output Assignments ---
+
+  assign src_ready_o = src_ready_next;
+  assign dst_data_o = dst_data_next;
+  assign dst_valid_o = dst_valid_next;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

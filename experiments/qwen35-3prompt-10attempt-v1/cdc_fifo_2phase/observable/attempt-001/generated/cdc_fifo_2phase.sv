@@ -1,0 +1,372 @@
+```verilog
+module cdc_fifo_2phase #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam ADDR_WIDTH = LOG_DEPTH;
+
+    // Source side registers
+    reg [ADDR_WIDTH-1:0] src_ptr;
+    reg [ADDR_WIDTH-1:0] dst_ptr;
+    reg [WIDTH-1:0]     src_data_reg;
+    reg                 src_valid_reg;
+    reg                 src_full;
+    reg                 src_empty;
+
+    // Destination side registers
+    reg [ADDR_WIDTH-1:0] dst_ptr_reg;
+    reg [ADDR_WIDTH-1:0] src_ptr_reg;
+    reg [WIDTH-1:0]     dst_data_reg;
+    reg                 dst_valid_reg;
+    reg                 dst_full;
+    reg                 dst_empty;
+
+    // CDC Signals: 2-Phase Gray Code
+    // Source to Destination (Write to Read)
+    wire [ADDR_WIDTH-1:0] src_gray;
+    wire [ADDR_WIDTH-1:0] dst_gray;
+    
+    // Destination to Source (Read to Write)
+    wire [ADDR_WIDTH-1:0] dst_gray_src;
+    wire [ADDR_WIDTH-1:0] src_gray_dst;
+
+    // --- Source Side Logic (src_clk_i domain) ---
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_ptr      <= 0;
+            dst_ptr      <= 0;
+            src_data_reg <= 0;
+            src_valid_reg <= 0;
+            src_full     <= 0;
+            src_empty    <= 1;
+        end else begin
+            // Update pointers
+            src_ptr <= src_ptr + 1'b1;
+            dst_ptr <= dst_ptr + 1'b1;
+            
+            // Handle wrap-around for pointers
+            if (src_ptr == 0) src_ptr <= DEPTH - 1;
+            if (dst_ptr == 0) dst_ptr <= DEPTH - 1;
+
+            // Update data and valid
+            if (src_valid_i) begin
+                src_data_reg <= src_data_i;
+                src_valid_reg <= 1;
+            end else begin
+                src_valid_reg <= 0;
+            end
+
+            // Full/Empty detection
+            // Full: Write pointer catches up to Read pointer (modulo arithmetic)
+            // Empty: Write pointer equals Read pointer
+            if (src_ptr == dst_ptr) begin
+                src_empty <= 1;
+                src_full  <= 0;
+            end else begin
+                src_empty <= 0;
+                // Check if write pointer is immediately behind read pointer in circular buffer
+                // (src_ptr + 1) == dst_ptr
+                if (src_ptr == dst_ptr - 1) begin
+                    src_full <= 1;
+                end else begin
+                    src_full <= 0;
+                end
+            end
+        end
+    end
+
+    // --- Destination Side Logic (dst_clk_i domain) ---
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_ptr_reg   <= 0;
+            src_ptr_reg   <= 0;
+            dst_data_reg  <= 0;
+            dst_valid_reg <= 0;
+            dst_full      <= 0;
+            dst_empty     <= 1;
+        end else begin
+            // Update pointers
+            dst_ptr_reg <= dst_ptr_reg + 1'b1;
+            src_ptr_reg <= src_ptr_reg + 1'b1;
+
+            // Handle wrap-around
+            if (dst_ptr_reg == 0) dst_ptr_reg <= DEPTH - 1;
+            if (src_ptr_reg == 0) src_ptr_reg <= DEPTH - 1;
+
+            // Update data and valid
+            if (dst_ready_i) begin
+                dst_data_reg <= src_data_reg; // Data comes from source domain via CDC
+                dst_valid_reg <= 1;
+            end else begin
+                dst_valid_reg <= 0;
+            end
+
+            // Full/Empty detection
+            if (dst_ptr_reg == src_ptr_reg) begin
+                dst_empty <= 1;
+                dst_full  <= 0;
+            end else begin
+                dst_empty <= 0;
+                if (dst_ptr_reg == src_ptr_reg - 1) begin
+                    dst_full <= 1;
+                end else begin
+                    dst_full <= 0;
+                end
+            end
+        end
+    end
+
+    // --- CDC Implementation: 2-Phase Gray Code ---
+    
+    // Helper function to generate Gray code from binary
+    // Since we cannot use functions in procedural blocks easily for synthesis without specific tools,
+    // we implement the logic directly or use a combinational block.
+    // Gray Code: G[n] = B[n] ^ B[n-1]
+    
+    // Source to Dest CDC (Write Ptr -> Read Ptr)
+    // We need to send src_ptr to dst domain.
+    // To avoid metastability on the pointer itself, we use a 2-phase synchronizer.
+    // However, standard 2-phase FIFO uses Gray code encoding for the pointer to ensure 
+    // only one bit changes at a time, allowing safe sampling in the destination domain.
+    
+    // Generate Gray Code for Source Pointer (to be read by Dest)
+    assign src_gray = {
+        src_ptr[ADDR_WIDTH-1],
+        src_ptr[ADDR_WIDTH-1] ^ src_ptr[ADDR_WIDTH-2],
+        src_ptr[ADDR_WIDTH-2] ^ src_ptr[ADDR_WIDTH-3],
+        {ADDR_WIDTH-3{src_ptr[ADDR_WIDTH-3] ^ src_ptr[ADDR_WIDTH-4]}}
+    };
+    // Note: The above generic assignment works for any width >= 2. 
+    // For LOG_DEPTH=1, special care is needed, but typically LOG_DEPTH >= 2 for FIFOs.
+    // Let's make it robust for any LOG_DEPTH.
+    
+    // Re-implementing Gray code generation properly for any width
+    wire [ADDR_WIDTH-1:0] src_gray_gen;
+    assign src_gray_gen[0] = src_ptr[0];
+    generate
+        genvar i;
+        for (i = 1; i < ADDR_WIDTH; i = i + 1) begin : gray_gen_src
+            assign src_gray_gen[i] = src_ptr[i] ^ src_ptr[i-1];
+        end
+    endgenerate
+    assign src_gray = src_gray_gen;
+
+    // Synchronize src_gray into dst domain using 2-phase synchronizer
+    // Phase 1: Sample src_gray
+    reg [ADDR_WIDTH-1:0] src_gray_sync1;
+    reg [ADDR_WIDTH-1:0] src_gray_sync2;
+    
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_gray_sync1 <= 0;
+            src_gray_sync2 <= 0;
+        end else begin
+            src_gray_sync1 <= src_gray;
+            src_gray_sync2 <= src_gray_sync1;
+        end
+    end
+
+    // Decode Gray code back to binary in dst domain
+    // This is done in the dst_clk domain logic above implicitly via the pointer update?
+    // No, the pointer update in dst domain must use the synchronized binary value.
+    // Wait, the standard 2-phase FIFO architecture:
+    // 1. Write domain generates Gray code of write pointer.
+    // 2. Read domain samples Gray code twice (2-phase) to get stable binary value.
+    // 3. Read domain uses this binary value for logic.
+    
+    // Let's refine the architecture:
+    // The 'dst_ptr' in the dst domain logic above is actually the 'read pointer'.
+    // The 'src_ptr' in the dst domain logic above is the 'write pointer' (synchronized).
+    
+    // Correct Flow:
+    // 1. src_clk domain: Calculate src_gray from src_ptr.
+    // 2. dst_clk domain: Sample src_gray twice to get stable src_ptr_bin.
+    // 3. dst_clk domain: Use src_ptr_bin for full/empty logic and data output.
+    // 4. dst_clk domain: Calculate dst_gray from dst_ptr.
+    // 5. src_clk domain: Sample dst_gray twice to get stable dst_ptr_bin.
+    // 6. src_clk domain: Use dst_ptr_bin for full/empty logic.
+    
+    // Re-architecting the module to strictly follow 2-phase Gray code flow.
+    
+    // --- Source Domain Logic (Revised) ---
+    reg [ADDR_WIDTH-1:0] src_ptr_bin;
+    reg [ADDR_WIDTH-1:0] dst_ptr_bin;
+    reg [WIDTH-1:0]     src_data_reg;
+    reg                 src_valid_reg;
+    reg                 src_full;
+    reg                 src_empty;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_ptr_bin      <= 0;
+            dst_ptr_bin      <= 0;
+            src_data_reg     <= 0;
+            src_valid_reg    <= 0;
+            src_full         <= 0;
+            src_empty        <= 1;
+        end else begin
+            src_ptr_bin <= src_ptr_bin + 1'b1;
+            dst_ptr_bin <= dst_ptr_bin + 1'b1;
+            
+            if (src_ptr_bin == 0) src_ptr_bin <= DEPTH - 1;
+            if (dst_ptr_bin == 0) dst_ptr_bin <= DEPTH - 1;
+
+            if (src_valid_i) begin
+                src_data_reg <= src_data_i;
+                src_valid_reg <= 1;
+            end else begin
+                src_valid_reg <= 0;
+            end
+
+            if (src_ptr_bin == dst_ptr_bin) begin
+                src_empty <= 1;
+                src_full  <= 0;
+            end else begin
+                src_empty <= 0;
+                if (src_ptr_bin == dst_ptr_bin - 1) begin
+                    src_full <= 1;
+                end else begin
+                    src_full <= 0;
+                end
+            end
+        end
+    end
+
+    // --- Destination Domain Logic (Revised) ---
+    reg [ADDR_WIDTH-1:0] dst_ptr_bin;
+    reg [ADDR_WIDTH-1:0] src_ptr_bin_sync; // Synchronized write pointer
+    reg [WIDTH-1:0]     dst_data_reg;
+    reg                 dst_valid_reg;
+    reg                 dst_full;
+    reg                 dst_empty;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_ptr_bin    <= 0;
+            src_ptr_bin_sync <= 0;
+            dst_data_reg   <= 0;
+            dst_valid_reg  <= 0;
+            dst_full       <= 0;
+            dst_empty      <= 1;
+        end else begin
+            dst_ptr_bin <= dst_ptr_bin + 1'b1;
+            
+            if (dst_ptr_bin == 0) dst_ptr_bin <= DEPTH - 1;
+
+            if (dst_ready_i) begin
+                dst_data_reg <= src_data_reg; // Data is valid here because we are in read domain
+                dst_valid_reg <= 1;
+            end else begin
+                dst_valid_reg <= 0;
+            end
+
+            if (dst_ptr_bin == src_ptr_bin_sync) begin
+                dst_empty <= 1;
+                dst_full  <= 0;
+            end else begin
+                dst_empty <= 0;
+                if (dst_ptr_bin == src_ptr_bin_sync - 1) begin
+                    dst_full <= 1;
+                end else begin
+                    dst_full <= 0;
+                end
+            end
+        end
+    end
+
+    // --- CDC: Write Pointer (src -> dst) ---
+    // Generate Gray code from src_ptr_bin
+    wire [ADDR_WIDTH-1:0] src_gray;
+    assign src_gray[0] = src_ptr_bin[0];
+    generate
+        genvar i;
+        for (i = 1; i < ADDR_WIDTH; i = i + 1) begin : gray_gen_src
+            assign src_gray[i] = src_ptr_bin[i] ^ src_ptr_bin[i-1];
+        end
+    endgenerate
+
+    // 2-Phase Synchronizer for src_gray
+    reg [ADDR_WIDTH-1:0] src_gray_sync1;
+    reg [ADDR_WIDTH-1:0] src_gray_sync2;
+    
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_gray_sync1 <= 0;
+            src_gray_sync2 <= 0;
+        end else begin
+            src_gray_sync1 <= src_gray;
+            src_gray_sync2 <= src_gray_sync1;
+        end
+    end
+
+    // Decode Gray to Binary in dst domain
+    wire [ADDR_WIDTH-1:0] src_ptr_bin_decoded;
+    assign src_ptr_bin_decoded[0] = src_gray_sync2[0];
+    generate
+        genvar i;
+        for (i = 1; i < ADDR_WIDTH; i = i + 1) begin : gray_decode_dst
+            assign src_ptr_bin_decoded[i] = src_gray_sync2[i] ^ src_gray_sync2[i-1];
+        end
+    endgenerate
+
+    // Assign synchronized binary pointer to the logic
+    assign src_ptr_bin_sync = src_ptr_bin_decoded;
+
+    // --- CDC: Read Pointer (dst -> src) ---
+    // Generate Gray code from dst_ptr_bin
+    wire [ADDR_WIDTH-1:0] dst_gray;
+    assign dst_gray[0] = dst_ptr_bin[0];
+    generate
+        genvar i;
+        for (i = 1; i < ADDR_WIDTH; i = i + 1) begin : gray_gen_dst
+            assign dst_gray[i] = dst_ptr_bin[i] ^ dst_ptr_bin[i-1];
+        end
+    endgenerate
+
+    // 2-Phase Synchronizer for dst_gray
+    reg [ADDR_WIDTH-1:0] dst_gray_sync1;
+    reg [ADDR_WIDTH-1:0] dst_gray_sync2;
+    
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_gray_sync1 <= 0;
+            dst_gray_sync2 <= 0;
+        end else begin
+            dst_gray_sync1 <= dst_gray;
+            dst_gray_sync2 <= dst_gray_sync1;
+        end
+    end
+
+    // Decode Gray to Binary in src domain
+    wire [ADDR_WIDTH-1:0] dst_ptr_bin_decoded;
+    assign dst_ptr_bin_decoded[0] = dst_gray_sync2[0];
+    generate
+        genvar i;
+        for (i = 1; i < ADDR_WIDTH; i = i + 1) begin : gray_decode_src
+            assign dst_ptr_bin_decoded[i] = dst_gray_sync2[i] ^ dst_gray_sync2[i-1];
+        end
+    endgenerate
+
+    // Assign synchronized binary pointer to the logic
+    assign dst_ptr_bin = dst_ptr_bin_decoded;
+
+    // --- Output Logic ---
+    assign src_ready_o = !src_full;
+    assign dst_data_o = dst_data_reg;
+    assign dst_valid_o = dst_valid_reg;
+
+endmodule
+```<|im_end|>

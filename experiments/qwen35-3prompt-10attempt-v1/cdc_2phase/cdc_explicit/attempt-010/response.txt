@@ -1,0 +1,100 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals for CDC handshake
+  logic src_valid_reg;
+  logic dst_valid_reg;
+  logic dst_valid_ack;
+  logic dst_valid_next;
+  logic dst_data_reg;
+  logic dst_data_next;
+  logic dst_valid_stable;
+
+  // ------------------------------------------------------------------
+  // Source Domain: Capture valid and drive ready
+  // ------------------------------------------------------------------
+  // Capture src_valid_i on rising edge of src_clk_i
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      src_valid_reg <= 1'b0;
+    else
+      src_valid_reg <= src_valid_i;
+  end
+
+  // Drive src_ready_o based on destination status
+  // Ready is asserted only when:
+  // 1. No pending transfer in destination (dst_valid_reg is low)
+  // 2. Destination is ready (dst_ready_i is high)
+  // 3. Current captured valid is low (no item currently being transferred)
+  assign src_ready_o = (~dst_valid_reg) & dst_ready_i;
+
+  // ------------------------------------------------------------------
+  // Destination Domain: Capture data/valid and drive valid
+  // ------------------------------------------------------------------
+  // Capture src_valid_reg and src_data_reg on rising edge of dst_clk_i
+  // Note: We capture the source valid signal to know when to assert dst_valid_o
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_data_reg  <= {WIDTH{1'b0}};
+    end else begin
+      // Capture the source valid signal from the source domain
+      // This creates a safe crossing because we are sampling an external signal
+      // that is stable during the capture window (two-phase protocol ensures this)
+      dst_valid_reg <= src_valid_reg;
+      // Capture the source data when valid is high
+      dst_data_reg  <= (src_valid_reg) ? src_data_i : {WIDTH{1'b0}};
+    end
+  end
+
+  // Drive dst_valid_o based on destination status
+  // Valid is asserted only when:
+  // 1. Captured source valid is high
+  // 2. Destination is ready (dst_ready_i is high)
+  // 3. No pending transfer from previous cycle (dst_valid_reg was low before this cycle)
+  // This ensures we don't re-assert valid if we are already in a transfer
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      dst_valid_o <= 1'b0;
+    else begin
+      // Check if we have a new item to send
+      logic new_item = (src_valid_reg) & (~dst_valid_reg);
+      
+      if (new_item) begin
+        // New item arrived and no pending transfer
+        dst_valid_o <= 1'b1;
+      end else if (dst_valid_reg) begin
+        // We have a pending transfer, keep valid high until ready
+        dst_valid_o <= 1'b1;
+      end else begin
+        // No pending transfer and no new item
+        dst_valid_o <= 1'b0;
+      end
+    end
+  end
+
+  // Drive dst_data_o
+  // Data is stable when dst_valid_o is high
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      dst_data_o <= {WIDTH{1'b0}};
+    else if (dst_valid_o)
+      dst_data_o <= dst_data_reg;
+    else
+      dst_data_o <= {WIDTH{1'b0}};
+  end
+
+endmodule<|im_end|>
+<|endoftext|>

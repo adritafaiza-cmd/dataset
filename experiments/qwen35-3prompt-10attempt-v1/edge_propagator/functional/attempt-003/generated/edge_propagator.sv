@@ -1,0 +1,52 @@
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  // Internal state registers
+  logic edge_tx_d;
+  logic edge_rx_d;
+  logic edge_rx_q;
+
+  // TX Domain: Detect rising edge on edge_i
+  // We sample edge_i on clk_tx_i to detect transitions safely
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i)
+      edge_tx_d <= 1'b0;
+    else
+      edge_tx_d <= edge_i;
+  end
+
+  // RX Domain: Detect rising edge of the propagated signal
+  // We sample the TX edge on clk_rx_i to generate a pulse
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i)
+      edge_rx_d <= 1'b0;
+    else
+      edge_rx_d <= edge_tx_d;
+  end
+
+  // Generate output pulse on the rising edge of edge_rx_d
+  // This ensures one pulse per detected edge without double-counting
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i)
+      edge_o <= 1'b0;
+    else if (edge_rx_d && !edge_rx_q)
+      edge_o <= 1'b1;
+    else
+      edge_o <= 1'b0;
+  end
+
+  // Register to hold previous value of edge_rx_d for pulse detection
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i)
+      edge_rx_q <= 1'b0;
+    else
+      edge_rx_q <= edge_rx_d;
+  end
+
+endmodule<|im_end|>

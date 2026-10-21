@@ -1,0 +1,177 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam LOG_PORTS = $clog2(PORTS);
+    localparam LOG_ACK = $clog2(PORTS);
+
+    // State encoding for Round Robin
+    localparam STATE_IDLE = 2'b00;
+    localparam STATE_GRANTING = 2'b01;
+    localparam STATE_WAITING_ACK = 2'b10;
+    localparam STATE_WAITING_DROP = 2'b11;
+
+    reg [LOG_PORTS-1:0] next_state;
+    reg [LOG_PORTS-1:0] current_state;
+    reg [LOG_PORTS-1:0] next_index;
+    reg [LOG_PORTS-1:0] current_index;
+    reg [LOG_PORTS-1:0] next_request_mask;
+    reg [LOG_PORTS-1:0] current_request_mask;
+    reg [LOG_PORTS-1:0] next_ack_mask;
+    reg [LOG_PORTS-1:0] current_ack_mask;
+    reg [LOG_PORTS-1:0] next_grant;
+    reg [LOG_PORTS-1:0] current_grant;
+    reg [LOG_PORTS-1:0] next_grant_encoded;
+    reg [LOG_PORTS-1:0] current_grant_encoded;
+    reg [LOG_PORTS-1:0] next_request;
+    reg [LOG_PORTS-1:0] current_request;
+    reg [LOG_PORTS-1:0] next_acknowledge;
+    reg [LOG_PORTS-1:0] current_acknowledge;
+    reg [LOG_PORTS-1:0] next_grant_valid;
+    reg [LOG_PORTS-1:0] current_grant_valid;
+
+    // Internal registers for state and index
+    reg [LOG_PORTS-1:0] state_reg;
+    reg [LOG_PORTS-1:0] index_reg;
+    reg [LOG_PORTS-1:0] request_mask_reg;
+    reg [LOG_PORTS-1:0] ack_mask_reg;
+    reg [LOG_PORTS-1:0] grant_reg;
+    reg [LOG_PORTS-1:0] grant_encoded_reg;
+    reg [LOG_PORTS-1:0] grant_valid_reg;
+
+    // Combinational logic for next state and outputs
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state_reg <= STATE_IDLE;
+            index_reg <= 0;
+            request_mask_reg <= 0;
+            ack_mask_reg <= 0;
+            grant_reg <= 0;
+            grant_encoded_reg <= 0;
+            grant_valid_reg <= 0;
+        end else begin
+            state_reg <= next_state;
+            index_reg <= next_index;
+            request_mask_reg <= next_request_mask;
+            ack_mask_reg <= next_ack_mask;
+            grant_reg <= next_grant;
+            grant_encoded_reg <= next_grant_encoded;
+            grant_valid_reg <= next_grant_valid;
+        end
+    end
+
+    always @(*) begin
+        next_state = STATE_IDLE;
+        next_index = 0;
+        next_request_mask = request;
+        next_ack_mask = acknowledge;
+        next_grant = 0;
+        next_grant_encoded = 0;
+        next_grant_valid = 0;
+
+        if (rst) begin
+            // Reset state
+        end else begin
+            // Determine current request mask and ack mask
+            current_request_mask = request;
+            current_ack_mask = acknowledge;
+
+            // Determine if there are any active requests
+            if (current_request_mask == 0) begin
+                next_state = STATE_IDLE;
+                next_grant_valid = 0;
+                next_grant = 0;
+                next_grant_encoded = 0;
+            end else begin
+                if (state_reg == STATE_IDLE) begin
+                    // Find first active requestor based on priority
+                    if (ARB_TYPE_ROUND_ROBIN) begin
+                        // Round Robin logic
+                        if (current_request_mask[index_reg] == 1) begin
+                            next_state = STATE_GRANTING;
+                            next_index = index_reg;
+                        end else begin
+                            // Rotate index
+                            next_index = (index_reg + 1) % PORTS;
+                            next_state = STATE_GRANTING;
+                        end
+                    end else begin
+                        // Fixed priority logic
+                        for (int i = 0; i < PORTS; i = i + 1) begin
+                            if (current_request_mask[i] == 1) begin
+                                next_state = STATE_GRANTING;
+                                next_index = i;
+                                break;
+                            end
+                        end
+                    end
+                end else if (state_reg == STATE_GRANTING) begin
+                    // Grant the selected port
+                    next_state = STATE_WAITING_ACK;
+                    next_grant = 1 << next_index;
+                    next_grant_encoded = next_index;
+                    next_grant_valid = 1;
+                end else if (state_reg == STATE_WAITING_ACK) begin
+                    // Wait for acknowledge or request drop
+                    if (current_ack_mask[next_index] == 1) begin
+                        // Acknowledge received, move to waiting for request drop
+                        next_state = STATE_WAITING_DROP;
+                        next_grant_valid = 0;
+                        next_grant = 0;
+                        next_grant_encoded = 0;
+                    end else if (current_request_mask[next_index] == 0) begin
+                        // Request dropped, move to waiting for request drop
+                        next_state = STATE_WAITING_DROP;
+                        next_grant_valid = 0;
+                        next_grant = 0;
+                        next_grant_encoded = 0;
+                    end else begin
+                        // Still waiting for acknowledge
+                        next_state = STATE_WAITING_ACK;
+                        next_grant_valid = 0;
+                        next_grant = 0;
+                        next_grant_encoded = 0;
+                    end
+                end else if (state_reg == STATE_WAITING_DROP) begin
+                    // Wait for request drop
+                    if (current_request_mask[next_index] == 0) begin
+                        // Request dropped, move to idle
+                        next_state = STATE_IDLE;
+                        next_grant_valid = 0;
+                        next_grant = 0;
+                        next_grant_encoded = 0;
+                    end else begin
+                        // Request still active, stay in waiting drop
+                        next_state = STATE_WAITING_DROP;
+                        next_grant_valid = 0;
+                        next_grant = 0;
+                        next_grant_encoded = 0;
+                    end
+                end
+            end
+        end
+    end
+
+    // Output assignments
+    assign grant = grant_reg;
+    assign grant_encoded = grant_encoded_reg;
+    assign grant_valid = grant_valid_reg;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

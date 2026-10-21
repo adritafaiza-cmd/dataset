@@ -1,0 +1,32 @@
+```systemverilog
+module sync #(
+    parameter int unsigned STAGES = 2,
+    parameter bit ResetValue = 1'b0
+) (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic serial_i,
+    output logic serial_o
+);
+
+    logic [STAGES-1:0] stage;
+
+    genvar i;
+    generate
+        for (i = 0; i < STAGES; i = i + 1) begin : stage_gen
+            logic stage_reg;
+            assign stage_reg = (i == 0) ? serial_i : stage[i-1];
+            
+            always_ff @(posedge clk_i or negedge rst_ni) begin
+                if (!rst_ni)
+                    stage[i] <= ResetValue;
+                else
+                    stage[i] <= stage_reg;
+            end
+        end
+    endgenerate
+
+    assign serial_o = stage[STAGES-1];
+
+endmodule
+```<|im_end|>

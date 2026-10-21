@@ -1,0 +1,247 @@
+```verilog
+module wbxclk #(
+	parameter	AW=32,
+				DW=32,
+				LGFIFO = 5
+) (
+	input	wire			i_wb_clk, i_reset,
+	input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+	input	wire	[(AW-1):0]	i_wb_addr,
+	input	wire	[(DW-1):0]	i_wb_data,
+	input	wire	[(DW/8-1):0]	i_wb_sel,
+	output	wire			o_wb_stall,
+	output	reg			o_wb_ack,
+	output	reg	[(DW-1):0]	o_wb_data,
+	output	reg			o_wb_err,
+	input	wire			i_xclk_clk,
+	output	reg			o_xclk_cyc,
+	output	reg			o_xclk_stb,
+	output	reg			o_xclk_we,
+	output	reg	[(AW-1):0]	o_xclk_addr,
+	output	reg	[(DW-1):0]	o_xclk_data,
+	output	reg	[(DW/8-1):0]	o_xclk_sel,
+	input	wire			i_xclk_stall,
+	input	wire			i_xclk_ack,
+	input	wire	[(DW-1):0]	i_xclk_data,
+	input	wire			i_xclk_err
+);
+
+	localparam	DEPTH = 1 << LGFIFO;
+
+	// Wishbone Side State Machine
+	// States: IDLE, WAIT_XACK, WAIT_XERR
+	localparam	IDLE = 2'b00,
+				WAIT_XACK = 2'b01,
+				WAIT_XERR = 2'b10;
+
+	reg	[1:0]	wb_state;
+	reg		wb_valid;
+	reg		wb_stall_flag;
+	reg		[LGFIPO-1:0]	wb_fifo_wptr;
+	reg		[LGFIPO-1:0]	wb_fifo_rptr;
+	reg		[LGFIPO-1:0]	wb_fifo_count;
+	reg		[AW-1:0]	wb_fifo_addr;
+	reg		[DW-1:0]	wb_fifo_data;
+	reg		[DW/8-1:0]	wb_fifo_sel;
+	reg			wb_fifo_we;
+	reg			wb_fifo_err;
+
+	// XCLK Side State Machine
+	// States: IDLE, WAIT_WACK, WAIT_WERR
+	localparam	X_IDLE = 2'b00,
+				X_WAIT_WACK = 2'b01,
+				X_WAIT_WERR = 2'b10;
+
+	reg	[1:0]	x_state;
+	reg		x_valid;
+	reg		x_stall_flag;
+	reg		[LGFIPO-1:0]	x_fifo_wptr;
+	reg		[LGFIPO-1:0]	x_fifo_rptr;
+	reg		[LGFIPO-1:0]	x_fifo_count;
+	reg		[AW-1:0]	x_fifo_addr;
+	reg		[DW-1:0]	x_fifo_data;
+	reg		[DW/8-1:0]	x_fifo_sel;
+	reg			x_fifo_we;
+	reg			x_fifo_err;
+
+	// Wishbone FIFO Logic
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			wb_fifo_wptr <= '0;
+			wb_fifo_rptr <= '0;
+			wb_fifo_count <= '0;
+			wb_fifo_addr <= '0;
+			wb_fifo_data <= '0;
+			wb_fifo_sel <= '0;
+			wb_fifo_we <= 1'b0;
+			wb_fifo_err <= 1'b0;
+		end
+		else begin
+			wb_fifo_wptr <= wb_fifo_wptr + wb_fifo_we;
+			wb_fifo_rptr <= wb_fifo_rptr + x_fifo_we;
+			wb_fifo_count <= wb_fifo_count + wb_fifo_we - x_fifo_we;
+			wb_fifo_addr <= wb_fifo_addr;
+			wb_fifo_data <= wb_fifo_data;
+			wb_fifo_sel <= wb_fifo_sel;
+			wb_fifo_we <= wb_valid;
+			wb_fifo_err <= wb_valid & wb_fifo_err;
+		end
+	end
+
+	// XCLK FIFO Logic
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			x_fifo_wptr <= '0;
+			x_fifo_rptr <= '0;
+			x_fifo_count <= '0;
+			x_fifo_addr <= '0;
+			x_fifo_data <= '0;
+			x_fifo_sel <= '0;
+			x_fifo_we <= 1'b0;
+			x_fifo_err <= 1'b0;
+		end
+		else begin
+			x_fifo_wptr <= x_fifo_wptr + x_fifo_we;
+			x_fifo_rptr <= x_fifo_rptr + wb_fifo_we;
+			x_fifo_count <= x_fifo_count + x_fifo_we - wb_fifo_we;
+			x_fifo_addr <= x_fifo_addr;
+			x_fifo_data <= x_fifo_data;
+			x_fifo_sel <= x_fifo_sel;
+			x_fifo_we <= x_valid;
+			x_fifo_err <= x_valid & x_fifo_err;
+		end
+	end
+
+	// Wishbone Side State Machine
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			wb_state <= IDLE;
+			wb_valid <= 1'b0;
+			wb_stall_flag <= 1'b0;
+			o_wb_ack <= 1'b0;
+			o_wb_err <= 1'b0;
+		end
+		else begin
+			case (wb_state)
+				IDLE: begin
+					if (i_wb_cyc & i_wb_stb & ~wb_stall_flag) begin
+						wb_state <= WAIT_XACK;
+						wb_valid <= 1'b1;
+						o_wb_ack <= 1'b0;
+						o_wb_err <= 1'b0;
+					end
+				end
+				WAIT_XACK: begin
+					if (i_xclk_ack) begin
+						wb_state <= IDLE;
+						wb_valid <= 1'b0;
+						o_wb_ack <= 1'b1;
+					end
+					else if (i_xclk_err) begin
+						wb_state <= IDLE;
+						wb_valid <= 1'b0;
+						o_wb_err <= 1'b1;
+					end
+				end
+				WAIT_XERR: begin
+					if (i_xclk_ack) begin
+						wb_state <= IDLE;
+						wb_valid <= 1'b0;
+						o_wb_err <= 1'b0;
+					end
+				end
+				default: begin
+					wb_state <= IDLE;
+				end
+			endcase
+		end
+	end
+
+	// XCLK Side State Machine
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			x_state <= X_IDLE;
+			x_valid <= 1'b0;
+			x_stall_flag <= 1'b0;
+			o_xclk_cyc <= 1'b0;
+			o_xclk_stb <= 1'b0;
+			o_xclk_we <= 1'b0;
+			o_xclk_err <= 1'b0;
+		end
+		else begin
+			case (x_state)
+				X_IDLE: begin
+					if (i_xclk_cyc & i_xclk_stb & ~x_stall_flag) begin
+						x_state <= X_WAIT_WACK;
+						x_valid <= 1'b1;
+						o_xclk_cyc <= 1'b1;
+						o_xclk_stb <= 1'b1;
+						o_xclk_we <= i_wb_we;
+						o_xclk_err <= 1'b0;
+					end
+				end
+				X_WAIT_WACK: begin
+					if (i_wb_ack) begin
+						x_state <= X_IDLE;
+						x_valid <= 1'b0;
+						o_xclk_cyc <= 1'b0;
+						o_xclk_stb <= 1'b0;
+						o_xclk_we <= 1'b0;
+						o_xclk_err <= 1'b0;
+					end
+					else if (i_wb_err) begin
+						x_state <= X_IDLE;
+						x_valid <= 1'b0;
+						o_xclk_cyc <= 1'b0;
+						o_xclk_stb <= 1'b0;
+						o_xclk_we <= 1'b0;
+						o_xclk_err <= 1'b1;
+					end
+				end
+				X_WAIT_WERR: begin
+					if (i_wb_ack) begin
+						x_state <= X_IDLE;
+						x_valid <= 1'b0;
+						o_xclk_cyc <= 1'b0;
+						o_xclk_stb <= 1'b0;
+						o_xclk_we <= 1'b0;
+						o_xclk_err <= 1'b0;
+					end
+				end
+				default: begin
+					x_state <= X_IDLE;
+				end
+			endcase
+		end
+	end
+
+	// Output Logic
+	assign o_wb_stall = wb_stall_flag | x_stall_flag;
+	assign o_wb_data = wb_fifo_data;
+	assign o_wb_sel = wb_fifo_sel;
+	assign o_xclk_addr = x_fifo_addr;
+	assign o_xclk_data = x_fifo_data;
+	assign o_xclk_sel = x_fifo_sel;
+
+	// Stall Logic
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			wb_stall_flag <= 1'b0;
+		end
+		else begin
+			wb_stall_flag <= (wb_fifo_count == DEPTH) ? 1'b1 : 1'b0;
+		end
+	end
+
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			x_stall_flag <= 1'b0;
+		end
+		else begin
+			x_stall_flag <= (x_fifo_count == DEPTH) ? 1'b1 : 1'b0;
+		end
+	end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

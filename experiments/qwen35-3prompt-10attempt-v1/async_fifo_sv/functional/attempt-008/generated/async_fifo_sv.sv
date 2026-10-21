@@ -1,0 +1,227 @@
+```systemverilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam INT_WIDTH = ADDR_WIDTH + 1;
+    localparam NUM_ENTRIES = 1 << ADDR_WIDTH;
+    localparam SYNC_DEPTH = 1 << SYNC_STAGES;
+
+    // Write Domain Signals
+    reg [INT_WIDTH-1:0] w_ptr;
+    reg [INT_WIDTH-1:0] w_cnt;
+    reg [ADDR_WIDTH:0]  w_addr_reg;
+    wire                w_full_int;
+
+    // Read Domain Signals
+    reg [INT_WIDTH-1:0] r_ptr;
+    reg [INT_WIDTH-1:0] r_cnt;
+    reg [ADDR_WIDTH:0]  r_addr_reg;
+    wire                r_empty_int;
+
+    // Cross-domain Gray Code Generators
+    // Write Domain: Generate Gray code for read domain synchronization
+    wire [INT_WIDTH-1:0] w_gray;
+    wire [INT_WIDTH-1:0] w_gray_synced;
+
+    // Read Domain: Generate Gray code for write domain synchronization
+    wire [INT_WIDTH-1:0] r_gray;
+    wire [INT_WIDTH-1:0] r_gray_synced;
+
+    // Internal pointers for logic
+    wire [INT_WIDTH-1:0] w_ptr_gray;
+    wire [INT_WIDTH-1:0] r_ptr_gray;
+
+    // ---------------------------------------------------------
+    // Write Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            w_ptr   <= 0;
+            w_cnt   <= 0;
+            w_addr_reg <= 0;
+        end else begin
+            if (winc && !w_full_int) begin
+                w_ptr   <= w_ptr + 1'b1;
+                w_cnt   <= w_cnt + 1'b1;
+                w_addr_reg <= w_ptr[ADDR_WIDTH:0];
+            end
+        end
+    end
+
+    // Full condition: counter equals max value (NUM_ENTRIES - 1)
+    assign w_full_int = (w_cnt == (NUM_ENTRIES - 1));
+    assign wfull = w_full_int;
+    assign waddr = w_addr_reg;
+
+    // ---------------------------------------------------------
+    // Read Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            r_ptr   <= 0;
+            r_cnt   <= 0;
+            r_addr_reg <= 0;
+        end else begin
+            if (rinc && !r_empty_int) begin
+                r_ptr   <= r_ptr + 1'b1;
+                r_cnt   <= r_cnt + 1'b1;
+            end
+        end
+    end
+
+    // Empty condition: counter equals 0
+    assign r_empty_int = (r_cnt == 0);
+    assign rempty = r_empty_int;
+    assign raddr = r_addr_reg;
+
+    // ---------------------------------------------------------
+    // Cross-Clock Synchronization
+    // ---------------------------------------------------------
+
+    // 1. Write Pointer to Read Domain (for Full detection)
+    // Convert Write Pointer to Gray Code
+    assign w_ptr_gray = w_ptr ^ (w_ptr >> 1);
+    
+    // Synchronize Write Pointer Gray Code to Read Domain
+    genvar i;
+    generate
+        for (i = 0; i < SYNC_DEPTH; i++) begin : sync_w_gray
+            wire [INT_WIDTH-1:0] w_gray_stage;
+            if (i == 0)
+                w_gray_stage = w_ptr_gray;
+            else
+                w_gray_stage = w_gray_synced;
+            
+            always @(posedge rclk or negedge rrst_n) begin
+                if (!rrst_n)
+                    w_gray_synced <= 0;
+                else
+                    w_gray_synced <= w_gray_stage;
+            end
+        end
+    endgenerate
+
+    // Calculate Read Domain Full Signal
+    // Full when (r_ptr + 1) == w_ptr (considering wrap around)
+    // Using counters: Full when r_cnt == w_cnt - 1
+    // We need to compare r_cnt with the synchronized w_cnt.
+    // Since we only synchronized w_ptr_gray, we can derive w_cnt from it or sync w_cnt directly.
+    // Simpler approach: Sync w_cnt directly to read domain.
+    
+    wire [INT_WIDTH-1:0] w_cnt_synced;
+    genvar j;
+    generate
+        for (j = 0; j < SYNC_DEPTH; j++) begin : sync_w_cnt
+            wire [INT_WIDTH-1:0] w_cnt_stage;
+            if (j == 0)
+                w_cnt_stage = w_cnt;
+            else
+                w_cnt_stage = w_cnt_synced;
+            
+            always @(posedge rclk or negedge rrst_n) begin
+                if (!rrst_n)
+                    w_cnt_synced <= 0;
+                else
+                    w_cnt_synced <= w_cnt_stage;
+            end
+        end
+    endgenerate
+
+    assign wfull = (r_cnt == (w_cnt_synced - 1));
+
+    // 2. Read Pointer to Write Domain (for Empty detection)
+    // Convert Read Pointer to Gray Code
+    assign r_ptr_gray = r_ptr ^ (r_ptr >> 1);
+    
+    // Synchronize Read Pointer Gray Code to Write Domain
+    genvar k;
+    generate
+        for (k = 0; k < SYNC_DEPTH; k++) begin : sync_r_gray
+            wire [INT_WIDTH-1:0] r_gray_stage;
+            if (k == 0)
+                r_gray_stage = r_ptr_gray;
+            else
+                r_gray_stage = r_gray_synced;
+            
+            always @(posedge wclk or negedge wrst_n) begin
+                if (!wrst_n)
+                    r_gray_synced <= 0;
+                else
+                    r_gray_synced <= r_gray_stage;
+            end
+        end
+    endgenerate
+
+    // Calculate Write Domain Empty Signal
+    // Empty when r_ptr == w_ptr
+    // Using counters: Empty when r_cnt == w_cnt
+    // We need to compare r_cnt with the synchronized r_cnt.
+    // Sync r_cnt directly to write domain.
+    
+    wire [INT_WIDTH-1:0] r_cnt_synced;
+    genvar l;
+    generate
+        for (l = 0; l < SYNC_DEPTH; l++) begin : sync_r_cnt
+            wire [INT_WIDTH-1:0] r_cnt_stage;
+            if (l == 0)
+                r_cnt_stage = r_cnt;
+            else
+                r_cnt_stage = r_cnt_synced;
+            
+            always @(posedge wclk or negedge wrst_n) begin
+                if (!wrst_n)
+                    r_cnt_synced <= 0;
+                else
+                    r_cnt_synced <= r_cnt_stage;
+            end
+        end
+    endgenerate
+
+    assign rempty = (r_cnt_synced == w_cnt);
+
+    // ---------------------------------------------------------
+    // Data Path
+    // ---------------------------------------------------------
+    // Write Data Storage
+    reg [DATA_WIDTH-1:0] mem [NUM_ENTRIES-1:0];
+    
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            // Clear memory on reset
+            for (int m = 0; m < NUM_ENTRIES; m = m + 1)
+                mem[m] <= 0;
+        end else begin
+            if (winc && !w_full_int) begin
+                mem[w_ptr[ADDR_WIDTH:0]] <= wdata;
+            end
+        end
+    end
+
+    // Read Data Output
+    // Sample the memory at the synchronized read address
+    // Since r_addr_reg is updated on rclk, we can use it directly for sampling
+    // However, to ensure stability, we can use the synchronized r_ptr_gray to index
+    // But standard practice is to use the read address register which is already in read domain.
+    // The synchronization is needed for the pointers to calculate full/empty.
+    // For data output, we just read from the memory array using the current r_addr_reg.
+    
+    assign rdata = mem[r_addr_reg];
+
+endmodule
+```<|im_end|>

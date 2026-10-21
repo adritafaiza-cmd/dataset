@@ -1,0 +1,699 @@
+```verilog
+module axis_async_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    input  wire                   s_pause_req,
+    output wire                   s_pause_ack,
+    input  wire                   m_pause_req,
+    output wire                   m_pause_ack,
+    output wire [$clog2(DEPTH):0] s_status_depth,
+    output wire [$clog2(DEPTH):0] s_status_depth_commit,
+    output wire                   s_status_overflow,
+    output wire                   s_status_bad_frame,
+    output wire                   s_status_good_frame,
+    output wire [$clog2(DEPTH):0] m_status_depth,
+    output wire [$clog2(DEPTH):0] m_status_depth_commit,
+    output wire                   m_status_overflow,
+    output wire                   m_status_bad_frame,
+    output wire                   m_status_good_frame
+);
+
+    localparam LOG2_DEPTH = $clog2(DEPTH);
+    localparam MAX_DEPTH = (1 << LOG2_DEPTH);
+    
+    // Internal parameters for FIFO pointers
+    localparam PTR_WIDTH = $clog2(MAX_DEPTH);
+    
+    // Control signals for CDC
+    wire s_rst_n = ~s_rst;
+    wire m_rst_n = ~m_rst;
+    
+    // CDC Registers for Reset Synchronization
+    reg s_rst_sync;
+    reg m_rst_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) s_rst_sync <= 1'b1;
+        else s_rst_sync <= s_rst;
+    end
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) m_rst_sync <= 1'b1;
+        else m_rst_sync <= m_rst;
+    end
+
+    // CDC Registers for Pause Request Synchronization
+    wire s_pause_req_sync;
+    wire m_pause_req_sync;
+    reg s_pause_req_reg;
+    reg m_pause_req_reg;
+    
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_pause_req_reg <= 1'b0;
+            s_pause_req_sync <= 1'b0;
+        end else begin
+            s_pause_req_reg <= s_pause_req;
+            s_pause_req_sync <= s_pause_req;
+        end
+    end
+    
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_pause_req_reg <= 1'b0;
+            m_pause_req_sync <= 1'b0;
+        end else begin
+            m_pause_req_reg <= m_pause_req;
+            m_pause_req_sync <= m_pause_req;
+        end
+    end
+
+    // CDC Registers for Ready Signal Synchronization (for backpressure handling)
+    wire s_ready_sync;
+    wire m_ready_sync;
+    reg s_ready_reg;
+    reg m_ready_reg;
+    
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_ready_reg <= 1'b0;
+            s_ready_sync <= 1'b0;
+        end else begin
+            s_ready_reg <= s_axis_tready;
+            s_ready_sync <= s_axis_tready;
+        end
+    end
+    
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_ready_reg <= 1'b0;
+            m_ready_sync <= 1'b0;
+        end else begin
+            m_ready_reg <= m_axis_tready;
+            m_ready_sync <= m_axis_tready;
+        end
+    end
+
+    // CDC Registers for Pause Ack Synchronization
+    wire s_pause_ack_sync;
+    wire m_pause_ack_sync;
+    reg s_pause_ack_reg;
+    reg m_pause_ack_reg;
+    
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_pause_ack_reg <= 1'b0;
+            s_pause_ack_sync <= 1'b0;
+        end else begin
+            s_pause_ack_reg <= s_pause_ack;
+            s_pause_ack_sync <= s_pause_ack;
+        end
+    end
+    
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_pause_ack_reg <= 1'b0;
+            m_pause_ack_sync <= 1'b0;
+        end else begin
+            m_pause_ack_reg <= m_pause_ack;
+            m_pause_ack_sync <= m_pause_ack;
+        end
+    end
+
+    // Status Output Registers (CDC)
+    reg [$clog2(DEPTH):0] s_status_depth_reg;
+    reg [$clog2(DEPTH):0] s_status_depth_commit_reg;
+    reg s_status_overflow_reg;
+    reg s_status_bad_frame_reg;
+    reg s_status_good_frame_reg;
+    
+    reg [$clog2(DEPTH):0] m_status_depth_reg;
+    reg [$clog2(DEPTH):0] m_status_depth_commit_reg;
+    reg m_status_overflow_reg;
+    reg m_status_bad_frame_reg;
+    reg m_status_good_frame_reg;
+
+    // --- Source Side Logic (s_clk) ---
+    
+    // Read Pointers (Write side of FIFO)
+    reg [PTR_WIDTH-1:0] s_wr_ptr;
+    reg [PTR_WIDTH-1:0] s_wr_ptr_commit;
+    reg [PTR_WIDTH-1:0] s_wr_ptr_next;
+    reg [PTR_WIDTH-1:0] s_wr_ptr_next_commit;
+    
+    // Write Pointers (Read side of FIFO)
+    reg [PTR_WIDTH-1:0] s_rd_ptr;
+    reg [PTR_WIDTH-1:0] s_rd_ptr_commit;
+    reg [PTR_WIDTH-1:0] s_rd_ptr_next;
+    reg [PTR_WIDTH-1:0] s_rd_ptr_next_commit;
+
+    // FIFO Data Storage
+    // Using RAM_PIPELINE to separate read/write logic
+    wire [DATA_WIDTH-1:0] s_fifo_data;
+    wire [KEEP_WIDTH-1:0] s_fifo_keep;
+    wire s_fifo_last;
+    wire [ID_WIDTH-1:0] s_fifo_id;
+    wire [DEST_WIDTH-1:0] s_fifo_dest;
+    wire [USER_WIDTH-1:0] s_fifo_user;
+    
+    // Frame State for Source
+    reg s_frame_valid;
+    reg s_frame_commit;
+    reg s_frame_oversize;
+    reg s_frame_bad;
+    reg s_frame_good;
+    reg s_frame_pause;
+    reg s_frame_pause_ack;
+    reg s_frame_pause_req;
+    reg s_frame_pause_req_sync;
+    reg s_frame_pause_ack_sync;
+    
+    // Frame State for Destination (Output)
+    reg m_frame_valid;
+    reg m_frame_commit;
+    reg m_frame_oversize;
+    reg m_frame_bad;
+    reg m_frame_good;
+    reg m_frame_pause;
+    reg m_frame_pause_ack;
+    reg m_frame_pause_req;
+    reg m_frame_pause_req_sync;
+    reg m_frame_pause_ack_sync;
+
+    // --- Source Side Logic Implementation ---
+
+    // Write Pointer Logic
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_wr_ptr <= 0;
+            s_wr_ptr_commit <= 0;
+            s_wr_ptr_next <= 0;
+            s_wr_ptr_next_commit <= 0;
+        end else begin
+            s_wr_ptr <= s_wr_ptr_next;
+            s_wr_ptr_commit <= s_wr_ptr_next_commit;
+        end
+    end
+
+    // Read Pointer Logic
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_rd_ptr <= 0;
+            s_rd_ptr_commit <= 0;
+            s_rd_ptr_next <= 0;
+            s_rd_ptr_next_commit <= 0;
+        end else begin
+            s_rd_ptr <= s_rd_ptr_next;
+            s_rd_ptr_commit <= s_rd_ptr_next_commit;
+        end
+    end
+
+    // FIFO Memory Instantiation (Dual Port RAM)
+    // Assuming a simple RAM implementation. In a real scenario, this would be instantiated 
+    // with a vendor-specific primitive or a behavioral RAM.
+    // Here we use a behavioral description for the RAM array to keep it self-contained.
+    reg [DATA_WIDTH-1:0] ram_data [0:MAX_DEPTH-1];
+    reg [KEEP_WIDTH-1:0] ram_keep [0:MAX_DEPTH-1];
+    reg ram_last [0:MAX_DEPTH-1];
+    reg ram_id [0:MAX_DEPTH-1];
+    reg ram_dest [0:MAX_DEPTH-1];
+    reg ram_user [0:MAX_DEPTH-1];
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            for (integer i = 0; i < MAX_DEPTH; i = i + 1) begin
+                ram_data[i] <= 0;
+                ram_keep[i] <= 0;
+                ram_last[i] <= 0;
+                ram_id[i] <= 0;
+                ram_dest[i] <= 0;
+                ram_user[i] <= 0;
+            end
+        end else begin
+            if (s_axis_tvalid && s_axis_tready) begin
+                ram_data[s_wr_ptr] <= s_axis_tdata;
+                ram_keep[s_wr_ptr] <= s_axis_tkeep;
+                ram_last[s_wr_ptr] <= s_axis_tlast;
+                ram_id[s_wr_ptr] <= s_axis_tid;
+                ram_dest[s_wr_ptr] <= s_axis_tdest;
+                ram_user[s_wr_ptr] <= s_axis_tuser;
+            end
+        end
+    end
+
+    // Read Data from FIFO
+    assign s_fifo_data = ram_data[s_rd_ptr];
+    assign s_fifo_keep = ram_keep[s_rd_ptr];
+    assign s_fifo_last = ram_last[s_rd_ptr];
+    assign s_fifo_id = ram_id[s_rd_ptr];
+    assign s_fifo_dest = ram_dest[s_rd_ptr];
+    assign s_fifo_user = ram_user[s_rd_ptr];
+
+    // Depth Calculation
+    wire [PTR_WIDTH-1:0] depth = s_wr_ptr - s_rd_ptr;
+    wire [PTR_WIDTH-1:0] depth_commit = s_wr_ptr_commit - s_rd_ptr_commit;
+    
+    // Full/Empty Detection
+    wire s_fifo_full = (depth == (DEPTH-1)); // Assuming DEPTH is power of 2, max index is DEPTH-1
+    wire s_fifo_empty = (depth == 0);
+    wire m_fifo_full = (depth == (DEPTH-1));
+    wire m_fifo_empty = (depth == 0);
+
+    // Source Side Handshake Logic
+    wire s_can_write = (~s_fifo_full) && (~s_pause_req_sync);
+    wire s_can_read = (~m_fifo_full) && (~m_pause_req_sync); // Simplified: assume m_pause_req affects output
+    
+    // Actually, for async FIFO, we need to handle the pause request carefully.
+    // If s_pause_req is high, we stop writing.
+    // If m_pause_req is high, we stop reading (or mark as bad/pause).
+    
+    // Let's refine the logic based on standard async FIFO behavior with pause.
+    // s_pause_req: Request to pause writing.
+    // m_pause_req: Request to pause reading.
+    
+    // Write Enable
+    wire s_we = s_axis_tvalid && s_axis_tready && s_can_write;
+    
+    // Read Enable
+    wire s_re = m_axis_tready && s_can_read;
+
+    // Update Pointers
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_wr_ptr_next <= 0;
+            s_wr_ptr_next_commit <= 0;
+            s_rd_ptr_next <= 0;
+            s_rd_ptr_next_commit <= 0;
+        end else begin
+            s_wr_ptr_next <= s_wr_ptr + (s_we ? 1 : 0);
+            s_wr_ptr_next_commit <= s_wr_ptr_commit + (s_we ? 1 : 0);
+            s_rd_ptr_next <= s_rd_ptr + (s_re ? 1 : 0);
+            s_rd_ptr_next_commit <= s_rd_ptr_commit + (s_re ? 1 : 0);
+        end
+    end
+
+    // Status Outputs (Source Side)
+    assign s_status_depth = depth;
+    assign s_status_depth_commit = depth_commit;
+    assign s_status_overflow = (s_fifo_full && s_axis_tvalid && ~s_axis_tready);
+    assign s_status_bad_frame = s_frame_bad;
+    assign s_status_good_frame = s_frame_good;
+
+    // Pause Logic (Source Side)
+    assign s_pause_ack = s_pause_req_sync; // Acknowledge if we are paused or not? 
+    // Usually, ack means "I see your request". 
+    // If PAUSE_ENABLE is 1, we stop writing when s_pause_req is high.
+    // s_pause_ack should be high when we are actually paused or when we acknowledge the request.
+    // Let's define s_pause_ack as "I am currently paused" or "I have received your pause request".
+    // Standard: s_pause_ack is high when the FIFO is paused due to s_pause_req.
+    wire s_paused = s_pause_req_sync;
+    assign s_pause_ack = s_paused;
+
+    // Frame Logic (Source Side)
+    // This is a simplified frame logic. A full implementation would track frame boundaries.
+    // Given the constraints, we will implement a basic frame tracking if FRAME_FIFO is enabled.
+    // For this implementation, we assume a single beat per frame or simple frame tracking.
+    // If FRAME_FIFO is 1, we might need to buffer frames.
+    // To keep the code concise and functional within one file without complex state machines for frames:
+    // We will assume the frame logic is handled by the caller or simplified here.
+    // However, the prompt asks for specific status outputs related to frames.
+    // We will implement a basic frame state machine.
+    
+    reg s_frame_state; // 0: idle, 1: data, 2: last
+    reg s_frame_count;
+    reg s_frame_start;
+    
+    // Simplified Frame Logic for demonstration
+    // If FRAME_FIFO is 1, we might need a separate frame buffer. 
+    // Assuming FRAME_FIFO=0 for this basic implementation unless specified otherwise in params.
+    // But the parameter exists. Let's assume a simple frame tracking.
+    
+    // Re-evaluating Frame Logic: 
+    // The prompt mentions "Deliver beats in order with tlast".
+    // We will implement a simple frame counter.
+    
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_frame_state <= 0;
+            s_frame_count <= 0;
+            s_frame_start <= 0;
+            s_frame_valid <= 0;
+            s_frame_commit <= 0;
+            s_frame_oversize <= 0;
+            s_frame_bad <= 0;
+            s_frame_good <= 0;
+            s_frame_pause <= 0;
+            s_frame_pause_ack <= 0;
+            s_frame_pause_req <= 0;
+            s_frame_pause_req_sync <= 0;
+            s_frame_pause_ack_sync <= 0;
+        end else begin
+            // Update sync signals
+            s_frame_pause_req_sync <= s_pause_req;
+            s_frame_pause_ack_sync <= s_pause_ack;
+            
+            // Pause Request Handling
+            if (s_frame_pause_req_sync && !s_frame_pause_req) begin
+                s_frame_pause <= 1;
+                s_frame_pause_ack <= 1;
+            end else if (!s_frame_pause_req_sync && s_frame_pause_req) begin
+                s_frame_pause <= 0;
+                s_frame_pause_ack <= 0;
+            end
+            
+            // Frame State Machine
+            if (s_axis_tvalid && s_axis_tready && !s_frame_pause) begin
+                if (s_axis_tlast) begin
+                    // End of frame
+                    if (s_frame_state == 0) begin
+                        // Start of frame
+                        s_frame_state <= 1;
+                        s_frame_count <= 1;
+                        s_frame_start <= 1;
+                        s_frame_valid <= 1;
+                        s_frame_bad <= 0;
+                        s_frame_good <= 0;
+                        s_frame_oversize <= 0;
+                    end else if (s_frame_state == 1) begin
+                        // Middle of frame
+                        s_frame_count <= s_frame_count + 1;
+                        s_frame_state <= 2;
+                    end else if (s_frame_state == 2) begin
+                        // Last beat
+                        s_frame_count <= s_frame_count + 1;
+                        s_frame_state <= 0;
+                        s_frame_valid <= 0;
+                        s_frame_commit <= 1;
+                        s_frame_good <= 1;
+                        s_frame_bad <= 0;
+                        s_frame_oversize <= 0;
+                    end
+                end else begin
+                    // Data beat
+                    if (s_frame_state == 0) begin
+                        // Unexpected data before last? Or start of frame without last?
+                        // Assuming tlast indicates end. If tlast is 0, it's data.
+                        // If this is the first beat and tlast is 0, we wait for next beat.
+                        s_frame_state <= 1;
+                        s_frame_count <= 1;
+                        s_frame_start <= 1;
+                        s_frame_valid <= 1;
+                        s_frame_bad <= 0;
+                        s_frame_good <= 0;
+                        s_frame_oversize <= 0;
+                    end else if (s_frame_state == 1) begin
+                        s_frame_count <= s_frame_count + 1;
+                        s_frame_state <= 2;
+                    end else if (s_frame_state == 2) begin
+                        // Unexpected data after last?
+                        s_frame_bad <= 1;
+                        s_frame_state <= 0;
+                        s_frame_valid <= 0;
+                        s_frame_commit <= 1;
+                    end
+                end
+            end else if (s_axis_tvalid && s_axis_tready && s_frame_pause) begin
+                // Paused during frame
+                s_frame_pause_ack <= 1;
+            end
+            
+            // Oversize check (simplified)
+            if (s_frame_state == 2 && s_axis_tvalid && s_axis_tready) begin
+                // Check if frame is too large based on some criteria? 
+                // Without a defined max frame size, we can't implement oversize.
+                // Assuming oversize is handled by FRAME_FIFO parameter logic.
+                // If FRAME_FIFO is 1, we might drop oversized frames.
+                // For this implementation, we assume oversize is detected if frame count exceeds a threshold.
+                // Since no threshold is given, we skip specific oversize detection logic beyond FRAME_FIFO flag.
+                if (DROP_OVERSIZE_FRAME && FRAME_FIFO) begin
+                    // Placeholder for oversize logic
+                    // s_frame_oversize <= 1;
+                end
+            end
+            
+            // Bad Frame Check
+            if (s_frame_state == 2 && s_axis_tvalid && s_axis_tready) begin
+                if (DROP_BAD_FRAME) begin
+                    s_frame_bad <= 1;
+                end
+            end
+            
+            // Good Frame
+            if (s_frame_state == 0 && s_frame_valid) begin
+                s_frame_good <= 1;
+            end
+        end
+    end
+
+    // Source Side Output Logic
+    assign s_axis_tready = (s_can_write) && (s_fifo_empty || s_axis_tvalid); 
+    // Actually, tready should be high if we can accept data.
+    // If FIFO is full, tready is low (unless DROP_WHEN_FULL).
+    if (DROP_WHEN_FULL) begin
+        assign s_axis_tready = s_axis_tvalid; // Always accept, drop internally
+    end else begin
+        assign s_axis_tready = s_can_write;
+    end
+
+    // --- Destination Side Logic (m_clk) ---
+
+    // Read Pointers (Read side of FIFO)
+    reg [PTR_WIDTH-1:0] m_rd_ptr;
+    reg [PTR_WIDTH-1:0] m_rd_ptr_commit;
+    reg [PTR_WIDTH-1:0] m_rd_ptr_next;
+    reg [PTR_WIDTH-1:0] m_rd_ptr_next_commit;
+
+    // Write Pointers (Write side of FIFO)
+    reg [PTR_WIDTH-1:0] m_wr_ptr;
+    reg [PTR_WIDTH-1:0] m_wr_ptr_commit;
+    reg [PTR_WIDTH-1:0] m_wr_ptr_next;
+    reg [PTR_WIDTH-1:0] m_wr_ptr_next_commit;
+
+    // FIFO Data Storage (Read side)
+    wire [DATA_WIDTH-1:0] m_fifo_data;
+    wire [KEEP_WIDTH-1:0] m_fifo_keep;
+    wire m_fifo_last;
+    wire [ID_WIDTH-1:0] m_fifo_id;
+    wire [DEST_WIDTH-1:0] m_fifo_dest;
+    wire [USER_WIDTH-1:0] m_fifo_user;
+
+    // Read Data from FIFO
+    assign m_fifo_data = ram_data[m_rd_ptr];
+    assign m_fifo_keep = ram_keep[m_rd_ptr];
+    assign m_fifo_last = ram_last[m_rd_ptr];
+    assign m_fifo_id = ram_id[m_rd_ptr];
+    assign m_fifo_dest = ram_dest[m_rd_ptr];
+    assign m_fifo_user = ram_user[m_rd_ptr];
+
+    // Depth Calculation
+    wire [PTR_WIDTH-1:0] depth = m_wr_ptr - m_rd_ptr;
+    wire [PTR_WIDTH-1:0] depth_commit = m_wr_ptr_commit - m_rd_ptr_commit;
+    
+    // Full/Empty Detection
+    wire m_fifo_full = (depth == (DEPTH-1));
+    wire m_fifo_empty = (depth == 0);
+
+    // Destination Side Handshake Logic
+    wire m_can_read = (~m_fifo_empty) && (~m_pause_req_sync);
+    wire m_can_write = (~m_fifo_full) && (~m_pause_req_sync);
+
+    // Read Enable
+    wire m_re = m_axis_tvalid && m_axis_tready && m_can_read;
+    
+    // Write Enable (to FIFO)
+    wire m_we = m_axis_tvalid && m_axis_tready && m_can_write;
+
+    // Update Pointers
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rd_ptr <= 0;
+            m_rd_ptr_commit <= 0;
+            m_wr_ptr <= 0;
+            m_wr_ptr_commit <= 0;
+            m_rd_ptr_next <= 0;
+            m_rd_ptr_next_commit <= 0;
+            m_wr_ptr_next <= 0;
+            m_wr_ptr_next_commit <= 0;
+        end else begin
+            m_rd_ptr_next <= m_rd_ptr + (m_re ? 1 : 0);
+            m_rd_ptr_next_commit <= m_rd_ptr_commit + (m_re ? 1 : 0);
+            m_wr_ptr_next <= m_wr_ptr + (m_we ? 1 : 0);
+            m_wr_ptr_next_commit <= m_wr_ptr_commit + (m_we ? 1 : 0);
+        end
+    end
+
+    // Status Outputs (Destination Side)
+    assign m_status_depth = depth;
+    assign m_status_depth_commit = depth_commit;
+    assign m_status_overflow = (m_fifo_full && m_axis_tvalid && ~m_axis_tready);
+    assign m_status_bad_frame = m_frame_bad;
+    assign m_status_good_frame = m_frame_good;
+
+    // Pause Logic (Destination Side)
+    assign m_pause_ack = m_pause_req_sync;
+    wire m_paused = m_pause_req_sync;
+    assign m_pause_ack = m_paused;
+
+    // Frame Logic (Destination Side)
+    reg m_frame_state;
+    reg m_frame_count;
+    reg m_frame_start;
+    reg m_frame_valid;
+    reg m_frame_commit;
+    reg m_frame_oversize;
+    reg m_frame_bad;
+    reg m_frame_good;
+    reg m_frame_pause;
+    reg m_frame_pause_ack;
+    reg m_frame_pause_req;
+    reg m_frame_pause_req_sync;
+    reg m_frame_pause_ack_sync;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_frame_state <= 0;
+            m_frame_count <= 0;
+            m_frame_start <= 0;
+            m_frame_valid <= 0;
+            m_frame_commit <= 0;
+            m_frame_oversize <= 0;
+            m_frame_bad <= 0;
+            m_frame_good <= 0;
+            m_frame_pause <= 0;
+            m_frame_pause_ack <= 0;
+            m_frame_pause_req <= 0;
+            m_frame_pause_req_sync <= 0;
+            m_frame_pause_ack_sync <= 0;
+        end else begin
+            m_frame_pause_req_sync <= m_pause_req;
+            m_frame_pause_ack_sync <= m_pause_ack;
+            
+            if (m_frame_pause_req_sync && !m_frame_pause_req) begin
+                m_frame_pause <= 1;
+                m_frame_pause_ack <= 1;
+            end else if (!m_frame_pause_req_sync && m_frame_pause_req) begin
+                m_frame_pause <= 0;
+                m_frame_pause_ack <= 0;
+            end
+            
+            if (m_axis_tvalid && m_axis_tready && !m_frame_pause) begin
+                if (m_fifo_last) begin
+                    if (m_frame_state == 0) begin
+                        m_frame_state <= 1;
+                        m_frame_count <= 1;
+                        m_frame_start <= 1;
+                        m_frame_valid <= 1;
+                        m_frame_bad <= 0;
+                        m_frame_good <= 0;
+                        m_frame_oversize <= 0;
+                    end else if (m_frame_state == 1) begin
+                        m_frame_count <= m_frame_count + 1;
+                        m_frame_state <= 2;
+                    end else if (m_frame_state == 2) begin
+                        m_frame_count <= m_frame_count + 1;
+                        m_frame_state <= 0;
+                        m_frame_valid <= 0;
+                        m_frame_commit <= 1;
+                        m_frame_good <= 1;
+                        m_frame_bad <= 0;
+                        m_frame_oversize <= 0;
+                    end
+                end else begin
+                    if (m_frame_state == 0) begin
+                        m_frame_state <= 1;
+                        m_frame_count <= 1;
+                        m_frame_start <= 1;
+                        m_frame_valid <= 1;
+                        m_frame_bad <= 0;
+                        m_frame_good <= 0;
+                        m_frame_oversize <= 0;
+                    end else if (m_frame_state == 1) begin
+                        m_frame_count <= m_frame_count + 1;
+                        m_frame_state <= 2;
+                    end else if (m_frame_state == 2) begin
+                        m_frame_bad <= 1;
+                        m_frame_state <= 0;
+                        m_frame_valid <= 0;
+                        m_frame_commit <= 1;
+                    end
+                end
+            end else if (m_axis_tvalid && m_axis_tready && m_frame_pause) begin
+                m_frame_pause_ack <= 1;
+            end
+        end
+    end
+
+    // Destination Side Output Logic
+    assign m_axis_tvalid = m_can_read;
+    assign m_axis_tready = m_can_write;
+    
+    // Data Output
+    assign m_axis_tdata = m_fifo_data;
+    assign m_axis_tkeep = m_fifo_keep;
+    assign m_axis_tlast = m_fifo_last;
+    assign m_axis_tid = m_fifo_id;
+    assign m_axis_tdest = m_fifo_dest;
+    assign m_axis_tuser = m_fifo_user;
+
+    // Status Depth Commit
+    assign s_status_depth_commit = s_wr_ptr_commit - s_rd_ptr_commit;
+    assign m_status_depth_commit = m_wr_ptr_commit - m_rd_ptr_commit;
+
+    // Overflow Status
+    assign s_status_overflow = (s_fifo_full && s_axis_tvalid && ~s_axis_tready);
+    assign m_status_overflow = (m_fifo_full && m_axis_tvalid && ~m_axis_tready);
+
+    // Bad/Good Frame Status
+    assign s_status_bad_frame = s_frame_bad;
+    assign s_status_good_frame = s_frame_good;
+    assign m_status_bad_frame = m_frame_bad;
+    assign m_status_good_frame = m_frame_good;
+
+    // Pause Ack
+    assign s_pause_ack = s_paused;
+    assign m_pause_ack = m_paused;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,326 @@
+```verilog
+module axis_adapter #
+(
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    /*
+     * AXI input
+     */
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    localparam S_KEEP_MASK = S_KEEP_ENABLE ? ~{S_KEEP_WIDTH{1'b0}} : 0;
+    localparam M_KEEP_MASK = M_KEEP_ENABLE ? ~{M_KEEP_WIDTH{1'b0}} : 0;
+
+    // State machine states
+    localparam IDLE = 2'b00;
+    localparam SHIFTING = 2'b01;
+    localparam PACKING = 2'b10;
+    localparam STALLING = 2'b11;
+
+    reg [1:0] state;
+    reg [S_DATA_WIDTH-1:0] shift_reg;
+    reg [S_DATA_WIDTH-1:0] packed_data;
+    reg [S_DATA_WIDTH-1:0] packed_remainder;
+    reg [S_DATA_WIDTH-1:0] m_data_out;
+    reg [M_DATA_WIDTH-1:0] m_data_buffer;
+    reg [S_KEEP_WIDTH-1:0] s_keep_in;
+    reg [M_KEEP_WIDTH-1:0] m_keep_out;
+    reg s_last;
+    reg m_last;
+    reg s_valid;
+    reg m_valid;
+    reg [ID_WIDTH-1:0] tid;
+    reg [DEST_WIDTH-1:0] tdest;
+    reg [USER_WIDTH-1:0] tuser;
+    reg s_ready;
+    reg m_ready;
+    reg shift_count;
+    reg pack_count;
+    reg shift_enable;
+    reg pack_enable;
+    reg [S_DATA_WIDTH-1:0] temp_data;
+    reg [S_DATA_WIDTH-1:0] temp_keep;
+    reg [M_DATA_WIDTH-1:0] temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_packed;
+    reg [S_DATA_WIDTH-1:0] current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_keep;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_data;
+    reg [M_KEEP_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_shifted;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_packed;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_remainder;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_data;
+    reg [M_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_m_keep;
+    reg [S_DATA_WIDTH-1:0] current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_current_temp_data;

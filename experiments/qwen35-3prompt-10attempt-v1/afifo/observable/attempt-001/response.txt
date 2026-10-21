@@ -1,0 +1,216 @@
+```verilog
+module afifo #(
+	parameter LGFIFO = 3,
+	parameter WIDTH  = 16,
+	parameter NFF    = 2,
+	parameter [0:0] WRITE_ON_POSEDGE = 1'b1,
+	parameter [0:0] OPT_REGISTER_READS = 1'b1
+) (
+	input	wire			i_wclk, i_wr_reset_n, i_wr,
+	input	wire	[WIDTH-1:0]	i_wr_data,
+	output	reg			o_wr_full,
+	input	wire			i_rclk, i_rd_reset_n, i_rd,
+	output	reg	[WIDTH-1:0]	o_rd_data,
+	output	reg			o_rd_empty
+);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam MASK  = DEPTH - 1;
+
+	// Write pointer and counter
+	reg [LGFIFO-1:0] wr_ptr;
+	reg [LGFIFO-1:0] wr_cnt;
+
+	// Read pointer and counter
+	reg [LGFIFO-1:0] rd_ptr;
+	reg [LGFIFO-1:0] rd_cnt;
+
+	// Gray code pointers for cross-clock domain signaling
+	reg [LGFIFO-1:0] wr_gray;
+	reg [LGFIFO-1:0] rd_gray;
+
+	// Internal pointers for data access
+	reg [LGFIFO-1:0] wr_ptr_int;
+	reg [LGFIFO-1:0] rd_ptr_int;
+
+	// FIFO Memory
+	reg [WIDTH-1:0] mem [DEPTH-1:0];
+
+	// Write side logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_ptr <= '0;
+			wr_cnt <= '0;
+			wr_gray <= '0;
+			o_wr_full <= 1'b0;
+		end else begin
+			if (i_wr) begin
+				// Calculate write index
+				wr_ptr_int <= wr_ptr;
+				
+				// Update counter
+				if (wr_cnt == MASK) begin
+					wr_cnt <= '0;
+				end else begin
+					wr_cnt <= wr_cnt + 1'b1;
+				end
+				
+				// Update Gray code pointer
+				wr_gray <= wr_ptr ^ (wr_ptr >> 1);
+				
+				// Write data to memory
+				mem[wr_ptr_int] <= i_wr_data;
+				
+				// Update full flag
+				if (wr_cnt == MASK) begin
+					o_wr_full <= 1'b1;
+				end else begin
+					o_wr_full <= 1'b0;
+				end
+			end else begin
+				// Idle state: maintain current state
+				wr_ptr <= wr_ptr;
+				wr_cnt <= wr_cnt;
+				wr_gray <= wr_gray;
+				o_wr_full <= 1'b0;
+			end
+		end
+	end
+
+	// Read side logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_ptr <= '0;
+			rd_cnt <= '0;
+			rd_gray <= '0;
+			o_rd_empty <= 1'b1;
+			o_rd_data <= '0;
+		end else begin
+			if (i_rd) begin
+				// Calculate read index
+				rd_ptr_int <= rd_ptr;
+				
+				// Update counter
+				if (rd_cnt == '0) begin
+					rd_cnt <= '0;
+				end else begin
+					rd_cnt <= rd_cnt - 1'b1;
+				end
+				
+				// Update Gray code pointer
+				rd_gray <= rd_ptr ^ (rd_ptr >> 1);
+				
+				// Read data from memory
+				o_rd_data <= mem[rd_ptr_int];
+				
+				// Update empty flag
+				if (rd_cnt == '0) begin
+					o_rd_empty <= 1'b1;
+				end else begin
+					o_rd_empty <= 1'b0;
+				end
+			end else begin
+				// Idle state: maintain current state
+				rd_ptr <= rd_ptr;
+				rd_cnt <= rd_cnt;
+				rd_gray <= rd_gray;
+				o_rd_empty <= 1'b1;
+				o_rd_data <= '0;
+			end
+		end
+	end
+
+	// Cross-clock domain synchronization for pointers
+	// Write side: synchronize read gray code to write domain
+	reg [LGFIFO-1:0] rd_gray_sync;
+	reg [LGFIFO-1:0] rd_gray_sync_d1;
+	reg [LGFIFO-1:0] rd_gray_sync_d2;
+
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			rd_gray_sync <= '0;
+			rd_gray_sync_d1 <= '0;
+			rd_gray_sync_d2 <= '0;
+		end else begin
+			rd_gray_sync <= rd_gray;
+			rd_gray_sync_d1 <= rd_gray_sync;
+			rd_gray_sync_d2 <= rd_gray_sync_d1;
+		end
+	end
+
+	// Read side: synchronize write gray code to read domain
+	reg [LGFIFO-1:0] wr_gray_sync;
+	reg [LGFIFO-1:0] wr_gray_sync_d1;
+	reg [LGFIFO-1:0] wr_gray_sync_d2;
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			wr_gray_sync <= '0;
+			wr_gray_sync_d1 <= '0;
+			wr_gray_sync_d2 <= '0;
+		end else begin
+			wr_gray_sync <= wr_gray;
+			wr_gray_sync_d1 <= wr_gray_sync;
+			wr_gray_sync_d2 <= wr_gray_sync_d1;
+		end
+	end
+
+	// Calculate actual pointers from synchronized Gray codes
+	// Convert Gray code back to binary
+	function [LGFIFO-1:0] gray_to_bin;
+		input [LGFIFO-1:0] gray;
+		reg [LGFIFO-1:0] bin;
+		reg [LGFIFO-1:0] temp;
+		reg [LGFIFO-1:0] carry;
+		
+		bin = gray;
+		temp = gray;
+		carry = 1'b0;
+		
+		for (integer i = LGFIFO-1; i >= 0; i = i - 1) begin
+			bin[i] = temp[i] ^ carry;
+			carry = temp[i];
+		end
+		
+		return bin;
+	endfunction
+
+	// Synchronized write pointer for read side
+	wire [LGFIFO-1:0] wr_ptr_sync = gray_to_bin(wr_gray_sync_d2);
+	
+	// Synchronized read pointer for write side
+	wire [LGFIFO-1:0] rd_ptr_sync = gray_to_bin(rd_gray_sync_d2);
+
+	// Calculate full and empty flags based on synchronized pointers
+	// Full: write pointer == read pointer + depth (wr_ptr_sync == rd_ptr_sync + DEPTH)
+	// Empty: write pointer == read pointer (wr_ptr_sync == rd_ptr_sync)
+	
+	// Since we are using counters, we can simplify the logic:
+	// Full: wr_cnt == MASK && wr_ptr_sync == rd_ptr_sync
+	// Empty: rd_cnt == '0 && wr_ptr_sync == rd_ptr_sync
+	
+	// However, the problem states: "o_rd_empty can be high while words remain stored"
+	// This is a specific requirement for the empty flag behavior.
+	// Standard behavior: empty when wr_ptr == rd_ptr
+	// Modified behavior: empty when rd_cnt == 0 AND wr_ptr_sync == rd_ptr_sync
+	
+	// For full flag:
+	// Full when wr_cnt == MASK AND wr_ptr_sync == rd_ptr_sync
+	
+	// Let's implement the flags based on the synchronized pointers and counters
+	
+	// Write full flag
+	assign o_wr_full = (wr_cnt == MASK) && (wr_ptr_sync == rd_ptr_sync);
+	
+	// Read empty flag
+	// The requirement says: "o_rd_empty can be high while words remain stored"
+	// This implies that if rd_cnt is 0, we check if there are actually words.
+	// If wr_ptr_sync == rd_ptr_sync, then the FIFO is empty.
+	// If wr_ptr_sync != rd_ptr_sync, then there are words, but rd_cnt is 0.
+	// So o_rd_empty should be high only when rd_cnt == 0 AND wr_ptr_sync == rd_ptr_sync.
+	
+	assign o_rd_empty = (rd_cnt == '0) && (wr_ptr_sync == rd_ptr_sync);
+
+endmodule
+```<|im_end|>
+<|endoftext|>

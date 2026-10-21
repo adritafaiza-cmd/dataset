@@ -1,0 +1,121 @@
+```verilog
+`timescale 1ns / 1ps
+
+module sync_wedge #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    // Synchronous reset logic for the pipeline stages
+    // We use a counter to track the stage index to avoid deep combinational paths
+    // and ensure clean state transitions.
+    
+    // State encoding: 0 to STAGES-1
+    localparam [STAGES-1:0] STAGE_IDLE = 0;
+    localparam [STAGES-1:0] STAGE_DONE = STAGES - 1;
+    
+    reg [STAGES-1:0] stage_cnt;
+    reg serial_reg;
+    reg serial_prev;
+    reg r_edge_flag;
+    reg f_edge_flag;
+    
+    // Output registers for the edge detection signals
+    // These are registered in the local clock domain to prevent glitches
+    reg r_edge_o_reg;
+    reg f_edge_o_reg;
+    
+    // Edge detection flags (internal)
+    reg r_edge_internal;
+    reg f_edge_internal;
+    
+    // Counter for edge detection to prevent multiple pulses per edge
+    reg [STAGES-1:0] edge_cnt;
+    
+    // Synchronous reset for all registers
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            stage_cnt      <= STAGE_IDLE;
+            serial_reg     <= 1'b0;
+            serial_prev    <= 1'b0;
+            r_edge_flag    <= 1'b0;
+            f_edge_flag    <= 1'b0;
+            r_edge_o_reg   <= 1'b0;
+            f_edge_o_reg   <= 1'b0;
+            edge_cnt       <= STAGE_IDLE;
+        end else begin
+            // State Machine Logic
+            if (stage_cnt == STAGE_DONE) begin
+                // Final stage: perform edge detection and output data
+                if (en_i) begin
+                    // Update edge detection flags based on current and previous bit
+                    if (serial_reg && !serial_prev) begin
+                        r_edge_internal <= 1'b1;
+                        f_edge_internal <= 1'b0;
+                    else if (!serial_reg && serial_prev) begin
+                        r_edge_internal <= 1'b0;
+                        f_edge_internal <= 1'b1;
+                    end else begin
+                        r_edge_internal <= 1'b0;
+                        f_edge_internal <= 1'b0;
+                    end
+                    
+                    // Output the synchronized bit
+                    serial_o <= serial_reg;
+                    
+                    // Pulse the edge outputs if enabled
+                    if (r_edge_internal && !r_edge_o_reg) begin
+                        r_edge_o_reg <= 1'b1;
+                    end else if (!r_edge_internal && r_edge_o_reg) begin
+                        r_edge_o_reg <= 1'b0;
+                    end
+                    
+                    if (f_edge_internal && !f_edge_o_reg) begin
+                        f_edge_o_reg <= 1'b1;
+                    end else if (!f_edge_internal && f_edge_o_reg) begin
+                        f_edge_o_reg <= 1'b0;
+                    end
+                    
+                    // Reset edge detection flags after one cycle to prevent multi-cycle pulses
+                    r_edge_internal <= 1'b0;
+                    f_edge_internal <= 1'b0;
+                    
+                    // Reset counter to idle
+                    edge_cnt <= STAGE_IDLE;
+                end else begin
+                    // Disable state: hold current values
+                    serial_o <= serial_reg;
+                    r_edge_o_reg <= r_edge_o_reg;
+                    f_edge_o_reg <= f_edge_o_reg;
+                end
+            end else begin
+                // Pipeline stages: just shift the data
+                serial_prev <= serial_reg;
+                serial_reg  <= serial_i;
+                
+                // Increment stage counter
+                stage_cnt <= stage_cnt + 1'b1;
+                
+                // Reset edge detection flags in intermediate stages
+                r_edge_internal <= 1'b0;
+                f_edge_internal <= 1'b0;
+                r_edge_o_reg    <= 1'b0;
+                f_edge_o_reg    <= 1'b0;
+            end
+        end
+    end
+
+    // Assign internal flags to outputs for clarity (though they are driven by the always block)
+    // This is optional but good for simulation visibility
+    assign r_edge_o = r_edge_o_reg;
+    assign f_edge_o = f_edge_o_reg;
+
+endmodule
+```<|im_end|>

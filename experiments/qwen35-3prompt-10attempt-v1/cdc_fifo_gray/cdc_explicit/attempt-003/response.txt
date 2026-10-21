@@ -1,0 +1,624 @@
+```verilog
+module cdc_fifo_gray #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 2
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output reg [WIDTH-1:0] dst_data_o,
+    output reg             dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam GRAY_WIDTH = $clog2(DEPTH);
+
+    // Source Domain: Write Pointer and Control
+    reg [LOG_DEPTH-1:0] src_wr_ptr;
+    reg [LOG_DEPTH-1:0] src_rd_ptr;
+    reg [LOG_DEPTH-1:0] src_gray_rd_ptr;
+    reg src_wr_en;
+    reg src_full;
+    reg src_empty;
+
+    // Destination Domain: Read Pointer and Control
+    reg [LOG_DEPTH-1:0] dst_wr_ptr;
+    reg [LOG_DEPTH-1:0] dst_rd_ptr;
+    reg [LOG_DEPTH-1:0] dst_gray_wr_ptr;
+    reg dst_rd_en;
+    reg dst_full;
+    reg dst_empty;
+
+    // Cross-domain pointers (Gray encoded for safe crossing)
+    reg [LOG_DEPTH-1:0] cross_gray_wr_ptr;
+    reg [LOG_DEPTH-1:0] cross_gray_rd_ptr;
+
+    // Synchronizers for pointers
+    reg [LOG_DEPTH-1:0] sync_wr_ptr_1;
+    reg [LOG_DEPTH-1:0] sync_wr_ptr_2;
+    reg [LOG_DEPTH-1:0] sync_rd_ptr_1;
+    reg [LOG_DEPTH-1:0] sync_rd_ptr_2;
+
+    // Synchronizers for control signals (valid/ready)
+    reg src_valid_sync_1;
+    reg src_valid_sync_2;
+    reg dst_ready_sync_1;
+    reg dst_ready_sync_2;
+
+    // Synchronizers for reset
+    reg src_rst_sync_1;
+    reg src_rst_sync_2;
+    reg dst_rst_sync_1;
+    reg dst_rst_sync_2;
+
+    // FIFO Memory
+    reg [WIDTH-1:0] mem [DEPTH-1:0];
+
+    // --- Source Domain Logic ---
+
+    // Reset Synchronizer
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_rst_sync_1 <= 1'b0;
+        else
+            src_rst_sync_1 <= src_rst_ni;
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_rst_sync_2 <= 1'b0;
+        else
+            src_rst_sync_2 <= src_rst_sync_1;
+    end
+
+    // Valid Synchronizer
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_valid_sync_1 <= 1'b0;
+        else
+            src_valid_sync_1 <= src_valid_i;
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_valid_sync_2 <= 1'b0;
+        else
+            src_valid_sync_2 <= src_valid_sync_1;
+    end
+
+    // Write Pointer Logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_wr_ptr <= 0;
+        else if (src_wr_en)
+            src_wr_ptr <= src_wr_ptr + 1'b1;
+    end
+
+    // Read Pointer Logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_rd_ptr <= 0;
+        else if (src_rd_en)
+            src_rd_ptr <= src_rd_ptr + 1'b1;
+    end
+
+    // Full/Empty Detection
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_full <= 1'b0;
+            src_empty <= 1'b1;
+        end else begin
+            src_full <= (src_wr_ptr == src_rd_ptr) && src_wr_en;
+            src_empty <= (src_wr_ptr == src_rd_ptr) && !src_wr_en;
+        end
+    end
+
+    // Write Enable Logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_wr_en <= 1'b0;
+        else if (src_valid_sync_2 && !src_full)
+            src_wr_en <= 1'b1;
+        else
+            src_wr_en <= 1'b0;
+    end
+
+    // Write Data
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            mem <= 0;
+        else if (src_wr_en)
+            mem[src_wr_ptr] <= src_data_i;
+    end
+
+    // Read Enable Logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_rd_en <= 1'b0;
+        else if (src_rd_ptr < src_wr_ptr)
+            src_rd_en <= 1'b1;
+        else
+            src_rd_en <= 1'b0;
+    end
+
+    // Source Ready Output
+    assign src_ready_o = !src_full;
+
+    // --- Cross Domain Pointer Synchronization (Gray Encoding) ---
+
+    // Write Pointer Sync (Src -> Dst)
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            cross_gray_wr_ptr <= 0;
+        else
+            cross_gray_wr_ptr <= $graycode(src_wr_ptr);
+    end
+
+    // Read Pointer Sync (Src -> Dst)
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            cross_gray_rd_ptr <= 0;
+        else
+            cross_gray_rd_ptr <= $graycode(src_rd_ptr);
+    end
+
+    // --- Destination Domain Logic ---
+
+    // Reset Synchronizer
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_rst_sync_1 <= 1'b0;
+        else
+            dst_rst_sync_1 <= dst_rst_ni;
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_rst_sync_2 <= 1'b0;
+        else
+            dst_rst_sync_2 <= dst_rst_sync_1;
+    end
+
+    // Ready Synchronizer
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_ready_sync_1 <= 1'b0;
+        else
+            dst_ready_sync_1 <= dst_ready_i;
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_ready_sync_2 <= 1'b0;
+        else
+            dst_ready_sync_2 <= dst_ready_sync_1;
+    end
+
+    // Read Pointer Logic (Gray to Binary conversion happens here)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_rd_ptr <= 0;
+        else if (dst_rd_en)
+            dst_rd_ptr <= $bin2gray($clog2(DEPTH), dst_rd_ptr) + 1'b1; // Increment after read
+        else
+            dst_rd_ptr <= $bin2gray($clog2(DEPTH), dst_rd_ptr);
+    end
+
+    // Write Pointer Logic (Gray to Binary conversion happens here)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_wr_ptr <= 0;
+        else if (dst_wr_en)
+            dst_wr_ptr <= $bin2gray($clog2(DEPTH), dst_wr_ptr) + 1'b1;
+        else
+            dst_wr_ptr <= $bin2gray($clog2(DEPTH), dst_wr_ptr);
+    end
+
+    // Full/Empty Detection
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_full <= 1'b0;
+            dst_empty <= 1'b1;
+        end else begin
+            // Compare binary pointers
+            dst_full <= (dst_wr_ptr == dst_rd_ptr) && dst_wr_en;
+            dst_empty <= (dst_wr_ptr == dst_rd_ptr) && !dst_wr_en;
+        end
+    end
+
+    // Write Enable Logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_wr_en <= 1'b0;
+        else if (dst_ready_sync_2 && !dst_full)
+            dst_wr_en <= 1'b1;
+        else
+            dst_wr_en <= 1'b0;
+    end
+
+    // Read Enable Logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_rd_en <= 1'b0;
+        else if (dst_rd_ptr < dst_wr_ptr)
+            dst_rd_en <= 1'b1;
+        else
+            dst_rd_en <= 1'b0;
+    end
+
+    // Data Output
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_data_o <= 0;
+        else if (dst_rd_en)
+            dst_data_o <= mem[dst_rd_ptr];
+        else
+            dst_data_o <= dst_data_o;
+    end
+
+    // Valid Output
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_valid_o <= 1'b0;
+        else if (dst_rd_en)
+            dst_valid_o <= 1'b1;
+        else
+            dst_valid_o <= 1'b0;
+    end
+
+    // Helper function for Gray to Binary conversion
+    // Since Verilog-2001 does not support functions inside modules directly for synthesis in all tools,
+    // we implement the logic inline or use a generate block if needed. 
+    // However, for a single file implementation without testbench, we can use a procedural block 
+    // or a separate module. To keep it self-contained in one file as requested, 
+    // we will implement a small helper module or use a generate block for the conversion logic.
+    // Given the constraint "one source file", we will define a local function-like logic 
+    // using a generate block or simply inline the conversion if depth is small, 
+    // but a reusable module is cleaner. Let's create a helper module for bin2gray.
+
+endmodule
+
+// Helper module for Gray to Binary conversion
+// This is needed because Verilog-2001 does not support functions inside modules.
+module bin2gray #(
+    parameter LOG_N = 3
+)(
+    input  [LOG_N-1:0] gray_in,
+    output [LOG_N-1:0] bin_out
+);
+    assign bin_out[LOG_N-1] = gray_in[LOG_N-1];
+    genvar i;
+    generate
+        for (i = LOG_N-2; i >= 0; i = i - 1) begin : bin2gray_gen
+            assign bin_out[i] = gray_in[i] ^ gray_in[i+1];
+        end
+    endgenerate
+endmodule
+
+// Helper module for Gray to Binary conversion (Alternative if above is not preferred)
+// Actually, the above is standard. But wait, the previous module used $bin2gray which is a system task/function.
+// System tasks/functions are not synthesizable in all contexts and might violate "no vendor primitives" if interpreted strictly.
+// The generate block approach is the most portable and standard Verilog-2001 way.
+// I will replace the $bin2gray calls in the main module with the generated logic.
+
+// Re-implementing the main module logic with the generate block approach for bin2gray to ensure portability.
+// Since I cannot edit the previous block directly in this thought trace, I will provide the corrected full code below.
+```
+
+```verilog
+module cdc_fifo_gray #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 2
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output reg [WIDTH-1:0] dst_data_o,
+    output reg             dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam GRAY_WIDTH = $clog2(DEPTH);
+
+    // Source Domain: Write Pointer and Control
+    reg [LOG_DEPTH-1:0] src_wr_ptr;
+    reg [LOG_DEPTH-1:0] src_rd_ptr;
+    reg src_wr_en;
+    reg src_full;
+    reg src_empty;
+
+    // Destination Domain: Read Pointer and Control
+    reg [LOG_DEPTH-1:0] dst_wr_ptr;
+    reg [LOG_DEPTH-1:0] dst_rd_ptr;
+    reg dst_rd_en;
+    reg dst_full;
+    reg dst_empty;
+
+    // Cross-domain pointers (Gray encoded for safe crossing)
+    reg [LOG_DEPTH-1:0] cross_gray_wr_ptr;
+    reg [LOG_DEPTH-1:0] cross_gray_rd_ptr;
+
+    // Synchronizers for pointers
+    reg [LOG_DEPTH-1:0] sync_wr_ptr_1;
+    reg [LOG_DEPTH-1:0] sync_wr_ptr_2;
+    reg [LOG_DEPTH-1:0] sync_rd_ptr_1;
+    reg [LOG_DEPTH-1:0] sync_rd_ptr_2;
+
+    // Synchronizers for control signals (valid/ready)
+    reg src_valid_sync_1;
+    reg src_valid_sync_2;
+    reg dst_ready_sync_1;
+    reg dst_ready_sync_2;
+
+    // Synchronizers for reset
+    reg src_rst_sync_1;
+    reg src_rst_sync_2;
+    reg dst_rst_sync_1;
+    reg dst_rst_sync_2;
+
+    // FIFO Memory
+    reg [WIDTH-1:0] mem [DEPTH-1:0];
+
+    // --- Source Domain Logic ---
+
+    // Reset Synchronizer
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_rst_sync_1 <= 1'b0;
+        else
+            src_rst_sync_1 <= src_rst_ni;
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_rst_sync_2 <= 1'b0;
+        else
+            src_rst_sync_2 <= src_rst_sync_1;
+    end
+
+    // Valid Synchronizer
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_valid_sync_1 <= 1'b0;
+        else
+            src_valid_sync_1 <= src_valid_i;
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_valid_sync_2 <= 1'b0;
+        else
+            src_valid_sync_2 <= src_valid_sync_1;
+    end
+
+    // Write Pointer Logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_wr_ptr <= 0;
+        else if (src_wr_en)
+            src_wr_ptr <= src_wr_ptr + 1'b1;
+    end
+
+    // Read Pointer Logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_rd_ptr <= 0;
+        else if (src_rd_en)
+            src_rd_ptr <= src_rd_ptr + 1'b1;
+    end
+
+    // Full/Empty Detection
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_full <= 1'b0;
+            src_empty <= 1'b1;
+        end else begin
+            src_full <= (src_wr_ptr == src_rd_ptr) && src_wr_en;
+            src_empty <= (src_wr_ptr == src_rd_ptr) && !src_wr_en;
+        end
+    end
+
+    // Write Enable Logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_wr_en <= 1'b0;
+        else if (src_valid_sync_2 && !src_full)
+            src_wr_en <= 1'b1;
+        else
+            src_wr_en <= 1'b0;
+    end
+
+    // Write Data
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            mem <= 0;
+        else if (src_wr_en)
+            mem[src_wr_ptr] <= src_data_i;
+    end
+
+    // Read Enable Logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_rd_en <= 1'b0;
+        else if (src_rd_ptr < src_wr_ptr)
+            src_rd_en <= 1'b1;
+        else
+            src_rd_en <= 1'b0;
+    end
+
+    // Source Ready Output
+    assign src_ready_o = !src_full;
+
+    // --- Cross Domain Pointer Synchronization (Gray Encoding) ---
+
+    // Write Pointer Sync (Src -> Dst)
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            cross_gray_wr_ptr <= 0;
+        else
+            cross_gray_wr_ptr <= $graycode(src_wr_ptr);
+    end
+
+    // Read Pointer Sync (Src -> Dst)
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            cross_gray_rd_ptr <= 0;
+        else
+            cross_gray_rd_ptr <= $graycode(src_rd_ptr);
+    end
+
+    // --- Destination Domain Logic ---
+
+    // Reset Synchronizer
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_rst_sync_1 <= 1'b0;
+        else
+            dst_rst_sync_1 <= dst_rst_ni;
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_rst_sync_2 <= 1'b0;
+        else
+            dst_rst_sync_2 <= dst_rst_sync_1;
+    end
+
+    // Ready Synchronizer
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_ready_sync_1 <= 1'b0;
+        else
+            dst_ready_sync_1 <= dst_ready_i;
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_ready_sync_2 <= 1'b0;
+        else
+            dst_ready_sync_2 <= dst_ready_sync_1;
+    end
+
+    // Helper function for Gray to Binary conversion
+    // Since Verilog-2001 does not support functions inside modules, we use a generate block.
+    // We define a local parameter for the width of the gray pointer.
+    localparam GRAY_PTR_WIDTH = LOG_DEPTH;
+
+    // Generate Gray to Binary logic for pointers
+    genvar i;
+    generate
+        for (i = 0; i < GRAY_PTR_WIDTH; i = i + 1) begin : gray_to_bin_gen
+            // This block is instantiated for each bit of the pointer
+            // We need to assign the binary output based on the gray input
+            // Since we are inside the main module, we can't easily create a separate instance for each bit
+            // without a separate module. Instead, we will use a procedural block with a generate loop
+            // to compute the binary value from the gray value.
+        end
+    endgenerate
+
+    // Procedural logic for Gray to Binary conversion inside the always block
+    // We will use a temporary register to hold the binary value
+    reg [GRAY_PTR_WIDTH-1:0] bin_wr_ptr;
+    reg [GRAY_PTR_WIDTH-1:0] bin_rd_ptr;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            bin_wr_ptr <= 0;
+            bin_rd_ptr <= 0;
+        end else begin
+            // Convert Gray to Binary
+            bin_wr_ptr[GRAY_PTR_WIDTH-1] = cross_gray_wr_ptr[GRAY_PTR_WIDTH-1];
+            bin_rd_ptr[GRAY_PTR_WIDTH-1] = cross_gray_rd_ptr[GRAY_PTR_WIDTH-1];
+            for (i = GRAY_PTR_WIDTH-2; i >= 0; i = i - 1) begin
+                bin_wr_ptr[i] = cross_gray_wr_ptr[i] ^ cross_gray_wr_ptr[i+1];
+                bin_rd_ptr[i] = cross_gray_rd_ptr[i] ^ cross_gray_rd_ptr[i+1];
+            end
+        end
+    end
+
+    // Write Pointer Logic (Binary)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_wr_ptr <= 0;
+        else if (dst_wr_en)
+            dst_wr_ptr <= bin_wr_ptr + 1'b1;
+        else
+            dst_wr_ptr <= bin_wr_ptr;
+    end
+
+    // Read Pointer Logic (Binary)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_rd_ptr <= 0;
+        else if (dst_rd_en)
+            dst_rd_ptr <= bin_rd_ptr + 1'b1;
+        else
+            dst_rd_ptr <= bin_rd_ptr;
+    end
+
+    // Full/Empty Detection
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_full <= 1'b0;
+            dst_empty <= 1'b1;
+        end else begin
+            dst_full <= (dst_wr_ptr == dst_rd_ptr) && dst_wr_en;
+            dst_empty <= (dst_wr_ptr == dst_rd_ptr) && !dst_wr_en;
+        end
+    end
+
+    // Write Enable Logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_wr_en <= 1'b0;
+        else if (dst_ready_sync_2 && !dst_full)
+            dst_wr_en <= 1'b1;
+        else
+            dst_wr_en <= 1'b0;
+    end
+
+    // Read Enable Logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_rd_en <= 1'b0;
+        else if (dst_rd_ptr < dst_wr_ptr)
+            dst_rd_en <= 1'b1;
+        else
+            dst_rd_en <= 1'b0;
+    end
+
+    // Data Output
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_data_o <= 0;
+        else if (dst_rd_en)
+            dst_data_o <= mem[dst_rd_ptr];
+        else
+            dst_data_o <= dst_data_o;
+    end
+
+    // Valid Output
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_valid_o <= 1'b0;
+        else if (dst_rd_en)
+            dst_valid_o <= 1'b1;
+        else
+            dst_valid_o <= 1'b0;
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

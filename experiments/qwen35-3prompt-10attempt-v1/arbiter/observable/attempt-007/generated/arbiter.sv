@@ -1,0 +1,159 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam LOG_PORTS = $clog2(PORTS);
+    localparam LSB_HIGH = ARB_LSB_HIGH_PRIORITY;
+
+    // State encoding
+    // 0: IDLE
+    // 1: GRANTING (Grant is active, waiting for ack or timeout)
+    // 2: BLOCKED (Grant is blocked, waiting for release event)
+    parameter IDLE = 2'b00;
+    parameter GRANTING = 2'b01;
+    parameter BLOCKED = 2'b10;
+
+    reg [1:0] state;
+    reg [LOG_PORTS-1:0] next_state;
+    reg [LOG_PORTS-1:0] rr_index;
+    reg [PORTS-1:0] grant;
+    reg grant_valid;
+    reg [$clog2(PORTS)-1:0] grant_encoded;
+    reg [PORTS-1:0] last_grant;
+    reg [PORTS-1:0] blocked_ports;
+
+    // Priority logic
+    function integer get_priority;
+        input [PORTS-1:0] req;
+        integer i, max_prio;
+        max_prio = -1;
+        if (LSB_HIGH) begin
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (req[i] && (i < max_prio || max_prio == -1)) begin
+                    max_prio = i;
+                end
+            end
+        end else begin
+            for (i = PORTS-1; i >= 0; i = i - 1) begin
+                if (req[i] && (i > max_prio || max_prio == -1)) begin
+                    max_prio = i;
+                end
+            end
+        end
+        get_priority = max_prio;
+    endfunction
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= IDLE;
+            rr_index <= 0;
+            grant <= 0;
+            grant_valid <= 0;
+            grant_encoded <= 0;
+            last_grant <= 0;
+            blocked_ports <= 0;
+        end else begin
+            case (state)
+                IDLE: begin
+                    if (request == 0) begin
+                        next_state <= IDLE;
+                    end else begin
+                        if (ARB_TYPE_ROUND_ROBIN) begin
+                            // Find first request at or after rr_index
+                            integer i;
+                            reg found;
+                            found = 0;
+                            for (i = rr_index; i < PORTS; i = i + 1) begin
+                                if (request[i]) begin
+                                    rr_index <= i;
+                                    next_state <= GRANTING;
+                                    found = 1;
+                                    break;
+                                end
+                            end
+                            if (!found) begin
+                                // Wrap around
+                                for (i = 0; i < rr_index; i = i + 1) begin
+                                    if (request[i]) begin
+                                        rr_index <= i;
+                                        next_state <= GRANTING;
+                                        found = 1;
+                                        break;
+                                    end
+                                end
+                            end
+                            if (!found) begin
+                                // No requests, stay idle
+                                next_state <= IDLE;
+                            end
+                        end else begin
+                            // Fixed priority
+                            integer prio;
+                            prio = get_priority(request);
+                            if (prio != -1) begin
+                                rr_index <= prio;
+                                next_state <= GRANTING;
+                            end else begin
+                                next_state <= IDLE;
+                            end
+                        end
+                    end
+                end
+
+                GRANTING: begin
+                    // Check if grant is still valid
+                    if (grant_valid && (ARB_BLOCK || (ARB_BLOCK_ACK && acknowledge[rr_index]))) begin
+                        // Grant is valid and either not blocked or ack received
+                        next_state <= IDLE;
+                    end else if (ARB_BLOCK && !ARB_BLOCK_ACK) begin
+                        // Blocked mode, waiting for ack
+                        next_state <= BLOCKED;
+                    end else begin
+                        // Grant expired or not blocked
+                        next_state <= IDLE;
+                    end
+                end
+
+                BLOCKED: begin
+                    // Wait for release event
+                    if (ARB_BLOCK_ACK && acknowledge[rr_index]) begin
+                        next_state <= IDLE;
+                    end else begin
+                        next_state <= BLOCKED;
+                    end
+                end
+            endcase
+            state <= next_state;
+        end
+    end
+
+    // Output logic
+    always @(*) begin
+        grant = 0;
+        grant_valid = 0;
+        grant_encoded = 0;
+        
+        if (state == GRANTING) begin
+            grant[rr_index] = 1;
+            grant_valid = 1;
+            grant_encoded = rr_index;
+        end
+    end
+
+endmodule
+```<|im_end|>

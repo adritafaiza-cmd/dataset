@@ -1,0 +1,184 @@
+```systemverilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam ADDR_WIDTH_LOG = ADDR_WIDTH;
+    localparam FIFO_DEPTH = 1 << ADDR_WIDTH;
+    localparam FULL_THRESHOLD = FIFO_DEPTH - 1;
+
+    // Write side registers
+    reg [ADDR_WIDTH-1:0] wptr;
+    reg [ADDR_WIDTH-1:0] wptr_next;
+    reg [ADDR_WIDTH-1:0] wfull_reg;
+    reg [ADDR_WIDTH-1:0] wfull_reg_next;
+
+    // Read side registers
+    reg [ADDR_WIDTH-1:0] rptr;
+    reg [ADDR_WIDTH-1:0] rptr_next;
+    reg [ADDR_WIDTH-1:0] rempty_reg;
+    reg [ADDR_WIDTH-1:0] rempty_reg_next;
+
+    // FIFO Memory
+    reg [DATA_WIDTH-1:0] mem [FIFO_DEPTH-1:0];
+
+    // Cross-domain signals
+    wire [ADDR_WIDTH-1:0] rptr_synced;
+    wire [ADDR_WIDTH-1:0] wptr_synced;
+    wire [ADDR_WIDTH-1:0] wptr_synced_next;
+    wire [ADDR_WIDTH-1:0] rptr_synced_next;
+
+    // Write Address Output (Current Write Pointer)
+    assign waddr = wptr;
+
+    // Read Address Output (Current Read Pointer)
+    assign raddr = rptr;
+
+    // Write Full Logic
+    // Full when write pointer equals read pointer and we are at the last valid entry
+    // We use the read pointer from the write domain (synced) to determine if full
+    assign wfull = (wptr == rptr_synced) && (wptr == FULL_THRESHOLD);
+
+    // Read Empty Logic
+    // Empty when write pointer equals read pointer
+    // We use the write pointer from the read domain (synced) to determine if empty
+    assign rempty = (rptr == wptr_synced);
+
+    // --- Write Side Logic ---
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= '0;
+            wfull_reg <= '0;
+        end else begin
+            wptr <= wptr_next;
+            wfull_reg <= wfull_reg_next;
+        end
+    end
+
+    // Calculate next write pointer
+    always @(*) begin
+        wptr_next = wptr;
+        if (winc && !wfull) begin
+            wptr_next = wptr + 1'b1;
+        end
+    end
+
+    // Calculate next full status
+    // Full if next write pointer would wrap around to current read pointer
+    // This happens when wptr == FULL_THRESHOLD and we are not empty
+    always @(*) begin
+        wfull_reg_next = wfull_reg;
+        if (winc && !wfull) begin
+            if (wptr == FULL_THRESHOLD) begin
+                // Check if we are wrapping around to the read pointer
+                // Since we are not full currently, rptr != wptr.
+                // If wptr is max, next is 0. If rptr is 0, then next wptr == rptr -> Full.
+                if (rptr == '0) begin
+                    wfull_reg_next = 1'b1;
+                end
+            end
+        end
+    end
+
+    // --- Read Side Logic ---
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= '0;
+            rempty_reg <= '1;
+        end else begin
+            rptr <= rptr_next;
+            rempty_reg <= rempty_reg_next;
+        end
+    end
+
+    // Calculate next read pointer
+    always @(*) begin
+        rptr_next = rptr;
+        if (rinc && !rempty) begin
+            rptr_next = rptr + 1'b1;
+        end
+    end
+
+    // Calculate next empty status
+    // Empty if next read pointer would equal current write pointer
+    always @(*) begin
+        rempty_reg_next = rempty_reg;
+        if (rinc && !rempty) begin
+            if (rptr == '0) begin
+                // Check if we are wrapping around to the write pointer
+                // Since we are not empty currently, wptr != rptr.
+                // If rptr is 0, next is 0. If wptr is 0, then next rptr == wptr -> Empty.
+                if (wptr == '0) begin
+                    rempty_reg_next = 1'b1;
+                end
+            end
+        end
+    end
+
+    // --- Clock Domain Crossing (CDC) Logic ---
+    // Write Pointer -> Read Domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            wptr_synced <= '0;
+        else
+            wptr_synced <= wptr_synced_next;
+    end
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            wptr_synced_next <= '0;
+        else
+            wptr_synced_next <= wptr;
+    end
+
+    // Read Pointer -> Write Domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            rptr_synced <= '0;
+        else
+            rptr_synced <= rptr_synced_next;
+    end
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            rptr_synced_next <= '0;
+        else
+            rptr_synced_next <= rptr;
+    end
+
+    // --- Data Storage and Retrieval ---
+    // Write Data
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            mem[*] <= '0;
+        end else if (winc && !wfull) begin
+            mem[wptr] <= wdata;
+        end
+    end
+
+    // Read Data (Sample from memory using read pointer)
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rdata <= '0;
+        end else begin
+            rdata <= mem[rptr];
+        end
+    end
+
+endmodule
+```<|im_end|>

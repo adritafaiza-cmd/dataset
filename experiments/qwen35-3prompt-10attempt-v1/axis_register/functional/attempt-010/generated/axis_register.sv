@@ -1,0 +1,209 @@
+```verilog
+module axis_register #
+(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI Stream input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI Stream output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser
+);
+
+    // Internal registers for storing data and sideband information
+    reg [DATA_WIDTH-1:0]     reg_tdata;
+    reg [KEEP_WIDTH-1:0]     reg_tkeep;
+    reg                      reg_tlast;
+    reg [ID_WIDTH-1:0]       reg_tid;
+    reg [DEST_WIDTH-1:0]     reg_tdest;
+    reg [USER_WIDTH-1:0]     reg_tuser;
+    reg                      reg_valid;
+
+    // Logic to determine if the module is ready to accept new data
+    // For REG_TYPE 2 (Skid Buffer), we must not drop a beat when output stalls.
+    // This means we only accept new data if we have space or if the output is ready.
+    // Since it's a single register slice, "space" is always available unless we are full.
+    // A single register can hold exactly one beat.
+    // If REG_TYPE is 2, we act as a buffer that holds data until m_axis_tready is asserted.
+    // If REG_TYPE is 0 (Wire) or 1 (Buffer), we pass through immediately if ready.
+    
+    // However, the requirement "must not drop a beat when the output stalls" for REG_TYPE 2
+    // implies that if m_axis_tready is low, we should hold the data in the register
+    // and wait for m_axis_tready to go high, rather than dropping the beat (ignoring it).
+    // For REG_TYPE 0 and 1, typically "drop" means if valid is high and ready is low,
+    // the next valid might be ignored or the current one is lost. 
+    // Standard interpretation for a "register slice" with REG_TYPE 2 is a 1-beat FIFO.
+    // If the FIFO is full (which happens if we just loaded and ready is low), we cannot load more.
+    
+    wire                     can_load;
+    
+    assign can_load = (REG_TYPE == 2) ? (!reg_valid) : (m_axis_tready);
+    
+    // Note: For REG_TYPE 0 (Wire) and 1 (Buffer), if m_axis_tready is low, 
+    // the standard behavior for a simple buffer is often to drop the beat (ignore the input)
+    // unless it's a specific buffering requirement. However, the prompt says:
+    // "REG_TYPE 2 is a skid buffer that must not drop a beat when the output stalls."
+    // This implies REG_TYPE 0 and 1 *are* allowed to drop beats (or simply pass through).
+    // But to be safe and consistent with "single-clock AXI-Stream register slice",
+    // usually REG_TYPE 0/1 act as a simple latch that only updates if ready.
+    // If not ready, the output remains valid with old data (if we consider it a latch) 
+    // OR the input is ignored and output becomes invalid (if we consider it a drop).
+    // Given the explicit distinction for Type 2, Type 0 and 1 will behave as:
+    // Update registers only if m_axis_tready is high. If not, output stays as is (latch behavior)
+    // OR output becomes invalid. 
+    // Let's assume standard FIFO behavior for Type 2 (hold until ready).
+    // For Type 0/1, if we don't have a FIFO depth > 1, "not dropping a beat" is impossible if ready is low
+    // unless we hold the previous value. But the prompt implies Type 2 is special for *not* dropping.
+    // So Type 0/1 likely drop the beat if ready is low (i.e., they don't store it).
+    // Actually, a common interpretation for Type 0/1 in this context is:
+    // If ready is low, do not update the register. The output remains valid with the last known good data?
+    // Or does the output become invalid?
+    // Let's stick to the most robust interpretation:
+    // Type 2: Store data if valid and not full. Output valid if stored.
+    // Type 0/1: Store data if valid and ready. If not ready, do not store (drop beat). Output becomes invalid?
+    // Wait, if we drop the beat, the output should probably go invalid.
+    // However, a simpler interpretation often used in simple slices:
+    // Always update if valid. If ready is low, the output stays valid with the new data (stalling the output stream effectively).
+    // But the prompt says Type 2 "must not drop". This implies Type 0/1 *might* drop.
+    // Let's implement Type 2 as a 1-deep FIFO.
+    // For Type 0/1, let's implement as a latch that only updates if ready. If not ready, output stays valid with old data?
+    // No, that's not dropping. Dropping means the data is lost.
+    // Let's assume:
+    // Type 2: 1-beat FIFO. If full (reg_valid=1) and ready=0, ignore input.
+    // Type 0/1: Simple latch. If ready=0, ignore input (drop beat). Output becomes invalid? 
+    // Or does the output stay valid with the previous data?
+    // Let's look at the "After reset the slice is empty" requirement.
+    // If we drop a beat, the output should reflect that nothing is there.
+    // So for Type 0/1: if !ready, do not update registers, and set reg_valid = 0.
+    // For Type 2: if !ready and reg_valid=1, do not update, keep reg_valid=1.
+    
+    // Re-evaluating Type 0/1:
+    // If I receive data, and ready is low.
+    // If I drop it: reg_valid becomes 0.
+    // If I hold it: reg_valid stays 1 (with old data).
+    // The prompt says Type 2 "must not drop". This implies Type 0/1 *do* drop.
+    // So:
+    // Type 0/1: Update only if ready. If not ready, clear valid.
+    // Type 2: Update if !full. If full, hold.
+    
+    // Wait, if Type 0/1 drop the beat, how do we know when the stream is empty?
+    // We rely on reg_valid.
+    
+    // Let's refine the logic:
+    // Always update registers if (s_axis_tvalid && can_load).
+    // can_load logic:
+    //   If REG_TYPE == 2: can_load = !reg_valid; (Only load if empty)
+    //   If REG_TYPE != 2: can_load = m_axis_tready; (Only load if ready, otherwise drop)
+    
+    // Wait, if REG_TYPE != 2 and ready is low, we drop the beat.
+    // So we don't update the registers.
+    // And we must ensure m_axis_tvalid is 0 if no data is stored.
+    
+    // Let's trace:
+    // Reset: reg_valid = 0.
+    // Input valid, ready low (Type 0/1): can_load = 0. No update. reg_valid = 0. Output valid = 0. (Dropped)
+    // Input valid, ready high (Type 0/1): can_load = 1. Update. reg_valid = 1. Output valid = 1.
+    // Input valid, ready low (Type 2): can_load = !reg_valid. 
+    //    If reg_valid=0: can_load=1. Update. reg_valid=1. Output valid=1.
+    //    If reg_valid=1: can_load=0. No update. reg_valid=1. Output valid=1. (Held)
+    
+    // This seems correct.
+    
+    assign s_axis_tready = (s_axis_tvalid && can_load) ? m_axis_tready : 1'b1;
+    
+    // Update registers
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            reg_tdata      <= 0;
+            reg_tkeep      <= 0;
+            reg_tlast      <= 0;
+            reg_tid        <= 0;
+            reg_tdest      <= 0;
+            reg_tuser      <= 0;
+            reg_valid      <= 0;
+        end else if (s_axis_tvalid && can_load) begin
+            reg_tdata      <= s_axis_tdata;
+            reg_tkeep      <= s_axis_tkeep;
+            reg_tlast      <= s_axis_tlast;
+            reg_tid        <= s_axis_tid;
+            reg_tdest      <= s_axis_tdest;
+            reg_tuser      <= s_axis_tuser;
+            reg_valid      <= 1'b1;
+        end else begin
+            // For Type 0/1, if we don't load, we clear valid (drop beat)
+            // For Type 2, if we don't load (because full), we keep valid (hold data)
+            if (REG_TYPE != 2) begin
+                reg_valid <= 1'b0;
+            end
+            // For Type 2, reg_valid is maintained by the 'else' branch implicitly if we don't assign it?
+            // No, in Verilog, if we don't assign, it holds. But we need to be explicit or careful.
+            // Let's restructure the always block to be clearer.
+        end
+    end
+    
+    // Re-writing the always block for clarity and correctness
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            reg_tdata      <= '0;
+            reg_tkeep      <= '0;
+            reg_tlast      <= 1'b0;
+            reg_tid        <= '0;
+            reg_tdest      <= '0;
+            reg_tuser      <= '0;
+            reg_valid      <= 1'b0;
+        end else if (s_axis_tvalid && can_load) begin
+            reg_tdata      <= s_axis_tdata;
+            reg_tkeep      <= s_axis_tkeep;
+            reg_tlast      <= s_axis_tlast;
+            reg_tid        <= s_axis_tid;
+            reg_tdest      <= s_axis_tdest;
+            reg_tuser      <= s_axis_tuser;
+            reg_valid      <= 1'b1;
+        end else if (REG_TYPE != 2) begin
+            // Type 0 or 1: Drop beat if not ready
+            reg_valid <= 1'b0;
+        end
+        // Type 2: If not loading (because full), keep reg_valid as is (hold data)
+    end
+
+    // Output assignments
+    assign m_axis_tdata      = reg_valid ? reg_tdata      : '0;
+    assign m_axis_tkeep      = reg_valid ? reg_tkeep      : '0;
+    assign m_axis_tvalid     = reg_valid;
+    assign m_axis_tlast      = reg_valid ? reg_tlast      : 1'b0;
+    assign m_axis_tid        = reg_valid ? reg_tid        : '0;
+    assign m_axis_tdest      = reg_valid ? reg_tdest      : '0;
+    assign m_axis_tuser      = reg_valid ? reg_tuser      : '0;
+
+endmodule
+```<|im_end|>

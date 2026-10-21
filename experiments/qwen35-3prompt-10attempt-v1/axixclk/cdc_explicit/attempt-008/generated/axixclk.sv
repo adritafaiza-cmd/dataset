@@ -1,0 +1,665 @@
+```verilog
+module axixclk #(
+	parameter integer C_S_AXI_ID_WIDTH	= 2,
+	parameter integer C_S_AXI_DATA_WIDTH	= 32,
+	parameter integer C_S_AXI_ADDR_WIDTH	= 6,
+	parameter [0:0]	OPT_WRITE_ONLY = 1'b0,
+	parameter [0:0]	OPT_READ_ONLY = 1'b0,
+	parameter	XCLOCK_FFS = 2,
+	parameter	LGFIFO = 5
+) (
+	input	wire				S_AXI_ACLK,
+	input	wire				S_AXI_ARESETN,
+	input	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_AWID,
+	input	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	S_AXI_AWADDR,
+	input	wire [7 : 0]			S_AXI_AWLEN,
+	input	wire [2 : 0]			S_AXI_AWSIZE,
+	input	wire [1 : 0]			S_AXI_AWBURST,
+	input	wire				S_AXI_AWLOCK,
+	input	wire [3 : 0]			S_AXI_AWCACHE,
+	input	wire [2 : 0]			S_AXI_AWPROT,
+	input	wire [3 : 0]			S_AXI_AWQOS,
+	input	wire				S_AXI_AWVALID,
+	output	wire				S_AXI_AWREADY,
+	input	wire [C_S_AXI_DATA_WIDTH-1 : 0]	S_AXI_WDATA,
+	input	wire [(C_S_AXI_DATA_WIDTH/8)-1 : 0] S_AXI_WSTRB,
+	input	wire				S_AXI_WLAST,
+	input	wire				S_AXI_WVALID,
+	output	wire				S_AXI_WREADY,
+	output	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_BID,
+	output	wire [1 : 0]			S_AXI_BRESP,
+	output	wire				S_AXI_BVALID,
+	input	wire				S_AXI_BREADY,
+	input	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_ARID,
+	input	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	S_AXI_ARADDR,
+	input	wire [7 : 0]			S_AXI_ARLEN,
+	input	wire [2 : 0]			S_AXI_ARSIZE,
+	input	wire [1 : 0]			S_AXI_ARBURST,
+	input	wire				S_AXI_ARLOCK,
+	input	wire [3 : 0]			S_AXI_ARCACHE,
+	input	wire [2 : 0]			S_AXI_ARPROT,
+	input	wire [3 : 0]			S_AXI_ARQOS,
+	input	wire				S_AXI_ARVALID,
+	output	wire				S_AXI_ARREADY,
+	output	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_RID,
+	output	wire [C_S_AXI_DATA_WIDTH-1 : 0]	S_AXI_RDATA,
+	output	wire [1 : 0]			S_AXI_RRESP,
+	output	wire				S_AXI_RLAST,
+	output	wire				S_AXI_RVALID,
+	input	wire				S_AXI_RREADY,
+	input	wire				M_AXI_ACLK,
+	output	wire				M_AXI_ARESETN,
+	output	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_AWID,
+	output	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	M_AXI_AWADDR,
+	output	wire [7 : 0]			M_AXI_AWLEN,
+	output	wire [2 : 0]			M_AXI_AWSIZE,
+	output	wire [1 : 0]			M_AXI_AWBURST,
+	output	wire				M_AXI_AWLOCK,
+	output	wire [3 : 0]			M_AXI_AWCACHE,
+	output	wire [2 : 0]			M_AXI_AWPROT,
+	output	wire [3 : 0]			M_AXI_AWQOS,
+	output	wire				M_AXI_AWVALID,
+	input	wire				M_AXI_AWREADY,
+	output	wire [C_S_AXI_DATA_WIDTH-1 : 0]	M_AXI_WDATA,
+	output	wire [(C_S_AXI_DATA_WIDTH/8)-1 : 0] M_AXI_WSTRB,
+	output	wire				M_AXI_WLAST,
+	output	wire				M_AXI_WVALID,
+	input	wire				M_AXI_WREADY,
+	input	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_BID,
+	input	wire [1 : 0]			M_AXI_BRESP,
+	input	wire				M_AXI_BVALID,
+	output	wire				M_AXI_BREADY,
+	output	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_ARID,
+	output	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	M_AXI_ARADDR,
+	output	wire [7 : 0]			M_AXI_ARLEN,
+	output	wire [2 : 0]			M_AXI_ARSIZE,
+	output	wire [1 : 0]			M_AXI_ARBURST,
+	output	wire				M_AXI_ARLOCK,
+	output	wire [3 : 0]			M_AXI_ARCACHE,
+	output	wire [2 : 0]			M_AXI_ARPROT,
+	output	wire [3 : 0]			M_AXI_ARQOS,
+	output	wire				M_AXI_ARVALID,
+	input	wire				M_AXI_ARREADY,
+	input	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_RID,
+	input	wire [C_S_AXI_DATA_WIDTH-1 : 0]	M_AXI_RDATA,
+	input	wire [1 : 0]			M_AXI_RRESP,
+	input	wire				M_AXI_RLAST,
+	input	wire				M_AXI_RVALID,
+	output	wire				M_AXI_RREADY
+);
+
+	// ------------------------------------------------------------------
+	// CDC Strategy:
+	// 1. Reset Generation: Use a 2-stage synchronizer for S_AXI_ARESETN 
+	//    to generate M_AXI_ARESETN.
+	// 2. Write Channel (AW -> W -> B):
+	//    - AW: Cross S->M using a FIFO.
+	//    - W: Cross S->M using a FIFO.
+	//    - B: Cross M->S using a FIFO.
+	//    - Handshake: AWVALID -> AWREADY (S->M), WVALID -> WREADY (S->M), 
+	//      BVALID -> BREADY (M->S).
+	//    - Data Integrity: WDATA is captured on S clock, transferred to M FIFO, 
+	//      then driven on M clock.
+	// 3. Read Channel (AR -> R):
+	//    - AR: Cross S->M using a FIFO.
+	//    - R: Cross M->S using a FIFO.
+	//    - Handshake: ARVALID -> ARREADY (S->M), RVALID -> RREADY (M->S).
+	//    - Data Integrity: RDATA is captured on M clock, transferred to S FIFO, 
+	//      then driven on S clock.
+	// ------------------------------------------------------------------
+
+	// ------------------------------------------------------------------
+	// Reset Generation (S -> M)
+	// ------------------------------------------------------------------
+	reg m_reset_sync_1;
+	reg m_reset_sync_2;
+
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			m_reset_sync_1 <= 1'b1;
+			m_reset_sync_2 <= 1'b1;
+		end else begin
+			m_reset_sync_1 <= m_reset_sync_1;
+			m_reset_sync_2 <= m_reset_sync_2;
+		end
+	end
+
+	assign M_AXI_ARESETN = m_reset_sync_2;
+
+	// ------------------------------------------------------------------
+	// Write Address Channel (S -> M)
+	// ------------------------------------------------------------------
+	// FIFO Parameters
+	localparam WRITE_ADDR_FIFO_DEPTH = 1 << LGFIFO;
+	localparam WRITE_ADDR_FIFO_ADDR_WIDTH = $clog2(WRITE_ADDR_FIFO_DEPTH);
+
+	reg [WRITE_ADDR_FIFO_ADDR_WIDTH-1 : 0] write_addr_fifo_addr;
+	reg [C_S_AXI_ID_WIDTH-1 : 0] write_addr_fifo_id;
+	reg [C_S_AXI_ADDR_WIDTH-1 : 0] write_addr_fifo_addr_data;
+	reg [7 : 0] write_addr_fifo_len;
+	reg [2 : 0] write_addr_fifo_size;
+	reg [1 : 0] write_addr_fifo_burst;
+	reg write_addr_fifo_lock;
+	reg [3 : 0] write_addr_fifo_cache;
+	reg [2 : 0] write_addr_fifo_prot;
+	reg [3 : 0] write_addr_fifo_qos;
+	reg write_addr_fifo_valid;
+	reg write_addr_fifo_empty;
+	reg write_addr_fifo_full;
+
+	// Write Address FIFO Logic
+	reg [WRITE_ADDR_FIFO_ADDR_WIDTH-1 : 0] write_addr_fifo_addr_reg;
+	reg [C_S_AXI_ID_WIDTH-1 : 0] write_addr_fifo_id_reg;
+	reg [C_S_AXI_ADDR_WIDTH-1 : 0] write_addr_fifo_addr_data_reg;
+	reg [7 : 0] write_addr_fifo_len_reg;
+	reg [2 : 0] write_addr_fifo_size_reg;
+	reg [1 : 0] write_addr_fifo_burst_reg;
+	reg write_addr_fifo_lock_reg;
+	reg [3 : 0] write_addr_fifo_cache_reg;
+	reg [2 : 0] write_addr_fifo_prot_reg;
+	reg [3 : 0] write_addr_fifo_qos_reg;
+	reg write_addr_fifo_valid_reg;
+
+	// S Domain: Write Address FIFO Write Logic
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			write_addr_fifo_addr <= 0;
+			write_addr_fifo_id <= 0;
+			write_addr_fifo_addr_data <= 0;
+			write_addr_fifo_len <= 0;
+			write_addr_fifo_size <= 0;
+			write_addr_fifo_burst <= 0;
+			write_addr_fifo_lock <= 0;
+			write_addr_fifo_cache <= 0;
+			write_addr_fifo_prot <= 0;
+			write_addr_fifo_qos <= 0;
+			write_addr_fifo_valid <= 0;
+			write_addr_fifo_empty <= 1;
+			write_addr_fifo_full <= 0;
+		end else begin
+			write_addr_fifo_addr <= write_addr_fifo_addr_reg;
+			write_addr_fifo_id <= write_addr_fifo_id_reg;
+			write_addr_fifo_addr_data <= write_addr_fifo_addr_data_reg;
+			write_addr_fifo_len <= write_addr_fifo_len_reg;
+			write_addr_fifo_size <= write_addr_fifo_size_reg;
+			write_addr_fifo_burst <= write_addr_fifo_burst_reg;
+			write_addr_fifo_lock <= write_addr_fifo_lock_reg;
+			write_addr_fifo_cache <= write_addr_fifo_cache_reg;
+			write_addr_fifo_prot <= write_addr_fifo_prot_reg;
+			write_addr_fifo_qos <= write_addr_fifo_qos_reg;
+			write_addr_fifo_valid <= write_addr_fifo_valid_reg;
+			
+			if (write_addr_fifo_valid && !M_AXI_AWREADY) begin
+				write_addr_fifo_addr <= write_addr_fifo_addr + 1;
+				if (write_addr_fifo_addr == (WRITE_ADDR_FIFO_DEPTH - 1))
+					write_addr_fifo_full <= 1;
+				else
+					write_addr_fifo_full <= 0;
+			end
+			if (write_addr_fifo_valid && M_AXI_AWREADY) begin
+				write_addr_fifo_valid <= 0;
+				write_addr_fifo_empty <= 1;
+			end
+		end
+	end
+
+	// M Domain: Write Address FIFO Read Logic
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			write_addr_fifo_addr_reg <= 0;
+			write_addr_fifo_id_reg <= 0;
+			write_addr_fifo_addr_data_reg <= 0;
+			write_addr_fifo_len_reg <= 0;
+			write_addr_fifo_size_reg <= 0;
+			write_addr_fifo_burst_reg <= 0;
+			write_addr_fifo_lock_reg <= 0;
+			write_addr_fifo_cache_reg <= 0;
+			write_addr_fifo_prot_reg <= 0;
+			write_addr_fifo_qos_reg <= 0;
+			write_addr_fifo_valid_reg <= 0;
+			write_addr_fifo_empty <= 1;
+			write_addr_fifo_full <= 0;
+		end else begin
+			if (write_addr_fifo_valid && !M_AXI_AWREADY) begin
+				write_addr_fifo_addr_reg <= write_addr_fifo_addr + 1;
+				if (write_addr_fifo_addr == (WRITE_ADDR_FIFO_DEPTH - 1))
+					write_addr_fifo_full <= 1;
+				else
+					write_addr_fifo_full <= 0;
+			end
+			if (write_addr_fifo_valid && M_AXI_AWREADY) begin
+				write_addr_fifo_valid_reg <= 0;
+				write_addr_fifo_empty <= 1;
+			end
+		end
+	end
+
+	assign S_AXI_AWREADY = write_addr_fifo_empty;
+	assign M_AXI_AWID = write_addr_fifo_id_reg;
+	assign M_AXI_AWADDR = write_addr_fifo_addr_data_reg;
+	assign M_AXI_AWLEN = write_addr_fifo_len_reg;
+	assign M_AXI_AWSIZE = write_addr_fifo_size_reg;
+	assign M_AXI_AWBURST = write_addr_fifo_burst_reg;
+	assign M_AXI_AWLOCK = write_addr_fifo_lock_reg;
+	assign M_AXI_AWCACHE = write_addr_fifo_cache_reg;
+	assign M_AXI_AWPROT = write_addr_fifo_prot_reg;
+	assign M_AXI_AWQOS = write_addr_fifo_qos_reg;
+	assign M_AXI_AWVALID = write_addr_fifo_valid;
+
+	// ------------------------------------------------------------------
+	// Write Data Channel (S -> M)
+	// ------------------------------------------------------------------
+	// FIFO Parameters
+	localparam WRITE_DATA_FIFO_DEPTH = 1 << LGFIFO;
+	localparam WRITE_DATA_FIFO_ADDR_WIDTH = $clog2(WRITE_DATA_FIFO_DEPTH);
+
+	reg [WRITE_DATA_FIFO_ADDR_WIDTH-1 : 0] write_data_fifo_addr;
+	reg [C_S_AXI_DATA_WIDTH-1 : 0] write_data_fifo_data;
+	reg [(C_S_AXI_DATA_WIDTH/8)-1 : 0] write_data_fifo_strb;
+	reg write_data_fifo_last;
+	reg write_data_fifo_valid;
+	reg write_data_fifo_empty;
+	reg write_data_fifo_full;
+
+	// Write Data FIFO Logic
+	reg [WRITE_DATA_FIFO_ADDR_WIDTH-1 : 0] write_data_fifo_addr_reg;
+	reg [C_S_AXI_DATA_WIDTH-1 : 0] write_data_fifo_data_reg;
+	reg [(C_S_AXI_DATA_WIDTH/8)-1 : 0] write_data_fifo_strb_reg;
+	reg write_data_fifo_last_reg;
+	reg write_data_fifo_valid_reg;
+
+	// S Domain: Write Data FIFO Write Logic
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			write_data_fifo_addr <= 0;
+			write_data_fifo_data <= 0;
+			write_data_fifo_strb <= 0;
+			write_data_fifo_last <= 0;
+			write_data_fifo_valid <= 0;
+			write_data_fifo_empty <= 1;
+			write_data_fifo_full <= 0;
+		end else begin
+			write_data_fifo_addr <= write_data_fifo_addr_reg;
+			write_data_fifo_data <= write_data_fifo_data_reg;
+			write_data_fifo_strb <= write_data_fifo_strb_reg;
+			write_data_fifo_last <= write_data_fifo_last_reg;
+			write_data_fifo_valid <= write_data_fifo_valid_reg;
+			
+			if (write_data_fifo_valid && !M_AXI_WREADY) begin
+				write_data_fifo_addr <= write_data_fifo_addr + 1;
+				if (write_data_fifo_addr == (WRITE_DATA_FIFO_DEPTH - 1))
+					write_data_fifo_full <= 1;
+				else
+					write_data_fifo_full <= 0;
+			end
+			if (write_data_fifo_valid && M_AXI_WREADY) begin
+				write_data_fifo_valid <= 0;
+				write_data_fifo_empty <= 1;
+			end
+		end
+	end
+
+	// M Domain: Write Data FIFO Read Logic
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			write_data_fifo_addr_reg <= 0;
+			write_data_fifo_data_reg <= 0;
+			write_data_fifo_strb_reg <= 0;
+			write_data_fifo_last_reg <= 0;
+			write_data_fifo_valid_reg <= 0;
+			write_data_fifo_empty <= 1;
+			write_data_fifo_full <= 0;
+		end else begin
+			if (write_data_fifo_valid && !M_AXI_WREADY) begin
+				write_data_fifo_addr_reg <= write_data_fifo_addr + 1;
+				if (write_data_fifo_addr == (WRITE_DATA_FIFO_DEPTH - 1))
+					write_data_fifo_full <= 1;
+				else
+					write_data_fifo_full <= 0;
+			end
+			if (write_data_fifo_valid && M_AXI_WREADY) begin
+				write_data_fifo_valid_reg <= 0;
+				write_data_fifo_empty <= 1;
+			end
+		end
+	end
+
+	assign S_AXI_WREADY = write_data_fifo_empty;
+	assign M_AXI_WDATA = write_data_fifo_data_reg;
+	assign M_AXI_WSTRB = write_data_fifo_strb_reg;
+	assign M_AXI_WLAST = write_data_fifo_last_reg;
+	assign M_AXI_WVALID = write_data_fifo_valid;
+
+	// ------------------------------------------------------------------
+	// Write Response Channel (M -> S)
+	// ------------------------------------------------------------------
+	// FIFO Parameters
+	localparam WRITE_RESP_FIFO_DEPTH = 1 << LGFIFO;
+	localparam WRITE_RESP_FIFO_ADDR_WIDTH = $clog2(WRITE_RESP_FIFO_DEPTH);
+
+	reg [WRITE_RESP_FIFO_ADDR_WIDTH-1 : 0] write_resp_fifo_addr;
+	reg [C_S_AXI_ID_WIDTH-1 : 0] write_resp_fifo_id;
+	reg [1 : 0] write_resp_fifo_resp;
+	reg write_resp_fifo_valid;
+	reg write_resp_fifo_empty;
+	reg write_resp_fifo_full;
+
+	// Write Response FIFO Logic
+	reg [WRITE_RESP_FIFO_ADDR_WIDTH-1 : 0] write_resp_fifo_addr_reg;
+	reg [C_S_AXI_ID_WIDTH-1 : 0] write_resp_fifo_id_reg;
+	reg [1 : 0] write_resp_fifo_resp_reg;
+	reg write_resp_fifo_valid_reg;
+
+	// M Domain: Write Response FIFO Write Logic
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			write_resp_fifo_addr <= 0;
+			write_resp_fifo_id <= 0;
+			write_resp_fifo_resp <= 0;
+			write_resp_fifo_valid <= 0;
+			write_resp_fifo_empty <= 1;
+			write_resp_fifo_full <= 0;
+		end else begin
+			write_resp_fifo_addr <= write_resp_fifo_addr_reg;
+			write_resp_fifo_id <= write_resp_fifo_id_reg;
+			write_resp_fifo_resp <= write_resp_fifo_resp_reg;
+			write_resp_fifo_valid <= write_resp_fifo_valid_reg;
+			
+			if (write_resp_fifo_valid && !S_AXI_BREADY) begin
+				write_resp_fifo_addr <= write_resp_fifo_addr + 1;
+				if (write_resp_fifo_addr == (WRITE_RESP_FIFO_DEPTH - 1))
+					write_resp_fifo_full <= 1;
+				else
+					write_resp_fifo_full <= 0;
+			end
+			if (write_resp_fifo_valid && S_AXI_BREADY) begin
+				write_resp_fifo_valid <= 0;
+				write_resp_fifo_empty <= 1;
+			end
+		end
+	end
+
+	// S Domain: Write Response FIFO Read Logic
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			write_resp_fifo_addr_reg <= 0;
+			write_resp_fifo_id_reg <= 0;
+			write_resp_fifo_resp_reg <= 0;
+			write_resp_fifo_valid_reg <= 0;
+			write_resp_fifo_empty <= 1;
+			write_resp_fifo_full <= 0;
+		end else begin
+			if (write_resp_fifo_valid && !S_AXI_BREADY) begin
+				write_resp_fifo_addr_reg <= write_resp_fifo_addr + 1;
+				if (write_resp_fifo_addr == (WRITE_RESP_FIFO_DEPTH - 1))
+					write_resp_fifo_full <= 1;
+				else
+					write_resp_fifo_full <= 0;
+			end
+			if (write_resp_fifo_valid && S_AXI_BREADY) begin
+				write_resp_fifo_valid_reg <= 0;
+				write_resp_fifo_empty <= 1;
+			end
+		end
+	end
+
+	assign M_AXI_BREADY = write_resp_fifo_empty;
+	assign S_AXI_BID = write_resp_fifo_id_reg;
+	assign S_AXI_BRESP = write_resp_fifo_resp_reg;
+	assign S_AXI_BVALID = write_resp_fifo_valid;
+
+	// ------------------------------------------------------------------
+	// Read Address Channel (S -> M)
+	// ------------------------------------------------------------------
+	// FIFO Parameters
+	localparam READ_ADDR_FIFO_DEPTH = 1 << LGFIFO;
+	localparam READ_ADDR_FIFO_ADDR_WIDTH = $clog2(READ_ADDR_FIFO_DEPTH);
+
+	reg [READ_ADDR_FIFO_ADDR_WIDTH-1 : 0] read_addr_fifo_addr;
+	reg [C_S_AXI_ID_WIDTH-1 : 0] read_addr_fifo_id;
+	reg [C_S_AXI_ADDR_WIDTH-1 : 0] read_addr_fifo_addr_data;
+	reg [7 : 0] read_addr_fifo_len;
+	reg [2 : 0] read_addr_fifo_size;
+	reg [1 : 0] read_addr_fifo_burst;
+	reg read_addr_fifo_lock;
+	reg [3 : 0] read_addr_fifo_cache;
+	reg [2 : 0] read_addr_fifo_prot;
+	reg [3 : 0] read_addr_fifo_qos;
+	reg read_addr_fifo_valid;
+	reg read_addr_fifo_empty;
+	reg read_addr_fifo_full;
+
+	// Read Address FIFO Logic
+	reg [READ_ADDR_FIFO_ADDR_WIDTH-1 : 0] read_addr_fifo_addr_reg;
+	reg [C_S_AXI_ID_WIDTH-1 : 0] read_addr_fifo_id_reg;
+	reg [C_S_AXI_ADDR_WIDTH-1 : 0] read_addr_fifo_addr_data_reg;
+	reg [7 : 0] read_addr_fifo_len_reg;
+	reg [2 : 0] read_addr_fifo_size_reg;
+	reg [1 : 0] read_addr_fifo_burst_reg;
+	reg read_addr_fifo_lock_reg;
+	reg [3 : 0] read_addr_fifo_cache_reg;
+	reg [2 : 0] read_addr_fifo_prot_reg;
+	reg [3 : 0] read_addr_fifo_qos_reg;
+	reg read_addr_fifo_valid_reg;
+
+	// S Domain: Read Address FIFO Write Logic
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			read_addr_fifo_addr <= 0;
+			read_addr_fifo_id <= 0;
+			read_addr_fifo_addr_data <= 0;
+			read_addr_fifo_len <= 0;
+			read_addr_fifo_size <= 0;
+			read_addr_fifo_burst <= 0;
+			read_addr_fifo_lock <= 0;
+			read_addr_fifo_cache <= 0;
+			read_addr_fifo_prot <= 0;
+			read_addr_fifo_qos <= 0;
+			read_addr_fifo_valid <= 0;
+			read_addr_fifo_empty <= 1;
+			read_addr_fifo_full <= 0;
+		end else begin
+			read_addr_fifo_addr <= read_addr_fifo_addr_reg;
+			read_addr_fifo_id <= read_addr_fifo_id_reg;
+			read_addr_fifo_addr_data <= read_addr_fifo_addr_data_reg;
+			read_addr_fifo_len <= read_addr_fifo_len_reg;
+			read_addr_fifo_size <= read_addr_fifo_size_reg;
+			read_addr_fifo_burst <= read_addr_fifo_burst_reg;
+			read_addr_fifo_lock <= read_addr_fifo_lock_reg;
+			read_addr_fifo_cache <= read_addr_fifo_cache_reg;
+			read_addr_fifo_prot <= read_addr_fifo_prot_reg;
+			read_addr_fifo_qos <= read_addr_fifo_qos_reg;
+			read_addr_fifo_valid <= read_addr_fifo_valid_reg;
+			
+			if (read_addr_fifo_valid && !M_AXI_ARREADY) begin
+				read_addr_fifo_addr <= read_addr_fifo_addr + 1;
+				if (read_addr_fifo_addr == (READ_ADDR_FIFO_DEPTH - 1))
+					read_addr_fifo_full <= 1;
+				else
+					read_addr_fifo_full <= 0;
+			end
+			if (read_addr_fifo_valid && M_AXI_ARREADY) begin
+				read_addr_fifo_valid <= 0;
+				read_addr_fifo_empty <= 1;
+			end
+		end
+	end
+
+	// M Domain: Read Address FIFO Read Logic
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			read_addr_fifo_addr_reg <= 0;
+			read_addr_fifo_id_reg <= 0;
+			read_addr_fifo_addr_data_reg <= 0;
+			read_addr_fifo_len_reg <= 0;
+			read_addr_fifo_size_reg <= 0;
+			read_addr_fifo_burst_reg <= 0;
+			read_addr_fifo_lock_reg <= 0;
+			read_addr_fifo_cache_reg <= 0;
+			read_addr_fifo_prot_reg <= 0;
+			read_addr_fifo_qos_reg <= 0;
+			read_addr_fifo_valid_reg <= 0;
+			read_addr_fifo_empty <= 1;
+			read_addr_fifo_full <= 0;
+		end else begin
+			if (read_addr_fifo_valid && !M_AXI_ARREADY) begin
+				read_addr_fifo_addr_reg <= read_addr_fifo_addr + 1;
+				if (read_addr_fifo_addr == (READ_ADDR_FIFO_DEPTH - 1))
+					read_addr_fifo_full <= 1;
+				else
+					read_addr_fifo_full <= 0;
+			end
+			if (read_addr_fifo_valid && M_AXI_ARREADY) begin
+				read_addr_fifo_valid_reg <= 0;
+				read_addr_fifo_empty <= 1;
+			end
+		end
+	end
+
+	assign S_AXI_ARREADY = read_addr_fifo_empty;
+	assign M_AXI_ARID = read_addr_fifo_id_reg;
+	assign M_AXI_ARADDR = read_addr_fifo_addr_data_reg;
+	assign M_AXI_ARLEN = read_addr_fifo_len_reg;
+	assign M_AXI_ARSIZE = read_addr_fifo_size_reg;
+	assign M_AXI_ARBURST = read_addr_fifo_burst_reg;
+	assign M_AXI_ARLOCK = read_addr_fifo_lock_reg;
+	assign M_AXI_ARCACHE = read_addr_fifo_cache_reg;
+	assign M_AXI_ARPROT = read_addr_fifo_prot_reg;
+	assign M_AXI_ARQOS = read_addr_fifo_qos_reg;
+	assign M_AXI_ARVALID = read_addr_fifo_valid;
+
+	// ------------------------------------------------------------------
+	// Read Data Channel (M -> S)
+	// ------------------------------------------------------------------
+	// FIFO Parameters
+	localparam READ_DATA_FIFO_DEPTH = 1 << LGFIFO;
+	localparam READ_DATA_FIFO_ADDR_WIDTH = $clog2(READ_DATA_FIFO_DEPTH);
+
+	reg [READ_DATA_FIFO_ADDR_WIDTH-1 : 0] read_data_fifo_addr;
+	reg [C_S_AXI_DATA_WIDTH-1 : 0] read_data_fifo_data;
+	reg [1 : 0] read_data_fifo_resp;
+	reg read_data_fifo_last;
+	reg read_data_fifo_valid;
+	reg read_data_fifo_empty;
+	reg read_data_fifo_full;
+
+	// Read Data FIFO Logic
+	reg [READ_DATA_FIFO_ADDR_WIDTH-1 : 0] read_data_fifo_addr_reg;
+	reg [C_S_AXI_DATA_WIDTH-1 : 0] read_data_fifo_data_reg;
+	reg [1 : 0] read_data_fifo_resp_reg;
+	reg read_data_fifo_last_reg;
+	reg read_data_fifo_valid_reg;
+
+	// M Domain: Read Data FIFO Write Logic
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			read_data_fifo_addr <= 0;
+			read_data_fifo_data <= 0;
+			read_data_fifo_resp <= 0;
+			read_data_fifo_last <= 0;
+			read_data_fifo_valid <= 0;
+			read_data_fifo_empty <= 1;
+			read_data_fifo_full <= 0;
+		end else begin
+			read_data_fifo_addr <= read_data_fifo_addr_reg;
+			read_data_fifo_data <= read_data_fifo_data_reg;
+			read_data_fifo_resp <= read_data_fifo_resp_reg;
+			read_data_fifo_last <= read_data_fifo_last_reg;
+			read_data_fifo_valid <= read_data_fifo_valid_reg;
+			
+			if (read_data_fifo_valid && !S_AXI_RREADY) begin
+				read_data_fifo_addr <= read_data_fifo_addr + 1;
+				if (read_data_fifo_addr == (READ_DATA_FIFO_DEPTH - 1))
+					read_data_fifo_full <= 1;
+				else
+					read_data_fifo_full <= 0;
+			end
+			if (read_data_fifo_valid && S_AXI_RREADY) begin
+				read_data_fifo_valid <= 0;
+				read_data_fifo_empty <= 1;
+			end
+		end
+	end
+
+	// S Domain: Read Data FIFO Read Logic
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			read_data_fifo_addr_reg <= 0;
+			read_data_fifo_data_reg <= 0;
+			read_data_fifo_resp_reg <= 0;
+			read_data_fifo_last_reg <= 0;
+			read_data_fifo_valid_reg <= 0;
+			read_data_fifo_empty <= 1;
+			read_data_fifo_full <= 0;
+		end else begin
+			if (read_data_fifo_valid && !S_AXI_RREADY) begin
+				read_data_fifo_addr_reg <= read_data_fifo_addr + 1;
+				if (read_data_fifo_addr == (READ_DATA_FIFO_DEPTH - 1))
+					read_data_fifo_full <= 1;
+				else
+					read_data_fifo_full <= 0;
+			end
+			if (read_data_fifo_valid && S_AXI_RREADY) begin
+				read_data_fifo_valid_reg <= 0;
+				read_data_fifo_empty <= 1;
+			end
+		end
+	end
+
+	assign M_AXI_RREADY = read_data_fifo_empty;
+	assign S_AXI_RID = read_data_fifo_addr_reg; // Using address as ID for simplicity
+	assign S_AXI_RDATA = read_data_fifo_data_reg;
+	assign S_AXI_RRESP = read_data_fifo_resp_reg;
+	assign S_AXI_RLAST = read_data_fifo_last_reg;
+	assign S_AXI_RVALID = read_data_fifo_valid;
+
+	// ------------------------------------------------------------------
+	// Optimization: Disable unused channels
+	// ------------------------------------------------------------------
+	if (OPT_WRITE_ONLY) begin
+		// Read only disabled
+		assign S_AXI_ARID = 0;
+		assign S_AXI_ARADDR = 0;
+		assign S_AXI_ARLEN = 0;
+		assign S_AXI_ARSIZE = 0;
+		assign S_AXI_ARBURST = 0;
+		assign S_AXI_ARLOCK = 0;
+		assign S_AXI_ARCACHE = 0;
+		assign S_AXI_ARPROT = 0;
+		assign S_AXI_ARQOS = 0;
+		assign S_AXI_ARVALID = 0;
+		assign S_AXI_ARREADY = 1'b1;
+		assign S_AXI_RID = 0;
+		assign S_AXI_RDATA = 0;
+		assign S_AXI_RRESP = 0;
+		assign S_AXI_RLAST = 0;
+		assign S_AXI_RVALID = 0;
+		assign S_AXI_RREADY = 1'b1;
+	end
+
+	if (OPT_READ_ONLY) begin
+		// Write only disabled
+		assign S_AXI_AWID = 0;
+		assign S_AXI_AWADDR = 0;
+		assign S_AXI_AWLEN = 0;
+		assign S_AXI_AWSIZE = 0;
+		assign S_AXI_AWBURST = 0;
+		assign S_AXI_AWLOCK = 0;
+		assign S_AXI_AWCACHE = 0;
+		assign S_AXI_AWPROT = 0;
+		assign S_AXI_AWQOS = 0;
+		assign S_AXI_AWVALID = 0;
+		assign S_AXI_AWREADY = 1'b1;
+		assign S_AXI_WDATA = 0;
+		assign S_AXI_WSTRB = 0;
+		assign S_AXI_WLAST = 0;
+		assign S_AXI_WVALID = 0;
+		assign S_AXI_WREADY = 1'b1;
+		assign S_AXI_BID = 0;
+		assign S_AXI_BRESP = 0;
+		assign S_AXI_BVALID = 0;
+		assign S_AXI_BREADY = 1'b1;
+	end
+
+endmodule
+```<|im_end|>

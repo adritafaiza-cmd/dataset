@@ -1,0 +1,182 @@
+```verilog
+`timescale 1ns/1ps
+
+module axis_switch #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter S_ID_WIDTH = 8,
+    parameter M_ID_WIDTH = S_ID_WIDTH+$clog2(S_COUNT),
+    parameter M_DEST_WIDTH = 1,
+    parameter S_DEST_WIDTH = M_DEST_WIDTH+$clog2(M_COUNT),
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter M_BASE = 0,
+    parameter M_TOP = 0,
+    parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
+    parameter UPDATE_TID = 0,
+    parameter S_REG_TYPE = 0,
+    parameter M_REG_TYPE = 2,
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 1
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    input  wire [S_COUNT*DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [S_COUNT*KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire [S_COUNT-1:0]               s_axis_tvalid,
+    output wire [S_COUNT-1:0]               s_axis_tready,
+    input  wire [S_COUNT-1:0]               s_axis_tlast,
+    input  wire [S_COUNT*S_ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [S_COUNT*USER_WIDTH-1:0]    s_axis_tuser,
+    output wire [M_COUNT*DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [M_COUNT*KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire [M_COUNT-1:0]               m_axis_tvalid,
+    input  wire [M_COUNT-1:0]               m_axis_tready,
+    output wire [M_COUNT-1:0]               m_axis_tlast,
+    output wire [M_COUNT*M_ID_WIDTH-1:0]    m_axis_tid,
+    output wire [M_COUNT*M_DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [M_COUNT*USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    localparam LOG_S_COUNT = $clog2(S_COUNT);
+    localparam LOG_M_COUNT = $clog2(M_COUNT);
+
+    // State for Round Robin Arbiter
+    reg [LOG_S_COUNT-1:0] arb_rr_index;
+    reg [LOG_S_COUNT-1:0] arb_rr_mask;
+    reg [LOG_S_COUNT-1:0] arb_rr_counter;
+
+    // Internal signals
+    wire [S_COUNT-1:0] s_valid;
+    wire [S_COUNT-1:0] s_ready;
+    wire [S_COUNT-1:0] s_last;
+    wire [S_COUNT-1:0] s_tid;
+    wire [S_COUNT-1:0] s_dest;
+    wire [S_COUNT-1:0] s_user;
+    wire [S_COUNT-1:0] s_keep;
+    wire [S_COUNT-1:0] s_data;
+
+    // Output registers
+    reg [M_COUNT-1:0] m_valid;
+    reg [M_COUNT-1:0] m_last;
+    reg [M_COUNT-1:0] m_tid;
+    reg [M_COUNT-1:0] m_dest;
+    reg [M_COUNT-1:0] m_user;
+    reg [M_COUNT-1:0] m_keep;
+    reg [M_COUNT-1:0] m_data;
+
+    // Arbitration Logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            arb_rr_index <= '0;
+            arb_rr_mask  <= '0;
+            arb_rr_counter <= '0;
+        end else begin
+            // Update mask based on valid inputs
+            arb_rr_mask <= s_valid;
+            
+            // Round Robin Selection
+            if (|s_valid) begin
+                // Find first set bit in mask starting from current index
+                arb_rr_index <= arb_rr_counter;
+                while (!arb_rr_mask[arb_rr_index]) begin
+                    arb_rr_index <= arb_rr_index + 1'b1;
+                    if (arb_rr_index >= S_COUNT)
+                        arb_rr_index <= '0;
+                end
+                // Increment counter for next time
+                arb_rr_counter <= arb_rr_index + 1'b1;
+                if (arb_rr_counter >= S_COUNT)
+                    arb_rr_counter <= '0;
+            end else begin
+                arb_rr_counter <= '0;
+            end
+        end
+    end
+
+    // Select Input Signals
+    assign s_valid = s_axis_tvalid[arb_rr_index];
+    assign s_ready = m_axis_tready[arb_rr_index];
+    assign s_last = s_axis_tlast[arb_rr_index];
+    assign s_tid = s_axis_tid[arb_rr_index];
+    assign s_dest = s_axis_tdest[arb_rr_index];
+    assign s_user = s_axis_tuser[arb_rr_index];
+    assign s_keep = s_axis_tkeep[arb_rr_index];
+    assign s_data = s_axis_tdata[arb_rr_index];
+
+    // Output Data Assignment
+    assign m_axis_tdata = m_data;
+    assign m_axis_tkeep = m_keep;
+    assign m_axis_tvalid = m_valid;
+    assign m_axis_tlast = m_last;
+    assign m_axis_tid = m_tid;
+    assign m_axis_tdest = m_dest;
+    assign m_axis_tuser = m_user;
+
+    // Output Logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            m_valid <= '0;
+            m_last  <= '0;
+            m_tid   <= '0;
+            m_dest  <= '0;
+            m_user  <= '0;
+            m_keep  <= '0;
+            m_data  <= '0;
+        end else begin
+            // Update output registers if valid and ready
+            if (s_valid && s_ready) begin
+                m_valid[arb_rr_index] <= 1'b1;
+                m_last[arb_rr_index]  <= s_last;
+                m_tid[arb_rr_index]   <= s_tid;
+                m_dest[arb_rr_index]  <= s_dest;
+                m_user[arb_rr_index]  <= s_user;
+                m_keep[arb_rr_index]  <= s_keep;
+                m_data[arb_rr_index]  <= s_data;
+            end else begin
+                // Reset output if not valid or not ready
+                m_valid[arb_rr_index] <= 1'b0;
+                m_last[arb_rr_index]  <= 1'b0;
+                m_tid[arb_rr_index]   <= '0;
+                m_dest[arb_rr_index]  <= '0;
+                m_user[arb_rr_index]  <= '0;
+                m_keep[arb_rr_index]  <= '0;
+                m_data[arb_rr_index]  <= '0;
+            end
+        end
+    end
+
+    // Input Ready Logic
+    assign s_axis_tready = m_axis_tready;
+
+    // Output Valid Logic
+    assign m_axis_tvalid = m_valid;
+
+    // Output Last Logic
+    assign m_axis_tlast = m_last;
+
+    // Output TID Logic
+    assign m_axis_tid = m_tid;
+
+    // Output TDEST Logic
+    assign m_axis_tdest = m_dest;
+
+    // Output TUSER Logic
+    assign m_axis_tuser = m_user;
+
+    // Output TKEEP Logic
+    assign m_axis_tkeep = m_keep;
+
+    // Output TDATA Logic
+    assign m_axis_tdata = m_data;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

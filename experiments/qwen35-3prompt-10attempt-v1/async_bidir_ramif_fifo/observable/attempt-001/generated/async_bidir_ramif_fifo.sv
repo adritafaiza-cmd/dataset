@@ -1,0 +1,322 @@
+```verilog
+`timescale 1ns/1ps
+
+module async_bidir_ramif_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "FALSE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir,
+       output wire             o_ram_a_clk,
+       output wire [DSIZE-1:0] o_ram_a_wdata,
+       input wire [DSIZE-1:0]  i_ram_a_rdata,
+       output wire [ASIZE-1:0] o_ram_a_addr,
+       output wire             o_ram_a_rinc,
+       output wire             o_ram_a_winc,
+       output wire             o_ram_b_clk,
+       output wire [DSIZE-1:0] o_ram_b_wdata,
+       input wire [DSIZE-1:0]  i_ram_b_rdata,
+       output wire [ASIZE-1:0] o_ram_b_addr,
+       output wire             o_ram_b_rinc,
+       output wire             o_ram_b_winc
+       );
+
+  // Internal pointers and counters
+  reg [ASIZE-1:0] a_wptr, a_rptr;
+  reg [ASIZE-1:0] b_wptr, b_rptr;
+  
+  // Cross-domain pointers (snapshots)
+  reg [ASIZE-1:0] a_wptr_b, a_rptr_b;
+  reg [ASIZE-1:0] b_wptr_a, b_rptr_a;
+  
+  // Full/Empty flags (internal logic)
+  reg a_full_int, a_empty_int;
+  reg b_full_int, b_empty_int;
+  
+  // Cross-domain status flags (for full/empty indication)
+  reg a_full_b, a_empty_b;
+  reg b_full_a, b_empty_a;
+  
+  // Write enables for RAM
+  reg o_ram_a_winc, o_ram_b_winc;
+  reg o_ram_a_rinc, o_ram_b_rinc;
+  
+  // Write data muxing
+  reg [DSIZE-1:0] o_ram_a_wdata, o_ram_b_wdata;
+  
+  // Direction control
+  reg a_dir, b_dir;
+  
+  // Clock signals to RAM
+  reg o_ram_a_clk, o_ram_b_clk;
+
+  // Generate clock signals for RAM
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      o_ram_a_clk <= 1'b0;
+    else
+      o_ram_a_clk <= ~o_ram_a_clk;
+  end
+  
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      o_ram_b_clk <= 1'b0;
+    else
+      o_ram_b_clk <= ~o_ram_b_clk;
+  end
+
+  // Direction registers
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_dir <= 1'b0;
+    else
+      a_dir <= a_dir; // Hold direction
+  end
+  
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_dir <= 1'b0;
+    else
+      b_dir <= b_dir; // Hold direction
+  end
+
+  // Write pointer updates (local clocks)
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_wptr <= 4'd0;
+    else if (a_winc)
+      a_wptr <= a_wptr + 1;
+  end
+  
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_wptr <= 4'd0;
+    else if (b_winc)
+      b_wptr <= b_wptr + 1;
+  end
+
+  // Read pointer updates (local clocks)
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_rptr <= 4'd0;
+    else if (a_rinc)
+      a_rptr <= a_rptr + 1;
+  end
+  
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_rptr <= 4'd0;
+    else if (b_rinc)
+      b_rptr <= b_rptr + 1;
+  end
+
+  // Cross-domain pointer updates (on opposite clocks)
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      a_wptr_b <= 4'd0;
+    else
+      a_wptr_b <= a_wptr;
+  end
+  
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      b_wptr_a <= 4'd0;
+    else
+      b_wptr_a <= b_wptr;
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      a_rptr_b <= 4'd0;
+    else
+      a_rptr_b <= a_rptr;
+  end
+  
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      b_rptr_a <= 4'd0;
+    else
+      b_rptr_a <= b_rptr;
+  end
+
+  // Full/Empty logic (internal)
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_full_int <= 1'b0;
+      a_empty_int <= 1'b1;
+    end else begin
+      a_full_int <= (a_wptr == a_rptr) && (a_wptr != 4'd0);
+      a_empty_int <= (a_wptr == a_rptr);
+    end
+  end
+  
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_full_int <= 1'b0;
+      b_empty_int <= 1'b1;
+    end else begin
+      b_full_int <= (b_wptr == b_rptr) && (b_wptr != 4'd0);
+      b_empty_int <= (b_wptr == b_rptr);
+    end
+  end
+
+  // Cross-domain full/empty flags (lagging)
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_full_b <= 1'b0;
+      a_empty_b <= 1'b1;
+    end else begin
+      a_full_b <= a_full_int;
+      a_empty_b <= a_empty_int;
+    end
+  end
+  
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_full_a <= 1'b0;
+      b_empty_a <= 1'b1;
+    end else begin
+      b_full_a <= b_full_int;
+      b_empty_a <= b_empty_int;
+    end
+  end
+
+  // RAM Write Enable Logic
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      o_ram_a_winc <= 1'b0;
+      o_ram_a_rinc <= 1'b0;
+      o_ram_a_wdata <= 8'd0;
+    end else begin
+      // A side writes to RAM when a_winc is high
+      if (a_winc) begin
+        o_ram_a_winc <= 1'b1;
+        o_ram_a_rinc <= 1'b0;
+        o_ram_a_wdata <= a_wdata;
+      end else begin
+        o_ram_a_winc <= 1'b0;
+        o_ram_a_rinc <= 1'b0;
+        o_ram_a_wdata <= 8'd0;
+      end
+    end
+  end
+  
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      o_ram_b_winc <= 1'b0;
+      o_ram_b_rinc <= 1'b0;
+      o_ram_b_wdata <= 8'd0;
+    end else begin
+      // B side writes to RAM when b_winc is high
+      if (b_winc) begin
+        o_ram_b_winc <= 1'b1;
+        o_ram_b_rinc <= 1'b0;
+        o_ram_b_wdata <= b_wdata;
+      end else begin
+        o_ram_b_winc <= 1'b0;
+        o_ram_b_rinc <= 1'b0;
+        o_ram_b_wdata <= 8'd0;
+      end
+    end
+  end
+
+  // RAM Read Enable Logic
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      o_ram_a_rinc <= 1'b0;
+    end else begin
+      // A side reads from RAM when a_rinc is high
+      if (a_rinc) begin
+        o_ram_a_rinc <= 1'b1;
+      end else begin
+        o_ram_a_rinc <= 1'b0;
+      end
+    end
+  end
+  
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      o_ram_b_rinc <= 1'b0;
+    end else begin
+      // B side reads from RAM when b_rinc is high
+      if (b_rinc) begin
+        o_ram_b_rinc <= 1'b1;
+      end else begin
+        o_ram_b_rinc <= 1'b0;
+      end
+    end
+  end
+
+  // Address Generation
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      o_ram_a_addr <= 4'd0;
+    else if (a_winc)
+      o_ram_a_addr <= a_wptr;
+    else if (a_rinc)
+      o_ram_a_addr <= a_rptr;
+    else
+      o_ram_a_addr <= o_ram_a_addr;
+  end
+  
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      o_ram_b_addr <= 4'd0;
+    else if (b_winc)
+      o_ram_b_addr <= b_wptr;
+    else if (b_rinc)
+      o_ram_b_addr <= b_rptr;
+    else
+      o_ram_b_addr <= o_ram_b_addr;
+  end
+
+  // Output Data Assignment
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_rdata <= 8'd0;
+    else
+      a_rdata <= i_ram_a_rdata;
+  end
+  
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_rdata <= 8'd0;
+    else
+      b_rdata <= i_ram_b_rdata;
+  end
+
+  // Full/Empty Outputs
+  assign a_full = a_full_int;
+  assign a_afull = a_full_b;
+  assign a_empty = a_empty_int;
+  assign a_aempty = a_empty_b;
+  
+  assign b_full = b_full_int;
+  assign b_afull = b_full_a;
+  assign b_empty = b_empty_int;
+  assign b_aempty = b_empty_a;
+
+endmodule
+```<|im_end|>

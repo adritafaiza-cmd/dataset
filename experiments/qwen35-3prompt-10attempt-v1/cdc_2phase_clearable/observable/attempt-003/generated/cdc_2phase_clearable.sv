@@ -1,0 +1,487 @@
+```verilog
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // ------------------------------------------------------------------
+  // Source Side: Handshake Logic & Clear Request Generation
+  // ------------------------------------------------------------------
+  logic src_valid_reg;
+  logic src_ready_reg;
+  logic src_clear_req;
+  logic src_clear_ack;
+  logic src_clear_pending;
+  logic src_clear_pending_ack;
+
+  // Internal state for clear handshake
+  logic [SYNC_STAGES-1:0] src_clear_sync_cnt;
+  logic src_clear_sync_valid;
+  logic src_clear_sync_ready;
+
+  // ------------------------------------------------------------------
+  // Destination Side: Handshake Logic & Clear Acknowledgment
+  // ------------------------------------------------------------------
+  logic dst_valid_reg;
+  logic dst_ready_reg;
+  logic dst_clear_ack_req;
+  logic dst_clear_ack;
+  logic dst_clear_pending;
+  logic dst_clear_pending_ack;
+
+  // Internal state for clear handshake
+  logic [SYNC_STAGES-1:0] dst_clear_sync_cnt;
+  logic dst_clear_sync_valid;
+  logic dst_clear_sync_ready;
+
+  // ------------------------------------------------------------------
+  // CDC: Clear Request (Source -> Destination)
+  // ------------------------------------------------------------------
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_clear_sync_cnt <= {SYNC_STAGES{1'b0}};
+      src_clear_sync_valid <= 1'b0;
+    end else begin
+      src_clear_sync_cnt <= src_clear_sync_cnt + 1'b1;
+      src_clear_sync_valid <= (src_clear_sync_cnt == {SYNC_STAGES{1'b1}});
+    end
+  end
+
+  // ------------------------------------------------------------------
+  // CDC: Clear Acknowledge (Destination -> Source)
+  // ------------------------------------------------------------------
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_clear_sync_cnt <= {SYNC_STAGES{1'b0}};
+      dst_clear_sync_valid <= 1'b0;
+    end else begin
+      dst_clear_sync_cnt <= dst_clear_sync_cnt + 1'b1;
+      dst_clear_sync_valid <= (dst_clear_sync_cnt == {SYNC_STAGES{1'b1}});
+    end
+  end
+
+  // ------------------------------------------------------------------
+  // Source Side Logic
+  // ------------------------------------------------------------------
+  assign src_clear_pending_o = src_clear_pending;
+  assign src_ready_o = src_ready_reg;
+
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_ready_reg <= 1'b1;
+      src_clear_req <= 1'b0;
+      src_clear_pending <= 1'b0;
+    end else begin
+      // Clear Request Logic
+      // If clear is asserted and we are not currently waiting for ack, or 
+      // if we are waiting for ack but the ack hasn't arrived yet (pending),
+      // we assert the request.
+      // However, the spec says "Each clear step reaches the other clock one handshake later."
+      // This implies a handshake between clear_req and clear_ack.
+      
+      // Determine if we should assert clear_req
+      // We assert clear_req if:
+      // 1. External clear is active
+      // 2. We are not already in the middle of a clear handshake (ack not received)
+      //    OR if we are waiting for ack, we keep it asserted until ack comes.
+      // Actually, standard handshake: Req -> Ack.
+      // If clear_i is high, we want to send a clear.
+      // If src_clear_pending is high, it means we sent a clear and are waiting for ack.
+      // If dst_clear_pending_ack is high, it means the ack has crossed back.
+      
+      logic clear_active = src_clear_i;
+      logic ack_received = dst_clear_pending_ack;
+      
+      if (!src_rst_ni) begin
+        src_clear_req <= 1'b0;
+        src_clear_pending <= 1'b0;
+      end else begin
+        // Assert clear_req if clear_i is active and we haven't received the ack yet
+        // If we received the ack, we can de-assert clear_req (even if clear_i is still high, 
+        // the channel is cleared, so we don't need to re-send unless clear_i goes high again? 
+        // Usually, clear is a pulse or level. If level, we hold req until ack.
+        // Spec: "A clear isolates both ends, then drops the one outstanding beat...".
+        // "Each clear step reaches the other clock one handshake later."
+        // This implies: Clear_i -> Clear_Req -> Clear_Ack -> Clear_Pending_Ack.
+        
+        if (clear_active && !ack_received) begin
+          src_clear_req <= 1'b1;
+        end else begin
+          src_clear_req <= 1'b0;
+        end
+
+        // Update pending status
+        // Pending is true if we sent a request and haven't received the ack yet.
+        // Note: dst_clear_pending_ack is the signal that the ACK has crossed back to source domain.
+        src_clear_pending <= src_clear_req && !ack_received;
+      end
+    end
+  end
+
+  // ------------------------------------------------------------------
+  // Destination Side Logic
+  // ------------------------------------------------------------------
+  assign dst_clear_pending_o = dst_clear_pending;
+  assign dst_data_o = dst_valid_reg ? src_data_i : 1'b0; // Data is captured from src_data_i
+  assign dst_valid_o = dst_valid_reg;
+
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_ready_reg <= 1'b1;
+      dst_clear_ack_req <= 1'b0;
+      dst_clear_pending <= 1'b0;
+    end else begin
+      // Clear Acknowledge Logic
+      // We assert dst_clear_ack_req if:
+      // 1. External clear is active
+      // 2. We are not already waiting for the source's ack (i.e., src_clear_pending_ack is low)
+      //    OR if we are waiting, we keep it asserted until src_clear_pending_ack goes high.
+      
+      logic clear_active = dst_clear_i;
+      logic req_received = src_clear_pending_ack;
+      
+      if (!dst_rst_ni) begin
+        dst_clear_ack_req <= 1'b0;
+        dst_clear_pending <= 1'b0;
+      end else begin
+        if (clear_active && !req_received) begin
+          dst_clear_ack_req <= 1'b1;
+        end else begin
+          dst_clear_ack_req <= 1'b0;
+        end
+
+        // Update pending status
+        dst_clear_pending <= dst_clear_ack_req && !req_received;
+      end
+    end
+  end
+
+  // ------------------------------------------------------------------
+  // Main Handshake Logic (Data Transfer)
+  // ------------------------------------------------------------------
+  // Source Side
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_ready_reg <= 1'b1;
+    end else begin
+      // Valid is asserted if:
+      // 1. Previous valid was not asserted (or it was, but we need to check ready)
+      // Standard handshake: Valid stays high until Ready goes high.
+      // But here we have a clear mechanism that can interrupt.
+      
+      // Logic:
+      // If src_valid_reg is already high, we keep it high unless we need to clear.
+      // If src_valid_reg is low, we assert it if src_valid_i is high AND src_ready_reg is high.
+      // However, the clear mechanism overrides this.
+      
+      // If we are in a clear state (src_clear_pending), we must NOT assert valid.
+      // Also, if dst_clear_pending_ack is high, it means the clear is done, and we can resume.
+      
+      if (!src_rst_ni) begin
+        src_valid_reg <= 1'b0;
+        src_ready_reg <= 1'b1;
+      end else begin
+        // If clear is pending, we cannot transfer data.
+        // If clear is NOT pending, we follow normal handshake.
+        
+        if (src_clear_pending) begin
+          src_valid_reg <= 1'b0;
+          src_ready_reg <= 1'b1; // Ready is always high if we are not sending data
+        end else begin
+          // Normal handshake
+          if (src_valid_reg) begin
+            // Valid is already high, wait for ready
+            src_ready_reg <= dst_ready_i;
+          end else begin
+            // Valid is low, try to assert
+            if (src_valid_i && src_ready_reg) begin
+              src_ready_reg <= dst_ready_i; // Update ready based on dst
+              src_valid_reg <= 1'b1;
+            end else begin
+              src_ready_reg <= 1'b1; // Keep ready high if not sending
+              src_valid_reg <= 1'b0;
+            end
+          end
+        end
+      end
+    end
+  end
+
+  // Destination Side
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_ready_reg <= 1'b1;
+    end else begin
+      // If clear is pending, we cannot accept data.
+      if (dst_clear_pending) begin
+        dst_ready_reg <= 1'b1;
+        dst_valid_reg <= 1'b0;
+      end else begin
+        // Normal handshake
+        if (dst_valid_reg) begin
+          // Valid is already high, wait for ready
+          dst_ready_reg <= src_ready_i; // Wait for src ready
+        end else begin
+          // Valid is low, try to assert
+          if (dst_ready_i) begin
+            dst_ready_reg <= src_ready_i; // Update ready based on src
+            dst_valid_reg <= 1'b1;
+          end else begin
+            dst_ready_reg <= 1'b1; // Keep ready high if not sending
+            dst_valid_reg <= 1'b0;
+          end
+        end
+      end
+    end
+  end
+
+  // ------------------------------------------------------------------
+  // Cross-Domain Clear Handshake Completion Signals
+  // ------------------------------------------------------------------
+  // These signals indicate that the clear handshake has completed on the other side.
+  // They are used to reset the internal clear state machines.
+
+  // Source side: Wait for dst_clear_ack_req to cross back
+  // We need to sync dst_clear_ack_req to src domain
+  logic [SYNC_STAGES-1:0] dst_clear_ack_sync_cnt;
+  logic dst_clear_ack_sync_valid;
+  logic dst_clear_ack_sync_ready;
+
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      dst_clear_ack_sync_cnt <= {SYNC_STAGES{1'b0}};
+      dst_clear_ack_sync_valid <= 1'b0;
+    end else begin
+      dst_clear_ack_sync_cnt <= dst_clear_ack_sync_cnt + 1'b1;
+      dst_clear_ack_sync_valid <= (dst_clear_ack_sync_cnt == {SYNC_STAGES{1'b1}});
+    end
+  end
+
+  // Destination side: Wait for src_clear_req to cross back
+  logic [SYNC_STAGES-1:0] src_clear_req_sync_cnt;
+  logic src_clear_req_sync_valid;
+  logic src_clear_req_sync_ready;
+
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_clear_req_sync_cnt <= {SYNC_STAGES{1'b0}};
+      src_clear_req_sync_valid <= 1'b0;
+    end else begin
+      src_clear_req_sync_cnt <= src_clear_req_sync_cnt + 1'b1;
+      src_clear_req_sync_valid <= (src_clear_req_sync_cnt == {SYNC_STAGES{1'b1}});
+    end
+  end
+
+  // ------------------------------------------------------------------
+  // Handshake between Clear Request and Clear Ack
+  // ------------------------------------------------------------------
+  // Source sends clear_req to Dest. Dest sends clear_ack_req to Src.
+  // We need to ensure they match up.
+  
+  // Source: Asserts src_clear_req. Dest must see it.
+  // Dest: Asserts dst_clear_ack_req. Source must see it.
+  
+  // Logic refinement for Clear Handshake:
+  // The spec says: "Each clear step reaches the other clock one handshake later."
+  // This implies:
+  // 1. Src asserts Clear_Req (crosses to Dst)
+  // 2. Dst sees Clear_Req, asserts Clear_Ack_Req (crosses to Src)
+  // 3. Src sees Clear_Ack_Req, de-asserts Clear_Req (if it was level) or completes the cycle.
+  // 4. Dst sees Clear_Ack_Req completion, de-asserts Clear_Ack_Req.
+  
+  // Let's implement a simple handshake for the clear signal itself.
+  // Src: clear_req_o (internal) -> Dst: clear_req_i (internal)
+  // Dst: clear_ack_req_o (internal) -> Src: clear_ack_req_i (internal)
+  
+  // We will use the CDC stages to transfer the clear signals.
+  
+  // --- Transfer src_clear_req to dst domain ---
+  // We already have src_clear_sync_cnt and src_clear_sync_valid.
+  // Now we need to capture it in dst domain.
+  logic [SYNC_STAGES-1:0] src_clear_req_dst_cnt;
+  logic src_clear_req_dst_valid;
+  logic src_clear_req_dst_ready;
+
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_clear_req_dst_cnt <= {SYNC_STAGES{1'b0}};
+      src_clear_req_dst_valid <= 1'b0;
+    end else begin
+      src_clear_req_dst_cnt <= src_clear_req_dst_cnt + 1'b1;
+      src_clear_req_dst_valid <= (src_clear_req_dst_cnt == {SYNC_STAGES{1'b1}});
+    end
+  end
+
+  // --- Transfer dst_clear_ack_req to src domain ---
+  // We already have dst_clear_sync_cnt and dst_clear_sync_valid.
+  // Now we need to capture it in src domain.
+  logic [SYNC_STAGES-1:0] dst_clear_ack_src_cnt;
+  logic dst_clear_ack_src_valid;
+  logic dst_clear_ack_src_ready;
+
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      dst_clear_ack_src_cnt <= {SYNC_STAGES{1'b0}};
+      dst_clear_ack_src_valid <= 1'b0;
+    end else begin
+      dst_clear_ack_src_cnt <= dst_clear_ack_src_cnt + 1'b1;
+      dst_clear_ack_src_valid <= (dst_clear_ack_src_cnt == {SYNC_STAGES{1'b1}});
+    end
+  end
+
+  // --- Handshake Logic for Clear Request (Src -> Dst) ---
+  // Src asserts src_clear_req. Dst must be ready to accept it.
+  // Dst is ready to accept clear request if it is not already processing a clear.
+  // Actually, the clear request is a single beat.
+  
+  // Src Side: Drive src_clear_req based on external clear_i and handshake state.
+  // Dst Side: Drive dst_clear_ack_req based on external clear_i and handshake state.
+  
+  // Revised Clear Logic:
+  // 1. Src checks external clear_i. If high, it wants to clear.
+  // 2. Src asserts src_clear_req.
+  // 3. Dst sees src_clear_req (via CDC). If Dst is not clearing, it asserts dst_clear_ack_req.
+  // 4. Src sees dst_clear_ack_req (via CDC). If Src sees this, it knows Dst is clearing.
+  // 5. Both sides clear their internal state.
+  
+  // Implementation details:
+  // Src: 
+  //   If (!src_rst_ni) -> clear_req = 0, clear_pending = 0
+  //   Else if (src_clear_i && !dst_clear_ack_src_valid) -> clear_req = 1
+  //   Else -> clear_req = 0
+  //   clear_pending = clear_req && !dst_clear_ack_src_valid
+  
+  // Dst:
+  //   If (!dst_rst_ni) -> ack_req = 0, clear_pending = 0
+  //   Else if (dst_clear_i && !src_clear_req_dst_valid) -> ack_req = 1
+  //   Else -> ack_req = 0
+  //   clear_pending = ack_req && !src_clear_req_dst_valid
+
+  // Wait, the spec says "Each clear step reaches the other clock one handshake later."
+  // This suggests that the clear signal itself is a handshake.
+  // Src -> Clear_Req -> Dst
+  // Dst -> Clear_Ack -> Src
+  
+  // Let's refine the logic to ensure proper sequencing.
+  
+  // Src Side Clear Logic
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_clear_req <= 1'b0;
+      src_clear_pending <= 1'b0;
+    end else begin
+      // Assert clear_req if external clear is active and we haven't received the ack yet.
+      // We receive the ack when dst_clear_ack_src_valid is high.
+      if (src_clear_i && !dst_clear_ack_src_valid) begin
+        src_clear_req <= 1'b1;
+      end else begin
+        src_clear_req <= 1'b0;
+      end
+      src_clear_pending <= src_clear_req && !dst_clear_ack_src_valid;
+    end
+  end
+
+  // Dst Side Clear Logic
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_clear_ack_req <= 1'b0;
+      dst_clear_pending <= 1'b0;
+    end else begin
+      // Assert ack_req if external clear is active and we haven't received the req yet.
+      if (dst_clear_i && !src_clear_req_dst_valid) begin
+        dst_clear_ack_req <= 1'b1;
+      end else begin
+        dst_clear_ack_req <= 1'b0;
+      end
+      dst_clear_pending <= dst_clear_ack_req && !src_clear_req_dst_valid;
+    end
+  end
+
+  // ------------------------------------------------------------------
+  // Handshake Logic Integration with Clear
+  // ------------------------------------------------------------------
+  // The main data handshake must be inhibited while clear is pending.
+  // Also, the clear handshake itself must not interfere with data handshake.
+  
+  // Source Side Data Logic
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_ready_reg <= 1'b1;
+    end else begin
+      // If clear is pending, we cannot send data.
+      if (src_clear_pending) begin
+        src_valid_reg <= 1'b0;
+        src_ready_reg <= 1'b1;
+      end else begin
+        // Normal handshake
+        if (src_valid_reg) begin
+          src_ready_reg <= dst_ready_i;
+        end else begin
+          if (src_valid_i && src_ready_reg) begin
+            src_ready_reg <= dst_ready_i;
+            src_valid_reg <= 1'b1;
+          end else begin
+            src_ready_reg <= 1'b1;
+            src_valid_reg <= 1'b0;
+          end
+        end
+      end
+    end
+  end
+
+  // Destination Side Data Logic
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_ready_reg <= 1'b1;
+    end else begin
+      // If clear is pending, we cannot accept data.
+      if (dst_clear_pending) begin
+        dst_ready_reg <= 1'b1;
+        dst_valid_reg <= 1'b0;
+      end else begin
+        // Normal handshake
+        if (dst_valid_reg) begin
+          dst_ready_reg <= src_ready_i;
+        end else begin
+          if (dst_ready_i) begin
+            dst_ready_reg <= src_ready_i;
+            dst_valid_reg <= 1'b1;
+          end else begin
+            dst_ready_reg <= 1'b1;
+            dst_valid_reg <= 1'b0;
+          end
+        end
+      end
+    end
+  end
+
+  // ------------------------------------------------------------------
+  // Output Assignments
+  // ------------------------------------------------------------------
+  assign src_clear_pending_o = src_clear_pending;
+  assign dst_clear_pending_o = dst_clear_pending;
+
+endmodule
+```<|im_end|>

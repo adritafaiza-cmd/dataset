@@ -1,0 +1,63 @@
+module apbslave #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH,
+	localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+) (
+	input	wire			PCLK, PRESETn,
+	input	wire			PSEL,
+	input	wire			PENABLE,
+	output	reg			PREADY,
+	input	wire	[AW-1:0]	PADDR,
+	input	wire			PWRITE,
+	input	wire	[DW-1:0]	PWDATA,
+	input	wire	[DW/8-1:0]	PWSTRB,
+	input	wire	[2:0]		PPROT,
+	output	reg	[DW-1:0]	PRDATA,
+	output	wire			PSLVERR
+);
+
+	reg	[AW-1:0]	addr_reg;
+	reg	[DW-1:0]	data_reg;
+	reg	[DW/8-1:0]	strb_reg;
+	reg	[2:0]	prot_reg;
+	reg	write_reg;
+	reg	ready_reg;
+
+	// Synchronous reset logic
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			addr_reg <= 0;
+			data_reg <= 0;
+			strb_reg <= 0;
+			prot_reg <= 0;
+			write_reg <= 0;
+			ready_reg <= 0;
+		end
+	end
+
+	// Address and control registers update on valid APB transaction
+	always @(posedge PCLK) begin
+		if (PSEL && PENABLE) begin
+			addr_reg <= PADDR;
+			data_reg <= PWDATA;
+			strb_reg <= PWSTRB;
+			prot_reg <= PPROT;
+			write_reg <= PWRITE;
+		end
+	end
+
+	// Output data and ready signal
+	always @(posedge PCLK) begin
+		if (PSEL && PENABLE) begin
+			PRDATA <= data_reg;
+			PREADY <= 1'b1;
+			PSLVERR <= 1'b0;
+		end else begin
+			PREADY <= 0;
+			PSLVERR <= 0;
+		end
+	end
+
+endmodule<|im_end|>

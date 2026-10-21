@@ -1,0 +1,418 @@
+```verilog
+`timescale 1ns/1ps
+
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // Internal timing constants
+    localparam int unsigned CYCLES_PER_BIT = 16; // Default 100kHz (16 cycles @ 16MHz)
+    localparam int unsigned START_CYCLES    = 10;
+    localparam int unsigned STOP_CYCLES     = 10;
+    localparam int unsigned ACK_CYCLES      = 10;
+    localparam int unsigned NO_ACK_CYCLES   = 10;
+    localparam int unsigned IDLE_CYCLES     = 10;
+
+    // State Machine States
+    localparam int unsigned STATE_IDLE = 0;
+    localparam int unsigned STATE_START = 1;
+    localparam int unsigned STATE_ADDR_WRITE = 2;
+    localparam int unsigned STATE_ADDR_READ = 3;
+    localparam int unsigned STATE_DATA_WRITE = 4;
+    localparam int unsigned STATE_DATA_READ = 5;
+    localparam int unsigned STATE_REPEATED_START = 6;
+    localparam int unsigned STATE_STOP = 7;
+    localparam int unsigned STATE_ERROR = 8;
+
+    // Registers
+    reg [2:0] state;
+    reg [7:0] cmd_addr;
+    reg cmd_read;
+    reg cmd_write;
+    reg cmd_write_multiple;
+    reg cmd_stop;
+    reg cmd_valid;
+    reg cmd_ready;
+    
+    reg [7:0] tx_data;
+    reg tx_valid;
+    reg tx_last;
+    reg tx_ready;
+    
+    reg [7:0] rx_data;
+    reg rx_valid;
+    reg rx_ready;
+    reg rx_last;
+    
+    reg [7:0] shift_reg;
+    reg [3:0] bit_count;
+    reg [3:0] wait_cycles;
+    reg scl_state;
+    reg sda_state;
+    reg scl_dir;
+    reg sda_dir;
+    reg scl_out;
+    reg sda_out;
+    
+    reg busy_reg;
+    reg bus_control_reg;
+    reg bus_active_reg;
+    reg missed_ack_reg;
+    
+    reg [15:0] prescale_reg;
+    reg [15:0] bit_time;
+    reg [15:0] wait_time;
+
+    // Timing Control
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            bit_time <= prescale_reg;
+            wait_time <= 0;
+        end else begin
+            if (prescale_reg != 0)
+                bit_time <= prescale_reg;
+            else
+                bit_time <= 16'd100; // Fallback
+            
+            if (wait_time > 0)
+                wait_time <= wait_time - 1'b1;
+            else
+                wait_time <= 0;
+        end
+    end
+
+    // State Machine Logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= STATE_IDLE;
+            shift_reg <= 8'd0;
+            bit_count <= 0;
+            wait_cycles <= 0;
+            tx_valid <= 0;
+            rx_valid <= 0;
+            tx_ready <= 0;
+            rx_ready <= 0;
+            tx_last <= 0;
+            rx_last <= 0;
+            missed_ack_reg <= 0;
+            busy_reg <= 0;
+            bus_control_reg <= 0;
+            bus_active_reg <= 0;
+        end else begin
+            // Host Interface Logic
+            if (s_axis_cmd_valid && s_axis_cmd_ready) begin
+                cmd_addr <= s_axis_cmd_address;
+                cmd_read <= s_axis_cmd_read;
+                cmd_write <= s_axis_cmd_write;
+                cmd_write_multiple <= s_axis_cmd_write_multiple;
+                cmd_stop <= s_axis_cmd_stop;
+                cmd_valid <= 0;
+                s_axis_cmd_ready <= 0;
+                
+                // Determine next state based on command
+                case (state)
+                    STATE_IDLE: begin
+                        if (cmd_write || cmd_write_multiple)
+                            state <= STATE_ADDR_WRITE;
+                        else if (cmd_read)
+                            state <= STATE_ADDR_READ;
+                        else
+                            state <= STATE_IDLE;
+                    end
+                    STATE_ADDR_WRITE: begin
+                        if (cmd_write_multiple)
+                            state <= STATE_DATA_WRITE;
+                        else
+                            state <= STATE_ADDR_READ;
+                    end
+                    STATE_ADDR_READ: begin
+                        if (cmd_read)
+                            state <= STATE_DATA_READ;
+                        else
+                            state <= STATE_ADDR_WRITE;
+                    end
+                    STATE_DATA_WRITE: begin
+                        if (cmd_stop)
+                            state <= STATE_STOP;
+                        else
+                            state <= STATE_DATA_WRITE;
+                    end
+                    STATE_DATA_READ: begin
+                        if (cmd_stop)
+                            state <= STATE_STOP;
+                        else
+                            state <= STATE_DATA_READ;
+                    end
+                    STATE_REPEATED_START: begin
+                        if (cmd_stop)
+                            state <= STATE_STOP;
+                        else
+                            state <= STATE_ADDR_WRITE;
+                    end
+                    default: state <= STATE_IDLE;
+                endcase
+            end else begin
+                s_axis_cmd_ready <= 1'b1;
+            end
+
+            // Data Interface Logic
+            if (s_axis_data_tvalid && s_axis_data_tready) begin
+                tx_data <= s_axis_data_tdata;
+                tx_valid <= 1'b1;
+                tx_last <= s_axis_data_tlast;
+                s_axis_data_tready <= 0;
+            end else begin
+                s_axis_data_tready <= 1'b1;
+                tx_valid <= 0;
+            end
+
+            if (m_axis_data_tvalid && m_axis_data_tready) begin
+                m_axis_data_tdata <= rx_data;
+                m_axis_data_tvalid <= 0;
+                rx_last <= 0;
+            end else begin
+                m_axis_data_tready <= 1'b1;
+            end
+
+            // State Transition Logic
+            if (state == STATE_IDLE) begin
+                if (cmd_valid) begin
+                    busy_reg <= 1'b1;
+                    bus_control_reg <= 1'b1;
+                    bus_active_reg <= 1'b1;
+                    missed_ack_reg <= 0;
+                    state <= STATE_START;
+                end
+            end else if (state == STATE_START) begin
+                if (wait_cycles == START_CYCLES) begin
+                    state <= STATE_ADDR_WRITE;
+                    shift_reg <= {cmd_addr[7:0], 1'b0}; // LSB first
+                    bit_count <= 0;
+                end
+            end else if (state == STATE_ADDR_WRITE) begin
+                if (wait_cycles == CYCLES_PER_BIT) begin
+                    if (sda_i == 1'b0) begin
+                        missed_ack_reg <= 1'b1;
+                        state <= STATE_ERROR;
+                    end else begin
+                        state <= STATE_ADDR_READ;
+                        shift_reg <= {cmd_addr[7:0], 1'b1}; // LSB first
+                        bit_count <= 0;
+                    end
+                end
+            end else if (state == STATE_ADDR_READ) begin
+                if (wait_cycles == CYCLES_PER_BIT) begin
+                    if (sda_i == 1'b0) begin
+                        missed_ack_reg <= 1'b1;
+                        state <= STATE_ERROR;
+                    end else begin
+                        state <= STATE_DATA_WRITE;
+                        shift_reg <= {cmd_addr[7:0], 1'b0}; // LSB first
+                        bit_count <= 0;
+                    end
+                end
+            end else if (state == STATE_DATA_WRITE) begin
+                if (tx_valid) begin
+                    shift_reg <= {shift_reg[6:0], tx_data[0]};
+                    tx_valid <= 0;
+                    tx_data <= s_axis_data_tdata;
+                    tx_last <= s_axis_data_tlast;
+                    s_axis_data_tready <= 0;
+                end
+                if (wait_cycles == CYCLES_PER_BIT) begin
+                    if (sda_i == 1'b0) begin
+                        missed_ack_reg <= 1'b1;
+                        state <= STATE_ERROR;
+                    end else begin
+                        if (tx_last) begin
+                            state <= STATE_STOP;
+                        end else if (cmd_write_multiple) begin
+                            state <= STATE_DATA_WRITE;
+                        end else begin
+                            state <= STATE_STOP;
+                        end
+                    end
+                end
+            end else if (state == STATE_DATA_READ) begin
+                if (wait_cycles == CYCLES_PER_BIT) begin
+                    if (sda_i == 1'b0) begin
+                        missed_ack_reg <= 1'b1;
+                        state <= STATE_ERROR;
+                    end else begin
+                        if (rx_valid) begin
+                            rx_data <= shift_reg;
+                            rx_valid <= 0;
+                            rx_data <= s_axis_data_tdata;
+                            rx_last <= s_axis_data_tlast;
+                            s_axis_data_tready <= 0;
+                        end
+                        if (tx_last) begin
+                            state <= STATE_STOP;
+                        end else begin
+                            state <= STATE_DATA_READ;
+                        end
+                    end
+                end
+            end else if (state == STATE_REPEATED_START) begin
+                if (wait_cycles == START_CYCLES) begin
+                    state <= STATE_ADDR_WRITE;
+                    shift_reg <= {cmd_addr[7:0], 1'b0};
+                    bit_count <= 0;
+                end
+            end else if (state == STATE_STOP) begin
+                if (wait_cycles == STOP_CYCLES) begin
+                    state <= STATE_IDLE;
+                    busy_reg <= 0;
+                    bus_control_reg <= 0;
+                    bus_active_reg <= 0;
+                    missed_ack_reg <= 0;
+                end
+            end else if (state == STATE_ERROR) begin
+                state <= STATE_IDLE;
+                busy_reg <= 0;
+                bus_control_reg <= 0;
+                bus_active_reg <= 0;
+                missed_ack_reg <= 1;
+            end
+
+            // Wait Cycle Counter
+            if (wait_cycles > 0) begin
+                wait_cycles <= wait_cycles - 1'b1;
+            end else begin
+                case (state)
+                    STATE_START: wait_cycles <= START_CYCLES;
+                    STATE_ADDR_WRITE: wait_cycles <= CYCLES_PER_BIT;
+                    STATE_ADDR_READ: wait_cycles <= CYCLES_PER_BIT;
+                    STATE_DATA_WRITE: wait_cycles <= CYCLES_PER_BIT;
+                    STATE_DATA_READ: wait_cycles <= CYCLES_PER_BIT;
+                    STATE_REPEATED_START: wait_cycles <= START_CYCLES;
+                    STATE_STOP: wait_cycles <= STOP_CYCLES;
+                    default: wait_cycles <= 0;
+                endcase
+            end
+        end
+    end
+
+    // I2C Signal Generation
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            scl_out <= 1'b1;
+            sda_out <= 1'b1;
+            scl_state <= 1'b0;
+            sda_state <= 1'b0;
+            scl_dir <= 1'b0;
+            sda_dir <= 1'b0;
+        end else begin
+            // SCL Direction Control
+            scl_dir <= (state == STATE_IDLE) ? 1'b0 : 1'b1;
+            sda_dir <= (state == STATE_IDLE) ? 1'b0 : 1'b1;
+
+            // SCL Output
+            if (scl_dir) begin
+                if (scl_state == 1'b0) begin
+                    scl_out <= 1'b1;
+                    scl_state <= 1'b1;
+                end else begin
+                    scl_out <= 1'b0;
+                    scl_state <= 1'b0;
+                end
+            end else begin
+                scl_out <= scl_i;
+            end
+
+            // SDA Output
+            if (sda_dir) begin
+                if (state == STATE_IDLE) begin
+                    sda_out <= 1'b1;
+                end else if (state == STATE_START) begin
+                    if (bit_count == 0) sda_out <= 1'b1;
+                    else if (bit_count == 1) sda_out <= 1'b0;
+                    else sda_out <= 1'b1;
+                end else if (state == STATE_ADDR_WRITE || state == STATE_ADDR_READ) begin
+                    if (bit_count == 0) sda_out <= 1'b1;
+                    else if (bit_count == 1) sda_out <= shift_reg[0];
+                    else sda_out <= 1'b1;
+                end else if (state == STATE_DATA_WRITE) begin
+                    if (bit_count == 0) sda_out <= 1'b1;
+                    else if (bit_count == 1) sda_out <= shift_reg[0];
+                    else sda_out <= 1'b1;
+                end else if (state == STATE_DATA_READ) begin
+                    if (bit_count == 0) sda_out <= 1'b1;
+                    else if (bit_count == 1) sda_out <= 1'b1; // Pull up during read
+                    else sda_out <= 1'b1;
+                end else if (state == STATE_REPEATED_START) begin
+                    if (bit_count == 0) sda_out <= 1'b1;
+                    else if (bit_count == 1) sda_out <= 1'b0;
+                    else sda_out <= 1'b1;
+                end else if (state == STATE_STOP) begin
+                    if (bit_count == 0) sda_out <= 1'b1;
+                    else if (bit_count == 1) sda_out <= 1'b0;
+                    else sda_out <= 1'b1;
+                end else begin
+                    sda_out <= 1'b1;
+                end
+            end else begin
+                sda_out <= sda_i;
+            end
+        end
+    end
+
+    // Output Assignments
+    assign scl_o = scl_out;
+    assign sda_o = sda_out;
+    assign scl_t = scl_dir;
+    assign sda_t = sda_dir;
+    assign busy = busy_reg;
+    assign bus_control = bus_control_reg;
+    assign bus_active = bus_active_reg;
+    assign missed_ack = missed_ack_reg;
+
+    // Host Interface Ready Signals
+    assign s_axis_cmd_ready = (state == STATE_IDLE);
+    assign s_axis_data_tready = (tx_valid == 1'b0);
+    assign m_axis_data_tvalid = (rx_valid == 1'b1);
+    assign m_axis_data_tlast = (rx_last == 1'b1);
+
+endmodule
+```<|im_end|>

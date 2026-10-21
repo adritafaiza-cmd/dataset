@@ -1,0 +1,175 @@
+```verilog
+module isochronous_4phase_handshake (
+    input  src_clk_i,
+    input  src_rst_ni,
+    input  src_valid_i,
+    output src_ready_o,
+    input  dst_clk_i,
+    input  dst_rst_ni,
+    output dst_valid_o,
+    input  dst_ready_i
+);
+
+    // Internal signals for state machine
+    reg [1:0] src_state;
+    reg [1:0] dst_state;
+    
+    // Handshake flags
+    reg src_valid_reg;
+    reg dst_valid_reg;
+    reg dst_ready_reg;
+    reg src_ready_reg;
+
+    // State encoding
+    // Source side states
+    parameter SRC_IDLE = 2'b00;
+    parameter SRC_WAIT_DST = 2'b01;
+    parameter SRC_DONE = 2'b10;
+
+    // Destination side states
+    parameter DST_IDLE = 2'b00;
+    parameter DST_WAIT_SRC = 2'b01;
+    parameter DST_DONE = 2'b10;
+
+    // Synchronizer for cross-clock signals
+    // We need to synchronize src_valid_i to dst_clk and dst_ready_i to src_clk
+    // to prevent metastability and ensure clean handshake transitions.
+
+    // Synchronize src_valid_i to dst_clk domain
+    reg [1:0] src_valid_sync;
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_valid_sync <= 2'b00;
+        else
+            src_valid_sync <= {src_valid_sync[0], src_valid_i};
+    end
+
+    // Synchronize dst_ready_i to src_clk domain
+    reg [1:0] dst_ready_sync;
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ready_sync <= 2'b00;
+        else
+            dst_ready_sync <= {dst_ready_sync[0], dst_ready_i};
+    end
+
+    // Source State Machine
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_state <= SRC_IDLE;
+            src_valid_reg <= 1'b0;
+            src_ready_reg <= 1'b0;
+        end else begin
+            case (src_state)
+                SRC_IDLE: begin
+                    if (src_valid_i) begin
+                        src_valid_reg <= 1'b1;
+                        src_state <= SRC_WAIT_DST;
+                    end else begin
+                        src_valid_reg <= 1'b0;
+                    end
+                end
+                SRC_WAIT_DST: begin
+                    if (dst_ready_sync[1]) begin
+                        // Handshake complete
+                        src_state <= SRC_DONE;
+                        src_valid_reg <= 1'b0;
+                    end
+                    // If dst_ready_sync[1] is 0, we stay in SRC_WAIT_DST
+                    // This implements the "do not accept transfer that did not occur" rule
+                    // by holding the valid signal until ready is asserted.
+                end
+                SRC_DONE: begin
+                    src_state <= SRC_IDLE;
+                    src_valid_reg <= 1'b0;
+                end
+                default: begin
+                    src_state <= SRC_IDLE;
+                    src_valid_reg <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Destination State Machine
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_state <= DST_IDLE;
+            dst_valid_reg <= 1'b0;
+            dst_ready_reg <= 1'b0;
+        end else begin
+            case (dst_state)
+                DST_IDLE: begin
+                    if (src_valid_sync[1]) begin
+                        dst_valid_reg <= 1'b1;
+                        dst_state <= DST_WAIT_SRC;
+                    end else begin
+                        dst_valid_reg <= 1'b0;
+                    end
+                end
+                DST_WAIT_SRC: begin
+                    if (src_ready_reg) begin
+                        // Handshake complete
+                        dst_state <= DST_DONE;
+                        dst_valid_reg <= 1'b0;
+                    end
+                    // If src_ready_reg is 0, we stay in DST_WAIT_SRC
+                    // This ensures we do not report a transfer that did not occur.
+                end
+                DST_DONE: begin
+                    dst_state <= DST_IDLE;
+                    dst_valid_reg <= 1'b0;
+                end
+                default: begin
+                    dst_state <= DST_IDLE;
+                    dst_valid_reg <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Output assignments
+    assign src_ready_o = src_ready_reg;
+    assign dst_valid_o = dst_valid_reg;
+
+    // Internal logic to drive the handshake completion flags
+    // These are driven in the clock domains where they are used
+    // to update the state machines correctly.
+
+    // In src_clk domain:
+    // When src_state is SRC_WAIT_DST and dst_ready_sync[1] is high,
+    // we transition to SRC_DONE and clear src_valid_reg.
+    // We also need to signal that the handshake is done so dst can clear its valid.
+    // However, the dst machine relies on src_ready_reg to know the handshake is done.
+    // So we set src_ready_reg here.
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_ready_reg <= 1'b0;
+        else begin
+            if (src_state == SRC_WAIT_DST && dst_ready_sync[1]) begin
+                src_ready_reg <= 1'b1;
+            end else begin
+                src_ready_reg <= 1'b0;
+            end
+        end
+    end
+
+    // In dst_clk domain:
+    // When dst_state is DST_WAIT_SRC and src_valid_sync[1] is high,
+    // we transition to DST_DONE and clear dst_valid_reg.
+    // We also need to signal that the handshake is done so src can clear its ready.
+    // So we set dst_ready_reg here.
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_ready_reg <= 1'b0;
+        else begin
+            if (dst_state == DST_WAIT_SRC && src_valid_sync[1]) begin
+                dst_ready_reg <= 1'b1;
+            end else begin
+                dst_ready_reg <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

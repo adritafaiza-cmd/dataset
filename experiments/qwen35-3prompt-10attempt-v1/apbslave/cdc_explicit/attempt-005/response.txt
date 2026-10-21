@@ -1,0 +1,166 @@
+```verilog
+module apbslave #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH,
+	localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+) (
+	input	wire			PCLK, PRESETn,
+	input	wire			PSEL,
+	input	wire			PENABLE,
+	output	reg			PREADY,
+	input	wire	[AW-1:0]	PADDR,
+	input	wire			PWRITE,
+	input	wire	[DW-1:0]	PWDATA,
+	input	wire	[DW/8-1:0]	PWSTRB,
+	input	wire	[2:0]		PPROT,
+	output	reg	[DW-1:0]	PRDATA,
+	output	wire			PSLVERR
+);
+
+	localparam	NUM_BYTES = DW/8;
+	localparam	NUM_BITS  = DW;
+
+	// State encoding
+	localparam IDLE = 2'b00;
+	localparam READ = 2'b01;
+	localparam WRITE= 2'b10;
+
+	reg	[1:0]	state;
+	reg	[AW-1:0]	addr_reg;
+	reg	[DW-1:0]	data_reg;
+	reg	[DW/8-1:0]	strb_reg;
+	reg	[2:0]	prot_reg;
+	reg	[1:0]	transfer_type; // 00: Idle, 01: Read, 10: Write
+
+	// --- Reset Logic (Safe RDC) ---
+	// Synchronous reset with asynchronous release detection is not strictly necessary 
+	// if we use a simple synchronous reset with a one-cycle pulse, but to be safe 
+	// against glitches on PRESETn during release, we use a standard synchronous 
+	// reset approach which is safe for CDC if the reset is stable for at least 
+	// one clock cycle before release.
+	
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			state <= IDLE;
+			transfer_type <= 2'b00;
+			PREADY <= 1'b0;
+			PSLVERR <= 1'b0;
+			addr_reg <= 2'b0;
+			data_reg <= {DW{1'b0}};
+			strb_reg <= {NUM_BYTES{1'b0}};
+			prot_reg <= 3'b000;
+		end
+		else begin
+			// State Machine
+			case (state)
+				IDLE: begin
+					if (PSEL && PENABLE) begin
+						state <= (PWRITE) ? WRITE : READ;
+						transfer_type <= (PWRITE) ? 2'b10 : 2'b01;
+						addr_reg <= PADDR;
+						data_reg <= PWDATA;
+						strb_reg <= PWSTRB;
+						prot_reg <= PPROT;
+						PREADY <= 1'b1; // APB requires PREADY to be asserted on the same cycle as PSEL/PENABLE
+					end
+					else begin
+						PREADY <= 1'b0;
+					end
+				end
+
+				READ: begin
+					// Data is already loaded in data_reg from PWDATA (though typically read data comes from internal logic, 
+					// for a simple slave we assume the register holds the value to be read).
+					// In a real implementation, data_reg would be loaded from internal registers here.
+					// For this generic slave, we assume data_reg is pre-loaded or this is a pass-through.
+					// To make it a functional slave, we assume data_reg holds the response.
+					PREADY <= 1'b1;
+					PSLVERR <= 1'b0;
+					// Transition back to idle after this cycle
+					state <= IDLE;
+				end
+
+				WRITE: begin
+					PREADY <= 1'b1;
+					PSLVERR <= 1'b0;
+					state <= IDLE;
+				end
+			endcase
+		end
+	end
+
+	// --- Output Logic ---
+	// PRDATA is driven by data_reg. 
+	// Note: In a real design, data_reg would be updated from internal registers on the WRITE cycle.
+	// Here, we assume the slave logic populates data_reg before the read cycle or it's a simple register file.
+	// To strictly follow "Accept standard APB setup/access transfers", we need to ensure data_reg 
+	// is valid when READ state is entered. 
+	// Since the prompt asks for a generic slave implementation and doesn't specify internal registers,
+	// we assume the data_reg is the output buffer. 
+	// However, for a WRITE cycle, we need to update the internal data. 
+	// Let's refine the state machine to handle the data update correctly.
+	
+	// Revised State Machine for proper data handling:
+	// We need to store the address and data during the access cycle and then output them.
+	// But APB is single-cycle access. The data must be ready in the same cycle as PREADY.
+	// Therefore, the internal logic (registers) must be updated synchronously with the clock.
+	
+	// Let's restructure to ensure CDC safety and correct behavior.
+	// We will use a synchronous register to hold the address and data for the current transaction.
+	// The output PRDATA will be driven by this register.
+	
+	reg	[AW-1:0]	int_addr;
+	reg	[DW-1:0]	int_data;
+	reg	[DW/8-1:0]	int_strb;
+	reg	[2:0]	int_prot;
+
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			int_addr <= 2'b0;
+			int_data <= {DW{1'b0}};
+			int_strb <= {NUM_BYTES{1'b0}};
+			int_prot <= 3'b000;
+			PREADY <= 1'b0;
+			PSLVERR <= 1'b0;
+		end
+		else begin
+			// Update internal registers on every clock edge if transaction is active
+			// This ensures CDC safety: registers are updated synchronously.
+			if (PSEL && PENABLE) begin
+				int_addr <= PADDR;
+				int_data <= PWDATA;
+				int_strb <= PWSTRB;
+				int_prot <= PPROT;
+			end
+
+			// Determine PREADY and PSLVERR
+			// APB Protocol: 
+			// PREADY must be asserted if the slave is ready to complete the transaction.
+			// For a simple register-based slave, it is always ready (single cycle).
+			// PSLVERR is asserted if the access is invalid (e.g., reserved address, bad protection).
+			
+			PREADY <= 1'b1;
+			PSLVERR <= 1'b0;
+
+			// Check for errors (Example: Address 0 is reserved, or PPROT[1] is reserved)
+			// This is a placeholder for error checking logic.
+			if (int_addr == 0 || (int_prot[1] == 1'b1)) begin
+				PSLVERR <= 1'b1;
+			end
+
+			// Drive outputs
+			PRDATA <= int_data;
+		end
+	end
+
+	// Note: The above implementation assumes the slave logic is simple enough to be 
+	// fully synchronous. If the slave requires multi-cycle access or complex internal logic,
+	// a separate internal clock domain or FIFO would be needed. 
+	// Given the constraints and "single-clock" requirement, this synchronous approach 
+	// is the standard and safest implementation for a basic APB slave.
+
+endmodule
+```<|im_end|>
+<|endoftext|>

@@ -1,0 +1,63 @@
+```verilog
+module sync #(
+    parameter int unsigned STAGES = 2,
+    parameter bit ResetValue = 1'b0
+) (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic serial_i,
+    output logic serial_o
+);
+
+    // Generate the pipeline stages
+    // We use a loop to unroll the stages for clarity and synthesis friendliness
+    genvar i;
+    logic [STAGES-1:0] sync_stage;
+
+    generate
+        for (i = 0; i < STAGES; i = i + 1) begin : stage_gen
+            assign sync_stage[i] = sync_stage[i-1];
+        end
+    endgenerate
+
+    // Handle the first stage specifically to include reset logic
+    // and handle the case where STAGES might be 0 (though 2 is default)
+    // If STAGES is 0, we just pass the input directly (though this is rare for CDC).
+    // Assuming STAGES >= 1 for a proper synchronizer.
+    
+    logic [STAGES-1:0] pipeline_reg;
+
+    // First stage: Capture input on clk_i
+    // We assume serial_i is asynchronous to clk_i.
+    // The first flip-flop captures the value.
+    // Reset logic: If rst_ni is low, force the first stage to ResetValue.
+    // This ensures the entire pipeline starts at a known state.
+    
+    // To ensure structural safety, we define the first stage explicitly
+    // and then chain the rest.
+    
+    // First stage register
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+            pipeline_reg[0] <= ResetValue;
+        else
+            pipeline_reg[0] <= serial_i;
+    end
+
+    // Subsequent stages
+    generate
+        for (i = 1; i < STAGES; i = i + 1) begin : stage_gen
+            always_ff @(posedge clk_i or negedge rst_ni) begin
+                if (!rst_ni)
+                    pipeline_reg[i] <= ResetValue;
+                else
+                    pipeline_reg[i] <= pipeline_reg[i-1];
+            end
+        end
+    endgenerate
+
+    // Output is the last stage
+    assign serial_o = pipeline_reg[STAGES-1];
+
+endmodule
+```<|im_end|>

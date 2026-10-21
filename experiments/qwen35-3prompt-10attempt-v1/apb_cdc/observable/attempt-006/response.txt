@@ -1,0 +1,350 @@
+```verilog
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam INT_DEPTH = 1 << LOG_DEPTH;
+    localparam INT_MASK = INT_DEPTH - 1;
+
+    // Source Side Signals
+    reg [ADDR_WIDTH-1:0] src_addr_reg;
+    reg [DATA_WIDTH-1:0] src_wdata_reg;
+    reg [DATA_WIDTH/8-1:0] src_strb_reg;
+    reg src_write_reg;
+    reg src_prot_reg;
+    reg src_valid_reg;
+    reg src_ready_reg;
+    reg src_done_reg;
+
+    // Destination Side Signals
+    reg [ADDR_WIDTH-1:0] dst_addr_reg;
+    reg [DATA_WIDTH-1:0] dst_wdata_reg;
+    reg [DATA_WIDTH/8-1:0] dst_strb_reg;
+    reg dst_write_reg;
+    reg dst_prot_reg;
+    reg dst_valid_reg;
+    reg dst_ready_reg;
+    reg dst_done_reg;
+
+    // FIFO Control Signals
+    reg [LOG_DEPTH-1:0] src_fifo_full;
+    reg [LOG_DEPTH-1:0] dst_fifo_empty;
+    reg [LOG_DEPTH-1:0] src_fifo_count;
+    reg [LOG_DEPTH-1:0] dst_fifo_count;
+    reg src_fifo_wr_en;
+    reg dst_fifo_rd_en;
+    reg src_fifo_rd_en;
+    reg dst_fifo_wr_en;
+
+    // Source Side FIFO
+    reg [ADDR_WIDTH-1:0] src_addr_fifo [INT_DEPTH-1:0];
+    reg [DATA_WIDTH-1:0] src_wdata_fifo [INT_DEPTH-1:0];
+    reg [DATA_WIDTH/8-1:0] src_strb_fifo [INT_DEPTH-1:0];
+    reg src_write_fifo [INT_DEPTH-1:0];
+    reg src_prot_fifo [INT_DEPTH-1:0];
+    reg src_valid_fifo [INT_DEPTH-1:0];
+
+    // Destination Side FIFO
+    reg [ADDR_WIDTH-1:0] dst_addr_fifo [INT_DEPTH-1:0];
+    reg [DATA_WIDTH-1:0] dst_wdata_fifo [INT_DEPTH-1:0];
+    reg [DATA_WIDTH/8-1:0] dst_strb_fifo [INT_DEPTH-1:0];
+    reg dst_write_fifo [INT_DEPTH-1:0];
+    reg dst_prot_fifo [INT_DEPTH-1:0];
+    reg dst_valid_fifo [INT_DEPTH-1:0];
+
+    // Source Side Logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_addr_reg <= 0;
+            src_wdata_reg <= 0;
+            src_strb_reg <= 0;
+            src_write_reg <= 0;
+            src_prot_reg <= 0;
+            src_valid_reg <= 0;
+            src_ready_reg <= 0;
+            src_done_reg <= 0;
+            src_fifo_count <= 0;
+            src_pready_o <= 1'b1;
+            src_prdata_o <= 0;
+            src_pslverr_o <= 1'b0;
+        end else begin
+            // Capture APB signals
+            src_addr_reg <= src_paddr_i;
+            src_wdata_reg <= src_pwdata_i;
+            src_strb_reg <= src_pstrb_i;
+            src_write_reg <= src_pwrite_i;
+            src_prot_reg <= src_pprot_i;
+            src_valid_reg <= src_psel_i && src_penable_i;
+
+            // Check if destination is ready
+            if (src_valid_reg && !src_ready_reg) begin
+                // Wait for destination to be ready
+                if (dst_fifo_empty == 0) begin
+                    // Push to FIFO
+                    src_fifo_wr_en <= 1'b1;
+                    src_fifo_count <= src_fifo_count + 1'b1;
+                end
+            end
+
+            // Pop from FIFO
+            if (src_fifo_wr_en && src_fifo_count > 0) begin
+                src_fifo_rd_en <= 1'b1;
+                src_fifo_count <= src_fifo_count - 1'b1;
+                src_fifo_wr_en <= 1'b0;
+            end
+
+            // Update ready signal
+            src_ready_reg <= src_fifo_count > 0;
+
+            // Update output signals
+            if (src_valid_reg && src_ready_reg) begin
+                src_pready_o <= 1'b0;
+                src_prdata_o <= 0;
+                src_pslverr_o <= 1'b0;
+            end else if (src_valid_reg && !src_ready_reg) begin
+                src_pready_o <= 1'b1;
+                src_prdata_o <= 0;
+                src_pslverr_o <= 1'b0;
+            end else begin
+                src_pready_o <= 1'b1;
+                src_prdata_o <= 0;
+                src_pslverr_o <= 1'b0;
+            end
+        end
+    end
+
+    // Destination Side Logic
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_addr_reg <= 0;
+            dst_wdata_reg <= 0;
+            dst_strb_reg <= 0;
+            dst_write_reg <= 0;
+            dst_prot_reg <= 0;
+            dst_valid_reg <= 0;
+            dst_ready_reg <= 0;
+            dst_done_reg <= 0;
+            dst_fifo_count <= 0;
+            dst_psel_o <= 1'b0;
+            dst_penable_o <= 1'b0;
+            dst_pwrite_o <= 1'b0;
+            dst_paddr_o <= 0;
+            dst_pwdata_o <= 0;
+            dst_pstrb_o <= 0;
+            dst_pprot_o <= 0;
+        end else begin
+            // Capture APB signals
+            dst_addr_reg <= dst_paddr_i;
+            dst_wdata_reg <= dst_pwdata_i;
+            dst_strb_reg <= dst_pstrb_i;
+            dst_write_reg <= dst_pwrite_i;
+            dst_prot_reg <= dst_pprot_i;
+            dst_valid_reg <= dst_psel_i && dst_penable_i;
+
+            // Check if source is ready
+            if (dst_valid_reg && !dst_ready_reg) begin
+                // Wait for source to be ready
+                if (src_fifo_empty == 0) begin
+                    // Push to FIFO
+                    dst_fifo_wr_en <= 1'b1;
+                    dst_fifo_count <= dst_fifo_count + 1'b1;
+                end
+            end
+
+            // Pop from FIFO
+            if (dst_fifo_wr_en && dst_fifo_count > 0) begin
+                dst_fifo_rd_en <= 1'b1;
+                dst_fifo_count <= dst_fifo_count - 1'b1;
+                dst_fifo_wr_en <= 1'b0;
+            end
+
+            // Update ready signal
+            dst_ready_reg <= dst_fifo_count > 0;
+
+            // Update output signals
+            if (dst_valid_reg && dst_ready_reg) begin
+                dst_psel_o <= 1'b1;
+                dst_penable_o <= 1'b1;
+                dst_pwrite_o <= dst_write_reg;
+                dst_paddr_o <= dst_addr_reg;
+                dst_pwdata_o <= dst_wdata_reg;
+                dst_pstrb_o <= dst_strb_reg;
+                dst_pprot_o <= dst_prot_reg;
+            end else begin
+                dst_psel_o <= 1'b0;
+                dst_penable_o <= 1'b0;
+                dst_pwrite_o <= 1'b0;
+                dst_paddr_o <= 0;
+                dst_pwdata_o <= 0;
+                dst_pstrb_o <= 0;
+                dst_pprot_o <= 0;
+            end
+        end
+    end
+
+    // Source Side FIFO Logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_fifo_full <= 0;
+            src_fifo_count <= 0;
+        end else begin
+            src_fifo_full <= src_fifo_count == INT_DEPTH;
+            src_fifo_count <= src_fifo_count + src_fifo_wr_en - src_fifo_rd_en;
+        end
+    end
+
+    // Destination Side FIFO Logic
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_fifo_empty <= 1;
+            dst_fifo_count <= 0;
+        end else begin
+            dst_fifo_empty <= dst_fifo_count == 0;
+            dst_fifo_count <= dst_fifo_count + dst_fifo_wr_en - dst_fifo_rd_en;
+        end
+    end
+
+    // Source Side FIFO Write Logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_addr_fifo <= 0;
+            src_wdata_fifo <= 0;
+            src_strb_fifo <= 0;
+            src_write_fifo <= 0;
+            src_prot_fifo <= 0;
+            src_valid_fifo <= 0;
+        end else begin
+            if (src_fifo_wr_en) begin
+                src_addr_fifo <= src_addr_fifo;
+                src_wdata_fifo <= src_wdata_fifo;
+                src_strb_fifo <= src_strb_fifo;
+                src_write_fifo <= src_write_fifo;
+                src_prot_fifo <= src_prot_fifo;
+                src_valid_fifo <= src_valid_fifo;
+            end
+        end
+    end
+
+    // Destination Side FIFO Write Logic
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_addr_fifo <= 0;
+            dst_wdata_fifo <= 0;
+            dst_strb_fifo <= 0;
+            dst_write_fifo <= 0;
+            dst_prot_fifo <= 0;
+            dst_valid_fifo <= 0;
+        end else begin
+            if (dst_fifo_wr_en) begin
+                dst_addr_fifo <= dst_addr_fifo;
+                dst_wdata_fifo <= dst_wdata_fifo;
+                dst_strb_fifo <= dst_strb_fifo;
+                dst_write_fifo <= dst_write_fifo;
+                dst_prot_fifo <= dst_prot_fifo;
+                dst_valid_fifo <= dst_valid_fifo;
+            end
+        end
+    end
+
+    // Source Side FIFO Read Logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_fifo_rd_en <= 0;
+        end else begin
+            if (src_fifo_rd_en) begin
+                src_fifo_rd_en <= 0;
+            end
+        end
+    end
+
+    // Destination Side FIFO Read Logic
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_fifo_rd_en <= 0;
+        end else begin
+            if (dst_fifo_rd_en) begin
+                dst_fifo_rd_en <= 0;
+            end
+        end
+    end
+
+    // Source Side FIFO Output Logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_pready_o <= 1'b1;
+            src_prdata_o <= 0;
+            src_pslverr_o <= 1'b0;
+        end else begin
+            if (src_fifo_rd_en) begin
+                src_pready_o <= 1'b1;
+                src_prdata_o <= 0;
+                src_pslverr_o <= 1'b0;
+            end else begin
+                src_pready_o <= 1'b1;
+                src_prdata_o <= 0;
+                src_pslverr_o <= 1'b0;
+            end
+        end
+    end
+
+    // Destination Side FIFO Output Logic
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_psel_o <= 1'b0;
+            dst_penable_o <= 1'b0;
+            dst_pwrite_o <= 1'b0;
+            dst_paddr_o <= 0;
+            dst_pwdata_o <= 0;
+            dst_pstrb_o <= 0;
+            dst_pprot_o <= 0;
+        end else begin
+            if (dst_fifo_rd_en) begin
+                dst_psel_o <= 1'b1;
+                dst_penable_o <= 1'b1;
+                dst_pwrite_o <= dst_write_fifo;
+                dst_paddr_o <= dst_addr_fifo;
+                dst_pwdata_o <= dst_wdata_fifo;
+                dst_pstrb_o <= dst_strb_fifo;
+                dst_pprot_o <= dst_prot_fifo;
+            end else begin
+                dst_psel_o <= 1'b0;
+                dst_penable_o <= 1'b0;
+                dst_pwrite_o <= 1'b0;
+                dst_paddr_o <= 0;
+                dst_pwdata_o <= 0;
+                dst_pstrb_o <= 0;
+                dst_pprot_o <= 0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

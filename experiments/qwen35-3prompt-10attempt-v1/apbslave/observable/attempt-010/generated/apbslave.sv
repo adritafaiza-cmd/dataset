@@ -1,0 +1,115 @@
+```verilog
+module apbslave #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH,
+	localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+) (
+	input	wire			PCLK, PRESETn,
+	input	wire			PSEL,
+	input	wire			PENABLE,
+	output	reg			PREADY,
+	input	wire		[AW-1:0]	PADDR,
+	input	wire			PWRITE,
+	input	wire		[DW-1:0]	PWDATA,
+	input	wire		[DW/8-1:0]	PWSTRB,
+	input	wire		[2:0]		PPROT,
+	output	reg		[DW-1:0]	PRDATA,
+	output	wire			PSLVERR
+);
+
+	localparam	NUM_BYTES = DW/8;
+	localparam	NUM_WORDS = 1; // Assuming single word access for simplicity as per standard APB behavior unless specified otherwise
+	localparam	ADDR_MASK = ~((1<<AW)-1);
+
+	reg	[AW-1:0]	ADDR_REG;
+	reg	[DW-1:0]	DATA_REG;
+	reg			STATE; // IDLE, SETUP, ACCESS
+	reg			WRITE_ENABLE;
+	reg			WORD_SELECT; // To handle byte strobe logic if needed, though APB usually handles word writes
+	reg			VALID_WORD;
+	reg			[DW/8-1:0]	WORD_MASK;
+	reg			[DW-1:0]	TEMP_DATA;
+	reg			[DW-1:1]	ADDR_MATCH; // Simplified address matching logic placeholder
+
+	// State Machine
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			STATE <= IDLE;
+			PREADY <= 1'b1;
+			PRDATA <= 0;
+			PSLVERR <= 0;
+			ADDR_REG <= 0;
+			DATA_REG <= 0;
+			WRITE_ENABLE <= 0;
+			WORD_SELECT <= 0;
+			VALID_WORD <= 0;
+			WORD_MASK <= {NUM_BYTES{1'b1}};
+			ADDR_MATCH <= 0;
+		end
+		else begin
+			if (STATE == IDLE) begin
+				if (PSEL && PENABLE) begin
+					STATE <= SETUP;
+					ADDR_REG <= PADDR;
+					DATA_REG <= PWDATA;
+					WRITE_ENABLE <= PWRITE;
+					WORD_SELECT <= 0; // Reset word select
+					VALID_WORD <= 0;
+					WORD_MASK <= {NUM_BYTES{1'b1}};
+					ADDR_MATCH <= 1; // Assume match for this simple implementation
+				end else begin
+					PREADY <= 1'b1;
+				end
+			end
+			else if (STATE == SETUP) begin
+				if (PSEL && PENABLE) begin
+					STATE <= ACCESS;
+					// Update word select based on PWSTRB if we were doing partial writes, 
+					// but standard APB slave often just accepts the word. 
+					// Here we assume full word write or simple byte enable logic.
+					// For a robust byte-strobed write, we need to mask the data.
+					if (PWRITE) begin
+						// Byte strobed write logic
+						TEMP_DATA <= PWDATA & WORD_MASK;
+						DATA_REG <= TEMP_DATA;
+						WORD_SELECT <= 1;
+						VALID_WORD <= 1;
+					end else begin
+						DATA_REG <= PWDATA;
+						WORD_SELECT <= 0;
+						VALID_WORD <= 0;
+					end
+				end else begin
+					PREADY <= 1'b1;
+				end
+			end
+			else if (STATE == ACCESS) begin
+				PREADY <= 1'b1;
+				if (PSEL && !PENABLE) begin
+					// End of transaction
+					if (WRITE_ENABLE) begin
+						// Write occurred
+						if (VALID_WORD) begin
+							// Data was written to DATA_REG
+							// In a real implementation, DATA_REG would be latched to the actual memory/register here
+							// For this model, we just acknowledge the write
+						end
+					end
+					STATE <= IDLE;
+					PREADY <= 1'b1;
+					PRDATA <= DATA_REG; // Read data back if it was a read
+					PSLVERR <= 0;
+				end
+			end
+		end
+	end
+
+	// Output logic
+	assign PREADY = (STATE == IDLE) || (STATE == SETUP) || (STATE == ACCESS);
+	assign PRDATA = (STATE == ACCESS && !PWRITE) ? DATA_REG : 0;
+	assign PSLVERR = (STATE == ACCESS && !PENABLE) ? 1'b0 : 1'b1; // Simplified error logic
+
+endmodule
+```<|im_end|>

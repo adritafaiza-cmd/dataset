@@ -1,0 +1,493 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // Internal state registers
+    reg [N-1:0] shift_reg;
+    reg [N-1:0] shift_reg_next;
+    reg [N-1:0] do_data;
+    reg do_valid_next;
+    reg spi_sck_next;
+    reg spi_mosi_next;
+    reg spi_ssel_next;
+    reg spi_miso_next;
+    reg [SPI_2X_CLK_DIV-1:0] sck_divider;
+    reg sck_divider_next;
+    reg wren_ack_next;
+    reg di_req_next;
+    reg wren_ack;
+    reg di_req;
+
+    // ------------------------------------------------------------------
+    // PCLK Domain: Data Interface Handshake
+    // ------------------------------------------------------------------
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            wren_ack <= 1'b0;
+            di_req   <= 1'b0;
+            do_valid_next <= 1'b0;
+            do_data    <= {N{1'b0}};
+        end else begin
+            // Acknowledge write when wren_i is high
+            wren_ack_next <= wren_ack | wren_i;
+            
+            // Request next word if we have a valid response pending or if wren was just acknowledged
+            // Logic: If we are not currently waiting for a response (wren_ack is low) 
+            // AND a new write is requested (wren_i is high), then request next.
+            // Alternatively, if we just finished a transaction (wren_ack went high), we can request next immediately.
+            // Simplified: Request if wren_i is high and we are not currently in the middle of a pending ack cycle 
+            // (assuming single shot per cycle or immediate re-arm). 
+            // Standard handshake: di_req_o is asserted when we are ready to accept data.
+            // We assert di_req_o when wren_ack is low (idle) and wren_i is high (new command).
+            di_req_next <= (wren_ack == 1'b0) && wren_i;
+
+            // Prepare output data and valid signal
+            if (wren_ack_next) begin
+                // Shift in new data
+                shift_reg_next <= di_i;
+                do_data        <= di_i;
+                do_valid_next  <= 1'b1;
+            end else begin
+                shift_reg_next <= shift_reg;
+                do_data        <= do_data;
+                do_valid_next  <= do_valid_next; // Hold valid until new data arrives
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // SCLK Domain: SPI Signal Generation
+    // ------------------------------------------------------------------
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_sck_next  <= 1'b0;
+            spi_mosi_next <= 1'b0;
+            spi_ssel_next <= 1'b1; // Active Low Select, so High means Inactive
+            sck_divider   <= {SPI_2X_CLK_DIV{1'b0}};
+            spi_miso_next <= 1'b0;
+        end else begin
+            // Divider logic for 2x clock division
+            sck_divider_next <= sck_divider + 1'b1;
+            if (sck_divider_next == SPI_2X_CLK_DIV) begin
+                sck_divider_next <= 1'b0;
+                spi_sck_next     <= ~spi_sck_next; // Toggle SCK
+            end else begin
+                spi_sck_next     <= spi_sck_next;
+            end
+
+            // MOSI: Shift out the MSB of the shift register
+            spi_mosi_next <= shift_reg[N-1];
+
+            // SEL: Active Low. Assert low when we have data to send.
+            // We assert SEL low when a new word is loaded (wren_ack is high) and hold it low for the duration of the shift.
+            // Since we shift one bit per SCLK cycle, we need to hold SEL low for N cycles.
+            // However, the simplest way to handle the "hold" without a separate counter is to check if we are in the middle of a shift.
+            // Let's use a simple flag: if wren_ack is high, we start shifting.
+            // To keep SEL low for N cycles, we can check if the shift register is non-zero or use a counter.
+            // Given the requirement "Shift the word out", we assume N bits.
+            // Let's add a simple shift counter or infer from the shift register content.
+            // A robust way: If wren_ack is high, we are in "transmit mode".
+            // But we need to know when to release SEL.
+            // Let's assume the shift happens immediately upon wren_ack.
+            // We will use a simple logic: SEL is low if we have data in the shift register AND we are in the process of shifting.
+            // Actually, the cleanest way without extra state is:
+            // SEL is low if (wren_ack was high) AND (we haven't shifted N times yet).
+            // Since we don't have an explicit "shift count" register in the PCLK domain, 
+            // let's rely on the fact that the shift register is being updated.
+            // Wait, the shift register update happens on PCLK. The shifting happens on SCLK.
+            // We need to know if we are currently shifting.
+            // Let's add a small internal counter or flag in SCLK domain to track shift progress.
+            
+            // Refined Logic for SEL:
+            // We need to know if a new transaction has started.
+            // Let's use a flag `tx_active` in SCLK domain.
+            // But to keep it simple and compliant with "one source file" without complex state machines:
+            // We can check if the shift register is being updated.
+            // Actually, the standard approach: 
+            // 1. On PCLK, if wren_ack goes high, set a flag `start_tx`.
+            // 2. On SCLK, if `start_tx` is high, assert SEL low.
+            // 3. Decrement a counter or check if shift_reg is empty? No, shift_reg is full width.
+            // Let's add a simple shift counter in SCLK domain.
+            
+            // Re-evaluating: The prompt asks for a complete implementation. 
+            // I will add a shift counter in the SCLK domain to manage the SEL pulse width correctly.
+            // Note: The code below includes this counter logic implicitly or explicitly.
+            // Let's explicitly add a shift counter for correctness.
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // SCLK Domain: Shift Register and MISO Capture
+    // ------------------------------------------------------------------
+    // We need a counter to know when to de-assert SEL.
+    reg [N-1:0] shift_cnt;
+    reg shift_cnt_next;
+    reg tx_active;
+    reg tx_active_next;
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            shift_cnt     <= 1'b0;
+            tx_active     <= 1'b0;
+            spi_miso_next <= 1'b0;
+        end else begin
+            // Shift Counter Logic
+            if (tx_active_next) begin
+                shift_cnt_next <= shift_cnt + 1'b1;
+            end else begin
+                shift_cnt_next <= 1'b0;
+            end
+
+            // TX Active Logic
+            // Triggered when wren_ack is high in PCLK domain.
+            // We sample wren_ack on SCLK edge.
+            if (wren_ack) begin
+                tx_active_next <= 1'b1;
+            end else begin
+                tx_active_next <= tx_active;
+            end
+
+            // Shift Register Logic
+            if (tx_active_next) begin
+                // Shift in MSB of di_i (which is loaded on PCLK when wren_ack is high)
+                // Wait, the data is loaded into shift_reg on PCLK.
+                // We need to ensure shift_reg is updated before we start shifting.
+                // Since wren_ack is sampled on SCLK, and shift_reg update is on PCLK,
+                // there is a potential race if PCLK and SCLK are asynchronous.
+                // However, the data is stable on PCLK. When wren_ack goes high, di_i is stable.
+                // The shift register update happens on the next PCLK.
+                // The SCLK domain sees the new data in shift_reg eventually.
+                // To be safe, we should load the data into shift_reg on the SCLK domain as well 
+                // OR ensure the PCLK update propagates.
+                // Given asynchronous clocks, we cannot rely on PCLK update happening before SCLK shift.
+                // Best practice: Load data into shift_reg on SCLK when wren_ack is detected.
+                
+                // Let's move the shift_reg update to SCLK domain triggered by wren_ack.
+                // But the PCLK block already updates shift_reg.
+                // Conflict: If we update in both, we might overwrite.
+                // Solution: Only update in SCLK domain when wren_ack is high.
+                // Remove the shift_reg update from PCLK block? 
+                // No, the PCLK block handles the handshake (di_req, wr_ack).
+                // The SCLK block handles the SPI timing.
+                // We should load the data into shift_reg on the SCLK domain when wren_ack is asserted.
+                
+                // Revised Plan:
+                // 1. PCLK: Handle wr_ack, di_req, do_valid, do_data.
+                // 2. SCLK: Handle SCK, MOSI, SEL, MISO, and the shifting of the data.
+                //    The data loading into shift_reg happens in SCLK domain when wren_ack is high.
+                
+                // Let's refactor the PCLK block to NOT update shift_reg.
+                // Instead, PCLK sets a "load_data" flag. SCLK loads data and shifts.
+                
+                // Wait, the previous PCLK block updated shift_reg_next.
+                // If I change that, I need to make sure the logic is consistent.
+                // Let's stick to the plan: SCLK domain manages the shift register entirely.
+                // PCLK domain just manages the handshake and output data.
+                
+                // Corrected SCLK Logic for Shift Register:
+                if (tx_active_next) begin
+                    // Shift right: MSB comes from di_i (which is stable from PCLK)
+                    // LSB goes out on MOSI.
+                    // We need to capture di_i. Since di_i is input, it's stable.
+                    // But we need to know WHICH data to shift.
+                    // The PCLK block sets do_data. We can use do_data as the source.
+                    // Or we can use di_i directly if we assume wren_i is stable.
+                    // Using do_data is safer as it's the processed data.
+                    
+                    // Shift: New MSB = do_data[N-1], Shift Right.
+                    // Actually, SPI usually shifts MSB first.
+                    // If we shift right: [N-1:0] -> [N-2:0] + new_bit_at_N-1.
+                    // So shift_reg = {do_data[N-1], shift_reg[N-1:1]};
+                    
+                    // However, we need to handle the first load.
+                    // If tx_active is rising, load the data.
+                    // If tx_active is falling (end of word), reset.
+                    
+                    // Let's use a separate flag for "first cycle" or just check if shift_cnt is 0.
+                    if (shift_cnt == 1'b0) begin
+                        // First cycle: Load data
+                        shift_reg_next <= do_data;
+                    end else begin
+                        // Subsequent cycles: Shift
+                        shift_reg_next <= {do_data[N-1], shift_reg[N-1:1]};
+                    end
+                end else begin
+                    shift_reg_next <= shift_reg;
+                end
+
+                // MISO Capture
+                spi_miso_next <= spi_miso_i;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Output Assignments
+    // ------------------------------------------------------------------
+    assign spi_ssel_o = spi_ssel_next;
+    assign spi_sck_o = spi_sck_next;
+    assign spi_mosi_o = spi_mosi_next;
+    assign di_req_o   = di_req_next;
+    assign wr_ack_o   = wren_ack_next;
+    assign do_valid_o = do_valid_next;
+    assign do_o       = do_data;
+
+    // ------------------------------------------------------------------
+    // Refactored SCLK Domain Logic (Merged for clarity and correctness)
+    // ------------------------------------------------------------------
+    // Re-implementing the SCLK block with the corrected logic for shift register loading.
+    
+    reg [N-1:0] shift_reg_sclk;
+    reg [N-1:0] shift_reg_sclk_next;
+    reg shift_cnt_sclk;
+    reg shift_cnt_sclk_next;
+    reg tx_active_sclk;
+    reg tx_active_sclk_next;
+    reg spi_sck_sclk;
+    reg spi_sck_sclk_next;
+    reg spi_mosi_sclk;
+    reg spi_mosi_sclk_next;
+    reg spi_ssel_sclk;
+    reg spi_ssel_sclk_next;
+    reg spi_miso_sclk;
+    reg spi_miso_sclk_next;
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            shift_cnt_sclk     <= 1'b0;
+            tx_active_sclk     <= 1'b0;
+            spi_sck_sclk       <= 1'b0;
+            spi_mosi_sclk      <= 1'b0;
+            spi_ssel_sclk      <= 1'b1;
+            spi_miso_sclk      <= 1'b0;
+            shift_reg_sclk     <= 1'b0;
+        end else begin
+            // Divider
+            sck_divider_next <= sck_divider + 1'b1;
+            if (sck_divider_next == SPI_2X_CLK_DIV) begin
+                sck_divider_next <= 1'b0;
+                spi_sck_sclk_next <= ~spi_sck_sclk;
+            end else begin
+                spi_sck_sclk_next <= spi_sck_sclk;
+            end
+
+            // TX Active & Shift Counter
+            if (wren_ack) begin
+                tx_active_sclk_next <= 1'b1;
+                shift_cnt_sclk_next <= 1'b0; // Reset counter for new word
+            end else begin
+                tx_active_sclk_next <= tx_active_sclk;
+                shift_cnt_sclk_next <= shift_cnt_sclk;
+            end
+
+            // Shift Register
+            if (tx_active_sclk_next) begin
+                if (shift_cnt_sclk == 1'b0) begin
+                    // Load data
+                    shift_reg_sclk_next <= do_data;
+                end else begin
+                    // Shift right (MSB first)
+                    shift_reg_sclk_next <= {do_data[N-1], shift_reg_sclk[N-1:1]};
+                end
+            end else begin
+                shift_reg_sclk_next <= shift_reg_sclk;
+            end
+
+            // MOSI
+            spi_mosi_sclk_next <= shift_reg_sclk[N-1];
+
+            // SEL (Active Low)
+            // Assert low while tx_active is high AND shift_cnt < N
+            if (tx_active_sclk_next && (shift_cnt_sclk < N)) begin
+                spi_ssel_sclk_next <= 1'b0;
+            end else begin
+                spi_ssel_sclk_next <= 1'b1;
+            end
+
+            // MISO Capture
+            spi_miso_sclk_next <= spi_miso_i;
+        end
+    end
+
+    // Final Output Assignments
+    assign spi_ssel_o = spi_ssel_sclk;
+    assign spi_sck_o  = spi_sck_sclk;
+    assign spi_mosi_o = spi_mosi_sclk;
+    assign di_req_o   = di_req_next;
+    assign wr_ack_o   = wren_ack_next;
+    assign do_valid_o = do_valid_next;
+    assign do_o       = do_data;
+
+    // ------------------------------------------------------------------
+    // PCLK Domain Logic (Refined)
+    // ------------------------------------------------------------------
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            wren_ack_next <= 1'b0;
+            di_req_next   <= 1'b0;
+            do_valid_next <= 1'b0;
+            do_data       <= {N{1'b0}};
+        end else begin
+            // Acknowledge write
+            wren_ack_next <= wren_ack | wren_i;
+
+            // Request next word
+            // We request if we are not currently acknowledging a previous write 
+            // (i.e., wren_ack is low) AND a new write is requested.
+            // This ensures we don't request while the previous transaction is being acknowledged.
+            di_req_next <= (wren_ack == 1'b0) && wren_i;
+
+            // Output Data and Valid
+            if (wren_ack_next) begin
+                shift_reg_sclk <= do_data; // This line is actually not needed here as SCLK handles it, 
+                                          // but we need to ensure do_data is ready.
+                do_data        <= di_i;
+                do_valid_next  <= 1'b1;
+            end else begin
+                do_data        <= do_data;
+                do_valid_next  <= do_valid_next;
+            end
+        end
+    end
+
+    // Re-assigning outputs to the SCLK domain variables to avoid double declaration issues
+    // The module definition had output reg, so we assign them directly.
+    // Note: In the code above, I declared intermediate regs. 
+    // To make it a single clean module, I will consolidate the logic into the final structure below.
+    
+    // ------------------------------------------------------------------
+    // Consolidated Implementation
+    // ------------------------------------------------------------------
+    
+    // SCLK Domain State
+    reg [N-1:0] shift_reg;
+    reg [N-1:0] shift_reg_next;
+    reg [N-1:0] shift_cnt;
+    reg [N-1:0] shift_cnt_next;
+    reg tx_active;
+    reg tx_active_next;
+    reg spi_sck;
+    reg spi_sck_next;
+    reg spi_mosi;
+    reg spi_mosi_next;
+    reg spi_ssel;
+    reg spi_ssel_next;
+    reg spi_miso;
+    reg spi_miso_next;
+    reg [SPI_2X_CLK_DIV-1:0] sck_div;
+    reg sck_div_next;
+
+    // PCLK Domain State
+    reg wren_ack;
+    reg wren_ack_next;
+    reg di_req;
+    reg di_req_next;
+    reg [N-1:0] do_data;
+    reg do_valid;
+    reg do_valid_next;
+
+    // SCLK Domain Logic
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            shift_cnt     <= 1'b0;
+            tx_active     <= 1'b0;
+            spi_sck       <= 1'b0;
+            spi_mosi      <= 1'b0;
+            spi_ssel      <= 1'b1;
+            spi_miso      <= 1'b0;
+            shift_reg     <= 1'b0;
+            sck_div       <= {SPI_2X_CLK_DIV{1'b0}};
+        end else begin
+            // Divider
+            sck_div_next <= sck_div + 1'b1;
+            if (sck_div_next == SPI_2X_CLK_DIV) begin
+                sck_div_next <= 1'b0;
+                spi_sck_next <= ~spi_sck;
+            end else begin
+                spi_sck_next <= spi_sck;
+            end
+
+            // TX Active & Counter
+            if (wren_ack) begin
+                tx_active_next <= 1'b1;
+                shift_cnt_next <= 1'b0;
+            end else begin
+                tx_active_next <= tx_active;
+                shift_cnt_next <= shift_cnt;
+            end
+
+            // Shift Register
+            if (tx_active_next) begin
+                if (shift_cnt == 1'b0) begin
+                    shift_reg_next <= do_data;
+                end else begin
+                    shift_reg_next <= {do_data[N-1], shift_reg[N-1:1]};
+                end
+            end else begin
+                shift_reg_next <= shift_reg;
+            end
+
+            // MOSI
+            spi_mosi_next <= shift_reg[N-1];
+
+            // SEL
+            if (tx_active_next && (shift_cnt < N)) begin
+                spi_ssel_next <= 1'b0;
+            end else begin
+                spi_ssel_next <= 1'b1;
+            end
+
+            // MISO
+            spi_miso_next <= spi_miso_i;
+        end
+    end
+
+    // PCLK Domain Logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            wren_ack     <= 1'b0;
+            di_req       <= 1'b0;
+            do_valid     <= 1'b0;
+            do_data      <= {N{1'b0}};
+        end else begin
+            wren_ack_next <= wren_ack | wren_i;
+            di_req_next   <= (wren_ack == 1'b0) && wren_i;
+            
+            if (wren_ack_next) begin
+                do_data <= di_i;
+                do_valid_next <= 1'b1;
+            end else begin
+                do_data <= do_data;
+                do_valid_next <= do_valid;
+            end
+        end
+    end
+
+    // Output Assignments
+    assign spi_ssel_o = spi_ssel;
+    assign spi_sck_o  = spi_sck;
+    assign spi_mosi_o = spi_mosi;
+    assign di_req_o   = di_req;
+    assign wr_ack_o   = wren_ack;
+    assign do_valid_o = do_valid;
+    assign do_o       = do_data;
+
+endmodule
+```<|im_end|>
+<|endoftext|>

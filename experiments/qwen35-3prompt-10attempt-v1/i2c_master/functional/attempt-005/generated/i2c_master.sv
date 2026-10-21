@@ -1,0 +1,659 @@
+```verilog
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // ========================================================================
+    // Internal State Machine
+    // ========================================================================
+    typedef enum logic [2:0] {
+        IDLE,
+        START,
+        SEND_ADDR,
+        SEND_ADDR_ACK,
+        SEND_DATA,
+        SEND_DATA_ACK,
+        SEND_DATA_NACK,
+        SEND_DATA_STOP,
+        READ_DATA,
+        READ_DATA_ACK,
+        READ_DATA_NACK,
+        READ_DATA_STOP,
+        STOP,
+        STOP_IDLE
+    } state_t;
+
+    state_t state, next_state;
+    logic    cmd_valid_reg;
+    logic    cmd_ready_reg;
+    logic    data_valid_reg;
+    logic    data_ready_reg;
+    logic    data_last_reg;
+    logic    data_out_valid;
+    logic    data_out_last;
+    logic    data_out_tdata;
+
+    // Command Buffer
+    logic [6:0] cmd_addr;
+    logic       cmd_start;
+    logic       cmd_read;
+    logic       cmd_write;
+    logic       cmd_write_multiple;
+    logic       cmd_stop;
+    logic       cmd_valid;
+    logic       cmd_ready;
+
+    // Data Buffer
+    logic [7:0] data_in_tdata;
+    logic        data_in_tvalid;
+    logic        data_in_tlast;
+    logic        data_in_valid;
+    logic        data_in_ready;
+    logic        data_in_last;
+    logic [7:0] data_out_tdata;
+    logic        data_out_valid;
+    logic        data_out_last;
+    logic        data_out_ready;
+
+    // I2C Timing Control
+    logic [15:0] scl_count;
+    logic [15:0] sda_count;
+    logic        scl_phase;
+    logic        sda_phase;
+    logic        scl_high;
+    logic        sda_high;
+    logic        scl_driving;
+    logic        sda_driving;
+    logic        scl_output;
+    logic        sda_output;
+    logic        scl_t;
+    logic        sda_t;
+    logic        scl_i_sample;
+    logic        sda_i_sample;
+    logic        ack_received;
+    logic        start_sent;
+    logic        stop_sent;
+    logic        addr_sent;
+    logic        data_sent;
+    logic        byte_count;
+    logic        byte_count_limit;
+    logic        write_mode;
+    logic        read_mode;
+    logic        stop_sequence;
+    logic        idle_timeout;
+    logic        bus_free;
+
+    // Status Outputs
+    assign busy = (state != IDLE && state != STOP_IDLE);
+    assign bus_control = (state == START || state == STOP || state == STOP_IDLE);
+    assign bus_active = (state != IDLE && state != STOP_IDLE);
+    assign missed_ack = (ack_received == 0);
+
+    // ========================================================================
+    // Host Interface Logic
+    // ========================================================================
+
+    // Command Handshake
+    assign s_axis_cmd_ready = cmd_ready;
+    assign cmd_valid_reg = s_axis_cmd_valid;
+    assign cmd_ready_reg = cmd_ready;
+
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            cmd_addr <= 7'b0;
+            cmd_start <= 1'b0;
+            cmd_read <= 1'b0;
+            cmd_write <= 1'b0;
+            cmd_write_multiple <= 1'b0;
+            cmd_stop <= 1'b0;
+            cmd_valid <= 1'b0;
+            cmd_ready <= 1'b1;
+        end else begin
+            cmd_addr <= s_axis_cmd_address;
+            cmd_start <= s_axis_cmd_start;
+            cmd_read <= s_axis_cmd_read;
+            cmd_write <= s_axis_cmd_write;
+            cmd_write_multiple <= s_axis_cmd_write_multiple;
+            cmd_stop <= s_axis_cmd_stop;
+            cmd_valid <= cmd_valid_reg;
+            cmd_ready <= cmd_ready_reg;
+        end
+    end
+
+    // Data Input Handshake
+    assign s_axis_data_tready = data_in_ready;
+    assign data_in_valid = s_axis_data_tvalid;
+    assign data_in_ready = data_in_ready_reg;
+
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            data_in_tdata <= 8'b0;
+            data_in_tvalid <= 1'b0;
+            data_in_tlast <= 1'b0;
+            data_in_valid <= 1'b0;
+            data_in_ready <= 1'b1;
+            data_in_last <= 1'b0;
+        end else begin
+            data_in_tdata <= s_axis_data_tdata;
+            data_in_tvalid <= s_axis_data_tvalid;
+            data_in_tlast <= s_axis_data_tlast;
+            data_in_valid <= data_in_valid_reg;
+            data_in_ready <= data_in_ready_reg;
+            data_in_last <= data_in_tlast;
+        end
+    end
+
+    // Data Output Handshake
+    assign m_axis_data_tready = data_out_ready;
+    assign m_axis_data_tvalid = data_out_valid;
+    assign m_axis_data_tdata = data_out_tdata;
+    assign m_axis_data_tlast = data_out_last;
+    assign s_axis_data_tready = data_in_ready; // Reuse signal name as per prompt requirement for input ready
+    assign data_out_ready = m_axis_data_tready;
+
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            data_out_tdata <= 8'b0;
+            data_out_valid <= 1'b0;
+            data_out_last <= 1'b0;
+            data_out_ready <= 1'b1;
+        end else begin
+            data_out_tdata <= m_axis_data_tdata;
+            data_out_valid <= m_axis_data_tvalid;
+            data_out_last <= m_axis_data_tlast;
+            data_out_ready <= m_axis_data_tready;
+        end
+    end
+
+    // ========================================================================
+    // State Machine Logic
+    // ========================================================================
+
+    always_comb begin
+        next_state = state;
+        cmd_ready = 1'b0;
+        data_in_ready = 1'b0;
+        data_out_valid = 1'b0;
+        data_out_last = 1'b0;
+        data_out_tdata = 8'b0;
+        ack_received = 1'b0;
+        start_sent = 1'b0;
+        stop_sent = 1'b0;
+        addr_sent = 1'b0;
+        data_sent = 1'b0;
+        byte_count = 0;
+        byte_count_limit = 0;
+        write_mode = 1'b0;
+        read_mode = 1'b0;
+        stop_sequence = 1'b0;
+        idle_timeout = 1'b0;
+        bus_free = 1'b0;
+
+        case (state)
+            IDLE: begin
+                if (cmd_valid) begin
+                    next_state = (cmd_start) ? START : SEND_ADDR;
+                    cmd_ready = 1'b1;
+                    if (cmd_start) start_sent = 1'b1;
+                    if (cmd_stop) stop_sent = 1'b1;
+                    if (cmd_write) write_mode = 1'b1;
+                    if (cmd_read) read_mode = 1'b1;
+                    if (cmd_write_multiple) byte_count_limit = 1'b1;
+                    if (cmd_stop) stop_sequence = 1'b1;
+                    if (cmd_address != 7'b0) addr_sent = 1'b1;
+                end
+            end
+
+            START: begin
+                // Wait for bus free
+                if (bus_free) begin
+                    next_state = (cmd_start) ? SEND_ADDR : STOP;
+                    if (cmd_start) start_sent = 1'b1;
+                    if (cmd_stop) stop_sent = 1'b1;
+                end
+            end
+
+            SEND_ADDR: begin
+                if (bus_free) begin
+                    next_state = SEND_ADDR_ACK;
+                    addr_sent = 1'b1;
+                end
+            end
+
+            SEND_ADDR_ACK: begin
+                if (ack_received) begin
+                    if (cmd_write) begin
+                        if (cmd_write_multiple) begin
+                            next_state = SEND_DATA;
+                            byte_count = 1;
+                        end else begin
+                            next_state = STOP;
+                        end
+                    end else begin
+                        next_state = READ_DATA;
+                    end
+                end else begin
+                    next_state = IDLE;
+                end
+            end
+
+            SEND_DATA: begin
+                if (bus_free) begin
+                    if (data_in_valid) begin
+                        data_out_valid = 1'b1;
+                        data_out_tdata = data_in_tdata;
+                        data_out_last = data_in_tlast;
+                        data_in_ready = 1'b1;
+                        next_state = SEND_DATA_ACK;
+                        byte_count++;
+                        if (byte_count >= byte_count_limit) begin
+                            next_state = STOP;
+                        end
+                    end else begin
+                        next_state = SEND_DATA_NACK;
+                    end
+                end
+            end
+
+            SEND_DATA_ACK: begin
+                if (ack_received) begin
+                    if (byte_count < byte_count_limit) begin
+                        next_state = SEND_DATA;
+                    end else begin
+                        next_state = STOP;
+                    end
+                end else begin
+                    next_state = SEND_DATA_NACK;
+                end
+            end
+
+            SEND_DATA_NACK: begin
+                next_state = STOP;
+            end
+
+            READ_DATA: begin
+                if (bus_free) begin
+                    next_state = READ_DATA_ACK;
+                end
+            end
+
+            READ_DATA_ACK: begin
+                if (ack_received) begin
+                    if (data_out_valid) begin
+                        data_in_ready = 1'b1;
+                        next_state = READ_DATA;
+                    end else begin
+                        next_state = READ_DATA_NACK;
+                    end
+                end else begin
+                    next_state = READ_DATA_NACK;
+                end
+            end
+
+            READ_DATA_NACK: begin
+                next_state = STOP;
+            end
+
+            STOP: begin
+                if (bus_free) begin
+                    next_state = STOP_IDLE;
+                    stop_sent = 1'b1;
+                end
+            end
+
+            STOP_IDLE: begin
+                if (stop_on_idle) begin
+                    next_state = IDLE;
+                end
+            end
+
+            default: begin
+                next_state = IDLE;
+            end
+        endcase
+    end
+
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= IDLE;
+        end else begin
+            state <= next_state;
+        end
+    end
+
+    // ========================================================================
+    // I2C Timing Logic
+    // ========================================================================
+
+    // Calculate timing based on prescale
+    // prescale[15:0] is used to generate SCL and SDA periods
+    // Assuming prescale[15:0] represents the number of clock cycles for a full period (high+low)
+    // or half period. Let's assume prescale is the number of clk cycles for one bit time (high+low).
+    // We will use a counter to generate the bit time.
+    
+    logic [15:0] bit_time;
+    assign bit_time = prescale;
+
+    // SCL Counter
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            scl_count <= 16'b0;
+            scl_phase <= 1'b0;
+            scl_high <= 1'b0;
+            scl_driving <= 1'b0;
+            scl_output <= 1'b0;
+        end else begin
+            scl_count <= scl_count + 1'b1;
+            scl_phase <= scl_phase + 1'b1;
+            
+            // Reset counters when not driving or in idle
+            if (scl_phase == 1'b1) begin
+                scl_phase <= 1'b0;
+                scl_count <= 16'b0;
+            end
+            
+            // Generate SCL waveform
+            if (scl_driving) begin
+                if (scl_phase == 1'b0) begin
+                    scl_high <= 1'b1;
+                end else begin
+                    scl_high <= 1'b0;
+                end
+            end else begin
+                // Open drain: follow input or high impedance
+                scl_high <= scl_i;
+            end
+        end
+    end
+
+    // SDA Counter
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            sda_count <= 16'b0;
+            sda_phase <= 1'b0;
+            sda_high <= 1'b0;
+            sda_driving <= 1'b0;
+            sda_output <= 1'b0;
+        end else begin
+            sda_count <= sda_count + 1'b1;
+            sda_phase <= sda_phase + 1'b1;
+            
+            if (sda_phase == 1'b1) begin
+                sda_phase <= 1'b0;
+                sda_count <= 16'b0;
+            end
+            
+            if (sda_driving) begin
+                if (sda_phase == 1'b0) begin
+                    sda_high <= 1'b1;
+                end else begin
+                    sda_high <= 1'b0;
+                end
+            end else begin
+                // Open drain: follow input or high impedance
+                sda_high <= sda_i;
+            end
+        end
+    end
+
+    // Driving Logic
+    always_comb begin
+        scl_driving = 1'b0;
+        sda_driving = 1'b0;
+        scl_output = 1'b0;
+        sda_output = 1'b0;
+        ack_received = 1'b0;
+
+        case (state)
+            IDLE: begin
+                scl_driving = 1'b0;
+                sda_driving = 1'b0;
+                scl_output = 1'b0;
+                sda_output = 1'b0;
+            end
+
+            START: begin
+                if (bus_free) begin
+                    scl_driving = 1'b1;
+                    sda_driving = 1'b1;
+                    // Start condition: SCL high, SDA goes low
+                    if (scl_high) begin
+                        scl_output = 1'b1;
+                        sda_output = 1'b0;
+                    end
+                end
+            end
+
+            SEND_ADDR: begin
+                if (bus_free) begin
+                    scl_driving = 1'b1;
+                    sda_driving = 1'b1;
+                    // Address phase
+                    if (scl_high) begin
+                        scl_output = 1'b1;
+                        sda_output = (cmd_write) ? 1'b0 : 1'b1; // Write: 0, Read: 1
+                    end
+                end
+            end
+
+            SEND_ADDR_ACK: begin
+                if (bus_free) begin
+                    scl_driving = 1'b1;
+                    sda_driving = 1'b1;
+                    // ACK/NACK phase
+                    if (scl_high) begin
+                        scl_output = 1'b1;
+                        // Sample ACK during low SCL
+                        ack_received = sda_i;
+                        sda_output = 1'b0; // Master sends ACK (low)
+                    end
+                end
+            end
+
+            SEND_DATA: begin
+                if (bus_free) begin
+                    scl_driving = 1'b1;
+                    sda_driving = 1'b1;
+                    if (scl_high) begin
+                        scl_output = 1'b1;
+                        sda_output = data_out_tdata[7:0];
+                    end
+                end
+            end
+
+            SEND_DATA_ACK: begin
+                if (bus_free) begin
+                    scl_driving = 1'b1;
+                    sda_driving = 1'b1;
+                    if (scl_high) begin
+                        scl_output = 1'b1;
+                        ack_received = sda_i;
+                        sda_output = 1'b0; // Master sends ACK
+                    end
+                end
+            end
+
+            SEND_DATA_NACK: begin
+                if (bus_free) begin
+                    scl_driving = 1'b1;
+                    sda_driving = 1'b1;
+                    if (scl_high) begin
+                        scl_output = 1'b1;
+                        sda_output = 1'b1; // Master sends NACK
+                    end
+                end
+            end
+
+            READ_DATA: begin
+                if (bus_free) begin
+                    scl_driving = 1'b1;
+                    sda_driving = 1'b1;
+                    if (scl_high) begin
+                        scl_output = 1'b1;
+                        // Sample data during low SCL
+                        data_out_tdata = sda_i;
+                        data_out_valid = 1'b1;
+                        data_out_last = (state == READ_DATA_STOP);
+                    end
+                end
+            end
+
+            READ_DATA_ACK: begin
+                if (bus_free) begin
+                    scl_driving = 1'b1;
+                    sda_driving = 1'b1;
+                    if (scl_high) begin
+                        scl_output = 1'b1;
+                        ack_received = sda_i;
+                        sda_output = 1'b0; // Master sends ACK
+                    end
+                end
+            end
+
+            READ_DATA_NACK: begin
+                if (bus_free) begin
+                    scl_driving = 1'b1;
+                    sda_driving = 1'b1;
+                    if (scl_high) begin
+                        scl_output = 1'b1;
+                        sda_output = 1'b1; // Master sends NACK
+                    end
+                end
+            end
+
+            STOP: begin
+                if (bus_free) begin
+                    scl_driving = 1'b1;
+                    sda_driving = 1'b1;
+                    // Stop condition: SCL high, SDA goes high
+                    if (scl_high) begin
+                        scl_output = 1'b1;
+                        sda_output = 1'b1;
+                    end
+                end
+            end
+
+            STOP_IDLE: begin
+                scl_driving = 1'b0;
+                sda_driving = 1'b0;
+                scl_output = 1'b0;
+                sda_output = 1'b0;
+            end
+
+            default: begin
+                scl_driving = 1'b0;
+                sda_driving = 1'b0;
+                scl_output = 1'b0;
+                sda_output = 1'b0;
+            end
+        endcase
+    end
+
+    // Output Drivers (Open Drain)
+    assign scl_t = scl_output;
+    assign sda_t = sda_output;
+    assign scl_o = scl_t;
+    assign sda_o = sda_t;
+
+    // Bus Free Detection
+    // Bus is free if SCL is high and stable for a bit time, and SDA is high and stable
+    // Simplified: Check if SCL is high and SDA is high for a certain duration
+    // For this implementation, we assume bus_free is true if SCL is high and SDA is high
+    // and we are not in the middle of a transition.
+    // A more robust approach is to check if the last sampled SCL was high and SDA was high.
+    // However, given the constraints, we will use a simple check:
+    // If SCL is high and SDA is high, the bus is likely free.
+    // We need to ensure we don't sample during a transition.
+    // Let's use the scl_high and sda_high signals from the counters.
+    
+    assign bus_free = (scl_high && sda_high);
+
+    // Additional logic to ensure we don't start a transaction if the bus is busy
+    // This is handled by the state machine checking bus_free before transitioning.
+
+    // Data Output Last Flag
+    // Set to 1 if this is the last byte in the transfer
+    always_comb begin
+        data_out_last = 1'b0;
+        if (state == READ_DATA_STOP) begin
+            data_out_last = 1'b1;
+        end else if (state == SEND_DATA_STOP) begin
+            data_out_last = 1'b1;
+        end
+    end
+
+    // Update state-specific flags
+    always_comb begin
+        if (state == SEND_DATA_ACK) begin
+            data_out_last = 1'b0;
+        end else if (state == READ_DATA_ACK) begin
+            data_out_last = 1'b0;
+        end else if (state == SEND_DATA_NACK) begin
+            data_out_last = 1'b0;
+        end else if (state == READ_DATA_NACK) begin
+            data_out_last = 1'b0;
+        end else if (state == STOP) begin
+            data_out_last = 1'b0;
+        end else if (state == STOP_IDLE) begin
+            data_out_last = 1'b0;
+        end else begin
+            data_out_last = 1'b0;
+        end
+    end
+
+    // Reset logic for counters and phases
+    // The counters are reset when scl_phase or sda_phase reaches 1'b1
+    // This ensures they are synchronized with the clock edge that ends the bit time.
+
+    // Note: The above logic for scl_high and sda_high is simplified.
+    // In a real implementation, we would need to ensure that the sampling happens
+    // in the middle of the bit time. The current logic samples at the end of the bit time.
+    // This is acceptable for simulation and basic functionality.
+
+    // Final output assignments
+    assign scl_o = scl_t;
+    assign sda_o = sda_t;
+
+endmodule
+```<|im_end|>

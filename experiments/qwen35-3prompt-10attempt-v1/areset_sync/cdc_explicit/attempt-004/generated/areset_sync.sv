@@ -1,0 +1,41 @@
+module areset_sync #(
+    parameter STAGES = 2
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    // Synchronizer chain for reset release
+    // STAGES defines the depth of the synchronizer pipeline
+    // Default is 2 stages, which is standard for robust CDC/RDC compliance
+    genvar i;
+    reg [STAGES-1:0] rst_pipe;
+
+    // Initialize the first stage of the synchronizer
+    // This stage captures the asynchronous reset signal on the first clock edge
+    always @(posedge clk or posedge async_rst_i) begin
+        if (async_rst_i)
+            rst_pipe[0] <= 1'b1;
+        else
+            rst_pipe[0] <= rst_pipe[0];
+    end
+
+    // Pipeline stages for reset release synchronization
+    // Each stage ensures the reset signal is stable before being passed to the next
+    generate
+        for (i = 1; i < STAGES; i = i + 1) begin : rst_stage
+            always @(posedge clk or posedge rst_pipe[i-1]) begin
+                if (rst_pipe[i-1])
+                    rst_pipe[i] <= 1'b1;
+                else
+                    rst_pipe[i] <= rst_pipe[i];
+            end
+        end
+    endgenerate
+
+    // Output the synchronized reset signal
+    // The final stage provides a clean, synchronized reset release
+    assign sync_rst_o = rst_pipe[STAGES-1];
+
+endmodule<|im_end|>

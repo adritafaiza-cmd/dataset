@@ -1,0 +1,460 @@
+```verilog
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output reg [WIDTH-1:0] dst_data_o
+);
+
+    // Internal state for the source domain
+    reg src_valid_reg;
+    reg src_data_reg [WIDTH-1:0];
+    reg src_ready_reg;
+
+    // Internal state for the destination domain
+    reg dst_valid_reg;
+    reg dst_data_reg [WIDTH-1:0];
+    reg dst_ready_reg;
+
+    // Synchronize src_valid and src_data to dst_clk domain
+    // We need to detect the edge where src_valid becomes high to capture data
+    reg src_valid_dst_sync;
+    reg src_valid_dst_sync_prev;
+    reg src_data_dst_sync [WIDTH-1:0];
+
+    // Synchronize dst_ready to src_clk domain
+    reg dst_ready_src_sync;
+    reg dst_ready_src_sync_prev;
+
+    // State machine for the source side (2-deep buffer logic)
+    // States: IDLE, WAIT_DST_READY, WAIT_SRC_VALID
+    // Actually, a simpler approach for "2-deep" with related clocks is to use
+    // a FIFO-like structure where we hold data until ready.
+    // Since the requirement is "2-deep", we can implement a small buffer.
+    // However, the standard robust way for related clocks with rate mismatch
+    // is a handshake buffer. Let's implement a 2-entry FIFO.
+
+    // Source side state
+    reg [1:0] src_state; // 0: IDLE, 1: WAIT_DST_READY, 2: WAIT_SRC_VALID
+    reg [1:0] src_count; // Buffer depth counter (0 to 2)
+
+    // Destination side state
+    reg [1:0] dst_state; // 0: IDLE, 1: WAIT_SRC_VALID
+    reg [1:0] dst_count; // Buffer depth counter (0 to 2)
+
+    // Data storage for the buffer
+    // We need two depths. Let's use a simple pointer or shift register approach.
+    // Given WIDTH is a parameter, let's use a small array or shift logic.
+    // Since it's 2-deep, we can just have two slots.
+    // But to keep it generic and simple without arrays (which are harder in 2001 for variable depth),
+    // we will use a shift register style or just two registers if we assume strict ordering.
+    // The prompt asks for "2-deep". Let's implement a 2-entry FIFO.
+    
+    // Source Domain Signals
+    reg [WIDTH-1:0] src_buf_data_0;
+    reg [WIDTH-1:0] src_buf_data_1;
+    reg [1:0] src_ptr; // Points to next write location (0, 1, or 2)
+
+    // Destination Domain Signals
+    reg [WIDTH-1:0] dst_buf_data_0;
+    reg [WIDTH-1:0] dst_buf_data_1;
+    reg [1:0] dst_ptr; // Points to next read location (0, 1, or 2)
+
+    // Synchronization Logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_valid_reg <= 1'b0;
+            src_data_reg <= 1'b0;
+            src_ready_reg <= 1'b1;
+            src_state <= 2'b00;
+            src_count <= 2'b00;
+            src_ptr <= 2'b00;
+            src_buf_data_0 <= 1'b0;
+            src_buf_data_1 <= 1'b0;
+        end else begin
+            src_valid_reg <= src_valid_i;
+            src_data_reg <= src_data_i;
+            src_ready_reg <= 1'b1; // Default ready, overridden by state machine
+        end
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_valid_reg <= 1'b0;
+            dst_data_reg <= 1'b0;
+            dst_ready_reg <= 1'b1;
+            dst_state <= 2'b00;
+            dst_count <= 2'b00;
+            dst_ptr <= 2'b00;
+            dst_buf_data_0 <= 1'b0;
+            dst_buf_data_1 <= 1'b0;
+        end else begin
+            dst_valid_reg <= 1'b0;
+            dst_data_reg <= 1'b0;
+            dst_ready_reg <= 1'b1;
+        end
+    end
+
+    // Cross-domain synchronization for src_valid
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_valid_dst_sync <= 1'b0;
+            src_valid_dst_sync_prev <= 1'b0;
+            src_data_dst_sync <= 1'b0;
+        end else begin
+            src_valid_dst_sync <= src_valid_reg;
+            src_valid_dst_sync_prev <= src_valid_dst_sync;
+            if (src_valid_dst_sync && !src_valid_dst_sync_prev) begin
+                src_data_dst_sync <= src_data_reg;
+            end else begin
+                src_data_dst_sync <= src_data_dst_sync;
+            end
+        end
+    end
+
+    // Cross-domain synchronization for dst_ready
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_ready_src_sync <= 1'b0;
+            dst_ready_src_sync_prev <= 1'b0;
+        end else begin
+            dst_ready_src_sync <= dst_ready_i;
+            dst_ready_src_sync_prev <= dst_ready_src_sync;
+        end
+    end
+
+    // Source Domain State Machine
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_state <= 2'b00;
+            src_count <= 2'b00;
+            src_ptr <= 2'b00;
+            src_ready_o <= 1'b1;
+        end else begin
+            case (src_state)
+                2'b00: begin // IDLE
+                    if (src_valid_i && dst_ready_src_sync) begin
+                        src_state <= 2'b01; // WAIT_DST_READY
+                        src_count <= 2'b01;
+                        src_ptr <= 2'b00;
+                        src_buf_data_0 <= src_data_i;
+                        src_ready_o <= 1'b0;
+                    end else if (src_valid_i) begin
+                        src_state <= 2'b01; // WAIT_DST_READY
+                        src_count <= 2'b01;
+                        src_ptr <= 2'b00;
+                        src_buf_data_0 <= src_data_i;
+                        src_ready_o <= 1'b0;
+                    end else begin
+                        src_state <= 2'b00;
+                        src_ready_o <= 1'b1;
+                    end
+                end
+
+                2'b01: begin // WAIT_DST_READY (Buffer Full or Processing)
+                    if (src_valid_i) begin
+                        // If we already have one item, push it to slot 1
+                        if (src_count == 2'b01) begin
+                            src_buf_data_1 <= src_data_i;
+                            src_ptr <= 2'b01;
+                            src_count <= 2'b10;
+                            src_ready_o <= 1'b0;
+                        end else begin
+                            // First item
+                            src_buf_data_0 <= src_data_i;
+                            src_ptr <= 2'b00;
+                            src_count <= 2'b01;
+                            src_ready_o <= 1'b0;
+                        end
+                    end else begin
+                        src_ready_o <= 1'b1;
+                    end
+                end
+
+                2'b10: begin // WAIT_SRC_VALID (Processing first item)
+                    if (dst_ready_src_sync) begin
+                        // Move item 0 to output, prepare for next
+                        src_state <= 2'b00;
+                        src_count <= 2'b00;
+                        src_ready_o <= 1'b1;
+                    end else begin
+                        src_ready_o <= 1'b0;
+                    end
+                end
+
+                2'b11: begin // Processing second item
+                    if (dst_ready_src_sync) begin
+                        src_state <= 2'b00;
+                        src_count <= 2'b00;
+                        src_ready_o <= 1'b1;
+                    end else begin
+                        src_ready_o <= 1'b0;
+                    end
+                end
+
+                default: begin
+                    src_state <= 2'b00;
+                    src_ready_o <= 1'b1;
+                end
+            endcase
+        end
+    end
+
+    // Destination Domain State Machine
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_state <= 2'b00;
+            dst_count <= 2'b00;
+            dst_ptr <= 2'b00;
+            dst_valid_o <= 1'b0;
+            dst_data_o <= 1'b0;
+        end else begin
+            case (dst_state)
+                2'b00: begin // IDLE
+                    if (src_valid_dst_sync) begin
+                        dst_state <= 2'b01; // WAIT_SRC_VALID
+                        dst_count <= 2'b01;
+                        dst_ptr <= 2'b00;
+                        dst_buf_data_0 <= src_data_dst_sync;
+                        dst_valid_o <= 1'b0;
+                    end else begin
+                        dst_state <= 2'b00;
+                        dst_valid_o <= 1'b0;
+                    end
+                end
+
+                2'b01: begin // WAIT_SRC_VALID (Buffer Full or Processing)
+                    if (src_valid_dst_sync) begin
+                        // If we already have one item, push it to slot 1
+                        if (dst_count == 2'b01) begin
+                            dst_buf_data_1 <= src_data_dst_sync;
+                            dst_ptr <= 2'b01;
+                            dst_count <= 2'b10;
+                            dst_valid_o <= 1'b0;
+                        end else begin
+                            // First item
+                            dst_buf_data_0 <= src_data_dst_sync;
+                            dst_ptr <= 2'b00;
+                            dst_count <= 2'b01;
+                            dst_valid_o <= 1'b0;
+                        end
+                    end else begin
+                        dst_valid_o <= 1'b1;
+                    end
+                end
+
+                2'b10: begin // WAIT_SRC_VALID (Processing first item)
+                    if (dst_ready_i) begin
+                        dst_state <= 2'b00;
+                        dst_count <= 2'b00;
+                        dst_valid_o <= 1'b0;
+                        dst_data_o <= dst_buf_data_0;
+                    end else begin
+                        dst_valid_o <= 1'b1;
+                    end
+                end
+
+                2'b11: begin // Processing second item
+                    if (dst_ready_i) begin
+                        dst_state <= 2'b00;
+                        dst_count <= 2'b00;
+                        dst_valid_o <= 1'b0;
+                        dst_data_o <= dst_buf_data_1;
+                    end else begin
+                        dst_valid_o <= 1'b1;
+                    end
+                end
+
+                default: begin
+                    dst_state <= 2'b00;
+                    dst_valid_o <= 1'b0;
+                    dst_data_o <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Output assignments
+    assign dst_valid_o = (dst_state == 2'b10) || (dst_state == 2'b11);
+    assign dst_data_o = (dst_state == 2'b10) ? dst_buf_data_0 : dst_buf_data_1;
+
+    // Note: The above logic for dst_valid_o and dst_data_o needs refinement based on the state machine transitions.
+    // Let's restructure the output logic to be cleaner within the state machine or as separate combinational logic.
+    
+    // Re-evaluating the state machine logic for clarity and correctness.
+    // The previous state machine had some redundancy. Let's simplify.
+    
+    // Source Side Logic (Simplified)
+    // State 0: Idle, Ready=1
+    // State 1: Waiting for dst_ready (Buffer has 1 item)
+    // State 2: Waiting for dst_ready (Buffer has 2 items)
+    
+    reg [1:0] src_fsm;
+    reg [1:0] src_depth;
+    reg [WIDTH-1:0] src_fifo [0:1];
+    reg [1:0] src_wptr;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_fsm <= 2'b00;
+            src_depth <= 2'b00;
+            src_wptr <= 2'b00;
+            src_fifo <= 1'b0;
+            src_ready_o <= 1'b1;
+        end else begin
+            case (src_fsm)
+                2'b00: begin // IDLE
+                    if (src_valid_i && dst_ready_src_sync) begin
+                        src_fifo[0] <= src_data_i;
+                        src_wptr <= 2'b00;
+                        src_depth <= 2'b01;
+                        src_fsm <= 2'b01;
+                        src_ready_o <= 1'b0;
+                    end else if (src_valid_i) begin
+                        src_fifo[0] <= src_data_i;
+                        src_wptr <= 2'b00;
+                        src_depth <= 2'b01;
+                        src_fsm <= 2'b01;
+                        src_ready_o <= 1'b0;
+                    end else begin
+                        src_ready_o <= 1'b1;
+                    end
+                end
+                2'b01: begin // Buffer has 1 item, waiting for dst_ready
+                    if (src_valid_i) begin
+                        src_fifo[1] <= src_data_i;
+                        src_wptr <= 2'b01;
+                        src_depth <= 2'b10;
+                        src_fsm <= 2'b10;
+                        src_ready_o <= 1'b0;
+                    end else begin
+                        src_ready_o <= 1'b1;
+                    end
+                end
+                2'b10: begin // Buffer has 2 items, waiting for dst_ready
+                    if (src_valid_i) begin
+                        // Overflow protection? The spec says 2-deep. 
+                        // If full and new data arrives, we might drop or wait. 
+                        // Usually, we wait. But if we wait forever, we deadlock.
+                        // Assuming the rate mismatch is small enough that we don't overflow 2-deep constantly.
+                        // Or we drop the oldest? "Absorbs a short rate mismatch".
+                        // Let's assume we wait if full, but if src_valid keeps coming, we might need to drop.
+                        // However, standard FIFO behavior on overflow is usually drop oldest or stall.
+                        // Given "2-deep", let's stall (wait for dst_ready) even if full.
+                        // But if src_valid is high and we are full, we stay full.
+                        // To prevent infinite stall if dst is slow, we might need to drop.
+                        // But the prompt implies a buffer to absorb mismatch.
+                        // Let's implement stall on full.
+                        src_ready_o <= 1'b0;
+                    end else begin
+                        src_ready_o <= 1'b1;
+                    end
+                end
+                2'b11: begin // Processing item 0
+                    if (dst_ready_src_sync) begin
+                        src_fifo[0] <= src_fifo[1]; // Shift
+                        src_wptr <= 2'b00;
+                        src_depth <= 2'b01;
+                        src_fsm <= 2'b01;
+                        src_ready_o <= 1'b1;
+                    end else begin
+                        src_ready_o <= 1'b0;
+                    end
+                end
+                default: begin
+                    src_fsm <= 2'b00;
+                    src_depth <= 2'b00;
+                    src_wptr <= 2'b00;
+                    src_fifo <= 1'b0;
+                    src_ready_o <= 1'b1;
+                end
+            endcase
+        end
+    end
+
+    // Destination Side Logic (Simplified)
+    // State 0: Idle
+    // State 1: Buffer has 1 item, waiting for src_valid
+    // State 2: Buffer has 2 items, waiting for src_valid
+    
+    reg [1:0] dst_fsm;
+    reg [1:0] dst_depth;
+    reg [WIDTH-1:0] dst_fifo [0:1];
+    reg [1:0] dst_rptr;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_fsm <= 2'b00;
+            dst_depth <= 2'b00;
+            dst_rptr <= 2'b00;
+            dst_fifo <= 1'b0;
+            dst_valid_o <= 1'b0;
+            dst_data_o <= 1'b0;
+        end else begin
+            case (dst_fsm)
+                2'b00: begin // IDLE
+                    if (src_valid_dst_sync) begin
+                        dst_fifo[0] <= src_data_dst_sync;
+                        dst_rptr <= 2'b00;
+                        dst_depth <= 2'b01;
+                        dst_fsm <= 2'b01;
+                        dst_valid_o <= 1'b0;
+                    end else begin
+                        dst_valid_o <= 1'b0;
+                    end
+                end
+                2'b01: begin // Buffer has 1 item, waiting for src_valid
+                    if (src_valid_dst_sync) begin
+                        dst_fifo[1] <= src_data_dst_sync;
+                        dst_rptr <= 2'b01;
+                        dst_depth <= 2'b10;
+                        dst_fsm <= 2'b10;
+                        dst_valid_o <= 1'b0;
+                    end else begin
+                        dst_valid_o <= 1'b1;
+                    end
+                end
+                2'b10: begin // Buffer has 2 items, waiting for src_valid
+                    if (src_valid_dst_sync) begin
+                        // Overflow? Stall.
+                        dst_valid_o <= 1'b0;
+                    end else begin
+                        dst_valid_o <= 1'b1;
+                    end
+                end
+                2'b11: begin // Processing item 0
+                    if (dst_ready_i) begin
+                        dst_fifo[0] <= dst_fifo[1]; // Shift
+                        dst_rptr <= 2'b00;
+                        dst_depth <= 2'b01;
+                        dst_fsm <= 2'b01;
+                        dst_valid_o <= 1'b0;
+                    end else begin
+                        dst_valid_o <= 1'b1;
+                    end
+                end
+                default: begin
+                    dst_fsm <= 2'b00;
+                    dst_depth <= 2'b00;
+                    dst_rptr <= 2'b00;
+                    dst_fifo <= 1'b0;
+                    dst_valid_o <= 1'b0;
+                    dst_data_o <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Output data selection
+    assign dst_data_o = (dst_fsm == 2'b01) ? dst_fifo[0] : dst_fifo[1];
+
+endmodule
+```<|im_end|>

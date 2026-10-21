@@ -1,0 +1,43 @@
+module rstgen (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic test_mode_i,
+    output logic rst_no,
+    output logic init_no
+);
+
+    logic rst_sync;
+    logic rst_sync_n;
+    logic init_pulse;
+
+    // Synchronize the active-low reset
+    // If test_mode_i is high, pass the raw reset directly (bypass sync)
+    // Otherwise, synchronize using a 2-stage synchronizer
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+            rst_sync <= 1'b1;
+        else if (test_mode_i)
+            rst_sync <= 1'b1;
+        else
+            rst_sync <= rst_sync;
+    end
+
+    // Generate active-low synchronized reset
+    rst_no = rst_sync;
+
+    // Generate initialization pulse
+    // When reset is released (rst_sync goes from 1 to 0), assert init_no for one clock cycle
+    // This is done by detecting the transition of rst_sync
+    always_ff @(posedge clk_i) begin
+        if (!rst_ni)
+            init_pulse <= 1'b0;
+        else if (rst_sync && !rst_sync_n)
+            init_pulse <= 1'b1;
+        else
+            init_pulse <= 1'b0;
+    end
+
+    // Active-low initialization qualifier
+    init_no = ~init_pulse;
+
+endmodule<|im_end|>

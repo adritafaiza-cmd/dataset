@@ -1,0 +1,185 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal registers for source domain
+  logic src_valid_reg;
+  logic src_data_reg [WIDTH-1:0];
+  logic src_valid_next;
+  logic src_data_next [WIDTH-1:0];
+
+  // Internal registers for destination domain
+  logic dst_valid_reg;
+  logic dst_data_reg [WIDTH-1:0];
+  logic dst_valid_next;
+  logic dst_data_next [WIDTH-1:0];
+
+  // ------------------------------------------------------------------
+  // Source Domain Logic
+  // ------------------------------------------------------------------
+  // Capture valid and data on rising edge of src_clk_i
+  // Reset is active-low, so we use !src_rst_ni as the enable condition
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_data_reg <= '{default: 1'b0};
+    end else begin
+      src_valid_reg <= src_valid_i;
+      src_data_reg <= src_data_i;
+    end
+  end
+
+  // Determine if we can accept a new item
+  // We can accept if:
+  // 1. Current item is not yet transferred (src_valid_reg is high)
+  // 2. Destination is ready (dst_ready_i is high)
+  // Note: dst_ready_i is asynchronous, so we sample it directly here.
+  // This is safe because we only use it to gate the acceptance of a new item.
+  // The actual transfer happens on the next cycle when dst_valid is asserted.
+  assign src_ready_o = (src_valid_reg && dst_ready_i);
+
+  // Prepare next state for valid and data
+  // If we are ready to accept, we prepare the data for the next cycle
+  // However, we only update the register if we are accepting a new item
+  // But wait, the standard 2-phase handshake works as follows:
+  // 1. Source captures data.
+  // 2. Source checks dst_ready. If high, it asserts dst_valid_next.
+  // 3. Destination captures data and asserts dst_valid.
+  // 4. Destination checks src_ready. If high, it deasserts dst_valid.
+  // 5. Source sees dst_valid and deasserts src_valid (implicitly by not re-asserting or by explicit logic).
+  
+  // Let's refine the logic to ensure exactly one outstanding item.
+  // State machine approach:
+  // State IDLE: src_valid_reg = 0
+  // State BUSY: src_valid_reg = 1, waiting for dst_ready
+  
+  // Actually, the simplest 2-phase implementation:
+  // 1. Source captures data on src_clk.
+  // 2. Source asserts dst_valid_next if src_valid_reg is high AND dst_ready_i is high.
+  // 3. Destination captures dst_valid_next and dst_data_next on dst_clk.
+  // 4. Destination asserts dst_valid_reg if dst_valid_next is high.
+  // 5. Destination deasserts dst_valid_reg if dst_ready_i is high (and dst_valid_reg was high).
+  // 6. Source deasserts src_valid_reg if dst_valid_reg was high (on next src_clk).
+  
+  // Let's restructure for clarity and safety:
+  
+  // Source side:
+  // - Capture src_valid_i and src_data_i.
+  // - If src_valid_reg is high and dst_ready_i is high, set dst_valid_next = 1.
+  // - If dst_valid_reg was high (meaning we sent something last cycle), set src_valid_next = 0.
+  
+  // Destination side:
+  // - Capture dst_valid_next and dst_data_next.
+  // - If dst_valid_next is high, set dst_valid_reg = 1.
+  // - If dst_valid_reg is high and dst_ready_i is high, set dst_valid_next = 0.
+  
+  // This ensures:
+  // - Data is captured only when valid.
+  // - Valid is asserted only when ready.
+  // - No spurious transactions on reset.
+  
+  // Source Domain Next State Logic
+  always_comb begin
+    src_valid_next = 1'b0;
+    src_data_next = '{default: 1'b0};
+    
+    if (!src_rst_ni) begin
+      src_valid_next = 1'b0;
+      src_data_next = '{default: 1'b0};
+    end else begin
+      // If we have data and destination is ready, we are about to send it.
+      // We keep the data in the register until it is acknowledged.
+      // But we need to deassert src_valid_reg once the transaction is complete.
+      // The transaction is complete when dst_valid_reg becomes 0.
+      
+      // Logic:
+      // 1. If dst_valid_reg is high, it means we sent something last cycle.
+      //    So we should deassert src_valid_reg now.
+      // 2. If src_valid_reg is high and dst_ready_i is high, we assert dst_valid_next.
+      //    We do NOT update src_valid_reg here; it will be updated based on dst_valid_reg.
+      
+      if (dst_valid_reg) begin
+        // Transaction completed in previous cycle (from dest perspective)
+        // So we clear our valid flag
+        src_valid_next = 1'b0;
+        src_data_next = '{default: 1'b0};
+      end else if (src_valid_reg && dst_ready_i) begin
+        // We have data and dest is ready, so we prepare to send
+        // We keep the data in the register for the next cycle
+        src_valid_next = src_valid_reg;
+        src_data_next = src_data_reg;
+      end else begin
+        // Idle or waiting
+        src_valid_next = 1'b0;
+        src_data_next = '{default: 1'b0};
+      end
+    end
+  end
+
+  // Destination Domain Next State Logic
+  always_comb begin
+    dst_valid_next = 1'b0;
+    dst_data_next = '{default: 1'b0};
+    
+    if (!dst_rst_ni) begin
+      dst_valid_next = 1'b0;
+      dst_data_next = '{default: 1'b0};
+    end else begin
+      // If dst_valid_reg is high and dst_ready_i is high, we acknowledge the transfer
+      // by deasserting dst_valid_next (which will cause dst_valid_reg to go low next cycle)
+      if (dst_valid_reg && dst_ready_i) begin
+        dst_valid_next = 1'b0;
+        dst_data_next = '{default: 1'b0};
+      end else if (src_valid_reg) begin
+        // We have a new item coming from source
+        // We capture it and assert dst_valid_next
+        dst_valid_next = 1'b1;
+        dst_data_next = src_data_reg;
+      end else begin
+        // Idle
+        dst_valid_next = 1'b0;
+        dst_data_next = '{default: 1'b0};
+      end
+    end
+  end
+
+  // Source Domain Registers
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_data_reg <= '{default: 1'b0};
+    end else begin
+      src_valid_reg <= src_valid_next;
+      src_data_reg <= src_data_next;
+    end
+  end
+
+  // Destination Domain Registers
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_data_reg <= '{default: 1'b0};
+    end else begin
+      dst_valid_reg <= dst_valid_next;
+      dst_data_reg <= dst_data_next;
+    end
+  end
+
+  // Output Assignments
+  assign src_ready_o = (src_valid_reg && dst_ready_i);
+  assign dst_data_o = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+endmodule<|im_end|>
+<|endoftext|>

@@ -1,0 +1,143 @@
+```verilog
+module isochronous_4phase_handshake (
+    input  src_clk_i,
+    input  src_rst_ni,
+    input  src_valid_i,
+    output src_ready_o,
+    input  dst_clk_i,
+    input  dst_rst_ni,
+    output dst_valid_o,
+    input  dst_ready_i
+);
+
+    // Internal signals for state machine
+    reg [1:0] src_state;
+    reg [1:0] dst_state;
+    
+    // State encoding: 00=Idle, 01=WaitValid, 10=WaitReady, 11=WaitAck
+    parameter IDLE = 2'b00;
+    parameter WAIT_VALID = 2'b01;
+    parameter WAIT_READY = 2'b10;
+    parameter WAIT_ACK = 2'b11;
+
+    // Synchronizers for cross-clock domain signals
+    // src_valid_i needs to be synchronized to dst_clk_i
+    reg src_valid_synced;
+    reg src_valid_synced_2;
+    
+    // dst_ready_i needs to be synchronized to src_clk_i
+    reg dst_ready_synced;
+    reg dst_ready_synced_2;
+
+    // Output registers
+    reg dst_valid_o_reg;
+
+    // Synchronization logic for src_valid_i (to dst domain)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_valid_synced <= 1'b0;
+        else
+            src_valid_synced <= src_valid_i;
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_valid_synced_2 <= 1'b0;
+        else
+            src_valid_synced_2 <= src_valid_synced;
+    end
+
+    // Synchronization logic for dst_ready_i (to src domain)
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ready_synced <= 1'b0;
+        else
+            dst_ready_synced <= dst_ready_i;
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ready_synced_2 <= 1'b0;
+        else
+            dst_ready_synced_2 <= dst_ready_synced;
+    end
+
+    // State Machine for Source Domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_state <= IDLE;
+        else
+            case (src_state)
+                IDLE: begin
+                    if (src_valid_i)
+                        src_state <= WAIT_VALID;
+                    else
+                        src_state <= IDLE;
+                end
+                WAIT_VALID: begin
+                    if (src_valid_i)
+                        src_state <= WAIT_READY;
+                    else
+                        src_state <= WAIT_VALID;
+                end
+                WAIT_READY: begin
+                    if (dst_ready_synced_2)
+                        src_state <= WAIT_ACK;
+                    else
+                        src_state <= WAIT_READY;
+                end
+                WAIT_ACK: begin
+                    src_state <= IDLE;
+                end
+                default:
+                    src_state <= IDLE;
+            endcase
+    end
+
+    // State Machine for Destination Domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_state <= IDLE;
+        else
+            case (dst_state)
+                IDLE: begin
+                    if (src_valid_synced_2)
+                        dst_state <= WAIT_READY;
+                    else
+                        dst_state <= IDLE;
+                end
+                WAIT_READY: begin
+                    if (dst_ready_i)
+                        dst_state <= WAIT_ACK;
+                    else
+                        dst_state <= WAIT_READY;
+                end
+                WAIT_ACK: begin
+                    dst_state <= IDLE;
+                end
+                default:
+                    dst_state <= IDLE;
+            endcase
+    end
+
+    // Output assignments
+    // src_ready_o is asserted when source is waiting for ready
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_ready_o <= 1'b0;
+        else
+            src_ready_o <= (src_state == WAIT_READY);
+    end
+
+    // dst_valid_o is asserted when destination is waiting for ack (has data)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_valid_o_reg <= 1'b0;
+        else
+            dst_valid_o_reg <= (dst_state == WAIT_READY);
+    end
+
+    assign dst_valid_o = dst_valid_o_reg;
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,289 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    localparam WORD_WIDTH = N;
+    localparam SPI_CLK_DIV = SPI_2X_CLK_DIV;
+
+    // State encoding
+    localparam IDLE = 2'd0;
+    localparam SELECT = 2'd1;
+    localparam TRANSFER = 2'd2;
+    localparam AWAIT_WR_ACK = 2'd3;
+    localparam AWAIT_DO_VALID = 2'd4;
+
+    reg [1:0] state;
+    reg [WORD_WIDTH-1:0] shift_reg;
+    reg [WORD_WIDTH-1:0] rx_data;
+    reg [WORD_WIDTH-1:0] tx_data;
+    reg [WORD_WIDTH-1:0] last_rx_data;
+    reg wr_ack_pending;
+    reg do_valid_pending;
+    reg [WORD_WIDTH-1:0] do_data;
+    reg ssel_active;
+    reg [3:0] bit_count;
+    reg [3:0] rx_bit_count;
+    reg [3:0] tx_bit_count;
+    reg sck_edge;
+    reg sck_edge_d;
+    reg di_req_valid;
+    reg di_req_d;
+    reg wren_d;
+
+    // Clock domain crossing registers for parallel interface
+    reg [WORD_WIDTH-1:0] di_sync_reg;
+    reg wren_sync_reg;
+    reg di_req_sync_reg;
+
+    // Clock domain crossing registers for SPI output data
+    reg [WORD_WIDTH-1:0] do_sync_reg;
+    reg do_valid_sync_reg;
+
+    // SCK edge detection (sclk_i domain)
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i)
+            sck_edge <= 1'b0;
+        else
+            sck_edge <= sclk_i;
+    end
+
+    // Parallel interface synchronization (pclk_i domain)
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_d <= 1'b0;
+            wren_d <= 1'b0;
+        end else begin
+            di_req_d <= di_req_i;
+            wren_d <= wren_i;
+        end
+    end
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_sync_reg <= {WORD_WIDTH{1'b0}};
+            wren_sync_reg <= 1'b0;
+        end else begin
+            di_sync_reg <= di_sync_reg;
+            wren_sync_reg <= wren_sync_reg;
+        end
+    end
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_sync_reg <= 1'b0;
+        end else begin
+            di_req_sync_reg <= di_req_d;
+        end
+    end
+
+    // SPI output data synchronization (sclk_i domain)
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            do_sync_reg <= {WORD_WIDTH{1'b0}};
+            do_valid_sync_reg <= 1'b0;
+        end else begin
+            do_sync_reg <= do_sync_reg;
+            do_valid_sync_reg <= do_valid_sync_reg;
+        end
+    end
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            do_valid_sync_reg <= 1'b0;
+        end else begin
+            do_valid_sync_reg <= do_valid_d;
+        end
+    end
+
+    // State machine logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state <= IDLE;
+            bit_count <= 4'd0;
+            rx_bit_count <= 4'd0;
+            tx_bit_count <= 4'd0;
+            shift_reg <= {WORD_WIDTH{1'b0}};
+            rx_data <= {WORD_WIDTH{1'b0}};
+            tx_data <= {WORD_WIDTH{1'b0}};
+            last_rx_data <= {WORD_WIDTH{1'b0}};
+            wr_ack_pending <= 1'b0;
+            do_valid_pending <= 1'b0;
+            do_data <= {WORD_WIDTH{1'b0}};
+            ssel_active <= 1'b0;
+            di_req_valid <= 1'b0;
+        end else begin
+            case (state)
+                IDLE: begin
+                    if (di_req_valid && wren_sync_reg) begin
+                        state <= SELECT;
+                        tx_data <= di_sync_reg;
+                        shift_reg <= {WORD_WIDTH{1'b0}};
+                        rx_data <= {WORD_WIDTH{1'b0}};
+                        bit_count <= 4'd0;
+                        rx_bit_count <= 4'd0;
+                        tx_bit_count <= 4'd0;
+                        wr_ack_pending <= 1'b0;
+                        do_valid_pending <= 1'b0;
+                        do_data <= {WORD_WIDTH{1'b0}};
+                    end else begin
+                        state <= IDLE;
+                    end
+                end
+
+                SELECT: begin
+                    if (bit_count == 4'd1) begin
+                        state <= TRANSFER;
+                        bit_count <= 4'd1;
+                    end else begin
+                        bit_count <= bit_count + 1;
+                    end
+                end
+
+                TRANSFER: begin
+                    if (tx_bit_count == WORD_WIDTH) begin
+                        state <= AWAIT_WR_ACK;
+                        wr_ack_pending <= 1'b1;
+                        bit_count <= 4'd0;
+                        rx_bit_count <= 4'd0;
+                        tx_bit_count <= 4'd0;
+                    end else begin
+                        bit_count <= bit_count + 1;
+                        tx_bit_count <= tx_bit_count + 1;
+                        rx_bit_count <= rx_bit_count + 1;
+                    end
+                end
+
+                AWAIT_WR_ACK: begin
+                    if (wr_ack_pending) begin
+                        state <= AWAIT_DO_VALID;
+                        wr_ack_pending <= 1'b0;
+                        do_valid_pending <= 1'b1;
+                        do_data <= rx_data;
+                    end else begin
+                        state <= AWAIT_WR_ACK;
+                    end
+                end
+
+                AWAIT_DO_VALID: begin
+                    if (do_valid_pending) begin
+                        state <= IDLE;
+                        do_valid_pending <= 1'b0;
+                        bit_count <= 4'd0;
+                        rx_bit_count <= 4'd0;
+                        tx_bit_count <= 4'd0;
+                    end else begin
+                        state <= AWAIT_DO_VALID;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Parallel interface input logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_valid <= 1'b0;
+        end else begin
+            di_req_valid <= di_req_sync_reg;
+        end
+    end
+
+    // SPI output logic
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_ssel_o <= 1'b1;
+            spi_sck_o <= 1'b0;
+            spi_mosi_o <= 1'b0;
+            do_valid_d <= 1'b0;
+            do_o <= {WORD_WIDTH{1'b0}};
+        end else begin
+            case (state)
+                IDLE: begin
+                    spi_ssel_o <= 1'b1;
+                    spi_sck_o <= 1'b0;
+                    spi_mosi_o <= 1'b0;
+                    do_valid_d <= 1'b0;
+                    do_o <= {WORD_WIDTH{1'b0}};
+                end
+
+                SELECT: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o <= 1'b0;
+                    spi_mosi_o <= 1'b0;
+                    do_valid_d <= 1'b0;
+                    do_o <= {WORD_WIDTH{1'b0}};
+                end
+
+                TRANSFER: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o <= 1'b0;
+                    spi_mosi_o <= shift_reg[WORD_WIDTH-1];
+                    
+                    if (rx_bit_count < WORD_WIDTH) begin
+                        rx_data[WORD_WIDTH-1-rx_bit_count] <= spi_miso_i;
+                    end
+                    
+                    if (tx_bit_count < WORD_WIDTH) begin
+                        shift_reg[WORD_WIDTH-1-tx_bit_count] <= tx_data[WORD_WIDTH-1-tx_bit_count];
+                    end
+
+                    do_valid_d <= 1'b0;
+                    do_o <= {WORD_WIDTH{1'b0}};
+                end
+
+                AWAIT_WR_ACK: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o <= 1'b0;
+                    spi_mosi_o <= 1'b0;
+                    do_valid_d <= 1'b0;
+                    do_o <= {WORD_WIDTH{1'b0}};
+                end
+
+                AWAIT_DO_VALID: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o <= 1'b0;
+                    spi_mosi_o <= 1'b0;
+                    
+                    if (do_valid_sync_reg) begin
+                        do_valid_d <= 1'b1;
+                        do_o <= do_data;
+                    end else begin
+                        do_valid_d <= 1'b0;
+                        do_o <= {WORD_WIDTH{1'b0}};
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Output registers for parallel interface
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            wr_ack_o <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o <= {WORD_WIDTH{1'b0}};
+        end else begin
+            wr_ack_o <= wr_ack_pending;
+            do_valid_o <= do_valid_pending;
+            do_o <= do_data;
+        end
+    end
+
+endmodule
+```<|im_end|>

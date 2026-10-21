@@ -1,0 +1,304 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // Clock domain definitions
+    localparam PCLK_DIV = 1; // Assuming 1:1 for parallel clock logic simplicity unless specified otherwise
+    localparam SPI_DIV = SPI_2X_CLK_DIV;
+
+    // State encoding
+    localparam IDLE = 2'd0;
+    localparam PREPHASE = 2'd1;
+    localparam TRANSFER = 2'd2;
+    localpost WAIT_ACK = 2'd3;
+
+    // State registers
+    reg [1:0] state_p;
+    reg [1:0] state_s;
+
+    // Counters
+    reg [3:0] tx_cnt_p;
+    reg [3:0] tx_cnt_s;
+    reg [N-1:0] tx_data_p;
+    reg [N-1:0] rx_data_p;
+    reg [N-1:0] rx_data_s;
+
+    // Control signals
+    reg di_req;
+    reg wr_ack;
+    reg do_valid;
+    reg [N-1:0] do_data;
+
+    // Cross-domain signals
+    reg pclk_enable;
+    reg sclk_enable;
+
+    // Synchronous logic for Parallel Domain (PCLK)
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state_p <= IDLE;
+            tx_cnt_p <= 4'd0;
+            tx_data_p <= 0;
+            rx_data_p <= 0;
+            di_req <= 0;
+            wr_ack <= 0;
+            do_valid <= 0;
+            do_data <= 0;
+        end else begin
+            // State Machine
+            case (state_p)
+                IDLE: begin
+                    if (wren_i && di_req) begin
+                        state_p <= PREPHASE;
+                        tx_cnt_p <= 4'd0;
+                        tx_data_p <= di_i;
+                        di_req <= 0; // Deassert request immediately after capture
+                    end
+                end
+                PREPHASE: begin
+                    if (tx_cnt_p == 4'd0) begin
+                        state_p <= TRANSFER;
+                        tx_cnt_p <= 4'd1; // Start counting after prephase
+                    end
+                end
+                TRANSFER: begin
+                    if (tx_cnt_p == N) begin
+                        state_p <= WAIT_ACK;
+                        rx_data_p <= rx_data_s; // Move received data from serial domain
+                        do_valid <= 1;
+                        do_data <= rx_data_p;
+                    end else begin
+                        // Shift out data, shift in data
+                        rx_data_p <= {rx_data_p[N-1:1], spi_miso_i};
+                        tx_cnt_p <= tx_cnt_p + 1;
+                    end
+                end
+                WAIT_ACK: begin
+                    if (wr_ack) begin
+                        state_p <= IDLE;
+                        do_valid <= 0;
+                        wr_ack <= 0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Synchronous logic for Serial Domain (SCLK)
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state_s <= IDLE;
+            tx_cnt_s <= 4'd0;
+            rx_data_s <= 0;
+            spi_sck_o <= 1'b0;
+            spi_ssel_o <= 1'b1;
+            spi_mosi_o <= 1'b0;
+        end else begin
+            // State Machine
+            case (state_s)
+                IDLE: begin
+                    spi_sck_o <= 1'b0;
+                    spi_ssel_o <= 1'b1;
+                    spi_mosi_o <= 1'b0;
+                end
+                PREPHASE: begin
+                    spi_sck_o <= 1'b0;
+                    spi_ssel_o <= 1'b0; // Assert CS
+                    spi_mosi_o <= tx_data_p[0]; // Shift out MSB first
+                    tx_cnt_s <= 4'd0;
+                end
+                TRANSFER: begin
+                    spi_sck_o <= 1'b1;
+                    spi_mosi_o <= tx_data_p[tx_cnt_s];
+                    rx_data_s <= {rx_data_s[N-1:1], spi_miso_i};
+                    tx_cnt_s <= tx_cnt_s + 1;
+                end
+                WAIT_ACK: begin
+                    spi_sck_o <= 1'b0;
+                    spi_ssel_o <= 1'b1; // Deassert CS
+                    spi_mosi_o <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Clock Domain Crossing (CDC) Logic
+    // We need to detect when the parallel domain wants to start a transfer
+    // and when the serial domain has finished.
+
+    // 1. Capture di_req and wren_i in Serial Domain to trigger PREPHASE
+    // Since PREPHASE is entered based on state_p, we need to synchronize the request.
+    // However, the state_p logic handles the transition. We need to ensure the serial domain
+    // knows when to start.
+    // Actually, the current design has a slight issue: state_p transitions to PREPHASE,
+    // but state_s stays in IDLE until it detects a start condition.
+    // We need a handshake mechanism or a flag passed from P to S.
+
+    // Revised Approach:
+    // PCLK domain decides "I want to send". It sets a flag.
+    // SCLK domain detects this flag and starts.
+    // SCLK domain sets a flag "I am done".
+    // PCLK domain detects "I am done" and asserts wr_ack.
+
+    reg [1:0] req_sync;
+    reg [1:0] ack_sync;
+    reg [1:0] done_sync;
+
+    // Synchronize PCLK signals to SCLK domain
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            req_sync <= 2'd0;
+            ack_sync <= 2'd0;
+            done_sync <= 2'd0;
+        end else begin
+            req_sync <= {req_sync[0], di_req};
+            ack_sync <= {ack_sync[0], wr_ack};
+            done_sync <= {done_sync[0], do_valid};
+        end
+    end
+
+    // Synchronize SCLK signals to PCLK domain
+    reg [1:0] sclk_req_sync;
+    reg [1:0] sclk_done_sync;
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sclk_req_sync <= 2'd0;
+            sclk_done_sync <= 2'd0;
+        end else begin
+            sclk_req_sync <= {sclk_req_sync[0], state_s == PREPHASE};
+            sclk_done_sync <= {sclk_done_sync[0], state_s == WAIT_ACK};
+        end
+    end
+
+    // Update Parallel Domain State based on Synchronized Serial signals
+    // This logic is inside the PCLK always block to keep it clean, 
+    // but effectively overrides the direct wren_i check if we want strict handshake.
+    // Let's refine the PCLK FSM to use the synchronized 'start' signal.
+
+    // Re-implementing PCLK FSM with proper CDC inputs
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state_p <= IDLE;
+            tx_cnt_p <= 4'd0;
+            tx_data_p <= 0;
+            rx_data_p <= 0;
+            di_req <= 0;
+            wr_ack <= 0;
+            do_valid <= 0;
+            do_data <= 0;
+            req_sync <= 2'd0;
+        end else begin
+            case (state_p)
+                IDLE: begin
+                    if (sclk_req_sync[1]) begin // Rising edge of start signal
+                        state_p <= PREPHASE;
+                        tx_cnt_p <= 4'd0;
+                        tx_data_p <= di_i;
+                        di_req <= 0;
+                    end
+                end
+                PREPHASE: begin
+                    if (tx_cnt_p == 4'd0) begin
+                        state_p <= TRANSFER;
+                        tx_cnt_p <= 4'd1;
+                    end
+                end
+                TRANSFER: begin
+                    if (tx_cnt_p == N) begin
+                        state_p <= WAIT_ACK;
+                        rx_data_p <= rx_data_s;
+                        do_valid <= 1;
+                        do_data <= rx_data_p;
+                    end else begin
+                        rx_data_p <= {rx_data_p[N-1:1], spi_miso_i};
+                        tx_cnt_p <= tx_cnt_p + 1;
+                    end
+                end
+                WAIT_ACK: begin
+                    if (sclk_done_sync[1]) begin // Rising edge of done signal
+                        state_p <= IDLE;
+                        do_valid <= 0;
+                        wr_ack <= 0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Update Serial Domain State based on PCLK signals
+    // We need to detect the rising edge of the request from PCLK domain
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state_s <= IDLE;
+            tx_cnt_s <= 4'd0;
+            rx_data_s <= 0;
+            spi_sck_o <= 1'b0;
+            spi_ssel_o <= 1'b1;
+            spi_mosi_o <= 1'b0;
+            ack_sync <= 2'd0;
+            done_sync <= 2'd0;
+        end else begin
+            // Detect rising edge of request from PCLK
+            if (sclk_req_sync[1] && !sclk_req_sync[0]) begin
+                state_s <= PREPHASE;
+                tx_cnt_s <= 4'd0;
+            end
+
+            case (state_s)
+                IDLE: begin
+                    spi_sck_o <= 1'b0;
+                    spi_ssel_o <= 1'b1;
+                    spi_mosi_o <= 1'b0;
+                end
+                PREPHASE: begin
+                    spi_sck_o <= 1'b0;
+                    spi_ssel_o <= 1'b0;
+                    spi_mosi_o <= tx_data_p[0];
+                    tx_cnt_s <= 4'd0;
+                end
+                TRANSFER: begin
+                    spi_sck_o <= 1'b1;
+                    spi_mosi_o <= tx_data_p[tx_cnt_s];
+                    rx_data_s <= {rx_data_s[N-1:1], spi_miso_i};
+                    tx_cnt_s <= tx_cnt_s + 1;
+                end
+                WAIT_ACK: begin
+                    spi_sck_o <= 1'b0;
+                    spi_ssel_o <= 1'b1;
+                    spi_mosi_o <= 1'b0;
+                    // Detect rising edge of ack from PCLK
+                    if (ack_sync[1] && !ack_sync[0]) begin
+                        state_s <= IDLE;
+                        ack_sync <= 2'd0;
+                        done_sync <= 2'd0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Output assignments
+    assign di_req_o = di_req;
+    assign wr_ack_o = wr_ack;
+    assign do_valid_o = do_valid;
+    assign do_o = do_data;
+
+endmodule
+```<|im_end|>

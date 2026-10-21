@@ -1,0 +1,86 @@
+```verilog
+`timescale 1ns/1ps
+
+module areset_sync #(
+    parameter STAGES = 2
+)(
+    input  wire        clk,
+    input  wire        async_rst_i,
+    output reg         sync_rst_o
+);
+
+    // Internal state to track the number of clock cycles since async_rst_i was released
+    reg [STAGES - 1 : 0] release_count;
+    reg                  rst_active;
+
+    // Stage 1: Detect the release of the asynchronous reset
+    // We use a simple edge detector on the negation of async_rst_i
+    // When async_rst_i goes low, we start counting.
+    // We need to ensure we don't start counting while the reset is still active.
+    reg                  prev_async_rst;
+    reg                  detect_release;
+
+    always @(posedge clk or posedge async_rst_i) begin
+        if (posedge async_rst_i) begin
+            // Reset is asserted (high). Stop counting and clear state.
+            rst_active <= 1'b1;
+            release_count <= 0;
+            detect_release <= 1'b0;
+        end else begin
+            // Reset is de-asserted (low).
+            if (!rst_active) begin
+                // If we are already in the counting phase, continue.
+                // If this is the first time we see it low, we detect the release edge.
+                if (prev_async_rst) begin
+                    detect_release <= 1'b1;
+                end
+                // If prev_async_rst was already 0, we are just maintaining the low state.
+            end
+        end
+        prev_async_rst <= async_rst_i;
+    end
+
+    // Stage 2: Count down the release duration
+    // Once the release is detected, we count down STAGES cycles.
+    // The reset remains asserted until the counter reaches 0.
+    always @(posedge clk or posedge async_rst_i) begin
+        if (posedge async_rst_i) begin
+            // Reset asserted
+            rst_active <= 1'b1;
+            release_count <= 0;
+        end else begin
+            // Reset de-asserted
+            if (rst_active) begin
+                // If we just detected the release edge, start counting
+                if (detect_release) begin
+                    release_count <= STAGES - 1;
+                    detect_release <= 1'b0;
+                end else begin
+                    // Continue counting down
+                    if (release_count > 0) begin
+                        release_count <= release_count - 1;
+                    end
+                end
+            end else begin
+                // Reset is already low and we are not in the counting phase (should not happen in normal flow)
+                release_count <= 0;
+            end
+        end
+    end
+
+    // Output logic
+    // sync_rst_o is asserted if the reset is active OR if we are still in the release countdown
+    always @(posedge clk or posedge async_rst_i) begin
+        if (posedge async_rst_i) begin
+            sync_rst_o <= 1'b1;
+        end else begin
+            if (rst_active || release_count > 0) begin
+                sync_rst_o <= 1'b1;
+            end else begin
+                sync_rst_o <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

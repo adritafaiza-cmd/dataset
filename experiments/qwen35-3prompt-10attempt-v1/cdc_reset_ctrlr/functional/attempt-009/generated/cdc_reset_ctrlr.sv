@@ -1,0 +1,244 @@
+```verilog
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  a_clk_i,
+    input  a_rst_ni,
+    input  a_clear_i,
+    output a_clear_o,
+    input  a_clear_ack_i,
+    output a_isolate_o,
+    input  a_isolate_ack_i,
+    input  b_clk_i,
+    input  b_rst_ni,
+    input  b_clear_i,
+    output b_clear_o,
+    input  b_clear_ack_i,
+    output b_isolate_o
+);
+
+    // ------------------------------------------------------------------
+    // State Machine Definition
+    // ------------------------------------------------------------------
+    // States:
+    // IDLE: Normal operation.
+    // REQ: Request received (local or peer), initiating sequence.
+    // ISOLATE: Isolating both domains. Waiting for peer isolate ack.
+    // CLEAR: Clearing both domains. Waiting for peer clear ack.
+    // DONE: Sequence complete, returning to IDLE.
+
+    typedef enum logic [1:0] {
+        IDLE,
+        REQ,
+        ISOLATE,
+        CLEAR,
+        DONE
+    } state_t;
+
+    state_t current_state, next_state;
+
+    // ------------------------------------------------------------------
+    // Synchronizers for Asynchronous Inputs
+    // ------------------------------------------------------------------
+    // Synchronize a_clear_i
+    logic [SYNC_STAGES-1:0] a_clear_sync;
+    genvar i;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_a_clear_sync
+            logic a_clear_sync_tmp;
+            always @(posedge a_clk_i or negedge a_rst_ni) begin
+                if (!a_rst_ni)
+                    a_clear_sync_tmp <= 1'b0;
+                else if (i == 0)
+                    a_clear_sync_tmp <= a_clear_i;
+                else
+                    a_clear_sync_tmp <= a_clear_sync[i-1];
+            end
+        end
+    endgenerate
+    assign a_clear_sync[SYNC_STAGES-1] = a_clear_sync_tmp; // Capture final stage
+
+    // Synchronize b_clear_i
+    logic [SYNC_STAGES-1:0] b_clear_sync;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_b_clear_sync
+            logic b_clear_sync_tmp;
+            always @(posedge b_clk_i or negedge b_rst_ni) begin
+                if (!b_rst_ni)
+                    b_clear_sync_tmp <= 1'b0;
+                else if (i == 0)
+                    b_clear_sync_tmp <= b_clear_i;
+                else
+                    b_clear_sync_tmp <= b_clear_sync[i-1];
+            end
+        end
+    endgenerate
+    assign b_clear_sync[SYNC_STAGES-1] = b_clear_sync_tmp;
+
+    // Synchronize a_isolate_ack_i
+    logic [SYNC_STAGES-1:0] a_isolate_ack_sync;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_a_isolate_ack_sync
+            logic a_isolate_ack_sync_tmp;
+            always @(posedge a_clk_i or negedge a_rst_ni) begin
+                if (!a_rst_ni)
+                    a_isolate_ack_sync_tmp <= 1'b0;
+                else if (i == 0)
+                    a_isolate_ack_sync_tmp <= a_isolate_ack_i;
+                else
+                    a_isolate_ack_sync_tmp <= a_isolate_ack_sync[i-1];
+            end
+        end
+    endgenerate
+    assign a_isolate_ack_sync[SYNC_STAGES-1] = a_isolate_ack_sync_tmp;
+
+    // Synchronize b_isolate_ack_i
+    logic [SYNC_STAGES-1:0] b_isolate_ack_sync;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_b_isolate_ack_sync
+            logic b_isolate_ack_sync_tmp;
+            always @(posedge b_clk_i or negedge b_rst_ni) begin
+                if (!b_rst_ni)
+                    b_isolate_ack_sync_tmp <= 1'b0;
+                else if (i == 0)
+                    b_isolate_ack_sync_tmp <= b_isolate_ack_i;
+                else
+                    b_isolate_ack_sync_tmp <= b_isolate_ack_sync[i-1];
+            end
+        end
+    endgenerate
+    assign b_isolate_ack_sync[SYNC_STAGES-1] = b_isolate_ack_sync_tmp;
+
+    // Synchronize a_clear_ack_i
+    logic [SYNC_STAGES-1:0] a_clear_ack_sync;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_a_clear_ack_sync
+            logic a_clear_ack_sync_tmp;
+            always @(posedge a_clk_i or negedge a_rst_ni) begin
+                if (!a_rst_ni)
+                    a_clear_ack_sync_tmp <= 1'b0;
+                else if (i == 0)
+                    a_clear_ack_sync_tmp <= a_clear_ack_i;
+                else
+                    a_clear_ack_sync_tmp <= a_clear_ack_sync[i-1];
+            end
+        end
+    endgenerate
+    assign a_clear_ack_sync[SYNC_STAGES-1] = a_clear_ack_sync_tmp;
+
+    // Synchronize b_clear_ack_i
+    logic [SYNC_STAGES-1:0] b_clear_ack_sync;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_b_clear_ack_sync
+            logic b_clear_ack_sync_tmp;
+            always @(posedge b_clk_i or negedge b_rst_ni) begin
+                if (!b_rst_ni)
+                    b_clear_ack_sync_tmp <= 1'b0;
+                else if (i == 0)
+                    b_clear_ack_sync_tmp <= b_clear_ack_i;
+                else
+                    b_clear_ack_sync_tmp <= b_clear_ack_sync[i-1];
+            end
+        end
+    endgenerate
+    assign b_clear_ack_sync[SYNC_STAGES-1] = b_clear_ack_sync_tmp;
+
+    // ------------------------------------------------------------------
+    // State Machine Logic
+    // ------------------------------------------------------------------
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            current_state <= IDLE;
+        else
+            current_state <= next_state;
+    end
+
+    always @(*) begin
+        next_state = current_state;
+
+        case (current_state)
+            IDLE: begin
+                // Check if any request is active (local or peer)
+                if (a_clear_sync[SYNC_STAGES-1] || b_clear_sync[SYNC_STAGES-1])
+                    next_state = REQ;
+                else
+                    next_state = IDLE;
+            end
+
+            REQ: begin
+                // Transition to ISOLATE immediately upon entering REQ state
+                // This ensures we don't wait for the other side to request if one already did.
+                // The protocol requires: Request -> Isolate -> Clear -> Done.
+                next_state = ISOLATE;
+            end
+
+            ISOLATE: begin
+                // Wait for peer isolate ack
+                if (current_state == ISOLATE) begin
+                    // We are in ISOLATE state. We need to wait for the peer's isolate ack.
+                    // If we are in domain A, we wait for b_isolate_ack.
+                    // If we are in domain B, we wait for a_isolate_ack.
+                    // However, the state machine is global. We must wait for BOTH isolate acks 
+                    // to be stable before moving to CLEAR, but the transition logic here 
+                    // is simplified to: once we enter ISOLATE, we drive outputs and wait for acks.
+                    // To strictly follow "wait for both isolate acks", we can use a counter or 
+                    // check the specific ack corresponding to the domain we are currently observing.
+                    // Since the state is global, we check the ack from the *other* domain 
+                    // to confirm the peer has seen our isolate request (which implies they are isolating too).
+                    
+                    // Actually, the requirement says: "wait for both isolate acks".
+                    // In the ISOLATE state, we have already driven both isolate_o.
+                    // We need to wait until a_isolate_ack_i AND b_isolate_ack_i are high.
+                    // Since we are in a single FSM, we can just check the condition.
+                    
+                    if (a_isolate_ack_sync[SYNC_STAGES-1] && b_isolate_ack_sync[SYNC_STAGES-1])
+                        next_state = CLEAR;
+                    else
+                        next_state = ISOLATE;
+                end
+            end
+
+            CLEAR: begin
+                // Wait for peer clear ack
+                if (current_state == CLEAR) begin
+                    // Similar to ISOLATE, we need both clear acks to be high.
+                    if (a_clear_ack_sync[SYNC_STAGES-1] && b_clear_ack_sync[SYNC_STAGES-1])
+                        next_state = DONE;
+                    else
+                        next_state = CLEAR;
+                end
+            end
+
+            DONE: begin
+                // Return to IDLE
+                next_state = IDLE;
+            end
+
+            default:
+                next_state = IDLE;
+        endcase
+    end
+
+    // ------------------------------------------------------------------
+    // Output Logic
+    // ------------------------------------------------------------------
+    // Drive outputs based on state
+    always @(*) begin
+        a_clear_o = 1'b0;
+        b_clear_o = 1'b0;
+        a_isolate_o = 1'b0;
+        b_isolate_o = 1'b0;
+
+        if (current_state == ISOLATE || current_state == CLEAR) begin
+            a_isolate_o = 1'b1;
+            b_isolate_o = 1'b1;
+        end
+
+        if (current_state == CLEAR) begin
+            a_clear_o = 1'b1;
+            b_clear_o = 1'b1;
+        end
+    end
+
+endmodule
+```<|im_end|>

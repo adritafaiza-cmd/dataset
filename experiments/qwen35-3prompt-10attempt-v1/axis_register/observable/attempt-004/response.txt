@@ -1,0 +1,231 @@
+```verilog
+module axis_register #
+(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI Stream input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI Stream output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser
+);
+
+    // Internal state registers
+    reg [DATA_WIDTH-1:0]   reg_data;
+    reg [KEEP_WIDTH-1:0]   reg_keep;
+    reg                    reg_last;
+    reg [ID_WIDTH-1:0]     reg_id;
+    reg [DEST_WIDTH-1:0]   reg_dest;
+    reg [USER_WIDTH-1:0]   reg_user;
+    reg                    reg_valid;
+    reg                    reg_ready;
+
+    // Control signals
+    wire wire_mode;
+    wire buffer_mode;
+    wire skid_mode;
+
+    assign wire_mode   = (REG_TYPE == 1);
+    assign buffer_mode = (REG_TYPE == 2);
+    assign skid_mode   = (REG_TYPE == 3);
+
+    // Logic to determine if we are in a stall condition
+    // A stall occurs when the register is full (valid) and cannot accept new data
+    // or when the register is empty and cannot output data.
+    // For a single register slice:
+    // - If wire_mode: pass through immediately if ready.
+    // - If buffer_mode: store on valid/ready, output on valid/ready.
+    // - If skid_mode: store on valid/ready, output on valid/ready (same as buffer for single stage).
+    
+    // Determine if the register is currently holding valid data
+    wire data_held = reg_valid;
+
+    // Determine if the register is ready to accept new data
+    // In wire mode, we are always ready if the output is ready.
+    // In buffer/skid mode, we are ready if we are not holding data OR if the output is ready.
+    // However, the standard behavior for a "register" in a pipeline is:
+    // Input Ready = (Not Valid) OR (Output Ready)
+    // This ensures data is captured on the next clock edge if the path is clear.
+    
+    // Calculate s_axis_tready
+    // If wire_mode: s_axis_tready = m_axis_tready
+    // If buffer_mode: s_axis_tready = (!reg_valid) | m_axis_tready
+    // If skid_mode: s_axis_tready = (!reg_valid) | m_axis_tready
+    
+    wire next_ready;
+    assign next_ready = (wire_mode) ? m_axis_tready : (!reg_valid | m_axis_tready);
+
+    // Calculate m_axis_tvalid
+    // If wire_mode: m_axis_tvalid = s_axis_tvalid & s_axis_tready
+    // If buffer_mode: m_axis_tvalid = reg_valid & m_axis_tready
+    // If skid_mode: m_axis_tvalid = reg_valid & m_axis_tready
+    
+    wire next_valid;
+    assign next_valid = (wire_mode) ? (s_axis_tvalid & s_axis_tready) : (reg_valid & m_axis_tready);
+
+    // Logic to update internal state
+    // Data is updated on the clock edge if s_axis_tvalid is high and s_axis_tready is high
+    // (i.e., data is accepted)
+    
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            reg_data      <= 0;
+            reg_keep      <= 0;
+            reg_last      <= 0;
+            reg_id        <= 0;
+            reg_dest      <= 0;
+            reg_user      <= 0;
+            reg_valid     <= 0;
+            reg_ready     <= 1; // Output is ready initially
+        end else begin
+            // Update state only if data is accepted (s_axis_tvalid && s_axis_tready)
+            if (s_axis_tvalid && s_axis_tready) begin
+                reg_data      <= s_axis_tdata;
+                reg_keep      <= s_axis_tkeep;
+                reg_last      <= s_axis_tlast;
+                reg_id        <= s_axis_tid;
+                reg_dest      <= s_axis_tdest;
+                reg_user      <= s_axis_tuser;
+                reg_valid     <= 1;
+            end else begin
+                // If not accepting data, keep current state
+                // reg_valid remains as is
+                // Note: In some implementations, if the register is empty and input is invalid,
+                // we might want to ensure reg_valid is 0, but since we only set it to 1 on accept,
+                // it naturally stays 0 if never accepted.
+                // However, if we were in a state where we held data but stopped accepting,
+                // reg_valid stays 1 until we output it.
+            end
+        end
+    end
+
+    // Assign output signals based on mode
+    // Wire Mode: Pass through immediately
+    // Buffer/Skid Mode: Use registered values
+    
+    assign m_axis_tdata      = (wire_mode) ? s_axis_tdata : reg_data;
+    assign m_axis_tkeep      = (wire_mode) ? s_axis_tkeep : reg_keep;
+    assign m_axis_tvalid     = next_valid;
+    assign m_axis_tlast      = (wire_mode) ? s_axis_tlast : reg_last;
+    assign m_axis_tid        = (wire_mode) ? s_axis_tid : reg_id;
+    assign m_axis_tdest      = (wire_mode) ? s_axis_tdest : reg_dest;
+    assign m_axis_tuser      = (wire_mode) ? s_axis_tuser : reg_user;
+
+    // Output ready signal
+    // In wire mode, output ready is simply the input ready.
+    // In buffer/skid mode, output ready is the internal ready signal.
+    // The internal ready signal is driven by the logic: if not valid, we are ready.
+    // If valid, we are ready only if the downstream is ready.
+    // This logic is handled by the state machine implicitly via the 'reg_ready' concept 
+    // but for AXI Stream, the 'ready' signal is an output that indicates the register 
+    // is prepared to accept data.
+    
+    // Actually, for a single stage register:
+    // s_axis_tready should be asserted if the register can accept data.
+    // It can accept data if it is empty OR if the downstream is ready.
+    // m_axis_tready is not an input to this module, but m_axis_tvalid drives the downstream.
+    // The downstream's tready determines if we can push data.
+    
+    // Re-evaluating s_axis_tready logic for correctness:
+    // If wire_mode: s_axis_tready = m_axis_tready (which is not an input here, wait).
+    // The module interface has m_axis_tready as an INPUT.
+    // So in wire mode, we just pass the input ready to output ready.
+    // In buffer mode, we are ready if we are empty OR if the downstream (m_axis_tready) is ready.
+    
+    assign s_axis_tready = (wire_mode) ? m_axis_tready : (!reg_valid | m_axis_tready);
+
+    // Note on m_axis_tready: It is an input.
+    // The logic above uses m_axis_tready to determine if we can output data (next_valid)
+    // and if we are ready to accept data (s_axis_tready).
+    
+    // One edge case: If reg_valid is 1 and m_axis_tready is 0, we hold data.
+    // s_axis_tready becomes 0.
+    // Next cycle, if m_axis_tready becomes 1, next_valid becomes 1, reg_valid becomes 1 (no change),
+    // but we need to ensure the data moves.
+    // Wait, the state update logic:
+    // if (s_axis_tvalid && s_axis_tready) -> update state.
+    // If s_axis_tvalid is 0 (downstream not ready), we don't update state.
+    // If s_axis_tvalid is 1 and s_axis_tready is 1 (downstream ready), we update state.
+    // BUT, if reg_valid is 1, and s_axis_tvalid is 1, and s_axis_tready is 1:
+    // We update reg_data with new data. This overwrites the old data.
+    // This is correct for a FIFO/Buffer: new data replaces old data if the slot is occupied?
+    // No, a single register slice usually acts as a 1-deep FIFO.
+    // If it is full (reg_valid=1), we should NOT accept new data until we output the old data.
+    // My logic: s_axis_tready = (!reg_valid | m_axis_tready).
+    // If reg_valid=1 and m_axis_tready=0 -> s_axis_tready=0. Correct (cannot accept).
+    // If reg_valid=1 and m_axis_tready=1 -> s_axis_tready=1. Correct (can accept).
+    // If we accept, we overwrite reg_data.
+    // Is this correct?
+    // If reg_valid=1, it means we have data. If we accept new data, we replace it.
+    // Then next cycle, we output the new data.
+    // This effectively implements a "skid buffer" or "buffer" where the register holds 1 beat.
+    // If the downstream is ready, we push the new data immediately.
+    // If the downstream is not ready, we hold the old data.
+    // This seems correct for a 1-deep buffer.
+    
+    // However, consider the case where s_axis_tvalid is 0.
+    // If reg_valid=1, s_axis_tvalid=0, m_axis_tready=0.
+    // s_axis_tready = 0.
+    // State doesn't change. We hold data. Correct.
+    
+    // If reg_valid=1, s_axis_tvalid=0, m_axis_tready=1.
+    // s_axis_tready = 1.
+    // State doesn't change (because s_axis_tvalid is 0).
+    // We output data (next_valid = 1 & 1 = 1).
+    // Correct.
+    
+    // If reg_valid=0, s_axis_tvalid=1, m_axis_tready=0.
+    // s_axis_tready = 1 (empty).
+    // State doesn't change (s_axis_tready is 1, but s_axis_tvalid is 1? Wait).
+    // Condition: if (s_axis_tvalid && s_axis_tready).
+    // Here s_axis_tvalid=1, s_axis_tready=1.
+    // We update state: reg_valid becomes 1.
+    // We output: next_valid = 0 & 0 = 0.
+    // Correct. We captured data, but couldn't output yet.
+    
+    // If reg_valid=0, s_axis_tvalid=1, m_axis_tready=1.
+    // s_axis_tready = 1.
+    // Update state: reg_valid becomes 1.
+    // Output: next_valid = 1 & 1 = 1.
+    // Correct. Throughput.
+
+    // Final check on parameters:
+    // KEEP_ENABLE, ID_ENABLE, etc. are used to determine widths, but the module assumes
+    // the vectors are sized correctly by the parameters.
+    // If KEEP_ENABLE is 0, KEEP_WIDTH is 1.
+    // If ID_ENABLE is 0, ID_WIDTH is 8 (default).
+    // The code uses the parameters directly for sizing, which is compliant.
+
+endmodule
+```<|im_end|>
+<|endoftext|>

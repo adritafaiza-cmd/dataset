@@ -1,0 +1,44 @@
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  // Internal state registers
+  logic edge_tx_d;
+  logic edge_rx_d;
+  logic edge_rx_q;
+
+  // TX Domain: Detect the edge/pulse on edge_i
+  // We sample the input edge and store it in a register synchronized to clk_tx_i
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      edge_tx_d <= 1'b0;
+    end else begin
+      edge_tx_d <= edge_i;
+    end
+  end
+
+  // RX Domain: Capture the edge from TX domain and generate a single pulse
+  // This logic runs on clk_rx_i to ensure the output is stable in the RX domain
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      edge_rx_d <= 1'b0;
+      edge_rx_q <= 1'b0;
+    end else begin
+      // Detect a transition from 0 to 1 in the sampled TX edge
+      if (edge_tx_d && !edge_rx_d) begin
+        edge_rx_q <= 1'b1;
+      end else begin
+        edge_rx_q <= 1'b0;
+      end
+      edge_rx_d <= edge_tx_d;
+    end
+  end
+
+  assign edge_o = edge_rx_q;
+
+endmodule<|im_end|>

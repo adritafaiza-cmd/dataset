@@ -1,0 +1,82 @@
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output reg [WIDTH-1:0] dst_data_o
+);
+
+    // Source domain state: 0 = empty, 1 = full
+    reg src_state;
+    // Destination domain state: 0 = empty, 1 = full
+    reg dst_state;
+    // Data storage for the single slot in the 2-deep buffer
+    reg [WIDTH-1:0] data_buf;
+
+    // ---------------------------------------------------------
+    // Source Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_state <= 1'b0;
+            src_ready_o <= 1'b1;
+        end else begin
+            // If destination is ready and we have data, push to dest
+            if (src_state == 1'b1 && dst_ready_i) begin
+                src_state <= 1'b0;
+                src_ready_o <= 1'b1;
+            end else if (src_valid_i && src_state == 1'b0) begin
+                // Accept new data, mark buffer full
+                src_state <= 1'b1;
+                src_ready_o <= 1'b0;
+            end else begin
+                // No data available or buffer full
+                src_ready_o <= 1'b1;
+            end
+        end
+    end
+
+    // Capture data when entering full state
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            data_buf <= 1'b0;
+        end else if (src_valid_i && src_state == 1'b0) begin
+            data_buf <= src_data_i;
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Destination Domain Logic
+    // ---------------------------------------------------------
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_state <= 1'b0;
+            dst_valid_o <= 1'b0;
+            dst_data_o <= 1'b0;
+        end else begin
+            // If source has data and buffer is not empty, pull from buffer
+            if (src_state == 1'b1 && dst_state == 1'b0) begin
+                dst_state <= 1'b1;
+                dst_valid_o <= 1'b1;
+                dst_data_o <= data_buf;
+            end else if (dst_state == 1'b1 && dst_ready_i) begin
+                // Data consumed, mark buffer empty
+                dst_state <= 1'b0;
+                dst_valid_o <= 1'b0;
+                dst_data_o <= 1'b0;
+            end else begin
+                // No data to send or destination not ready
+                dst_valid_o <= 1'b0;
+                dst_data_o <= 1'b0;
+            end
+        end
+    end
+
+endmodule<|im_end|>

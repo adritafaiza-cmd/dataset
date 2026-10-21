@@ -1,0 +1,171 @@
+```verilog
+`timescale 1ns/1ps
+
+module afifo #(
+	parameter LGFIFO = 3,
+	parameter WIDTH  = 16,
+	parameter NFF    = 2,
+	parameter [0:0]  WRITE_ON_POSEDGE = 1'b1,
+	parameter [0:0]  OPT_REGISTER_READS = 1'b1
+) (
+	input  wire            i_wclk, i_wr_reset_n, i_wr,
+	input  wire [WIDTH-1:0] i_wr_data,
+	output reg             o_wr_full,
+	input  wire            i_rclk, i_rd_reset_n, i_rd,
+	output reg [WIDTH-1:0] o_rd_data,
+	output reg             o_rd_empty
+);
+
+	localparam FIFO_DEPTH = 1 << LGFIFO;
+	localparam GRAY_WIDTH = LGFIFO;
+
+	// Gray code generation for address
+	reg [GRAY_WIDTH-1:0] gray_addr_w;
+	reg [GRAY_WIDTH-1:0] gray_addr_r;
+
+	// Write pointer logic
+	reg [GRAY_WIDTH-1:0] next_gray_addr;
+	reg [GRAY_WIDTH-1:0] prev_gray_addr;
+	reg [GRAY_WIDTH-1:0] curr_gray_addr;
+
+	// Read pointer logic
+	reg [GRAY_WIDTH-1:0] read_ptr_reg;
+	reg [GRAY_WIDTH-1:0] read_ptr_next;
+	reg [GRAY_WIDTH-1:0] read_ptr_prev;
+
+	// Counters for full/empty detection
+	reg [LGFIFO-1:0] write_cnt;
+	reg [LGFIFO-1:0] read_cnt;
+
+	// Internal registers for data
+	reg [WIDTH-1:0] fifo_mem [FIFO_DEPTH-1:0];
+
+	// Write side logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			gray_addr_w <= {1'b0, 1'b0}; // Reset to 0
+			write_cnt   <= 0;
+			o_wr_full   <= 0;
+		end else begin
+			// Update Gray code
+			gray_addr_w <= next_gray_addr;
+			
+			// Update counter
+			if (i_wr && !o_wr_full) begin
+				if (write_cnt < (FIFO_DEPTH - 1))
+					write_cnt <= write_cnt + 1;
+			end
+		end
+	end
+
+	// Calculate next Gray code for write
+	always @(*) begin
+		next_gray_addr = gray_addr_w;
+		if (WRITE_ON_POSEDGE) begin
+			if (i_wr) begin
+				next_gray_addr = gray_addr_w ^ {1'b0, gray_addr_w[GRAY_WIDTH-1:1]};
+			end
+		end
+	end
+
+	// Calculate next Gray code for read (for full detection)
+	always @(*) begin
+		prev_gray_addr = gray_addr_w;
+		if (WRITE_ON_POSEDGE) begin
+			if (i_wr) begin
+				prev_gray_addr = gray_addr_w ^ {1'b0, gray_addr_w[GRAY_WIDTH-1:1]};
+			end
+		end
+	end
+
+	// Full detection logic (Gray code based)
+	always @(*) begin
+		o_wr_full = 0;
+		if (WRITE_ON_POSEDGE) begin
+			if (i_wr) begin
+				// Full when current gray address equals previous gray address (wrapped around)
+				// This happens when write_cnt == FIFO_DEPTH - 1
+				if (write_cnt == (FIFO_DEPTH - 1))
+					o_wr_full = 1;
+			end
+		end
+	end
+
+	// Read side logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			read_ptr_reg <= {1'b0, 1'b0};
+			o_rd_empty   <= 1;
+			o_rd_data    <= 0;
+		end else begin
+			// Update read pointer
+			read_ptr_reg <= read_ptr_next;
+			
+			// Output data
+			o_rd_data <= fifo_mem[read_ptr_reg];
+			
+			// Empty detection
+			if (OPT_REGISTER_READS) begin
+				// If OPT_REGISTER_READS is 1, we register the read pointer
+				// Empty when read_ptr_reg == write_cnt
+				if (read_ptr_reg == write_cnt)
+					o_rd_empty = 1;
+				else
+					o_rd_empty = 0;
+			end else begin
+				// If OPT_REGISTER_READS is 0, we don't register the read pointer
+				// Empty when read_ptr_reg == write_cnt
+				if (read_ptr_reg == write_cnt)
+					o_rd_empty = 1;
+				else
+					o_rd_empty = 0;
+			end
+		end
+	end
+
+	// Calculate next Gray code for read
+	always @(*) begin
+		read_ptr_next = read_ptr_reg;
+		if (i_rd && !o_rd_empty) begin
+			read_ptr_next = read_ptr_reg ^ {1'b0, read_ptr_reg[GRAY_WIDTH-1:1]};
+		end
+	end
+
+	// Calculate previous Gray code for read (for empty detection)
+	always @(*) begin
+		read_ptr_prev = read_ptr_reg;
+		if (i_rd && !o_rd_empty) begin
+			read_ptr_prev = read_ptr_reg ^ {1'b0, read_ptr_reg[GRAY_WIDTH-1:1]};
+		end
+	end
+
+	// Data write logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			fifo_mem <= 0;
+		end else begin
+			if (i_wr && !o_wr_full) begin
+				fifo_mem[gray_addr_w] <= i_wr_data;
+			end
+		end
+	end
+
+	// Data read logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			o_rd_data <= 0;
+		end else begin
+			if (OPT_REGISTER_READS) begin
+				// If OPT_REGISTER_READS is 1, we register the read pointer
+				// Output data from the registered read pointer
+				o_rd_data <= fifo_mem[read_ptr_reg];
+			end else begin
+				// If OPT_REGISTER_READS is 0, we don't register the read pointer
+				// Output data from the current read pointer
+				o_rd_data <= fifo_mem[read_ptr_reg];
+			end
+		end
+	end
+
+endmodule
+```<|im_end|>

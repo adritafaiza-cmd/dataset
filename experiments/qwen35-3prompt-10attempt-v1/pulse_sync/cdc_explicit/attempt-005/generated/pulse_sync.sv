@@ -1,0 +1,78 @@
+```verilog
+`timescale 1ns/1ps
+
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  wire clk_a,
+    input  wire rstn_a,
+    input  wire clk_b,
+    input  wire rstn_b,
+    input  wire pulseA_i,
+    output wire pulseB_o,
+    output wire busy_o
+);
+
+    // Internal signals
+    wire [STAGES-1:0] busy_reg_a;
+    wire [STAGES-1:0] busy_reg_b;
+    wire [STAGES-1:0] pulse_reg_a;
+    wire [STAGES-1:0] pulse_reg_b;
+    wire busy_a;
+    wire busy_b;
+
+    // Generate stage instances
+    genvar i;
+    generate
+        for (i = 0; i < STAGES; i = i + 1) begin : stage_gen
+            // Stage 0: Input capture in Domain A
+            if (i == 0) begin : stage_a_input
+                always @(posedge clk_a or negedge rstn_a) begin
+                    if (!rstn_a) begin
+                        pulse_reg_a[i] <= 1'b0;
+                        busy_reg_a[i] <= 1'b0;
+                    end else begin
+                        pulse_reg_a[i] <= pulseA_i;
+                        busy_reg_a[i] <= pulseA_i;
+                    end
+                end
+            end
+
+            // Intermediate stages: Cross from A to B
+            else if (i < STAGES - 1) begin : stage_cross
+                always @(posedge clk_b or negedge rstn_b) begin
+                    if (!rstn_b) begin
+                        pulse_reg_b[i] <= 1'b0;
+                        busy_reg_b[i] <= 1'b0;
+                    end else begin
+                        pulse_reg_b[i] <= pulse_reg_a[i];
+                        busy_reg_b[i] <= busy_reg_a[i];
+                    end
+                end
+            end
+
+            // Last stage: Output generation in Domain B
+            else begin : stage_b_output
+                always @(posedge clk_b or negedge rstn_b) begin
+                    if (!rstn_b) begin
+                        pulse_reg_b[i] <= 1'b0;
+                        busy_reg_b[i] <= 1'b0;
+                    end else begin
+                        pulse_reg_b[i] <= pulse_reg_a[i];
+                        busy_reg_b[i] <= busy_reg_a[i];
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // Aggregate signals for logic
+    assign busy_a = busy_reg_a[STAGES-1];
+    assign busy_b = busy_reg_b[STAGES-1];
+
+    // Output assignments
+    assign pulseB_o = pulse_reg_b[STAGES-1];
+    assign busy_o = busy_b;
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,150 @@
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    localparam TAP_COUNT = CHAINS;
+    localparam TAP_WIDTH = 1;
+
+    reg [TAP_WIDTH-1:0] tap_reg [0:TAP_COUNT-1];
+    reg                tap_valid;
+    reg                sync_rst_int;
+
+    // Initialize all registers to inactive state (0 for active-high reset)
+    // This ensures a clean start even if async_rst_i is deasserted before clk stabilizes.
+    initial begin
+        for (integer i = 0; i < TAP_COUNT; i = i + 1) begin
+            tap_reg[i] = 1'b0;
+        end
+        tap_valid = 1'b0;
+        sync_rst_int = 1'b0;
+    end
+
+    // Synchronizer pipeline for reset deassertion
+    // Logic:
+    // 1. If RST_POL is 1 (active-high):
+    //    - We want sync_rst_o to follow async_rst_i immediately on assertion.
+    //    - We want sync_rst_o to stay high until we see CHAINS consecutive '0's on async_rst_i.
+    //    - Strategy: Invert the signal conceptually. Treat '1' as valid data to propagate,
+    //      but the release condition requires seeing '0's.
+    //    - Implementation:
+    //      a. First stage: Capture async_rst_i. If it's 1, set tap_valid=1 and load data.
+    //      b. Subsequent stages: Shift data. If data is 1, keep valid. If data is 0,
+    //         after CHAINS zeros, release the reset.
+    //      c. To handle the "immediate assertion" requirement:
+    //         If async_rst_i goes high, the first stage captures it. The output logic
+    //         will see a '1' in the pipeline, forcing sync_rst_o high immediately.
+    //         The release happens only when the pipeline shifts out a '0' after seeing
+    //         CHAINS consecutive '0's.
+    //
+    // 2. If RST_POL is 0 (active-low):
+    //    - async_rst_i is 0 when active.
+    //    - We want sync_rst_o to go low immediately.
+    //    - We want sync_rst_o to stay low until we see CHAINS consecutive '1's.
+    //    - Strategy: Similar logic, but inverted polarity.
+    //      a. Capture async_rst_i. If it's 0, set tap_valid=1.
+    //      b. Shift. If data is 0, keep valid. If data is 1, after CHAINS ones, release.
+
+    // Generate combinational logic for the pipeline stages
+    genvar i;
+    generate
+        for (i = 0; i < TAP_COUNT; i = i + 1) begin : tap_stage
+            if (i == 0) begin : first_stage
+                // First stage captures the input
+                always @(posedge clk or posedge async_rst_i) begin
+                    if (RST_POL) begin
+                        // Active High Reset
+                        if (async_rst_i) begin
+                            tap_reg[i] <= 1'b1;
+                            tap_valid <= 1'b1;
+                        end else begin
+                            tap_reg[i] <= 1'b0;
+                            tap_valid <= 1'b0;
+                        end
+                    end else begin
+                        // Active Low Reset
+                        if (!async_rst_i) begin
+                            tap_reg[i] <= 1'b0;
+                            tap_valid <= 1'b1;
+                        end else begin
+                            tap_reg[i] <= 1'b1;
+                            tap_valid <= 1'b0;
+                        end
+                    end
+                end
+            end else begin : subsequent_stages
+                // Subsequent stages shift data
+                always @(posedge clk or posedge async_rst_i) begin
+                    if (RST_POL) begin
+                        // Active High Reset
+                        if (async_rst_i) begin
+                            // If input is high, propagate high and keep valid
+                            tap_reg[i] <= tap_reg[i-1];
+                            tap_valid <= tap_valid;
+                        end else begin
+                            // If input is low, shift in low.
+                            // If previous was valid and we see a 0, we are counting down the release chain.
+                            // However, to ensure immediate assertion, we must maintain validity
+                            // as long as we see 1s. Once we see a 0, we start the release count.
+                            // Actually, a simpler approach for CDC reset release:
+                            // Use a counter or a shift register that holds the "last seen value".
+                            // If we see a 0 (for active high), we shift it.
+                            // If the pipeline is full of 0s, we release.
+                            // But we need to handle the transition from 1 to 0.
+                            // Let's refine:
+                            // We need to detect CHAINS consecutive 0s.
+                            // We can use a shift register where we shift in the inverted signal?
+                            // No, let's stick to the standard "release synchronizer" pattern.
+                            // Pattern:
+                            // 1. Detect assertion immediately.
+                            // 2. For release, count N cycles of deassertion.
+                            
+                            // Revised Logic for Active High (RST_POL=1):
+                            // We need to output 1 if we have seen a 1 recently (within CHAINS).
+                            // We need to output 0 only if we have seen CHAINS consecutive 0s.
+                            // This is equivalent to: sync_rst_o = OR of last CHAINS samples of async_rst_i.
+                            // If any of the last CHAINS samples were 1, output 1.
+                            // If all are 0, output 0.
+                            
+                            // Implementation:
+                            // Shift register stores the history.
+                            // If current input is 1, shift 1.
+                            // If current input is 0, shift 0.
+                            // Output is the OR of all stages.
+                            // Wait, if we do OR of all stages, then if we have a 1 anywhere in the chain,
+                            // the output is 1. This satisfies "immediate assertion" (1 enters, OR becomes 1)
+                            // and "safe release" (must see CHAINS 0s to clear the OR).
+                            
+                            tap_reg[i] <= tap_reg[i-1];
+                            tap_valid <= tap_valid;
+                        end
+                    end else begin
+                        // Active Low Reset (RST_POL=0)
+                        // We want sync_rst_o to be 0 if any of the last CHAINS samples were 0.
+                        // We want sync_rst_o to be 1 only if we have seen CHAINS consecutive 1s.
+                        // This is equivalent to: sync_rst_o = NOR of last CHAINS samples of async_rst_i.
+                        // If any sample is 0, output 0.
+                        // If all are 1, output 1.
+                        
+                        tap_reg[i] <= tap_reg[i-1];
+                        tap_valid <= tap_valid;
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // Output logic
+    // For Active High (RST_POL=1): Output is OR of the pipeline.
+    // For Active Low (RST_POL=0): Output is NOR of the pipeline.
+    
+    assign sync_rst_o = (RST_POL) ? 
+        | tap_reg[0:TAP_COUNT-1] : 
+        ~(| tap_reg[0:TAP_COUNT-1]);
+
+endmodule<|im_end|>
+<|endoftext|>

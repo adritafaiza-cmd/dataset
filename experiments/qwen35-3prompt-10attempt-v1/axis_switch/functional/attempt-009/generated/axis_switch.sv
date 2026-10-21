@@ -1,0 +1,222 @@
+```verilog
+module axis_switch #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter S_ID_WIDTH = 8,
+    parameter M_ID_WIDTH = S_ID_WIDTH+$clog2(S_COUNT),
+    parameter M_DEST_WIDTH = 1,
+    parameter S_DEST_WIDTH = M_DEST_WIDTH+$clog2(M_COUNT),
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter M_BASE = 0,
+    parameter M_TOP = 0,
+    parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
+    parameter UPDATE_TID = 0,
+    parameter S_REG_TYPE = 0,
+    parameter M_REG_TYPE = 2,
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 1
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    /*
+     * AXI Stream inputs
+     */
+    input  wire [S_COUNT*DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [S_COUNT*KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire [S_COUNT-1:0]               s_axis_tvalid,
+    output wire [S_COUNT-1:0]               s_axis_tready,
+    input  wire [S_COUNT-1:0]               s_axis_tlast,
+    input  wire [S_COUNT*S_ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [S_COUNT*USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI Stream outputs
+     */
+    output wire [M_COUNT*DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [M_COUNT*KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire [M_COUNT-1:0]               m_axis_tvalid,
+    input  wire [M_COUNT-1:0]               m_axis_tready,
+    output wire [M_COUNT-1:0]               m_axis_tlast,
+    output wire [M_COUNT*M_ID_WIDTH-1:0]    m_axis_tid,
+    output wire [M_COUNT*M_DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [M_COUNT*USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    localparam LOG_S_COUNT = $clog2(S_COUNT);
+    localparam LOG_M_COUNT = $clog2(M_COUNT);
+
+    // State encoding for Round Robin
+    localparam [LOG_S_COUNT+LOG_M_COUNT-1:0] STATE_IDLE = 0;
+    localparam [LOG_S_COUNT+LOG_M_COUNT-1:0] STATE_GRANT = 1;
+
+    // State registers
+    reg [LOG_S_COUNT+LOG_M_COUNT-1:0] state;
+    reg [LOG_S_COUNT+LOG_M_COUNT-1:0] next_state;
+    
+    // Round Robin counters
+    reg [LOG_S_COUNT-1:0] s_rr_counter;
+    reg [LOG_M_COUNT-1:0] m_rr_counter;
+    reg [LOG_S_COUNT-1:0] s_rr_mask;
+    reg [LOG_M_COUNT-1:0] m_rr_mask;
+    reg [LOG_S_COUNT-1:0] s_rr_next;
+    reg [LOG_M_COUNT-1:0] m_rr_next;
+    
+    // Grant signals
+    reg [S_COUNT-1:0] s_axis_grant;
+    reg [M_COUNT-1:0] m_axis_grant;
+    
+    // Buffer for selected input data
+    reg [S_COUNT-1:0] sel_s_axis_tdata;
+    reg [S_COUNT-1:0] sel_s_axis_tkeep;
+    reg [S_COUNT-1:0] sel_s_axis_tlast;
+    reg [S_COUNT-1:0] sel_s_axis_tid;
+    reg [S_COUNT-1:0] sel_s_axis_tdest;
+    reg [S_COUNT-1:0] sel_s_axis_tuser;
+    
+    // Output registers
+    reg [M_COUNT-1:0] m_axis_tdata_reg;
+    reg [M_COUNT-1:0] m_axis_tkeep_reg;
+    reg [M_COUNT-1:0] m_axis_tlast_reg;
+    reg [M_COUNT-1:0] m_axis_tid_reg;
+    reg [M_COUNT-1:0] m_axis_tdest_reg;
+    reg [M_COUNT-1:0] m_axis_tuser_reg;
+    reg [M_COUNT-1:0] m_axis_tvalid_reg;
+
+    // State logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= STATE_IDLE;
+            s_rr_counter <= 0;
+            m_rr_counter <= 0;
+            s_rr_mask <= {S_COUNT{1'b0}};
+            m_rr_mask <= {M_COUNT{1'b0}};
+            s_axis_grant <= {S_COUNT{1'b0}};
+            m_axis_grant <= {M_COUNT{1'b0}};
+        end else begin
+            state <= next_state;
+            s_rr_counter <= s_rr_next;
+            m_rr_counter <= m_rr_next;
+            s_rr_mask <= s_rr_next;
+            m_rr_mask <= m_rr_next;
+            s_axis_grant <= m_axis_grant;
+            m_axis_grant <= s_axis_grant;
+        end
+    end
+
+    // Next state logic
+    always @(*) begin
+        next_state = state;
+        s_rr_next = s_rr_counter;
+        m_rr_next = m_rr_counter;
+        
+        if (state == STATE_IDLE) begin
+            // Check if any input is valid and ready
+            if (m_axis_tready[0]) begin
+                // Find first valid input using round robin
+                s_rr_next = s_rr_counter;
+                if (s_axis_tvalid[s_rr_next]) begin
+                    next_state = STATE_GRANT;
+                    s_axis_grant[s_rr_next] = 1;
+                end else begin
+                    // Increment counter to find next valid
+                    s_rr_next = s_rr_counter + 1;
+                    if (s_rr_next == S_COUNT) s_rr_next = 0;
+                    if (s_axis_tvalid[s_rr_next]) begin
+                        next_state = STATE_GRANT;
+                        s_axis_grant[s_rr_next] = 1;
+                    end
+                end
+            end
+        end else if (state == STATE_GRANT) begin
+            // Grant is active, wait for output ready
+            if (m_axis_tready[0]) begin
+                next_state = STATE_IDLE;
+            end
+        end
+    end
+
+    // Data selection logic
+    always @(*) begin
+        sel_s_axis_tdata = {S_COUNT{1'b0}};
+        sel_s_axis_tkeep = {S_COUNT{1'b0}};
+        sel_s_axis_tlast = {S_COUNT{1'b0}};
+        sel_s_axis_tid = {S_COUNT{1'b0}};
+        sel_s_axis_tdest = {S_COUNT{1'b0}};
+        sel_s_axis_tuser = {S_COUNT{1'b0}};
+        
+        for (integer i = 0; i < S_COUNT; i = i + 1) begin
+            if (s_axis_grant[i]) begin
+                sel_s_axis_tdata[i] = s_axis_tdata[i*DATA_WIDTH +: DATA_WIDTH];
+                sel_s_axis_tkeep[i] = s_axis_tkeep[i*KEEP_WIDTH +: KEEP_WIDTH];
+                sel_s_axis_tlast[i] = s_axis_tlast[i];
+                sel_s_axis_tid[i] = s_axis_tid[i*S_ID_WIDTH +: S_ID_WIDTH];
+                sel_s_axis_tdest[i] = s_axis_tdest[i*S_DEST_WIDTH +: S_DEST_WIDTH];
+                sel_s_axis_tuser[i] = s_axis_tuser[i*USER_WIDTH +: USER_WIDTH];
+            end
+        end
+    end
+
+    // Output logic
+    always @(*) begin
+        m_axis_tdata = {M_COUNT{1'b0}};
+        m_axis_tkeep = {M_COUNT{1'b0}};
+        m_axis_tlast = {M_COUNT{1'b0}};
+        m_axis_tid = {M_COUNT{1'b0}};
+        m_axis_tdest = {M_COUNT{1'b0}};
+        m_axis_tuser = {M_COUNT{1'b0}};
+        m_axis_tvalid = {M_COUNT{1'b0}};
+        
+        for (integer i = 0; i < M_COUNT; i = i + 1) begin
+            if (m_axis_grant[i]) begin
+                m_axis_tdata[i] = sel_s_axis_tdata[i];
+                m_axis_tkeep[i] = sel_s_axis_tkeep[i];
+                m_axis_tlast[i] = sel_s_axis_tlast[i];
+                m_axis_tid[i] = sel_s_axis_tid[i];
+                m_axis_tdest[i] = sel_s_axis_tdest[i];
+                m_axis_tuser[i] = sel_s_axis_tuser[i];
+                m_axis_tvalid[i] = 1;
+            end
+        end
+    end
+
+    // Output registers
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            m_axis_tdata_reg <= {M_COUNT{1'b0}};
+            m_axis_tkeep_reg <= {M_COUNT{1'b0}};
+            m_axis_tlast_reg <= {M_COUNT{1'b0}};
+            m_axis_tid_reg <= {M_COUNT{1'b0}};
+            m_axis_tdest_reg <= {M_COUNT{1'b0}};
+            m_axis_tuser_reg <= {M_COUNT{1'b0}};
+            m_axis_tvalid_reg <= {M_COUNT{1'b0}};
+        end else begin
+            m_axis_tdata_reg <= m_axis_tdata;
+            m_axis_tkeep_reg <= m_axis_tkeep;
+            m_axis_tlast_reg <= m_axis_tlast;
+            m_axis_tid_reg <= m_axis_tid;
+            m_axis_tdest_reg <= m_axis_tdest;
+            m_axis_tuser_reg <= m_axis_tuser;
+            m_axis_tvalid_reg <= m_axis_tvalid;
+        end
+    end
+
+    // Assign output ports
+    assign m_axis_tdata = m_axis_tdata_reg;
+    assign m_axis_tkeep = m_axis_tkeep_reg;
+    assign m_axis_tlast = m_axis_tlast_reg;
+    assign m_axis_tid = m_axis_tid_reg;
+    assign m_axis_tdest = m_axis_tdest_reg;
+    assign m_axis_tuser = m_axis_tuser_reg;
+    assign m_axis_tvalid = m_axis_tvalid_reg;
+    
+    assign s_axis_tready = m_axis_tready;
+
+endmodule
+```<|im_end|>

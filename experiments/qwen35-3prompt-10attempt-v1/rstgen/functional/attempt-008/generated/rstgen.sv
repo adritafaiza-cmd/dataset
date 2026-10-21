@@ -1,0 +1,43 @@
+module rstgen (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic test_mode_i,
+    output logic rst_no,
+    output logic init_no
+);
+
+    // Synchronization logic for the reset signal
+    // When test_mode_i is high, the reset is passed directly without synchronization.
+    // Otherwise, a 2-stage synchronizer is used to ensure metastability is resolved.
+    logic rst_sync_1, rst_sync_2;
+
+    always_ff @(posedge clk_i) begin
+        if (test_mode_i) begin
+            rst_sync_1 <= rst_ni;
+            rst_sync_2 <= rst_sync_1;
+        end else begin
+            rst_sync_1 <= rst_ni;
+            rst_sync_2 <= rst_sync_1;
+        end
+    end
+
+    // Generate the synchronized active-low reset output
+    assign rst_no = rst_sync_2;
+
+    // Generate the initialization qualifier
+    // init_no is active low during reset and for a short duration after reset release.
+    // It transitions high after the first rising edge of the synchronized reset.
+    logic rst_edge;
+    logic rst_edge_d;
+
+    // Detect the rising edge of the synchronized reset (transition from low to high)
+    always_ff @(posedge clk_i) begin
+        rst_edge_d <= rst_edge;
+        rst_edge <= rst_no & ~rst_edge_d;
+    end
+
+    // Assign init_no: active low when rst_no is low OR when the reset edge has not occurred yet.
+    // Once the reset edge is detected, init_no goes high and stays high.
+    assign init_no = rst_no | rst_edge_d;
+
+endmodule<|im_end|>

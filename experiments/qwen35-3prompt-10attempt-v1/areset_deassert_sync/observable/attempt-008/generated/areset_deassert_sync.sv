@@ -1,0 +1,120 @@
+```verilog
+`timescale 1ns / 1ps
+
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  wire clk,
+    input  wire async_rst_i,
+    output wire sync_rst_o
+);
+
+    localparam DEASSERT_DEPTH = CHAINS;
+
+    // Internal signal to hold the synchronized reset state
+    reg sync_rst_int;
+
+    // Generate the reset chain
+    // We use a counter-like approach where we count the number of consecutive
+    // clock cycles where the reset has been deasserted in the async domain
+    // before releasing it in the sync domain.
+    
+    // To handle the polarity correctly:
+    // If RST_POL is 1 (Active High):
+    //   - Reset is asserted when async_rst_i is 1.
+    //   - We need to wait for async_rst_i to go low for DEASSERT_DEPTH cycles before releasing.
+    // If RST_POL is 0 (Active Low):
+    //   - Reset is asserted when async_rst_i is 0.
+    //   - We need to wait for async_rst_i to go high for DEASSERT_DEPTH cycles before releasing.
+
+    // We will use a counter that increments when the reset condition is met (asserted)
+    // and resets when the reset is released (deasserted).
+    // However, a simpler and more robust method for "release" synchronization is:
+    // 1. Detect the transition from Asserted to Deasserted.
+    // 2. Count DEASSERT_DEPTH cycles of the deasserted state.
+    // 3. Release the output after the count completes.
+
+    // Let's implement a state machine or a counter based on the "time since deassertion".
+    // We need a counter that counts up when the reset is NOT active.
+    // When the reset becomes active, we reset the counter.
+    // When the counter reaches DEASSERT_DEPTH, we release the output.
+
+    reg [DEASSERT_DEPTH - 1:0] deassert_count;
+    reg reset_active; // Tracks if the current async_rst_i is considered "asserted"
+
+    // Determine if the reset is currently active based on polarity
+    // If RST_POL is 1, active is 1. If RST_POL is 0, active is 0.
+    // We use a simple comparison or XOR logic.
+    // Actually, we can just check if (async_rst_i == RST_POL).
+    
+    // We need to detect the edge where the reset goes from Active to Deasserted.
+    // But since we are counting cycles of deassertion, we can just:
+    // 1. If (async_rst_i == RST_POL), then reset is active.
+    // 2. If (async_rst_i != RST_POL), then reset is deasserted.
+    // 3. We count consecutive cycles where (async_rst_i != RST_POL).
+    // 4. Once count == DEASSERT_DEPTH, we release the output.
+    // 5. If reset becomes active again (async_rst_i == RST_POL), we reset the count.
+
+    // Note: This logic assumes the async_rst_i is stable enough or we are just sampling it.
+    // For a clean release, we count the number of clock edges where the reset has been low (or high depending on polarity).
+    
+    // Let's refine the logic to ensure we don't release prematurely if the signal glitches.
+    // The requirement is: "release cleanly with the destination clock".
+    // Standard approach:
+    // - Detect the transition from Asserted -> Deasserted.
+    // - Count DEASSERT_DEPTH cycles of the Deasserted state.
+    // - Release after the count.
+    
+    // However, a simpler synchronous counter approach works well if we assume the async signal
+    // is sampled correctly. We count how many cycles the signal has been in the "safe" state.
+    // If it goes back to "unsafe" (asserted), we reset the count.
+    
+    // Logic:
+    // safe_state = (async_rst_i != RST_POL)
+    // If safe_state is true, increment count.
+    // If safe_state is false, reset count to 0.
+    // If count == DEASSERT_DEPTH, then sync_rst_o = 0 (assuming active high output reset).
+    // Wait, the output polarity must match the input polarity conceptually, but usually
+    // reset synchronizers output an active-high reset signal that matches the input polarity.
+    // If input is active-high, output is active-high. If input is active-low, output is active-low.
+    // So sync_rst_o should be equal to RST_POL when count < DEASSERT_DEPTH, and 0 when count == DEASSERT_DEPTH?
+    // No, that's not right.
+    // If RST_POL is 1 (Active High):
+    //   Input 1 -> Output 1.
+    //   Input 0 -> Wait DEASSERT_DEPTH -> Output 0.
+    // If RST_POL is 0 (Active Low):
+    //   Input 0 -> Output 0.
+    //   Input 1 -> Wait DEASSERT_DEPTH -> Output 1.
+    
+    // So, the output should be RST_POL initially (asserted).
+    // When the input becomes deasserted (input != RST_POL), we start counting.
+    // When count reaches DEASSERT_DEPTH, we set output to 0 (deasserted).
+    // If input becomes asserted again (input == RST_POL), we immediately set output to RST_POL and reset count.
+    
+    // Let's implement this.
+    
+    // Counter logic
+    // We only count when the reset is deasserted.
+    // If the reset is asserted, count is 0.
+    
+    always @(posedge clk) begin
+        if (async_rst_i == RST_POL) begin
+            // Reset is asserted
+            deassert_count <= 0;
+            sync_rst_o <= RST_POL;
+        end else begin
+            // Reset is deasserted
+            if (deassert_count < DEASSERT_DEPTH) begin
+                deassert_count <= deassert_count + 1'b1;
+                sync_rst_o <= RST_POL; // Still holding reset
+            end else begin
+                // Count reached depth, release reset
+                deassert_count <= 0;
+                sync_rst_o <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

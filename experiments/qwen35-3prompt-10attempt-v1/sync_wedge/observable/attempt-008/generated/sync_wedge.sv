@@ -1,0 +1,88 @@
+```verilog
+module sync_wedge #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    // Synchronizer chain for the data bit
+    logic [STAGES-1:0] sync_data;
+    
+    // Edge detection flags for the sync domain
+    logic sync_rising;
+    logic sync_falling;
+    
+    // Output registers in the local clock domain
+    logic out_rising;
+    logic out_falling;
+
+    // --- Synchronizer Chain ---
+    // Stage 0
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+            sync_data[0] <= 1'b0;
+        else
+            sync_data[0] <= serial_i;
+    end
+
+    // Stage 1 to STAGES
+    genvar i;
+    generate
+        for (i = 1; i < STAGES; i = i + 1) begin : sync_stage
+            always_ff @(posedge clk_i or negedge rst_ni) begin
+                if (!rst_ni)
+                    sync_data[i] <= 1'b0;
+                else
+                    sync_data[i] <= sync_data[i-1];
+            end
+        end
+    endgenerate
+
+    // --- Edge Detection in Sync Domain ---
+    // Rising edge: current is 1, previous was 0
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+            sync_rising <= 1'b0;
+        else
+            sync_rising <= (sync_data[STAGES-1] && ~sync_data[STAGES-2]);
+    end
+
+    // Falling edge: current is 0, previous was 1
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+            sync_falling <= 1'b0;
+        else
+            sync_falling <= (~sync_data[STAGES-1] && sync_data[STAGES-2]);
+    end
+
+    // --- Output Logic in Local Domain ---
+    // Capture the edge status and drive outputs
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            out_rising <= 1'b0;
+            out_falling <= 1'b0;
+            serial_o    <= 1'b0;
+        end
+        else begin
+            // Only update edge flags if enabled
+            if (en_i) begin
+                out_rising <= sync_rising;
+                out_falling <= sync_falling;
+            end
+            // Drive serial_o with the synchronized data
+            serial_o <= sync_data[STAGES-1];
+        end
+    end
+
+    // Assign outputs
+    assign r_edge_o = out_rising;
+    assign f_edge_o = out_falling;
+
+endmodule
+```<|im_end|>

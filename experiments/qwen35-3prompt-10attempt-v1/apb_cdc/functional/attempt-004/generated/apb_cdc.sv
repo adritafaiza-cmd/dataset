@@ -1,0 +1,184 @@
+```verilog
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam VALID_WIDTH = 1;
+    localparam DATA_WIDTH_LOG = $clog2(DATA_WIDTH);
+
+    // Source side FIFO (src -> dst)
+    // Stores the request to be sent to the destination
+    reg [ADDR_WIDTH-1:0] src_fifo_addr;
+    reg [DATA_WIDTH-1:0] src_fifo_wdata;
+    reg [DATA_WIDTH/8-1:0] src_fifo_wstrb;
+    reg [2:0] src_fifo_wprot;
+    reg src_fifo_valid;
+    reg src_fifo_empty;
+    reg src_fifo_full;
+    wire src_fifo_rvalid;
+    wire src_fifo_rdata_addr;
+    wire src_fifo_rdata_wdata;
+    wire src_fifo_rdata_wstrb;
+    wire src_fifo_rdata_wprot;
+
+    // Destination side FIFO (dst -> src)
+    // Stores the response from the destination
+    reg [DATA_WIDTH-1:0] dst_fifo_rdata;
+    reg [2:0] dst_fifo_rprot;
+    reg dst_fifo_valid;
+    reg dst_fifo_empty;
+    reg dst_fifo_full;
+    wire dst_fifo_rvalid;
+    wire dst_fifo_rdata_addr;
+    wire dst_fifo_rdata_wdata;
+    wire dst_fifo_rdata_wstrb;
+    wire dst_fifo_rdata_wprot;
+
+    // Source FIFO Instance
+    fifo #(
+        .ADDR_WIDTH(ADDR_WIDTH),
+        .DATA_WIDTH(DATA_WIDTH),
+        .LOG_DEPTH(LOG_DEPTH)
+    ) u_src_fifo (
+        .clk(src_pclk_i),
+        .preset_n(src_preset_ni),
+        .wren(src_fifo_valid & ~src_fifo_full),
+        .addr(src_fifo_addr),
+        .wdata({src_fifo_wprot, src_fifo_wstrb, src_fifo_wdata}),
+        .valid(src_fifo_valid),
+        .empty(src_fifo_empty),
+        .full(src_fifo_full),
+        .rdata_addr(src_fifo_rdata_addr),
+        .rdata_wdata(src_fifo_rdata_wdata),
+        .rdata_wstrb(src_fifo_rdata_wstrb),
+        .rdata_wprot(src_fifo_rdata_wprot),
+        .rvalid(src_fifo_rvalid)
+    );
+
+    // Destination FIFO Instance
+    fifo #(
+        .ADDR_WIDTH(ADDR_WIDTH),
+        .DATA_WIDTH(DATA_WIDTH),
+        .LOG_DEPTH(LOG_DEPTH)
+    ) u_dst_fifo (
+        .clk(dst_pclk_i),
+        .preset_n(dst_preset_ni),
+        .wren(dst_fifo_valid & ~dst_fifo_full),
+        .addr({dst_fifo_rprot, dst_fifo_rstrb, dst_fifo_rdata}),
+        .wdata({dst_fifo_rprot, dst_fifo_rstrb, dst_fifo_rdata}),
+        .valid(dst_fifo_valid),
+        .empty(dst_fifo_empty),
+        .full(dst_fifo_full),
+        .rdata_addr(dst_fifo_rdata_addr),
+        .rdata_wdata(dst_fifo_rdata_wdata),
+        .rdata_wstrb(dst_fifo_rdata_wstrb),
+        .rdata_wprot(dst_fifo_rdata_wprot),
+        .rvalid(dst_fifo_rvalid)
+    );
+
+    // Source Side Logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_pready_o <= 1'b1;
+            src_prdata_o <= {DATA_WIDTH{1'b0}};
+            src_pslverr_o <= 1'b0;
+            src_fifo_valid <= 1'b0;
+        end else begin
+            src_pready_o <= 1'b1;
+            src_prdata_o <= {DATA_WIDTH{1'b0}};
+            src_pslverr_o <= 1'b0;
+
+            // Check for new request
+            if (src_psel_i && src_penable_i && !src_fifo_valid) begin
+                src_fifo_valid <= 1'b1;
+                src_fifo_addr <= src_paddr_i;
+                src_fifo_wdata <= src_pwdata_i;
+                src_fifo_wstrb <= src_pstrb_i;
+                src_fifo_wprot <= src_pprot_i;
+            end
+
+            // Check if request is complete
+            if (src_fifo_valid && src_fifo_rvalid && dst_pready_i) begin
+                src_fifo_valid <= 1'b0;
+                src_prdata_o <= dst_prdata_i;
+                src_pslverr_o <= dst_pslverr_i;
+            end
+        end
+    end
+
+    // Destination Side Logic
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_psel_o <= 1'b0;
+            dst_penable_o <= 1'b0;
+            dst_pwrite_o <= 1'b0;
+            dst_paddr_o <= {ADDR_WIDTH{1'b0}};
+            dst_pwdata_o <= {DATA_WIDTH{1'b0}};
+            dst_pstrb_o <= {DATA_WIDTH/8{1'b0}};
+            dst_pprot_o <= 3'b000;
+            dst_fifo_valid <= 1'b0;
+        end else begin
+            dst_psel_o <= 1'b0;
+            dst_penable_o <= 1'b0;
+            dst_pwrite_o <= 1'b0;
+            dst_paddr_o <= {ADDR_WIDTH{1'b0}};
+            dst_pwdata_o <= {DATA_WIDTH{1'b0}};
+            dst_pstrb_o <= {DATA_WIDTH/8{1'b0}};
+            dst_pprot_o <= 3'b000;
+            dst_fifo_valid <= 1'b0;
+
+            // Check if there is a request to send
+            if (src_fifo_valid && !dst_fifo_valid) begin
+                dst_fifo_valid <= 1'b1;
+                dst_fifo_addr <= src_fifo_addr;
+                dst_fifo_wdata <= src_fifo_wdata;
+                dst_fifo_wstrb <= src_fifo_wstrb;
+                dst_fifo_wprot <= src_fifo_wprot;
+            end
+
+            // Check if request is complete
+            if (dst_fifo_valid && dst_pready_i) begin
+                dst_fifo_valid <= 1'b0;
+            end
+        end
+    end
+
+    // Output Logic
+    assign dst_psel_o = dst_fifo_valid;
+    assign dst_penable_o = dst_fifo_valid;
+    assign dst_pwrite_o = dst_fifo_valid & src_pwrite_i;
+    assign dst_paddr_o = dst_fifo_addr;
+    assign dst_pwdata_o = dst_fifo_wdata;
+    assign dst_pstrb_o = dst_fifo_wstrb;
+    assign dst_pprot_o = dst_fifo_wprot;
+
+endmodule
+```<|im_end|>

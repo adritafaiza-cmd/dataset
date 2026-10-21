@@ -1,0 +1,217 @@
+```verilog
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam INT_DEPTH = 1 << LOG_DEPTH;
+    localparam GRAY_WIDTH = $clog2(INT_DEPTH);
+
+    // Internal signals for pointers
+    reg [LOG_DEPTH-1:0] src_ptr;
+    reg [LOG_DEPTH-1:0] dst_ptr;
+    reg [LOG_DEPTH-1:0] src_gray;
+    reg [LOG_DEPTH-1:0] dst_gray;
+    reg [LOG_DEPTH-1:0] src_gray_synced;
+    reg [LOG_DEPTH-1:0] dst_gray_synced;
+    reg [LOG_DEPTH-1:0] dst_gray_synced_2;
+
+    // Clear state machine
+    reg [1:0] clear_state; // 0: Idle, 1: Clearing, 2: Done
+    reg clear_req;
+    reg clear_ack;
+
+    // Write side logic
+    assign src_ready_o = (src_valid_i && dst_gray_synced_2 != src_gray) && (clear_state == 2'b00);
+    reg write_enable;
+
+    // Read side logic
+    reg read_enable;
+    reg [WIDTH-1:0] fifo_data;
+    reg [WIDTH-1:0] fifo_data_reg;
+    reg [WIDTH-1:0] fifo_data_reg_reg;
+    reg [WIDTH-1:0] fifo_data_reg_reg_reg;
+
+    // Clear pending flags
+    reg src_clear_pending;
+    reg dst_clear_pending;
+
+    // ---------------------------------------------------------
+    // CDC: Write Pointer (src_gray) -> Read Side
+    // ---------------------------------------------------------
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_gray <= {1{1'b0}};
+            src_clear_pending <= 1'b0;
+        end else begin
+            src_gray <= src_ptr;
+        end
+    end
+
+    // ---------------------------------------------------------
+    // CDC: Read Pointer (dst_gray) -> Write Side
+    // ---------------------------------------------------------
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_gray <= {1{1'b0}};
+            dst_clear_pending <= 1'b0;
+        end else begin
+            dst_gray <= dst_ptr;
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Synchronizers for Gray Codes
+    // ---------------------------------------------------------
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_gray_synced <= {1{1'b0}};
+        else
+            src_gray_synced <= src_gray;
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_gray_synced <= {1{1'b0}};
+        else
+            dst_gray_synced <= dst_gray;
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_gray_synced_2 <= {1{1'b0}};
+        else
+            dst_gray_synced_2 <= dst_gray_synced;
+    end
+
+    // ---------------------------------------------------------
+    // Clear Logic
+    // ---------------------------------------------------------
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            clear_state <= 2'b00;
+            clear_req <= 1'b0;
+            src_clear_pending <= 1'b0;
+        end else begin
+            if (src_clear_i) begin
+                clear_req <= 1'b1;
+                clear_state <= 2'b01;
+            end else if (clear_state == 2'b01) begin
+                if (src_gray_synced == src_gray) begin
+                    clear_state <= 2'b10;
+                end
+            end else if (clear_state == 2'b10) begin
+                clear_state <= 2'b00;
+            end
+            src_clear_pending <= (clear_state != 2'b00);
+        end
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            clear_state <= 2'b00;
+            clear_req <= 1'b0;
+            dst_clear_pending <= 1'b0;
+        end else begin
+            if (dst_clear_i) begin
+                clear_req <= 1'b1;
+                clear_state <= 2'b01;
+            end else if (clear_state == 2'b01) begin
+                if (dst_gray_synced == dst_gray) begin
+                    clear_state <= 2'b10;
+                end
+            end else if (clear_state == 2'b10) begin
+                clear_state <= 2'b00;
+            end
+            dst_clear_pending <= (clear_state != 2'b00);
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Pointer Updates
+    // ---------------------------------------------------------
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_ptr <= {1{1'b0}};
+        else if (write_enable && (clear_state == 2'b00))
+            src_ptr <= src_ptr + 1;
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_ptr <= {1{1'b0}};
+        else if (read_enable && (clear_state == 2'b00))
+            dst_ptr <= dst_ptr + 1;
+    end
+
+    // ---------------------------------------------------------
+    // FIFO Storage
+    // ---------------------------------------------------------
+    reg [WIDTH-1:0] mem [INT_DEPTH-1:0];
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            for (integer i = 0; i < INT_DEPTH; i = i + 1)
+                mem[i] <= 0;
+        end else if (write_enable && (clear_state == 2'b00)) begin
+            mem[src_ptr] <= src_data_i;
+        end
+    end
+
+    // ---------------------------------------------------------
+    // Read Data Path
+    // ---------------------------------------------------------
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            fifo_data_reg_reg_reg <= 0;
+            dst_valid_o <= 1'b0;
+        end else if (read_enable && (clear_state == 2'b00)) begin
+            fifo_data_reg_reg_reg <= mem[dst_ptr];
+            dst_valid_o <= 1'b1;
+        end else begin
+            fifo_data_reg_reg_reg <= fifo_data_reg_reg;
+            dst_valid_o <= 1'b0;
+        end
+    end
+
+    assign dst_data_o = fifo_data_reg_reg_reg;
+
+    // ---------------------------------------------------------
+    // Control Logic
+    // ---------------------------------------------------------
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            write_enable <= 1'b0;
+        else if (src_valid_i && dst_gray_synced_2 != src_gray && (clear_state == 2'b00))
+            write_enable <= 1'b1;
+        else
+            write_enable <= 1'b0;
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            read_enable <= 1'b0;
+        else if (dst_ready_i && (clear_state == 2'b00))
+            read_enable <= 1'b1;
+        else
+            read_enable <= 1'b0;
+    end
+
+endmodule
+```<|im_end|>

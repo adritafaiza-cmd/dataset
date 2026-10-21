@@ -1,0 +1,351 @@
+```verilog
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  wire a_clk_i,
+    input  wire a_rst_ni,
+    input  wire a_clear_i,
+    output reg  a_clear_o,
+    input  wire a_clear_ack_i,
+    output reg  a_isolate_o,
+    input  wire a_isolate_ack_i,
+    input  wire b_clk_i,
+    input  wire b_rst_ni,
+    input  wire b_clear_i,
+    output reg  b_clear_o,
+    input  wire b_clear_ack_i,
+    output reg  b_isolate_o,
+    input  wire b_isolate_ack_i
+);
+
+    localparam STATE_IDLE = 2'b00;
+    localparam STATE_ISOLATE = 2'b01;
+    localparam STATE_CLEAR = 2'b10;
+    localparam STATE_DONE = 2'b11;
+
+    // ------------------------------------------------------------------
+    // Domain A Logic
+    // ------------------------------------------------------------------
+    wire a_rst_n_synced;
+    wire a_clear_req_synced;
+    wire a_isolate_req_synced;
+    wire a_clear_ack_synced;
+    wire a_isolate_ack_synced;
+
+    // Synchronize inputs from Domain B to Domain A
+    // Using a 2-stage synchronizer for safety
+    wire [SYNC_STAGES-1:0] b_clear_i_synced_a;
+    wire [SYNC_STAGES-1:0] b_clear_ack_i_synced_a;
+    wire [SYNC_STAGES-1:0] b_isolate_ack_i_synced_a;
+
+    genvar i;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_sync_b_to_a
+            wire sync_in, sync_out;
+            if (i == 0) begin
+                assign sync_in = b_clear_i;
+                assign sync_out = b_clear_i_synced_a[i];
+            end else begin
+                assign sync_in = b_clear_i_synced_a[i-1];
+                assign sync_out = b_clear_i_synced_a[i];
+            end
+            always @(posedge a_clk_i or negedge a_rst_ni) begin
+                if (!a_rst_ni)
+                    sync_out <= 1'b0;
+                else
+                    sync_out <= sync_in;
+            end
+        end
+    endgenerate
+
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_sync_b_ack_to_a
+        wire sync_in, sync_out;
+        if (i == 0) begin
+            assign sync_in = b_clear_ack_i;
+            assign sync_out = b_clear_ack_i_synced_a[i];
+        end else begin
+            assign sync_in = b_clear_ack_i_synced_a[i-1];
+            assign sync_out = b_clear_ack_i_synced_a[i];
+        end
+        always @(posedge a_clk_i or negedge a_rst_ni) begin
+            if (!a_rst_ni)
+                sync_out <= 1'b0;
+            else
+                sync_out <= sync_in;
+        end
+    endgenerate
+
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_sync_b_iso_ack_to_a
+        wire sync_in, sync_out;
+        if (i == 0) begin
+            assign sync_in = b_isolate_ack_i;
+            assign sync_out = b_isolate_ack_i_synced_a[i];
+        end else begin
+            assign sync_in = b_isolate_ack_i_synced_a[i-1];
+            assign sync_out = b_isolate_ack_i_synced_a[i];
+        end
+        always @(posedge a_clk_i or negedge a_rst_ni) begin
+            if (!a_rst_ni)
+                sync_out <= 1'b0;
+            else
+                sync_out <= sync_in;
+        end
+    endgenerate
+
+    // State Machine for Domain A
+    reg [1:0] a_state;
+    reg a_local_clear_req;
+    reg a_peer_clear_req;
+    reg a_peer_clear_ack;
+    reg a_peer_isolate_ack;
+
+    assign a_rst_n_synced = a_rst_ni;
+    assign a_clear_req_synced = a_clear_i;
+    assign a_isolate_req_synced = a_isolate_o; // Output is driven by logic, input is ack
+    assign a_clear_ack_synced = a_clear_ack_i;
+    assign a_isolate_ack_synced = a_isolate_ack_i;
+
+    // Capture local request and peer status
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            a_local_clear_req <= 1'b0;
+            a_peer_clear_req <= 1'b0;
+            a_peer_clear_ack <= 1'b0;
+            a_peer_isolate_ack <= 1'b0;
+        end else begin
+            a_local_clear_req <= a_clear_i;
+            a_peer_clear_req <= b_clear_i_synced_a[0]; // First stage of peer request
+            a_peer_clear_ack <= b_clear_ack_i_synced_a[0];
+            a_peer_isolate_ack <= b_isolate_ack_i_synced_a[0];
+        end
+    end
+
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            a_state <= STATE_IDLE;
+        else begin
+            case (a_state)
+                STATE_IDLE: begin
+                    if (a_local_clear_req || a_peer_clear_req)
+                        a_state <= STATE_ISOLATE;
+                    else
+                        a_state <= STATE_IDLE;
+                end
+                STATE_ISOLATE: begin
+                    if (a_peer_isolate_ack)
+                        a_state <= STATE_CLEAR;
+                    else
+                        a_state <= STATE_ISOLATE;
+                end
+                STATE_CLEAR: begin
+                    if (a_peer_clear_ack)
+                        a_state <= STATE_DONE;
+                    else
+                        a_state <= STATE_CLEAR;
+                end
+                STATE_DONE: begin
+                    // Wait for local clear ack before releasing
+                    if (a_clear_ack_synced)
+                        a_state <= STATE_IDLE;
+                    else
+                        a_state <= STATE_DONE;
+                end
+                default: a_state <= STATE_IDLE;
+            endcase
+        end
+    end
+
+    // Drive outputs for Domain A
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            a_isolate_o <= 1'b0;
+            a_clear_o <= 1'b0;
+        end else begin
+            case (a_state)
+                STATE_IDLE: begin
+                    a_isolate_o <= 1'b0;
+                    a_clear_o <= 1'b0;
+                end
+                STATE_ISOLATE: begin
+                    a_isolate_o <= 1'b1;
+                    a_clear_o <= 1'b0;
+                end
+                STATE_CLEAR: begin
+                    a_isolate_o <= 1'b1;
+                    a_clear_o <= 1'b1;
+                end
+                STATE_DONE: begin
+                    a_isolate_o <= 1'b1;
+                    a_clear_o <= 1'b1;
+                end
+                default: begin
+                    a_isolate_o <= 1'b0;
+                    a_clear_o <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Domain B Logic
+    // ------------------------------------------------------------------
+    wire b_rst_n_synced;
+    wire b_clear_req_synced;
+    wire b_isolate_req_synced;
+    wire b_clear_ack_synced;
+    wire b_isolate_ack_synced;
+
+    // Synchronize inputs from Domain A to Domain B
+    wire [SYNC_STAGES-1:0] a_clear_i_synced_b;
+    wire [SYNC_STAGES-1:0] a_clear_ack_i_synced_b;
+    wire [SYNC_STAGES-1:0] a_isolate_ack_i_synced_b;
+
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_sync_a_to_b
+            wire sync_in, sync_out;
+            if (i == 0) begin
+                assign sync_in = a_clear_i;
+                assign sync_out = a_clear_i_synced_b[i];
+            end else begin
+                assign sync_in = a_clear_i_synced_b[i-1];
+                assign sync_out = a_clear_i_synced_b[i];
+            end
+            always @(posedge b_clk_i or negedge b_rst_ni) begin
+                if (!b_rst_ni)
+                    sync_out <= 1'b0;
+                else
+                    sync_out <= sync_in;
+            end
+        end
+    endgenerate
+
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_sync_a_ack_to_b
+        wire sync_in, sync_out;
+        if (i == 0) begin
+            assign sync_in = a_clear_ack_i;
+            assign sync_out = a_clear_ack_i_synced_b[i];
+        end else begin
+            assign sync_in = a_clear_ack_i_synced_b[i-1];
+            assign sync_out = a_clear_ack_i_synced_b[i];
+        end
+        always @(posedge b_clk_i or negedge b_rst_ni) begin
+            if (!b_rst_ni)
+                sync_out <= 1'b0;
+            else
+                sync_out <= sync_in;
+        end
+    endgenerate
+
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_sync_a_iso_ack_to_b
+        wire sync_in, sync_out;
+        if (i == 0) begin
+            assign sync_in = a_isolate_ack_i;
+            assign sync_out = a_isolate_ack_i_synced_b[i];
+        end else begin
+            assign sync_in = a_isolate_ack_i_synced_b[i-1];
+            assign sync_out = a_isolate_ack_i_synced_b[i];
+        end
+        always @(posedge b_clk_i or negedge b_rst_ni) begin
+            if (!b_rst_ni)
+                sync_out <= 1'b0;
+            else
+                sync_out <= sync_in;
+        end
+    endgenerate
+
+    // State Machine for Domain B
+    reg [1:0] b_state;
+    reg b_local_clear_req;
+    reg b_peer_clear_req;
+    reg b_peer_clear_ack;
+    reg b_peer_isolate_ack;
+
+    assign b_rst_n_synced = b_rst_ni;
+    assign b_clear_req_synced = b_clear_i;
+    assign b_isolate_req_synced = b_isolate_o; // Output is driven by logic, input is ack
+    assign b_clear_ack_synced = b_clear_ack_i;
+    assign b_isolate_ack_synced = b_isolate_ack_i;
+
+    // Capture local request and peer status
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            b_local_clear_req <= 1'b0;
+            b_peer_clear_req <= 1'b0;
+            b_peer_clear_ack <= 1'b0;
+            b_peer_isolate_ack <= 1'b0;
+        end else begin
+            b_local_clear_req <= b_clear_i;
+            b_peer_clear_req <= a_clear_i_synced_b[0]; // First stage of peer request
+            b_peer_clear_ack <= a_clear_ack_i_synced_b[0];
+            b_peer_isolate_ack <= a_isolate_ack_i_synced_b[0];
+        end
+    end
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            b_state <= STATE_IDLE;
+        else begin
+            case (b_state)
+                STATE_IDLE: begin
+                    if (b_local_clear_req || b_peer_clear_req)
+                        b_state <= STATE_ISOLATE;
+                    else
+                        b_state <= STATE_IDLE;
+                end
+                STATE_ISOLATE: begin
+                    if (b_peer_isolate_ack)
+                        b_state <= STATE_CLEAR;
+                    else
+                        b_state <= STATE_ISOLATE;
+                end
+                STATE_CLEAR: begin
+                    if (b_peer_clear_ack)
+                        b_state <= STATE_DONE;
+                    else
+                        b_state <= STATE_CLEAR;
+                end
+                STATE_DONE: begin
+                    // Wait for local clear ack before releasing
+                    if (b_clear_ack_synced)
+                        b_state <= STATE_IDLE;
+                    else
+                        b_state <= STATE_DONE;
+                end
+                default: b_state <= STATE_IDLE;
+            endcase
+        end
+    end
+
+    // Drive outputs for Domain B
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            b_isolate_o <= 1'b0;
+            b_clear_o <= 1'b0;
+        end else begin
+            case (b_state)
+                STATE_IDLE: begin
+                    b_isolate_o <= 1'b0;
+                    b_clear_o <= 1'b0;
+                end
+                STATE_ISOLATE: begin
+                    b_isolate_o <= 1'b1;
+                    b_clear_o <= 1'b0;
+                end
+                STATE_CLEAR: begin
+                    b_isolate_o <= 1'b1;
+                    b_clear_o <= 1'b1;
+                end
+                STATE_DONE: begin
+                    b_isolate_o <= 1'b1;
+                    b_clear_o <= 1'b1;
+                end
+                default: begin
+                    b_isolate_o <= 1'b0;
+                    b_clear_o <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+endmodule
+```<|im_end|>

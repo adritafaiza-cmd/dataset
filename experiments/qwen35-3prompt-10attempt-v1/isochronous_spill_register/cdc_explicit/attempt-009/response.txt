@@ -1,0 +1,371 @@
+```verilog
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output reg [WIDTH-1:0] dst_data_o
+);
+
+    // Internal signals for CDC compliance
+    logic src_valid_reg;
+    logic src_data_reg;
+    logic dst_valid_reg;
+    logic dst_ready_reg;
+    logic dst_data_reg;
+    logic [WIDTH-1:0] buffer_data;
+    logic buffer_valid;
+    logic buffer_empty;
+
+    // ------------------------------------------------------------------
+    // Source Domain Logic
+    // ------------------------------------------------------------------
+    // Capture incoming data and valid signal synchronously.
+    // We use a simple 1-cycle register to ensure stability before crossing.
+    always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_valid_reg <= 1'b0;
+            src_data_reg  <= 1'b0;
+        end else begin
+            src_valid_reg <= src_valid_i;
+            src_data_reg  <= src_data_i;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Cross-Clock Buffer Logic (FIFO-like behavior)
+    // ------------------------------------------------------------------
+    // This block runs on the destination clock to manage the buffer state
+    // and transfer data from the source domain registers.
+    //
+    // Architecture:
+    // 1. On dst_clk, we check if the source has new data (src_valid_reg).
+    // 2. If the buffer is not full (empty == 1), we shift data in.
+    // 3. We maintain a "valid" flag for the buffer content.
+    // 4. We drive dst_valid_o based on buffer_valid and dst_ready_i.
+    
+    always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            buffer_valid <= 1'b0;
+            buffer_empty <= 1'b1;
+            dst_valid_o  <= 1'b0;
+            dst_data_o   <= 1'b0;
+        end else begin
+            // Logic to update buffer state and output
+            // We use a non-blocking assignment for the internal state updates
+            // and a separate logic block for the output to avoid race conditions
+            // within this process, though a single process is sufficient here
+            // if we are careful with the order of evaluation.
+            
+            // Calculate next state
+            logic next_valid;
+            logic next_empty;
+            
+            if (!dst_rst_ni) begin
+                next_valid  <= 1'b0;
+                next_empty  <= 1'b1;
+            end else begin
+                // If buffer is empty and we have new data from source
+                if (buffer_empty && src_valid_reg) begin
+                    next_valid  <= 1'b1;
+                    next_empty  <= 1'b0;
+                    // Load data
+                    buffer_data <= src_data_reg;
+                end
+                // If buffer is full, do nothing (wait for consumption)
+                // If buffer is not empty and we have new data, overwrite? 
+                // No, for a spill buffer with integer ratio clocks, we typically 
+                // want to absorb bursts. A 2-deep buffer implies we can hold 2 beats.
+                // However, the prompt asks for a "2-deep" buffer. 
+                // The current logic above is a 1-deep buffer (depth 1).
+                // To make it 2-deep, we need a shift register or a counter.
+                
+                // Revised Logic for 2-Deep Buffer:
+                // We need to store up to 2 beats.
+                // Let's use a counter to track depth.
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Corrected 2-Deep Buffer Implementation
+    // ------------------------------------------------------------------
+    // To strictly meet "2-deep", we need to store 2 beats.
+    // We will use a counter to track the number of items in the buffer.
+    // Max depth = 2.
+    
+    logic [1:0] buffer_depth; // 0, 1, or 2 items
+    logic [WIDTH-1:0] buffer_data_0;
+    logic [WIDTH-1:0] buffer_data_1;
+    logic buffer_valid_0;
+    logic buffer_valid_1;
+
+    always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            buffer_depth <= 2'b00;
+            buffer_valid_0 <= 1'b0;
+            buffer_valid_1 <= 1'b0;
+            buffer_data_0 <= 1'b0;
+            buffer_data_1 <= 1'b0;
+            dst_valid_o <= 1'b0;
+            dst_data_o <= 1'b0;
+        end else begin
+            // Determine if we should accept new data
+            // Accept if depth < 2 AND source has valid data
+            logic accept_new;
+            accept_new = (buffer_depth < 2'b10) && src_valid_reg;
+
+            if (accept_new) begin
+                // Shift existing data down
+                if (buffer_depth == 2'b01) begin
+                    // Move data_0 to data_1
+                    buffer_data_1 <= buffer_data_0;
+                    buffer_valid_1 <= buffer_valid_0;
+                    // New data goes to data_0
+                    buffer_data_0 <= src_data_reg;
+                    buffer_valid_0 <= 1'b1;
+                end else if (buffer_depth == 2'b00) begin
+                    // Just fill data_0
+                    buffer_data_0 <= src_data_reg;
+                    buffer_valid_0 <= 1'b1;
+                end
+                // If depth is already 2, we do nothing (drop oldest? or wait?)
+                // Standard FIFO behavior: wait until space is available.
+                // Since it's a spill buffer, we assume the source will eventually
+                // slow down or the destination will catch up.
+            end
+
+            // Update depth counter
+            if (accept_new) begin
+                buffer_depth <= buffer_depth + 2'b01;
+            end else begin
+                // Check if we can pop data
+                if (buffer_depth > 2'b00) begin
+                    // Pop data
+                    if (buffer_depth == 2'b10) begin
+                        // Move data_1 to data_0
+                        buffer_data_0 <= buffer_data_1;
+                        buffer_valid_0 <= buffer_valid_1;
+                        buffer_depth <= 2'b01;
+                    end else begin
+                        // depth is 1, just clear data_0
+                        buffer_valid_0 <= 1'b0;
+                        buffer_depth <= 2'b00;
+                    end
+                end
+            end
+
+            // Drive output
+            // Output valid if buffer_valid_0 is high and dst_ready is high
+            // This ensures we only drive data when ready, preventing metastability
+            // on the destination side if we were driving continuously.
+            // However, for a standard valid/ready handshake:
+            // dst_valid_o is asserted when we have data AND dst_ready_i is high?
+            // No, usually dst_valid_o is asserted when we have data, and the handshake
+            // happens on the edge. But to be safe with CDC and avoid holding valid
+            // while dst_ready is low (which might cause issues if dst_valid is latched),
+            // we can drive dst_valid_o based on buffer_valid_0.
+            // The actual data transfer happens when dst_ready_i is high.
+            
+            // Standard approach:
+            // dst_valid_o = buffer_valid_0;
+            // dst_data_o = buffer_valid_0 ? buffer_data_0 : 0;
+            // But we must ensure dst_ready_i is respected.
+            // If dst_ready_i is low, we keep dst_valid_o high? 
+            // Yes, that's the standard handshake. The destination will eventually
+            // assert dst_ready_i, at which point the data is consumed.
+            
+            // However, to prevent the "valid" signal from being held high indefinitely
+            // if the destination is stuck, we rely on the fact that the source
+            // will stop asserting src_valid_i, which stops filling the buffer.
+            // The buffer depth is limited to 2, so it will eventually empty.
+            
+            // One nuance: If we drive dst_valid_o directly from buffer_valid_0,
+            // and dst_ready_i is low, dst_valid_o stays high. This is correct.
+            // When dst_ready_i goes high, the transaction completes.
+            
+            // Let's refine the output logic to be strictly compliant with 
+            // the requirement "Every accepted source beat appears exactly once".
+            
+            // We need to ensure that when we pop, we don't re-assert valid immediately
+            // if the destination hasn't consumed it yet.
+            // Actually, the standard model is:
+            // Producer asserts valid. Consumer asserts ready.
+            // Here, the buffer acts as the producer for the destination.
+            // The buffer asserts dst_valid_o when it has data.
+            // The destination asserts dst_ready_i when it can accept.
+            // The buffer should NOT de-assert dst_valid_o until the destination
+            // acknowledges (dst_ready_i).
+            
+            // BUT, we have a clock domain crossing.
+            // If we drive dst_valid_o based on buffer_valid_0, and the destination
+            // is slow, dst_valid_o stays high.
+            // When dst_ready_i becomes high, the destination samples dst_valid_o
+            // and dst_data_o.
+            // Then the destination asserts dst_ready_i (which we already did).
+            // The buffer should then pop the data.
+            
+            // How do we know the destination has consumed the data?
+            // We need to sample dst_ready_i on the destination clock.
+            // If dst_ready_i was high in the previous cycle (or current cycle),
+            // we know the transaction is done.
+            
+            // Let's use a flag 'dst_consumed' to indicate if the current beat
+            // has been acknowledged by the destination.
+            logic dst_consumed;
+
+            if (!dst_rst_ni) begin
+                dst_consumed <= 1'b0;
+            end else begin
+                // If dst_ready_i is high, and we have valid data, we mark it consumed
+                // for the NEXT cycle's decision.
+                // Actually, we need to track if the CURRENT cycle's data was accepted.
+                // Since this is a single cycle process, we can look at the previous
+                // state of dst_ready_i? No, we are in the current cycle.
+                
+                // Correct logic:
+                // 1. Check if we have data (buffer_valid_0).
+                // 2. Check if dst_ready_i is high.
+                // 3. If both are true, we assert dst_valid_o.
+                // 4. The destination will sample this.
+                // 5. In the NEXT cycle, if dst_ready_i was high (meaning it accepted),
+                //    we pop the buffer.
+                
+                // To implement step 5, we need to remember if dst_ready_i was high
+                // in the previous cycle.
+                logic dst_ready_prev;
+                // We can't easily store 'dst_ready_prev' inside this block without
+                // an extra register. Let's add one.
+            end
+        end
+    end
+
+    // Re-architecting the buffer logic for clarity and correctness
+    // We need to track:
+    // 1. Buffer depth (0, 1, 2)
+    // 2. Data at depth 0 and 1
+    // 3. Whether the current head (depth 0) has been acknowledged by dst
+    
+    logic [1:0] depth;
+    logic [WIDTH-1:0] data_0, data_1;
+    logic valid_0, valid_1;
+    logic dst_ack; // Indicates if the current head has been accepted by dst
+
+    always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            depth <= 2'b00;
+            data_0 <= 1'b0;
+            data_1 <= 1'b0;
+            valid_0 <= 1'b0;
+            valid_1 <= 1'b0;
+            dst_ack <= 1'b0;
+            dst_valid_o <= 1'b0;
+            dst_data_o <= 1'b0;
+        end else begin
+            // 1. Determine if we can accept new data from source
+            logic accept_src;
+            accept_src = (depth < 2'b10) && src_valid_reg;
+
+            // 2. Determine if we should acknowledge the current head to destination
+            // We acknowledge if we have valid data at head AND dst_ready_i is high.
+            // Note: dst_ready_i is sampled on dst_clk.
+            logic ack_current;
+            ack_current = (valid_0 && dst_ready_i);
+
+            // 3. Update state
+            if (!dst_rst_ni) begin
+                dst_ack <= 1'b0;
+            end else begin
+                // If we acknowledged the current head, we pop it
+                if (ack_current) begin
+                    if (depth == 2'b01) begin
+                        // Shift data_1 to data_0
+                        data_0 <= data_1;
+                        valid_0 <= valid_1;
+                        depth <= 2'b00;
+                    end else if (depth == 2'b10) begin
+                        // Shift data_1 to data_0
+                        data_0 <= data_1;
+                        valid_0 <= valid_1;
+                        depth <= 2'b01;
+                    end else begin
+                        // depth is 0, nothing to pop
+                        dst_ack <= 1'b0;
+                    end
+                end else begin
+                    // Did not acknowledge, keep data_0
+                    dst_ack <= 1'b0;
+                end
+            end
+
+            // 4. Handle new data arrival
+            if (accept_src) begin
+                if (depth == 2'b00) begin
+                    // Fill slot 0
+                    data_0 <= src_data_reg;
+                    valid_0 <= 1'b1;
+                    depth <= 2'b01;
+                end else if (depth == 2'b01) begin
+                    // Shift slot 0 to 1, fill slot 0
+                    data_1 <= data_0;
+                    valid_1 <= valid_0;
+                    data_0 <= src_data_reg;
+                    valid_0 <= 1'b1;
+                    depth <= 2'b10;
+                end
+                // If depth is 2'b10, we do nothing (buffer full)
+            end
+
+            // 5. Drive outputs
+            // dst_valid_o is asserted if valid_0 is high.
+            // The handshake is: dst_valid_o high -> dst_ready_i high -> transaction done.
+            // We do NOT de-assert dst_valid_o until we pop the data.
+            
+            // Wait, if dst_ready_i is low, dst_valid_o stays high.
+            // If dst_ready_i is high, dst_valid_o stays high (until we pop).
+            // This is correct.
+            
+            dst_valid_o <= valid_0;
+            dst_data_o <= (valid_0) ? data_0 : 1'b0;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Source Domain Ready Logic
+    // ------------------------------------------------------------------
+    // src_ready_o is asserted when the buffer has space (depth < 2).
+    // This is a simple combinational logic driven by the internal depth register.
+    // Since depth is updated on dst_clk, src_ready_o will be stable for at least
+    // one cycle of src_clk (assuming integer ratio and no metastability on the
+    // sampling of src_valid_reg).
+    //
+    // To be extra safe, we can register src_ready_o on src_clk to ensure it
+    // is stable for the duration of the src_clk cycle before being sampled by
+    // the destination logic (if we were doing a direct cross). But here,
+    // src_ready_o is driven by the destination domain state.
+    //
+    // The destination domain updates 'depth' on dst_clk.
+    // 'depth' changes only when dst_clk rises.
+    // src_ready_o is driven by 'depth'.
+    // If src_clk and dst_clk are related, 'depth' will be stable for multiple
+    // src_clk cycles between dst_clk edges.
+    //
+    // However, to ensure zero unsafe crossings, we should ensure that the
+    // signal driving src_ready_o is stable.
+    // Since 'depth' is a register in the dst domain, it changes only on dst_clk.
+    // Between dst_clk edges, 'depth' is constant.
+    // Therefore, src_ready_o is constant for at least one dst_clk period.
+    // Given the integer ratio, this is sufficient for CDC.
+    
+    assign src_ready_o = (depth < 2'b10);
+
+endmodule
+```<|im_end|>
+<|endoftext|>

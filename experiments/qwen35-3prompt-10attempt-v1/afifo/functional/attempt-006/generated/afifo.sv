@@ -1,0 +1,126 @@
+```verilog
+`timescale 1ns/1ps
+
+module afifo #(
+	parameter LGFIFO = 3,
+	parameter WIDTH  = 16,
+	parameter NFF    = 2,
+	parameter [0:0] WRITE_ON_POSEDGE = 1'b1,
+	parameter [0:0] OPT_REGISTER_READS = 1'b1
+) (
+	input  wire            i_wclk, i_wr_reset_n, i_wr,
+	input  wire [WIDTH-1:0] i_wr_data,
+	output reg             o_wr_full,
+	input  wire            i_rclk, i_rd_reset_n, i_rd,
+	output reg [WIDTH-1:0] o_rd_data,
+	output reg             o_rd_empty
+);
+
+	localparam FIFO_DEPTH = 1 << LGFIFO;
+	localparam GRAY_WIDTH = LGFIFO;
+
+	// Gray code generation for address
+	reg [GRAY_WIDTH-1:0] gray_addr_w, gray_addr_r;
+	reg [GRAY_WIDTH-1:0] next_gray_addr;
+
+	// Write pointer logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			gray_addr_w <= {1{1'b0}};
+		else if (i_wr && !o_wr_full) begin
+			if (WRITE_ON_POSEDGE)
+				gray_addr_w <= next_gray_addr;
+			else
+				gray_addr_w <= next_gray_addr;
+		end
+	end
+
+	// Read pointer logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			gray_addr_r <= {1{1'b0}};
+		else if (i_rd && !o_rd_empty) begin
+			gray_addr_r <= next_gray_addr;
+		end
+	end
+
+	// Next Gray address calculation
+	always @(*) begin
+		next_gray_addr = gray_addr_w;
+		if (gray_addr_w[GRAY_WIDTH-1:1] != gray_addr_w[GRAY_WIDTH-1:1] + 1'b1)
+			next_gray_addr = gray_addr_w ^ 1'b1;
+	end
+
+	// FIFO Memory
+	reg [WIDTH-1:0] mem [FIFO_DEPTH-1:0];
+	reg [GRAY_WIDTH-1:0] write_ptr, read_ptr;
+
+	// Write pointer (binary)
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			write_ptr <= {1{1'b0}};
+		else if (i_wr && !o_wr_full)
+			write_ptr <= write_ptr + 1'b1;
+	end
+
+	// Read pointer (binary)
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			read_ptr <= {1{1'b0}};
+		else if (i_rd && !o_rd_empty)
+			read_ptr <= read_ptr + 1'b1;
+	end
+
+	// Convert binary pointers to Gray for memory access
+	assign gray_addr_w = write_ptr ^ (write_ptr >> 1);
+	assign gray_addr_r = read_ptr ^ (read_ptr >> 1);
+
+	// Memory write
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			mem <= '{default: 1'b0};
+			o_wr_full <= 1'b0;
+		end
+		else if (i_wr && !o_wr_full) begin
+			mem[write_ptr] <= i_wr_data;
+			if (write_ptr == FIFO_DEPTH - 1'b1)
+				o_wr_full <= 1'b1;
+		end
+	end
+
+	// Memory read
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			o_rd_data <= 1'b0;
+			o_rd_empty <= 1'b1;
+		end
+		else if (i_rd && !o_rd_empty) begin
+			if (OPT_REGISTER_READS) begin
+				o_rd_data <= mem[read_ptr];
+				o_rd_empty <= 1'b0;
+			end
+			else begin
+				o_rd_data <= mem[read_ptr];
+				o_rd_empty <= 1'b0;
+			end
+		end
+	end
+
+	// Empty flag logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_empty <= 1'b1;
+		else if (i_rd && !o_rd_empty)
+			o_rd_empty <= 1'b0;
+	end
+
+	// Full flag logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			o_wr_full <= 1'b0;
+		else if (i_wr && !o_wr_full)
+			o_wr_full <= 1'b1;
+	end
+
+endmodule
+```<|im_end|>

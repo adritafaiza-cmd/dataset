@@ -1,0 +1,102 @@
+```verilog
+module isochronous_4phase_handshake (
+    input  src_clk_i,
+    input  src_rst_ni,
+    input  src_valid_i,
+    output src_ready_o,
+    input  dst_clk_i,
+    input  dst_rst_ni,
+    output dst_valid_o,
+    input  dst_ready_i
+);
+
+    // Synchronizer for dst_ready_i to src_clk domain
+    reg dst_ready_sync_1;
+    reg dst_ready_sync_2;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_ready_sync_1 <= 1'b0;
+            dst_ready_sync_2 <= 1'b0;
+        end else begin
+            dst_ready_sync_1 <= dst_ready_i;
+            dst_ready_sync_2 <= dst_ready_sync_1;
+        end
+    end
+
+    // Synchronizer for src_valid_i to dst_clk domain
+    reg src_valid_sync_1;
+    reg src_valid_sync_2;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_valid_sync_1 <= 1'b0;
+            src_valid_sync_2 <= 1'b0;
+        end else begin
+            src_valid_sync_1 <= src_valid_i;
+            src_valid_sync_2 <= src_valid_sync_1;
+        end
+    end
+
+    // Handshake State Machine in src_clk domain
+    // States: IDLE, WAIT_DST_READY, WAIT_SRC_VALID_ACK
+    reg [1:0] state;
+    reg src_valid_latched;
+    reg dst_ready_latched;
+
+    parameter IDLE = 2'b00;
+    parameter WAIT_DST_READY = 2'b01;
+    parameter WAIT_SRC_VALID_ACK = 2'b10;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            state <= IDLE;
+            src_valid_latched <= 1'b0;
+            dst_ready_latched <= 1'b0;
+            src_ready_o <= 1'b0;
+            dst_valid_o <= 1'b0;
+        end else begin
+            // State Logic
+            case (state)
+                IDLE: begin
+                    if (src_valid_i) begin
+                        state <= WAIT_DST_READY;
+                        src_valid_latched <= 1'b1;
+                        dst_valid_o <= 1'b0; // Do not assert valid until dst_ready is seen
+                    end else begin
+                        state <= IDLE;
+                    end
+                end
+
+                WAIT_DST_READY: begin
+                    if (dst_ready_sync_2) begin
+                        // Phase 1: Data is valid on dst side
+                        dst_valid_o <= 1'b1;
+                        state <= WAIT_SRC_VALID_ACK;
+                        dst_ready_latched <= 1'b1;
+                    end else begin
+                        // Wait for dst_ready
+                        state <= WAIT_DST_READY;
+                    end
+                end
+
+                WAIT_SRC_VALID_ACK: begin
+                    if (src_valid_sync_2) begin
+                        // Phase 2: Data accepted by src
+                        src_ready_o <= 1'b1;
+                        state <= IDLE;
+                        src_valid_latched <= 1'b0;
+                        dst_ready_latched <= 1'b0;
+                        dst_valid_o <= 1'b0;
+                    end else begin
+                        // Wait for src_valid to confirm acceptance
+                        state <= WAIT_SRC_VALID_ACK;
+                    end
+                end
+            endcase
+        end
+    end
+
+endmodule
+```<|im_end|>
+<|endoftext|>

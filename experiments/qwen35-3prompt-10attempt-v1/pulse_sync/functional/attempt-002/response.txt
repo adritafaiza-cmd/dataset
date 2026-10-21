@@ -1,0 +1,89 @@
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // Internal signals
+    reg [STAGES-1:0] shift_reg;
+    reg busy;
+
+    // Stage 0: Capture pulse from domain A
+    // We use a 2-stage pipeline for domain A to ensure setup/hold met with single-cycle pulse
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a)
+            shift_reg[0] <= 1'b0;
+        else
+            shift_reg[0] <= pulseA_i;
+    end
+
+    // Pipeline stages for domain A to serialize the pulse
+    genvar i;
+    generate
+        for (i = 1; i < STAGES; i = i + 1) begin : a_pipeline
+            always @(posedge clk_a or negedge rstn_a) begin
+                if (!rstn_a)
+                    shift_reg[i] <= 1'b0;
+                else
+                    shift_reg[i] <= shift_reg[i-1];
+            end
+        end
+    endgenerate
+
+    // Detect pulse in domain A (rising edge of the last stage)
+    // This indicates a new pulse has arrived
+    reg pulse_detected;
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a)
+            pulse_detected <= 1'b0;
+        else
+            pulse_detected <= (shift_reg[STAGES-1] && !shift_reg[STAGES-2]);
+    end
+
+    // Domain B logic: Capture and serialize the pulse
+    // We need to capture the pulse_detected signal and ensure it appears as a single cycle
+    // in domain B. We use a similar pipeline approach.
+    
+    // Capture the pulse detection in domain B
+    reg [STAGES-1:0] b_shift_reg;
+    reg b_pulse_detected;
+
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            b_shift_reg <= {STAGES{1'b0}};
+            busy <= 1'b0;
+            pulseB_o <= 1'b0;
+        end
+        else begin
+            // Shift register for domain B
+            b_shift_reg[0] <= pulse_detected;
+            for (i = 1; i < STAGES; i = i + 1) begin
+                b_shift_reg[i] <= b_shift_reg[i-1];
+            end
+            
+            // Detect rising edge in domain B to start the pulse
+            b_pulse_detected <= (b_shift_reg[STAGES-1] && !b_shift_reg[STAGES-2]);
+            
+            // busy is high if we are in the middle of processing a pulse
+            // It's high from the moment we detect the pulse until the pulse is fully serialized
+            busy <= (b_shift_reg[STAGES-1] || b_shift_reg[STAGES-2]);
+            
+            // Output the pulse in domain B
+            // The pulse should be one cycle wide in domain B
+            // We output when the pulse is at the last stage of our B pipeline
+            pulseB_o <= b_shift_reg[STAGES-1];
+        end
+    end
+
+    // Assign output registers
+    assign pulseB_o = b_shift_reg[STAGES-1];
+    assign busy_o = busy;
+
+endmodule<|im_end|>
+<|endoftext|>

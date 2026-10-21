@@ -1,0 +1,355 @@
+```verilog
+module axis_register #
+(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI Stream input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI Stream output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser
+);
+
+    // Generate enable signals for sideband parameters
+    wire keep_en = KEEP_ENABLE;
+    wire last_en = LAST_ENABLE;
+    wire id_en = ID_ENABLE;
+    wire dest_en = DEST_ENABLE;
+    wire user_en = USER_ENABLE;
+
+    // Internal storage registers
+    reg [DATA_WIDTH-1:0] reg_tdata;
+    reg [KEEP_WIDTH-1:0] reg_tkeep;
+    reg reg_tlast;
+    reg [ID_WIDTH-1:0] reg_tid;
+    reg [DEST_WIDTH-1:0] reg_tdest;
+    reg [USER_WIDTH-1:0] reg_tuser;
+    reg reg_valid;
+
+    // Output logic
+    assign s_axis_tready = m_axis_tready;
+
+    // Output assignments
+    assign m_axis_tdata = reg_tdata;
+    assign m_axis_tkeep = reg_tkeep;
+    assign m_axis_tvalid = reg_valid;
+    assign m_axis_tlast = reg_tlast;
+    assign m_axis_tid = reg_tid;
+    assign m_axis_tdest = reg_tdest;
+    assign m_axis_tuser = reg_tuser;
+
+    // Reset logic for all registers
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            reg_tdata <= 0;
+            reg_tkeep <= 0;
+            reg_tlast <= 0;
+            reg_tid <= 0;
+            reg_tdest <= 0;
+            reg_tuser <= 0;
+            reg_valid <= 0;
+        end else begin
+            case (REG_TYPE)
+                0: begin // Wire: Pass through immediately, no storage
+                    if (s_axis_tvalid && m_axis_tready) begin
+                        reg_tdata <= s_axis_tdata;
+                        reg_tkeep <= s_axis_tkeep;
+                        reg_tlast <= s_axis_tlast;
+                        reg_tid <= s_axis_tid;
+                        reg_tdest <= s_axis_tdest;
+                        reg_tuser <= s_axis_tuser;
+                        reg_valid <= 1;
+                    end else begin
+                        reg_valid <= 0;
+                    end
+                end
+                1: begin // Simple Buffer: Store on valid, output on ready
+                    if (s_axis_tvalid && m_axis_tready) begin
+                        reg_tdata <= s_axis_tdata;
+                        reg_tkeep <= s_axis_tkeep;
+                        reg_tlast <= s_axis_tlast;
+                        reg_tid <= s_axis_tid;
+                        reg_tdest <= s_axis_tdest;
+                        reg_tuser <= s_axis_tuser;
+                        reg_valid <= 1;
+                    end else if (s_axis_tvalid && !m_axis_tready) begin
+                        // Hold state
+                        reg_valid <= 1;
+                    end else begin
+                        reg_valid <= 0;
+                    end
+                end
+                2: begin // Skid Buffer: Must not drop a beat when output stalls
+                    // Logic: If input is valid and output is not ready, we must capture the data
+                    // and keep it valid until output becomes ready.
+                    // If input is valid and output is ready, we capture and push.
+                    
+                    if (s_axis_tvalid) begin
+                        // Capture input data
+                        reg_tdata <= s_axis_tdata;
+                        reg_tkeep <= s_axis_tkeep;
+                        reg_tlast <= s_axis_tlast;
+                        reg_tid <= s_axis_tid;
+                        reg_tdest <= s_axis_tdest;
+                        reg_tuser <= s_axis_tuser;
+                        
+                        // Determine new valid state
+                        if (m_axis_tready) begin
+                            // Output is ready, so we can push the current stored value
+                            // and accept new data. The stored value becomes the output.
+                            // Since we just updated the registers with new data, 
+                            // we need to ensure the output reflects the data that was 
+                            // available before the stall cleared if we were in a stall.
+                            // However, in a single register skid buffer:
+                            // If we are NOT stalled (m_axis_tready == 1), we can push immediately.
+                            // If we ARE stalled (m_axis_tready == 0), we must hold.
+                            
+                            // Correct Skid Buffer Logic:
+                            // 1. If s_axis_tvalid is high:
+                            //    - Update registers with new data.
+                            //    - If m_axis_tready is high:
+                            //      - Set reg_valid = 1 (Output the new data).
+                            //    - If m_axis_tready is low:
+                            //      - Set reg_valid = 1 (Hold the new data until ready).
+                            //      - Wait for m_axis_tready to go high to output.
+                            //      - Note: This effectively queues one beat.
+                            
+                            // Refined Logic for "Must not drop a beat":
+                            // If input arrives and output is ready -> Push.
+                            // If input arrives and output is NOT ready -> Store and keep valid.
+                            // If input is not valid and output is ready -> Clear.
+                            // If input is not valid and output is NOT ready -> Hold.
+                            
+                            if (m_axis_tready) begin
+                                reg_valid <= 1;
+                            end else begin
+                                reg_valid <= 1;
+                            end
+                        end else begin
+                            // Input valid, Output not ready.
+                            // We must store the data and keep it valid.
+                            reg_valid <= 1;
+                        end
+                    end else begin
+                        // Input not valid.
+                        if (m_axis_tready) begin
+                            // Output ready, but no new data. Clear the register.
+                            reg_valid <= 0;
+                        end else begin
+                            // Output not ready, hold current data.
+                            reg_valid <= 1;
+                        end
+                    end
+                end
+                default: begin
+                    // Fallback to simple buffer behavior if unknown type
+                    if (s_axis_tvalid && m_axis_tready) begin
+                        reg_tdata <= s_axis_tdata;
+                        reg_tkeep <= s_axis_tkeep;
+                        reg_tlast <= s_axis_tlast;
+                        reg_tid <= s_axis_tid;
+                        reg_tdest <= s_axis_tdest;
+                        reg_tuser <= s_axis_tuser;
+                        reg_valid <= 1;
+                    end else if (s_axis_tvalid && !m_axis_tready) begin
+                        reg_valid <= 1;
+                    end else begin
+                        reg_valid <= 0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Generate handshake signals based on REG_TYPE logic
+    // For REG_TYPE 0 (Wire):
+    //   tvalid = s_axis_tvalid
+    //   tready = m_axis_tready
+    //   Data is passed directly.
+    
+    // For REG_TYPE 1 (Buffer) and 2 (Skid):
+    //   tvalid = reg_valid
+    //   tready = m_axis_tready
+    //   Data is passed from registers.
+
+    always @(*) begin
+        if (REG_TYPE == 0) begin
+            // Wire: Direct pass-through
+            // tvalid is driven by input, tready is driven by output
+            // However, the module interface requires us to drive s_axis_tready.
+            // In a wire, s_axis_tready = m_axis_tready.
+            // s_axis_tvalid is an input, so we don't drive it.
+            // The logic inside the always block for type 0 handled the register updates.
+            // We just need to ensure the output signals are correct.
+            // Since it's a wire, the output is just the input.
+            // But we need to drive m_axis_tvalid based on s_axis_tvalid?
+            // No, the module definition says m_axis_tvalid is an output.
+            // For a wire, m_axis_tvalid should track s_axis_tvalid.
+            // But wait, if m_axis_tready is low, and s_axis_tvalid is high,
+            // a wire would stall the input.
+            // The prompt says "REG_TYPE 0 is a wire".
+            // Usually, a wire in AXI-Stream implies no buffering.
+            // If m_axis_tready is low, s_axis_tvalid must be low.
+            // But s_axis_tvalid is an INPUT. We cannot drive it.
+            // This implies REG_TYPE 0 is only valid if the downstream is always ready,
+            // OR it acts as a pass-through where the upstream drives tvalid and downstream drives tready.
+            // Given the constraints of Verilog and AXI-Stream, a "Wire" module usually just passes data.
+            // If the downstream is not ready, the upstream must deassert tvalid.
+            // Since we cannot drive s_axis_tvalid, REG_TYPE 0 is effectively a passthrough
+            // that assumes the upstream handles backpressure or the downstream is always ready.
+            // However, to be safe and functional as a module:
+            // We will implement it such that if REG_TYPE is 0, we just pass data.
+            // But we must drive s_axis_tready.
+            // s_axis_tready = m_axis_tready.
+            // m_axis_tvalid = s_axis_tvalid.
+            // This creates a potential deadlock if m_axis_tready is low and s_axis_tvalid is high.
+            // But since we can't drive s_axis_tvalid, we can't prevent the deadlock.
+            // Therefore, REG_TYPE 0 is strictly a passthrough.
+            
+            // Let's re-read the requirement: "REG_TYPE 0 is a wire".
+            // This likely means no storage.
+            // Implementation:
+            // s_axis_tready = m_axis_tready;
+            // m_axis_tvalid = s_axis_tvalid;
+            // Data is passed directly.
+            // The case statement above for type 0 updates registers.
+            // We need to override the output logic for type 0 to be direct.
+        end
+    end
+
+    // Re-implementing the output logic cleanly based on REG_TYPE
+    // To avoid complexity in the always block, we can use combinational logic for outputs
+    // and sequential logic for storage.
+
+    // Reset logic for storage (Sequential)
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            reg_tdata <= 0;
+            reg_tkeep <= 0;
+            reg_tlast <= 0;
+            reg_tid <= 0;
+            reg_tdest <= 0;
+            reg_tuser <= 0;
+            reg_valid <= 0;
+        end else begin
+            if (REG_TYPE == 0) begin
+                // Wire: No storage. Just pass through.
+                // We don't need to update registers.
+                // We just need to set reg_valid to match s_axis_tvalid for the output logic below.
+                // But wait, if we don't store, we can't hold data across cycles.
+                // So for Type 0, we just pass data directly.
+                // The "registers" are effectively bypassed.
+                // We can set reg_valid = s_axis_tvalid, but we don't store data in reg_tdata.
+                // Let's use a separate flag for wire mode.
+                reg_valid <= s_axis_tvalid;
+            end else if (REG_TYPE == 1) begin
+                // Simple Buffer
+                if (s_axis_tvalid && m_axis_tready) begin
+                    reg_tdata <= s_axis_tdata;
+                    reg_tkeep <= s_axis_tkeep;
+                    reg_tlast <= s_axis_tlast;
+                    reg_tid <= s_axis_tid;
+                    reg_tdest <= s_axis_tdest;
+                    reg_tuser <= s_axis_tuser;
+                    reg_valid <= 1;
+                end else if (s_axis_tvalid && !m_axis_tready) begin
+                    // Input valid, Output not ready. Hold data.
+                    reg_valid <= 1;
+                end else begin
+                    // Input not valid.
+                    if (m_axis_tready) begin
+                        // Output ready, no input. Clear.
+                        reg_valid <= 0;
+                    end else begin
+                        // Output not ready, hold.
+                        reg_valid <= 1;
+                    end
+                end
+            end else if (REG_TYPE == 2) begin
+                // Skid Buffer: Must not drop a beat.
+                // Logic: If input is valid, capture data.
+                // If output is ready, push data (set valid=1).
+                // If output is not ready, hold data (set valid=1).
+                // If input is not valid:
+                //   If output is ready, clear data (set valid=0).
+                //   If output is not ready, hold data (set valid=1).
+                
+                if (s_axis_tvalid) begin
+                    reg_tdata <= s_axis_tdata;
+                    reg_tkeep <= s_axis_tkeep;
+                    reg_tlast <= s_axis_tlast;
+                    reg_tid <= s_axis_tid;
+                    reg_tdest <= s_axis_tdest;
+                    reg_tuser <= s_axis_tuser;
+                    // Always set valid to 1 if input is valid, because we must not drop a beat.
+                    // The data is now in the register.
+                    reg_valid <= 1;
+                end else begin
+                    // Input not valid.
+                    if (m_axis_tready) begin
+                        // Output ready, no new data. Clear the register.
+                        reg_valid <= 0;
+                    end else begin
+                        // Output not ready. Hold the data.
+                        reg_valid <= 1;
+                    end
+                end
+            end
+        end
+    end
+
+    // Output Logic (Combinational)
+    always @(*) begin
+        if (REG_TYPE == 0) begin
+            // Wire: Direct pass-through
+            m_axis_tdata = s_axis_tdata;
+            m_axis_tkeep = s_axis_tkeep;
+            m_axis_tvalid = s_axis_tvalid;
+            m_axis_tlast = s_axis_tlast;
+            m_axis_tid = s_axis_tid;
+            m_axis_tdest = s_axis_tdest;
+            m_axis_tuser = s_axis_tuser;
+        end else begin
+            // Buffer or Skid
+            m_axis_tdata = reg_tdata;
+            m_axis_tkeep = reg_tkeep;
+            m_axis_tvalid = reg_valid;
+            m_axis_tlast = reg_tlast;
+            m_axis_tid = reg_tid;
+            m_axis_tdest = reg_tdest;
+            m_axis_tuser = reg_tuser;
+        end
+    end
+
+endmodule
+```<|im_end|>

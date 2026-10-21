@@ -1,0 +1,103 @@
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    // Internal signal to handle polarity inversion if needed
+    wire rst_active;
+    assign rst_active = (RST_POL == 1'b1) ? async_rst_i : ~async_rst_i;
+
+    // Pipeline stage for the release of the reset
+    // We use a chain of flip-flops to ensure the deassertion is safely synchronized
+    wire [CHAINS-1:0] rst_pipe;
+
+    // First stage: Capture the reset state on the clock edge
+    // If rst_active is high, the output is forced high (or low depending on logic)
+    // We want sync_rst_o to follow assertion immediately.
+    // Since we are synchronizing the *release*, we can use a simple latch-like behavior
+    // for the assertion, but a pipeline for the release.
+    
+    // Approach:
+    // 1. If rst_active is asserted, sync_rst_o must be asserted immediately.
+    //    We can achieve this by using the input directly gated by the pipeline state,
+    //    or by ensuring the pipeline forces the output high when input is high.
+    // 2. The pipeline ensures that once rst_active goes low, it takes CHAINS cycles
+    //    for sync_rst_o to go low.
+    
+    // Let's define the pipeline stages.
+    // Stage 0 (rst_pipe[0]): Captures the current state of rst_active.
+    // However, to ensure immediate assertion, we can drive the first stage directly
+    // and let the chain handle the release delay.
+    
+    // Actually, a common pattern for "immediate assertion, delayed release" is:
+    // sync_rst_o = rst_active OR (pipeline_chain_output)
+    // But if rst_active goes high, we want sync_rst_o high immediately.
+    // If rst_active goes low, we want sync_rst_o to stay high until the pipeline confirms it's low.
+    
+    // Let's implement the pipeline such that:
+    // rst_pipe[0] captures rst_active.
+    // rst_pipe[i] captures rst_pipe[i-1].
+    // sync_rst_o = rst_pipe[CHAINS-1] ? 1 : 0;
+    // This would delay the assertion too.
+    
+    // Correct approach for "Immediate Assertion, Delayed Release":
+    // We need the output to be 1 if (rst_active is 1) OR (the pipeline hasn't fully cleared yet).
+    // Let's create a chain where the reset propagates through.
+    // If rst_active is 1, all stages become 1.
+    // If rst_active becomes 0, the 1s propagate down the chain one stage per clock.
+    // The output is the last stage.
+    
+    // Wait, if rst_active is 1, and we want immediate output 1:
+    // We can just assign sync_rst_o = rst_active | rst_pipe[CHAINS-1];
+    // But we need to make sure the pipeline logic is correct.
+    
+    // Let's refine:
+    // We want a chain of flip-flops that holds the "reset active" state.
+    // If rst_active is high, the chain fills up.
+    // If rst_active goes low, the chain drains.
+    // The output is the last stage of the chain.
+    // To ensure immediate assertion:
+    // sync_rst_o = rst_active | rst_pipe[CHAINS-1];
+    // This works because if rst_active is high, sync_rst_o is high immediately.
+    // If rst_active goes low, sync_rst_o stays high until the chain drains (CHAINS cycles).
+    
+    // Implementation of the chain:
+    // rst_pipe[0] <= rst_active;
+    // rst_pipe[i] <= rst_pipe[i-1];
+    
+    // However, there is a subtle issue. If rst_active is high, rst_pipe[0] becomes high.
+    // Then rst_pipe[1] becomes high next cycle, etc.
+    // So if rst_active goes high, it takes CHAINS cycles for the chain to fill.
+    // But we are OR-ing with rst_active, so the output is high immediately.
+    // When rst_active goes low, rst_pipe[0] goes low.
+    // Then rst_pipe[1] goes low next cycle, ..., rst_pipe[CHAINS-1] goes low after CHAINS cycles.
+    // This satisfies the requirement: "sync_rst_o must follow assertion... immediately" (via the OR gate)
+    // and "may release only after... safe deassert" (via the chain draining).
+    
+    // Let's verify the "immediate" part.
+    // Cycle N: rst_active = 1.
+    // sync_rst_o = 1 | rst_pipe[CHAINS-1]. Even if chain is empty, output is 1. Immediate.
+    // Cycle N+1: rst_active = 0.
+    // rst_pipe[0] becomes 0.
+    // sync_rst_o = 0 | rst_pipe[CHAINS-1]. If chain was full, it's still 1.
+    // ...
+    // Cycle N+CHAINS: rst_pipe[CHAINS-1] becomes 0.
+    // sync_rst_o becomes 0.
+    // This matches the spec perfectly.
+
+    reg [CHAINS-1:0] rst_pipe;
+
+    always @(posedge clk) begin
+        rst_pipe[0] <= rst_active;
+        for (integer i = 1; i < CHAINS; i = i + 1) begin
+            rst_pipe[i] <= rst_pipe[i-1];
+        end
+    end
+
+    assign sync_rst_o = rst_active | rst_pipe[CHAINS-1];
+
+endmodule<|im_end|>

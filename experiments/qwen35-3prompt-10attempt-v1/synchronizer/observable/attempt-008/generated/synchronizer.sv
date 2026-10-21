@@ -1,0 +1,30 @@
+```verilog
+`timescale 1ns / 1ps
+
+module synchronizer #(
+    parameter STAGES = 2
+)(
+    input  wire clk,
+    input  wire rstn,
+    input  wire async_sig_i,
+    output wire sync_sig_o
+);
+
+    wire [STAGES-1:0] sync_pipe;
+
+    genvar i;
+    generate
+        for (i = 0; i < STAGES; i = i + 1) begin : stage_gen
+            always @(posedge clk or negedge rstn) begin
+                if (!rstn)
+                    sync_pipe[i] <= 1'b0;
+                else
+                    sync_pipe[i] <= sync_pipe[i-1];
+            end
+        end
+    endgenerate
+
+    assign sync_sig_o = sync_pipe[STAGES-1];
+
+endmodule
+```<|im_end|>

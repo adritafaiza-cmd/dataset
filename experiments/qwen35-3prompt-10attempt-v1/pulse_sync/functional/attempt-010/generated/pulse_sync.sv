@@ -1,0 +1,81 @@
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // Internal state machine to track pulse capture and transfer
+    // States: IDLE, CAPTURE, TRANSFER
+    localparam [2:0] STATE_IDLE = 3'd0;
+    localparam [2:0] STATE_CAP = 3'd1;
+    localparam [2:0] STATE_TRF = 3'd2;
+
+    reg [2:0] state_a, state_b;
+    reg pulseA_d;
+    reg pulseB_d;
+    reg busy_d;
+
+    // Domain A Logic: Capture pulse from pulseA_i
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            state_a <= STATE_IDLE;
+            pulseA_d <= 1'b0;
+        end else begin
+            case (state_a)
+                STATE_IDLE: begin
+                    if (pulseA_i)
+                        state_a <= STATE_CAP;
+                    else
+                        state_a <= STATE_IDLE;
+                end
+                STATE_CAP: begin
+                    if (!pulseA_i)
+                        state_a <= STATE_TRF;
+                    else
+                        state_a <= STATE_CAP;
+                end
+                STATE_TRF: begin
+                    state_a <= STATE_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Domain B Logic: Generate pulse from captured signal
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            state_b <= STATE_IDLE;
+            pulseB_d <= 1'b0;
+            busy_d <= 1'b0;
+        end else begin
+            case (state_b)
+                STATE_IDLE: begin
+                    if (pulseA_d)
+                        state_b <= STATE_CAP;
+                    else
+                        state_b <= STATE_IDLE;
+                end
+                STATE_CAP: begin
+                    if (!pulseA_d)
+                        state_b <= STATE_TRF;
+                    else
+                        state_b <= STATE_CAP;
+                end
+                STATE_TRF: begin
+                    state_b <= STATE_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Output assignments
+    assign pulseB_o = pulseB_d;
+    assign busy_o = (state_a == STATE_CAP) || (state_b == STATE_CAP) || (state_b == STATE_TRF);
+
+endmodule<|im_end|>

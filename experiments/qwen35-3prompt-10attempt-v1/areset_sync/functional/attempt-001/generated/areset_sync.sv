@@ -1,0 +1,23 @@
+module areset_sync #(
+    parameter STAGES = 2
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    reg [STAGES-1:0] sync_rst_pipe;
+
+    always @(posedge clk or posedge async_rst_i) begin
+        if (async_rst_i)
+            sync_rst_pipe <= {STAGES{1'b1}};
+        else begin
+            sync_rst_pipe[0] <= sync_rst_pipe[0];
+            for (integer i = 1; i < STAGES; i = i + 1)
+                sync_rst_pipe[i] <= sync_rst_pipe[i-1];
+        end
+    end
+
+    assign sync_rst_o = sync_rst_pipe[STAGES-1];
+
+endmodule<|im_end|>

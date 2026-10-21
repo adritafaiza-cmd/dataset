@@ -1,0 +1,351 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // Internal state registers
+    reg [N-1:0] shift_reg;
+    reg [N-1:0] shift_reg_next;
+    reg [N-1:0] do_data;
+    reg do_valid_next;
+    reg shift_done;
+    reg shift_done_next;
+    reg sck_count;
+    reg sck_count_next;
+    reg sck_enable;
+    reg sck_enable_next;
+    reg spi_ssel_active;
+    reg spi_ssel_active_next;
+    reg wr_ack_pending;
+    reg wr_ack_pending_next;
+    reg di_req_pending;
+    reg di_req_pending_next;
+
+    // State machine for SPI timing control
+    // States: IDLE, SELECT, SHIFT, DESELECT
+    localparam IDLE = 2'b00;
+    localparam SELECT = 2'b01;
+    localparam SHIFT = 2'b10;
+    localparam DESELECT = 2'b11;
+
+    reg [1:0] state;
+    reg [1:0] state_next;
+
+    // SPI Clock Divider Counter
+    reg [SPI_2X_CLK_DIV:0] sck_div_cnt;
+    reg [SPI_2X_CLK_DIV:0] sck_div_cnt_next;
+
+    // MISO Shift Register
+    reg [N-1:0] miso_reg;
+    reg [N-1:0] miso_reg_next;
+    reg miso_valid;
+    reg miso_valid_next;
+
+    // SSEL Control
+    assign spi_ssel_o = spi_ssel_active;
+    assign spi_sck_o = sck_enable;
+    assign spi_mosi_o = shift_reg[N-1];
+    assign di_req_o = di_req_pending;
+    assign wr_ack_o = wr_ack_pending;
+    assign do_valid_o = miso_valid;
+    assign do_o = miso_reg;
+
+    // ------------------------------------------------------------------
+    // SPI Clock Divider Logic (sclk_i -> sck_o)
+    // ------------------------------------------------------------------
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sck_div_cnt <= 0;
+        end else begin
+            sck_div_cnt_next = sck_div_cnt + 1;
+            if (sck_div_cnt_next == SPI_2X_CLK_DIV) begin
+                sck_div_cnt <= 0;
+                sck_enable <= 1;
+            end else begin
+                sck_div_cnt <= sck_div_cnt_next;
+                sck_enable <= 0;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // State Machine Logic
+    // ------------------------------------------------------------------
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state <= IDLE;
+            shift_reg <= 0;
+            shift_done <= 0;
+            sck_enable <= 0;
+            spi_ssel_active <= 0;
+            wr_ack_pending <= 0;
+            di_req_pending <= 0;
+            miso_reg <= 0;
+            miso_valid <= 0;
+        end else begin
+            state_next = state;
+            shift_reg_next = shift_reg;
+            shift_done_next = shift_done;
+            sck_enable_next = sck_enable;
+            spi_ssel_active_next = spi_ssel_active;
+            wr_ack_pending_next = wr_ack_pending;
+            di_req_pending_next = di_req_pending;
+            miso_reg_next = miso_reg;
+            miso_valid_next = miso_valid;
+
+            // State Transitions
+            case (state)
+                IDLE: begin
+                    if (wren_i && !wr_ack_pending) begin
+                        // Load new data and acknowledge write
+                        shift_reg_next = di_i;
+                        wr_ack_pending_next = 1;
+                        di_req_pending_next = 1; // Request next word immediately if available
+                        state_next = SELECT;
+                    end else if (di_req_pending) begin
+                        // If we already requested and got data, start shift
+                        state_next = SELECT;
+                    end
+                end
+
+                SELECT: begin
+                    // Assert SSEL, wait for slave to acknowledge (simulated by immediate start)
+                    spi_ssel_active_next = 1;
+                    // Transition to SHIFT immediately for this design style
+                    state_next = SHIFT;
+                end
+
+                SHIFT: begin
+                    spi_ssel_active_next = 1;
+                    // Check if shift is complete
+                    if (shift_done) begin
+                        spi_ssel_active_next = 0;
+                        state_next = DESELECT;
+                    end
+                end
+
+                DESELECT: begin
+                    spi_ssel_active_next = 0;
+                    // Deassert SSEL, wait for slave to release
+                    // Transition back to IDLE after a short delay or immediately if no slave
+                    // For this implementation, we go back to IDLE immediately after deasserting
+                    state_next = IDLE;
+                end
+            endcase
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Shift Register Logic (MSB First)
+    // ------------------------------------------------------------------
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            shift_reg <= 0;
+            shift_done <= 0;
+        end else begin
+            // Shift right, new bit comes from MSB of shift_reg_next
+            // We need to know if we are currently shifting
+            if (state == SHIFT) begin
+                shift_reg_next = {shift_reg[N-2:0], shift_reg[N-1]}; // Shift right
+                // Check if last bit shifted out
+                if (shift_reg_next[N-1] == 1'b0 && shift_reg[N-1] == 1'b0) begin
+                    // This logic is tricky without a counter. 
+                    // Better approach: Use a counter or check if all bits are shifted.
+                    // Since N is a parameter, let's use a simple counter approach inside the state machine logic
+                    // or track the bit count.
+                end
+            end else begin
+                shift_reg_next = shift_reg;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Revised Shift Logic with Counter
+    // ------------------------------------------------------------------
+    reg [N-1:0] shift_count;
+    reg [N-1:0] shift_count_next;
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            shift_count <= 0;
+            shift_reg <= 0;
+            shift_done <= 0;
+        end else begin
+            shift_count_next = shift_count;
+            shift_reg_next = shift_reg;
+            shift_done_next = shift_done;
+
+            if (state == SHIFT) begin
+                shift_count_next = shift_count + 1;
+                // Shift right: {shift_reg[N-2:0], 1'b0}
+                shift_reg_next = {shift_reg[N-2:0], 1'b0};
+                
+                if (shift_count_next == N) begin
+                    shift_done_next = 1;
+                    shift_count_next = 0;
+                end
+            end else begin
+                shift_count_next = 0;
+                shift_done_next = 0;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // MISO Shift Register Logic
+    // ------------------------------------------------------------------
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            miso_reg <= 0;
+            miso_valid <= 0;
+        end else begin
+            // Capture MISO on the falling edge of SCK (standard SPI)
+            // Since sck_o is generated by our divider, we capture on the active edge of sclk_i 
+            // but only when sck_o is high (assuming standard SPI where data is sampled on falling edge of SCK)
+            // However, the problem states sclk_i is async to pclk_i. 
+            // Standard SPI: MOSI shifts out on rising edge of SCK, MISO shifts in on falling edge of SCK.
+            // Our sck_o is generated from sclk_i.
+            // To capture MISO correctly, we need to detect the falling edge of sck_o.
+            // Since we can't use edge detection easily in a simple always block without extra regs,
+            // we will assume the divider creates a clean clock and we sample on the falling edge.
+            // Let's add a flag for sck_falling.
+        end
+    end
+
+    reg sck_falling;
+    reg sck_falling_next;
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sck_falling <= 0;
+            miso_reg <= 0;
+            miso_valid <= 0;
+        end else begin
+            sck_falling_next = 0;
+            if (sck_enable) begin
+                // sck_o is high
+                sck_falling_next = 0;
+            end else begin
+                // sck_o is low -> Falling edge detected
+                sck_falling_next = 1;
+            end
+        end
+    end
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            miso_reg <= 0;
+            miso_valid <= 0;
+        end else begin
+            if (sck_falling) begin
+                // Shift MISO in (MSB first)
+                miso_reg_next = {miso_reg[N-2:0], spi_miso_i};
+                // Check if full
+                if (miso_reg_next[N-1] == 1'b0 && miso_reg[N-1] == 1'b0) begin
+                    // This logic is flawed for variable N without a counter.
+                    // Let's use a counter for MISO too.
+                end
+            end else begin
+                miso_reg_next = miso_reg;
+            end
+        end
+    end
+
+    reg [N-1:0] miso_count;
+    reg [N-1:0] miso_count_next;
+    reg miso_full;
+    reg miso_full_next;
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            miso_count <= 0;
+            miso_reg <= 0;
+            miso_valid <= 0;
+            miso_full <= 0;
+        end else begin
+            miso_count_next = miso_count;
+            miso_reg_next = miso_reg;
+            miso_valid_next = miso_valid;
+            miso_full_next = miso_full;
+
+            if (sck_falling) begin
+                miso_count_next = miso_count + 1;
+                miso_reg_next = {miso_reg[N-2:0], spi_miso_i};
+                
+                if (miso_count_next == N) begin
+                    miso_full_next = 1;
+                    miso_count_next = 0;
+                    miso_valid_next = 1;
+                end
+            end else begin
+                miso_count_next = 0;
+                miso_full_next = 0;
+                miso_valid_next = 0;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Write Acknowledge Logic
+    // ------------------------------------------------------------------
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            wr_ack_pending <= 0;
+        end else begin
+            if (state == SHIFT && shift_done) begin
+                // Shift complete, acknowledge write
+                wr_ack_pending <= 0;
+            end else begin
+                wr_ack_pending <= wr_ack_pending;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // DI Request Logic
+    // ------------------------------------------------------------------
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_pending <= 0;
+        end else begin
+            if (state == IDLE && wren_i) begin
+                // New write request
+                di_req_pending <= 1;
+            end else if (state == SHIFT && shift_done) begin
+                // Shift done, request next if wren_i is still high
+                if (wren_i) begin
+                    di_req_pending <= 1;
+                end else begin
+                    di_req_pending <= 0;
+                end
+            end else begin
+                di_req_pending <= di_req_pending;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Reset Logic for SSEL
+    // ------------------------------------------------------------------
+    // spi_ssel_o is driven by spi_ssel_active in the state machine output logic
+    // which is reset to 0 in the state machine block.
+
+endmodule
+```<|im_end|>
+<|endoftext|>

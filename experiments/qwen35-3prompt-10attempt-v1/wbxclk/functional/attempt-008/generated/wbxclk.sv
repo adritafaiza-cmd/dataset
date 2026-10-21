@@ -1,0 +1,117 @@
+```verilog
+module wbxclk #(
+	parameter	AW=32,
+				DW=32,
+				LGFIFO = 5
+) (
+	input	wire			i_wb_clk, i_reset,
+	input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+	input	wire	[(AW-1):0]	i_wb_addr,
+	input	wire	[(DW-1):0]	i_wb_data,
+	input	wire	[(DW/8-1):0]	i_wb_sel,
+	output	wire			o_wb_stall,
+	output	reg			o_wb_ack,
+	output	reg	[(DW-1):0]	o_wb_data,
+	output	reg			o_wb_err,
+	input	wire			i_xclk_clk,
+	output	reg			o_xclk_cyc,
+	output	reg			o_xclk_stb,
+	output	reg			o_xclk_we,
+	output	reg	[(AW-1):0]	o_xclk_addr,
+	output	reg	[(DW-1):0]	o_xclk_data,
+	output	reg	[(DW/8-1):0]	o_xclk_sel,
+	input	wire			i_xclk_stall,
+	input	wire			i_xclk_ack,
+	input	wire	[(DW-1):0]	i_xclk_data,
+	input	wire			i_xclk_err
+);
+
+	// Wishbone FIFO (Source side)
+	// Stores incoming WB cycles until they can be forwarded to XCLK
+	wbx_fifo #(
+		.AW(AW),
+		.DW(DW),
+		.LGFIFO(LGFIFO)
+	) u_wb_fifo (
+		.clk(i_wb_clk),
+		.reset(i_reset),
+		.write_en(~i_reset & i_wb_cyc & i_wb_stb),
+		.write_data({i_wb_we, i_wb_sel, i_wb_addr, i_wb_data}),
+		.read_en(~i_reset & o_xclk_cyc & o_xclk_stb),
+		.read_data({o_wb_ack, o_wb_err, o_wb_data}),
+		.full(o_wb_stall)
+	);
+
+	// XCLK FIFO (Destination side)
+	// Stores outgoing XCLK cycles until they can be accepted by the destination
+	wbx_fifo #(
+		.AW(AW),
+		.DW(DW),
+		.LGFIFO(LGFIFO)
+	) u_xclk_fifo (
+		.clk(i_xclk_clk),
+		.reset(i_reset),
+		.write_en(~i_reset & o_xclk_cyc & o_xclk_stb),
+		.write_data({o_xclk_we, o_xclk_sel, o_xclk_addr, o_xclk_data}),
+		.read_en(~i_reset & i_xclk_ack & ~i_xclk_err),
+		.read_data({o_wb_ack, o_wb_err, o_wb_data}),
+		.full(o_wb_stall)
+	);
+
+	// Control Logic for XCLK side
+	// Generates XCLK signals based on FIFO status and destination feedback
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			o_xclk_cyc <= 1'b0;
+			o_xclk_stb <= 1'b0;
+			o_xclk_we <= 1'b0;
+			o_xclk_addr <= {AW{1'b0}};
+			o_xclk_data <= {DW{1'b0}};
+			o_xclk_sel <= {DW/8{1'b0}};
+		end
+		else begin
+			// Start a new cycle if FIFO is not full and we have a valid read from WB side
+			if (!u_xclk_fifo.full && u_wb_fifo.read_en) begin
+				o_xclk_cyc <= 1'b1;
+				o_xclk_stb <= 1'b1;
+				o_xclk_we <= u_wb_fifo.read_data[0];
+				o_xclk_addr <= u_wb_fifo.read_data[1:1+AW];
+				o_xclk_data <= u_wb_fifo.read_data[1+AW:1+AW+DW];
+				o_xclk_sel <= u_wb_fifo.read_data[1+AW+DW:1+AW+DW+DW/8];
+			end
+			else begin
+				o_xclk_cyc <= 1'b0;
+				o_xclk_stb <= 1'b0;
+				o_xclk_we <= 1'b0;
+				o_xclk_addr <= {AW{1'b0}};
+				o_xclk_data <= {DW{1'b0}};
+				o_xclk_sel <= {DW/8{1'b0}};
+			end
+		end
+	end
+
+	// Control Logic for WB side
+	// Generates WB signals based on FIFO status and source feedback
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			o_wb_ack <= 1'b0;
+			o_wb_err <= 1'b0;
+			o_wb_data <= {DW{1'b0}};
+		end
+		else begin
+			// If FIFO is not empty and we have a valid write from XCLK side
+			if (!u_wb_fifo.empty && u_xclk_fifo.read_en) begin
+				o_wb_ack <= u_xclk_fifo.read_data[0];
+				o_wb_err <= u_xclk_fifo.read_data[1];
+				o_wb_data <= u_xclk_fifo.read_data[2+DW/8:2+DW/8+DW];
+			end
+			else begin
+				o_wb_ack <= 1'b0;
+				o_wb_err <= 1'b0;
+				o_wb_data <= {DW{1'b0}};
+			end
+		end
+	end
+
+endmodule
+```<|im_end|>
