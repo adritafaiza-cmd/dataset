@@ -1,0 +1,154 @@
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam PTR_W = LGFIFO + 1;
+
+	// Write domain
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+	reg [PTR_W-1:0] wptr;
+	reg [PTR_W-1:0] rptr_w;
+	reg [PTR_W-1:0] rptr_w_sync1;
+	reg [PTR_W-1:0] rptr_w_sync2;
+	reg [PTR_W-1:0] rptr_w_sync3;
+	reg [PTR_W-1:0] rptr_w_sync4;
+	reg [PTR_W-1:0] rptr_w_sync5;
+	reg [PTR_W-1:0] rptr_w_sync6;
+	reg [PTR_W-1:0] rptr_w_sync7;
+	reg [PTR_W-1:0] rptr_w_sync8;
+
+	// Read domain
+	reg [PTR_W-1:0] rptr;
+	reg [PTR_W-1:0] wptr_r;
+	reg [PTR_W-1:0] wptr_r_sync1;
+	reg [PTR_W-1:0] wptr_r_sync2;
+	reg [PTR_W-1:0] wptr_r_sync3;
+	reg [PTR_W-1:0] wptr_r_sync4;
+	reg [PTR_W-1:0] wptr_r_sync5;
+	reg [PTR_W-1:0] wptr_r_sync6;
+	reg [PTR_W-1:0] wptr_r_sync7;
+	reg [PTR_W-1:0] wptr_r_sync8;
+
+	reg [WIDTH-1:0] rd_data_reg;
+	reg [WIDTH-1:0] rd_data_reg2;
+
+	// Write clock edge
+	wire wclk_edge = WRITE_ON_POSEDGE ? i_wclk : ~i_wclk;
+	// Read clock edge
+	wire rclk_edge = i_rclk;
+
+	// Write pointer increment
+	wire w_en = i_wr & ~o_wr_full;
+	wire [PTR_W-1:0] wptr_next = wptr + 1'b1;
+
+	// Read pointer increment
+	wire r_en = i_rd & ~o_rd_empty;
+	wire [PTR_W-1:0] rptr_next = rptr + 1'b1;
+
+	// Write domain logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wptr <= {PTR_W{1'b0}};
+			rptr_w_sync1 <= {PTR_W{1'b0}};
+			rptr_w_sync2 <= {PTR_W{1'b0}};
+			rptr_w_sync3 <= {PTR_W{1'b0}};
+			rptr_w_sync4 <= {PTR_W{1'b0}};
+			rptr_w_sync5 <= {PTR_W{1'b0}};
+			rptr_w_sync6 <= {PTR_W{1'b0}};
+			rptr_w_sync7 <= {PTR_W{1'b0}};
+			rptr_w_sync8 <= {PTR_W{1'b0}};
+			o_wr_full <= 1'b0;
+		end else begin
+			rptr_w_sync1 <= rptr_w;
+			rptr_w_sync2 <= rptr_w_sync1;
+			rptr_w_sync3 <= rptr_w_sync2;
+			rptr_w_sync4 <= rptr_w_sync3;
+			rptr_w_sync5 <= rptr_w_sync4;
+			rptr_w_sync6 <= rptr_w_sync5;
+			rptr_w_sync7 <= rptr_w_sync6;
+			rptr_w_sync8 <= rptr_w_sync7;
+			if (w_en) begin
+				wptr <= wptr_next;
+				mem[wptr[LGFIFO-1:0]] <= i_wr_data;
+			end
+			// Full condition: write pointer has lapped read pointer by DEPTH
+			// Using the most stable synchronized read pointer
+			o_wr_full <= (wptr[PTR_W-1:1] == rptr_w_sync8[PTR_W-1:1]) &&
+						 (wptr[0] != rptr_w_sync8[0]);
+		end
+	end
+
+	// Read domain logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rptr <= {PTR_W{1'b0}};
+			wptr_r_sync1 <= {PTR_W{1'b0}};
+			wptr_r_sync2 <= {PTR_W{1'b0}};
+			wptr_r_sync3 <= {PTR_W{1'b0}};
+			wptr_r_sync4 <= {PTR_W{1'b0}};
+			wptr_r_sync5 <= {PTR_W{1'b0}};
+			wptr_r_sync6 <= {PTR_W{1'b0}};
+			wptr_r_sync7 <= {PTR_W{1'b0}};
+			wptr_r_sync8 <= {PTR_W{1'b0}};
+			o_rd_empty <= 1'b1;
+			rd_data_reg <= {WIDTH{1'b0}};
+			rd_data_reg2 <= {WIDTH{1'b0}};
+		end else begin
+			wptr_r_sync1 <= wptr_r;
+			wptr_r_sync2 <= wptr_r_sync1;
+			wptr_r_sync3 <= wptr_r_sync2;
+			wptr_r_sync4 <= wptr_r_sync3;
+			wptr_r_sync5 <= wptr_r_sync4;
+			wptr_r_sync6 <= wptr_r_sync5;
+			wptr_r_sync7 <= wptr_r_sync6;
+			wptr_r_sync8 <= wptr_r_sync7;
+			if (r_en) begin
+				rptr <= rptr_next;
+				if (OPT_REGISTER_READS) begin
+					rd_data_reg <= mem[rptr[LGFIFO-1:0]];
+					rd_data_reg2 <= rd_data_reg;
+				end else begin
+					rd_data_reg <= mem[rptr[LGFIFO-1:0]];
+				end
+			end
+			// Empty condition: read pointer equals write pointer
+			o_rd_empty <= (rptr == wptr_r_sync8);
+			if (OPT_REGISTER_READS) begin
+				o_rd_data <= rd_data_reg2;
+			end else begin
+				o_rd_data <= rd_data_reg;
+			end
+		end
+	end
+
+	// Synchronize write pointer to read domain
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			wptr_r <= {PTR_W{1'b0}};
+		end else begin
+			wptr_r <= wptr;
+		end
+	end
+
+	// Synchronize read pointer to write domain
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			rptr_w <= {PTR_W{1'b0}};
+		end else begin
+			rptr_w <= rptr;
+		end
+	end
+
+endmodule

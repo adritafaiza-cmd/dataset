@@ -1,0 +1,152 @@
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam ADDR_WIDTH = LGFIFO;
+	localparam PTR_WIDTH = LGFIFO + 1;
+
+	// Write side
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+	reg [ADDR_WIDTH-1:0] wr_ptr;
+	reg [PTR_WIDTH-1:0] wr_ptr_gray;
+	reg [PTR_WIDTH-1:0] wr_ptr_gray_sync;
+
+	// Read side
+	reg [ADDR_WIDTH-1:0] rd_ptr;
+	reg [PTR_WIDTH-1:0] rd_ptr_gray;
+	reg [PTR_WIDTH-1:0] rd_ptr_gray_sync;
+
+	// Synchronizers
+	reg [PTR_WIDTH-1:0] wr_ptr_gray_sync_r1, wr_ptr_gray_sync_r2;
+	reg [PTR_WIDTH-1:0] rd_ptr_gray_sync_r1, rd_ptr_gray_sync_r2;
+
+	// Binary to Gray conversion
+	function [PTR_WIDTH-1:0] bin2gray;
+		input [PTR_WIDTH-1:0] bin;
+		begin
+			bin2gray = bin ^ (bin >> 1);
+		end
+	endfunction
+
+	// Gray to Binary conversion
+	function [PTR_WIDTH-1:0] gray2bin;
+		input [PTR_WIDTH-1:0] gray;
+		reg [PTR_WIDTH-1:0] bin;
+		begin
+			bin[PTR_WIDTH-1] = gray[PTR_WIDTH-1];
+			for (i = PTR_WIDTH-2; i >= 0; i = i - 1)
+				bin[i] = gray[i] ^ bin[i+1];
+			gray2bin = bin;
+		end
+	endfunction
+
+	// Write side logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_ptr <= {ADDR_WIDTH{1'b0}};
+			wr_ptr_gray <= {PTR_WIDTH{1'b0}};
+			o_wr_full <= 1'b0;
+		end else begin
+			if (i_wr && !o_wr_full) begin
+				mem[wr_ptr] <= i_wr_data;
+				wr_ptr <= wr_ptr + 1'b1;
+				wr_ptr_gray <= bin2gray(wr_ptr + 1'b1);
+			end
+		end
+	end
+
+	// Read side logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_ptr <= {ADDR_WIDTH{1'b0}};
+			rd_ptr_gray <= {PTR_WIDTH{1'b0}};
+			o_rd_empty <= 1'b1;
+			o_rd_data <= {WIDTH{1'b0}};
+		end else begin
+			if (i_rd && !o_rd_empty) begin
+				rd_ptr <= rd_ptr + 1'b1;
+				rd_ptr_gray <= bin2gray(rd_ptr + 1'b1);
+			end
+		end
+	end
+
+	// Synchronize write pointer gray to read clock domain
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			wr_ptr_gray_sync_r1 <= {PTR_WIDTH{1'b0}};
+			wr_ptr_gray_sync_r2 <= {PTR_WIDTH{1'b0}};
+		end else begin
+			wr_ptr_gray_sync_r1 <= wr_ptr_gray;
+			wr_ptr_gray_sync_r2 <= wr_ptr_gray_sync_r1;
+		end
+	end
+
+	// Synchronize read pointer gray to write clock domain
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			rd_ptr_gray_sync_r1 <= {PTR_WIDTH{1'b0}};
+			rd_ptr_gray_sync_r2 <= {PTR_WIDTH{1'b0}};
+		end else begin
+			rd_ptr_gray_sync_r1 <= rd_ptr_gray;
+			rd_ptr_gray_sync_r2 <= rd_ptr_gray_sync_r1;
+		end
+	end
+
+	// Full flag: write pointer has lapped read pointer by DEPTH
+	// In gray code, full when wr_ptr_gray == {~rd_ptr_gray_sync[MSB], rd_ptr_gray_sync[MSB-1:0]}
+	// i.e., the two MSBs differ and the rest are equal
+	always @(*) begin
+		o_wr_full = (wr_ptr_gray[PTR_WIDTH-1] != rd_ptr_gray_sync_r2[PTR_WIDTH-1]) &&
+					(wr_ptr_gray[PTR_WIDTH-2:0] == rd_ptr_gray_sync_r2[PTR_WIDTH-2:0]);
+	end
+
+	// Empty flag: read pointer equals write pointer
+	always @(*) begin
+		o_rd_empty = (rd_ptr_gray == wr_ptr_gray_sync_r2);
+	end
+
+	// Read data output
+	// If OPT_REGISTER_READS is 1, register the read data
+	// If OPT_REGISTER_READS is 0, combinational read
+	// NFF is the number of flip-flops for read data path (typically 1 or 2)
+	// For simplicity, we'll use a single registered read if OPT_REGISTER_READS=1
+	// The read address is rd_ptr (current value before increment)
+	
+	// We need to present the data at rd_ptr when a read occurs
+	// With registered reads, the data appears one cycle after the read enable
+	// Let's implement: when i_rd && !o_rd_empty, capture mem[rd_ptr]
+	
+	reg [WIDTH-1:0] rd_data_reg;
+	
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_data_reg <= {WIDTH{1'b0}};
+		end else begin
+			if (i_rd && !o_rd_empty) begin
+				rd_data_reg <= mem[rd_ptr];
+			end
+		end
+	end
+
+	// Output assignment
+	always @(*) begin
+		if (OPT_REGISTER_READS) begin
+			o_rd_data = rd_data_reg;
+		end else begin
+			o_rd_data = mem[rd_ptr];
+		end
+	end
+
+endmodule

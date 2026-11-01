@@ -1,0 +1,185 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire [WIDTH-1:0] src_data_reg;
+  wire src_valid_reg;
+  wire src_ready_int;
+  wire dst_valid_reg;
+  wire dst_ready_int;
+  wire [WIDTH-1:0] dst_data_reg;
+
+  // Source side: register data and valid, generate ready
+  // Destination side: register valid and data, generate ready
+
+  // We use a 4-phase handshake:
+  // Phase 1: src_valid rises (data valid)
+  // Phase 2: dst_ready rises (acknowledge)
+  // Phase 3: src_valid falls (deassert valid)
+  // Phase 4: dst_ready falls (deassert ready)
+
+  // For CDC, we need to synchronize the handshake signals.
+  // The data is transferred when both src_valid and dst_ready are high.
+
+  // Let's implement a simple 4-phase handshake with CDC.
+  // We'll use a 2-stage synchronizer for each signal crossing.
+
+  // Source to destination: src_valid, src_data
+  // Destination to source: dst_ready
+
+  // Synchronizers
+  wire [1:0] src_valid_sync;
+  wire [WIDTH-1:0] src_data_sync;
+  wire [1:0] dst_ready_sync;
+
+  // Synchronize src_valid to dst domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_valid_sync <= 2'b00;
+    else
+      src_valid_sync <= {src_valid_sync[0], src_valid_reg};
+  end
+
+  // Synchronize src_data to dst domain (data is stable when valid is high)
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_data_sync <= {WIDTH{1'b0}};
+    else
+      src_data_sync <= src_data_reg;
+  end
+
+  // Synchronize dst_ready to src domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_ready_sync <= 2'b00;
+    else
+      dst_ready_sync <= {dst_ready_sync[0], dst_ready_int};
+  end
+
+  // Source side logic
+  // src_ready_o is high when we can accept new data
+  // We can accept new data when the previous transfer is complete
+  // i.e., when dst_ready is high (synchronized)
+
+  // For 4-phase: 
+  // - When src_valid is low and dst_ready is low: idle, can accept new data
+  // - When src_valid is high and dst_ready is low: waiting for ack
+  // - When src_valid is high and dst_ready is high: transfer in progress
+  // - When src_valid is low and dst_ready is high: deasserting valid
+
+  // Let's use a state machine approach
+  // States: IDLE, WAIT_ACK, DEASSERT_VALID, WAIT_DEASSERT
+
+  localparam [1:0] ST_IDLE = 2'b00;
+  localparam [1:0] ST_WAIT_ACK = 2'b01;
+  localparam [1:0] ST_DEASSERT_VALID = 2'b10;
+  localparam [1:0] ST_WAIT_DEASSERT = 2'b11;
+
+  reg [1:0] src_state;
+  reg [WIDTH-1:0] src_data_latch;
+  reg src_valid_latch;
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_state <= ST_IDLE;
+      src_data_latch <= {WIDTH{1'b0}};
+      src_valid_latch <= 1'b0;
+    end else begin
+      case (src_state)
+        ST_IDLE: begin
+          if (src_valid_i) begin
+            src_data_latch <= src_data_i;
+            src_valid_latch <= 1'b1;
+            src_state <= ST_WAIT_ACK;
+          end
+        end
+        ST_WAIT_ACK: begin
+          if (dst_ready_sync[1]) begin
+            src_state <= ST_DEASSERT_VALID;
+          end
+        end
+        ST_DEASSERT_VALID: begin
+          src_valid_latch <= 1'b0;
+          src_state <= ST_WAIT_DEASSERT;
+        end
+        ST_WAIT_DEASSERT: begin
+          if (!dst_ready_sync[1]) begin
+            src_state <= ST_IDLE;
+          end
+        end
+        default: src_state <= ST_IDLE;
+      endcase
+    end
+  end
+
+  assign src_ready_o = (src_state == ST_IDLE);
+  assign src_valid_reg = src_valid_latch;
+  assign src_data_reg = src_data_latch;
+
+  // Destination side logic
+  // dst_valid_o is high when data is available
+  // dst_ready_int is generated based on dst_ready_i and internal state
+
+  localparam [1:0] DST_IDLE = 2'b00;
+  localparam [1:0] DST_WAIT_DATA = 2'b01;
+  localparam [1:0] DST_ACK = 2'b10;
+  localparam [1:0] DST_WAIT_DEASSERT = 2'b11;
+
+  reg [1:0] dst_state;
+  reg [WIDTH-1:0] dst_data_latch;
+  reg dst_valid_latch;
+  reg dst_ready_latch;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_state <= DST_IDLE;
+      dst_data_latch <= {WIDTH{1'b0}};
+      dst_valid_latch <= 1'b0;
+      dst_ready_latch <= 1'b0;
+    end else begin
+      case (dst_state)
+        DST_IDLE: begin
+          if (src_valid_sync[1]) begin
+            dst_data_latch <= src_data_sync;
+            dst_valid_latch <= 1'b1;
+            dst_ready_latch <= 1'b1;
+            dst_state <= DST_ACK;
+          end
+        end
+        DST_ACK: begin
+          if (dst_ready_i) begin
+            dst_state <= DST_WAIT_DEASSERT;
+          end
+        end
+        DST_WAIT_DEASSERT: begin
+          dst_valid_latch <= 1'b0;
+          dst_ready_latch <= 1'b0;
+          dst_state <= DST_IDLE;
+        end
+        default: dst_state <= DST_IDLE;
+      endcase
+    end
+  end
+
+  assign dst_valid_o = dst_valid_latch;
+  assign dst_data_o = dst_data_latch;
+  assign dst_ready_int = dst_ready_latch;
+
+endmodule
+```<|im_end|>

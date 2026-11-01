@@ -1,0 +1,67 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire [WIDTH-1:0] src_data_reg;
+  wire src_valid_reg;
+  wire src_ready_int;
+  wire dst_valid_int;
+  wire dst_ready_int;
+  wire [WIDTH-1:0] dst_data_reg;
+
+  // Source domain: register input data and valid
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_reg <= {WIDTH{1'b0}};
+      src_valid_reg <= 1'b0;
+    end else begin
+      if (src_valid_i && src_ready_int) begin
+        src_data_reg <= src_data_i;
+        src_valid_reg <= 1'b1;
+      end else if (src_valid_i) begin
+        src_data_reg <= src_data_i;
+      end
+    end
+  end
+
+  // Destination domain: register output data and valid
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_reg <= {WIDTH{1'b0}};
+      dst_valid_int <= 1'b0;
+    end else begin
+      if (dst_valid_int && dst_ready_i) begin
+        dst_valid_int <= 1'b0;
+      end else if (!dst_valid_int) begin
+        dst_data_reg <= src_data_reg;
+        dst_valid_int <= src_valid_reg;
+      end
+    end
+  end
+
+  // Source ready logic
+  // In non-decoupled mode, source is ready when destination is not valid
+  // In decoupled mode, source is always ready (can accept new data while previous is in flight)
+  assign src_ready_int = DECOUPLED ? 1'b1 : !dst_valid_int;
+  assign src_ready_o = src_ready_int;
+
+  // Destination valid output
+  assign dst_valid_o = dst_valid_int;
+  assign dst_data_o = dst_data_reg;
+
+endmodule

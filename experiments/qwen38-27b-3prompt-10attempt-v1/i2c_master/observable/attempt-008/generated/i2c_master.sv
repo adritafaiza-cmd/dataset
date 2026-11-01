@@ -1,0 +1,654 @@
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // State machine states
+    localparam S_IDLE            = 4'd0;
+    localparam S_START           = 4'd1;
+    localparam S_SEND_ADDR       = 4'd2;
+    localparam S_CHECK_ACK       = 4'd3;
+    localparam S_SEND_DATA       = 4'd4;
+    localparam S_CHECK_DATA_ACK  = 4'd5;
+    localparam S_RECV_DATA       = 4'd6;
+    localparam S_SEND_NACK       = 4'd7;
+    localparam S_STOP            = 4'd8;
+    localparam S_DONE            = 4'd9;
+
+    // Internal signals
+    reg [3:0]  state;
+    reg [3:0]  state_next;
+
+    reg [15:0] cnt;
+    reg [15:0] cnt_next;
+
+    reg [7:0]  tx_data;
+    reg [7:0]  rx_data;
+    reg [2:0]  bit_cnt;
+    reg [2:0]  bit_cnt_next;
+
+    reg [6:0]  addr_reg;
+    reg        read_reg;
+    reg        write_reg;
+    reg        write_multiple_reg;
+    reg        stop_reg;
+
+    reg        scl_reg;
+    reg        sda_reg;
+    reg        scl_t_reg;
+    reg        sda_t_reg;
+
+    reg        missed_ack_reg;
+    reg        missed_ack_reg_next;
+
+    reg        data_valid_reg;
+    reg        data_valid_reg_next;
+    reg        data_last_reg;
+    reg        data_last_reg_next;
+
+    reg        data_tready_reg;
+    reg        data_tready_reg_next;
+
+    reg        cmd_ready_reg;
+    reg        cmd_ready_reg_next;
+
+    reg        busy_reg;
+    reg        busy_reg_next;
+
+    reg        bus_control_reg;
+    reg        bus_control_reg_next;
+
+    reg        bus_active_reg;
+    reg        bus_active_reg_next;
+
+    // SDA/SCL tristate control
+    // When tristate is high, the output is disabled and input is used
+    // scl_t = 1 means tristate (input), 0 means drive (output)
+    // sda_t = 1 means tristate (input), 0 means drive (output)
+
+    // Prescale counter
+    wire [15:0] prescale_val = prescale;
+    wire        prescale_done = (cnt == prescale_val - 16'd1);
+
+    // State machine
+    always @(*) begin
+        state_next = state;
+        cnt_next = cnt;
+        bit_cnt_next = bit_cnt;
+        missed_ack_reg_next = missed_ack_reg;
+        data_valid_reg_next = data_valid_reg;
+        data_last_reg_next = data_last_reg;
+        data_tready_reg_next = data_tready_reg;
+        cmd_ready_reg_next = cmd_ready_reg;
+        busy_reg_next = busy_reg;
+        bus_control_reg_next = bus_control_reg;
+        bus_active_reg_next = bus_active_reg;
+
+        case (state)
+            S_IDLE: begin
+                state_next = S_IDLE;
+                cnt_next = 16'd0;
+                bit_cnt_next = 3'd0;
+                missed_ack_reg_next = 1'b0;
+                data_valid_reg_next = 1'b0;
+                data_last_reg_next = 1'b0;
+                data_tready_reg_next = 1'b0;
+                cmd_ready_reg_next = 1'b1;
+                busy_reg_next = 1'b0;
+                bus_control_reg_next = 1'b0;
+                bus_active_reg_next = 1'b0;
+
+                if (s_axis_cmd_valid) begin
+                    if (s_axis_cmd_start) begin
+                        state_next = S_START;
+                        cmd_ready_reg_next = 1'b0;
+                        busy_reg_next = 1'b1;
+                        bus_control_reg_next = 1'b1;
+                        bus_active_reg_next = 1'b1;
+                    end else if (s_axis_cmd_stop) begin
+                        state_next = S_STOP;
+                        cmd_ready_reg_next = 1'b0;
+                        busy_reg_next = 1'b1;
+                        bus_control_reg_next = 1'b1;
+                        bus_active_reg_next = 1'b1;
+                    end
+                end
+            end
+
+            S_START: begin
+                // Generate START condition: SDA high to low while SCL high
+                // We need to ensure SCL is high first, then pull SDA low
+                // For simplicity, we'll use a multi-cycle approach
+                state_next = S_START;
+                cnt_next = cnt + 16'd1;
+                bit_cnt_next = bit_cnt;
+                missed_ack_reg_next = missed_ack_reg;
+                data_valid_reg_next = data_valid_reg;
+                data_last_reg_next = data_last_reg;
+                data_tready_reg_next = data_tready_reg;
+                cmd_ready_reg_next = cmd_ready_reg;
+                busy_reg_next = busy_reg;
+                bus_control_reg_next = bus_control_reg;
+                bus_active_reg_next = bus_active_reg;
+
+                if (prescale_done) begin
+                    state_next = S_SEND_ADDR;
+                    cnt_next = 16'd0;
+                    bit_cnt_next = 3'd7;
+                end
+            end
+
+            S_SEND_ADDR: begin
+                // Send 7-bit address + R/W bit
+                state_next = S_SEND_ADDR;
+                cnt_next = cnt + 16'd1;
+                bit_cnt_next = bit_cnt;
+                missed_ack_reg_next = missed_ack_reg;
+                data_valid_reg_next = data_valid_reg;
+                data_last_reg_next = data_last_reg;
+                data_tready_reg_next = data_tready_reg;
+                cmd_ready_reg_next = cmd_ready_reg;
+                busy_reg_next = busy_reg;
+                bus_control_reg_next = bus_control_reg;
+                bus_active_reg_next = bus_active_reg;
+
+                if (prescale_done) begin
+                    if (bit_cnt == 3'd0) begin
+                        state_next = S_CHECK_ACK;
+                        cnt_next = 16'd0;
+                    end else begin
+                        bit_cnt_next = bit_cnt - 3'd1;
+                    end
+                end
+            end
+
+            S_CHECK_ACK: begin
+                // Release SDA and read ACK from slave
+                state_next = S_CHECK_ACK;
+                cnt_next = cnt + 16'd1;
+                bit_cnt_next = bit_cnt;
+                missed_ack_reg_next = missed_ack_reg;
+                data_valid_reg_next = data_valid_reg;
+                data_last_reg_next = data_last_reg;
+                data_tready_reg_next = data_tready_reg;
+                cmd_ready_reg_next = cmd_ready_reg;
+                busy_reg_next = busy_reg;
+                bus_control_reg_next = bus_control_reg;
+                bus_active_reg_next = bus_active_reg;
+
+                if (prescale_done) begin
+                    if (sda_i == 1'b0) begin
+                        // ACK received
+                        if (read_reg) begin
+                            state_next = S_RECV_DATA;
+                            cnt_next = 16'd0;
+                            bit_cnt_next = 3'd7;
+                        end else begin
+                            state_next = S_SEND_DATA;
+                            cnt_next = 16'd0;
+                            bit_cnt_next = 3'd7;
+                        end
+                    end else begin
+                        // NACK received
+                        missed_ack_reg_next = 1'b1;
+                        state_next = S_STOP;
+                        cnt_next = 16'd0;
+                    end
+                end
+            end
+
+            S_SEND_DATA: begin
+                // Send data byte
+                state_next = S_SEND_DATA;
+                cnt_next = cnt + 16'd1;
+                bit_cnt_next = bit_cnt;
+                missed_ack_reg_next = missed_ack_reg;
+                data_valid_reg_next = data_valid_reg;
+                data_last_reg_next = data_last_reg;
+                data_tready_reg_next = data_tready_reg;
+                cmd_ready_reg_next = cmd_ready_reg;
+                busy_reg_next = busy_reg;
+                bus_control_reg_next = bus_control_reg;
+                bus_active_reg_next = bus_active_reg;
+
+                if (prescale_done) begin
+                    if (bit_cnt == 3'd0) begin
+                        state_next = S_CHECK_DATA_ACK;
+                        cnt_next = 16'd0;
+                    end else begin
+                        bit_cnt_next = bit_cnt - 3'd1;
+                    end
+                end
+            end
+
+            S_CHECK_DATA_ACK: begin
+                // Check ACK for data byte
+                state_next = S_CHECK_DATA_ACK;
+                cnt_next = cnt + 16'd1;
+                bit_cnt_next = bit_cnt;
+                missed_ack_reg_next = missed_ack_reg;
+                data_valid_reg_next = data_valid_reg;
+                data_last_reg_next = data_last_reg;
+                data_tready_reg_next = data_tready_reg;
+                cmd_ready_reg_next = cmd_ready_reg;
+                busy_reg_next = busy_reg;
+                bus_control_reg_next = bus_control_reg;
+                bus_active_reg_next = bus_active_reg;
+
+                if (prescale_done) begin
+                    if (sda_i == 1'b0) begin
+                        // ACK received
+                        if (write_multiple_reg && !s_axis_data_tlast) begin
+                            state_next = S_SEND_DATA;
+                            cnt_next = 16'd0;
+                            bit_cnt_next = 3'd7;
+                        end else begin
+                            state_next = S_STOP;
+                            cnt_next = 16'd0;
+                        end
+                    end else begin
+                        // NACK received
+                        missed_ack_reg_next = 1'b1;
+                        state_next = S_STOP;
+                        cnt_next = 16'd0;
+                    end
+                end
+            end
+
+            S_RECV_DATA: begin
+                // Receive data byte
+                state_next = S_RECV_DATA;
+                cnt_next = cnt + 16'd1;
+                bit_cnt_next = bit_cnt;
+                missed_ack_reg_next = missed_ack_reg;
+                data_valid_reg_next = data_valid_reg;
+                data_last_reg_next = data_last_reg;
+                data_tready_reg_next = data_tready_reg;
+                cmd_ready_reg_next = cmd_ready_reg;
+                busy_reg_next = busy_reg;
+                bus_control_reg_next = bus_control_reg;
+                bus_active_reg_next = bus_active_reg;
+
+                if (prescale_done) begin
+                    if (bit_cnt == 3'd0) begin
+                        state_next = S_SEND_NACK;
+                        cnt_next = 16'd0;
+                    end else begin
+                        bit_cnt_next = bit_cnt - 3'd1;
+                    end
+                end
+            end
+
+            S_SEND_NACK: begin
+                // Send NACK to slave
+                state_next = S_SEND_NACK;
+                cnt_next = cnt + 16'd1;
+                bit_cnt_next = bit_cnt;
+                missed_ack_reg_next = missed_ack_reg;
+                data_valid_reg_next = data_valid_reg;
+                data_last_reg_next = data_last_reg;
+                data_tready_reg_next = data_tready_reg;
+                cmd_ready_reg_next = cmd_ready_reg;
+                busy_reg_next = busy_reg;
+                bus_control_reg_next = bus_control_reg;
+                bus_active_reg_next = bus_active_reg;
+
+                if (prescale_done) begin
+                    state_next = S_STOP;
+                    cnt_next = 16'd0;
+                end
+            end
+
+            S_STOP: begin
+                // Generate STOP condition: SDA low to high while SCL high
+                state_next = S_STOP;
+                cnt_next = cnt + 16'd1;
+                bit_cnt_next = bit_cnt;
+                missed_ack_reg_next = missed_ack_reg;
+                data_valid_reg_next = data_valid_reg;
+                data_last_reg_next = data_last_reg;
+                data_tready_reg_next = data_tready_reg;
+                cmd_ready_reg_next = cmd_ready_reg;
+                busy_reg_next = busy_reg;
+                bus_control_reg_next = bus_control_reg;
+                bus_active_reg_next = bus_active_reg;
+
+                if (prescale_done) begin
+                    state_next = S_DONE;
+                    cnt_next = 16'd0;
+                end
+            end
+
+            S_DONE: begin
+                state_next = S_IDLE;
+                cnt_next = 16'd0;
+                bit_cnt_next = 3'd0;
+                missed_ack_reg_next = 1'b0;
+                data_valid_reg_next = 1'b0;
+                data_last_reg_next = 1'b0;
+                data_tready_reg_next = 1'b0;
+                cmd_ready_reg_next = 1'b1;
+                busy_reg_next = 1'b0;
+                bus_control_reg_next = 1'b0;
+                bus_active_reg_next = 1'b0;
+            end
+
+            default: begin
+                state_next = S_IDLE;
+                cnt_next = 16'd0;
+                bit_cnt_next = 3'd0;
+                missed_ack_reg_next = 1'b0;
+                data_valid_reg_next = 1'b0;
+                data_last_reg_next = 1'b0;
+                data_tready_reg_next = 1'b0;
+                cmd_ready_reg_next = 1'b1;
+                busy_reg_next = 1'b0;
+                bus_control_reg_next = 1'b0;
+                bus_active_reg_next = 1'b0;
+            end
+        endcase
+    end
+
+    // Register updates
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= S_IDLE;
+            cnt <= 16'd0;
+            bit_cnt <= 3'd0;
+            tx_data <= 8'd0;
+            rx_data <= 8'd0;
+            addr_reg <= 7'd0;
+            read_reg <= 1'b0;
+            write_reg <= 1'b0;
+            write_multiple_reg <= 1'b0;
+            stop_reg <= 1'b0;
+            scl_reg <= 1'b1;
+            sda_reg <= 1'b1;
+            scl_t_reg <= 1'b1;
+            sda_t_reg <= 1'b1;
+            missed_ack_reg <= 1'b0;
+            data_valid_reg <= 1'b0;
+            data_last_reg <= 1'b0;
+            data_tready_reg <= 1'b0;
+            cmd_ready_reg <= 1'b1;
+            busy_reg <= 1'b0;
+            bus_control_reg <= 1'b0;
+            bus_active_reg <= 1'b0;
+        end else begin
+            state <= state_next;
+            cnt <= cnt_next;
+            bit_cnt <= bit_cnt_next;
+            missed_ack_reg <= missed_ack_reg_next;
+            data_valid_reg <= data_valid_reg_next;
+            data_last_reg <= data_last_reg_next;
+            data_tready_reg <= data_tready_reg_next;
+            cmd_ready_reg <= cmd_ready_reg_next;
+            busy_reg <= busy_reg_next;
+            bus_control_reg <= bus_control_reg_next;
+            bus_active_reg <= bus_active_reg_next;
+
+            // Capture command
+            if (state == S_IDLE && s_axis_cmd_valid) begin
+                addr_reg <= s_axis_cmd_address;
+                read_reg <= s_axis_cmd_read;
+                write_reg <= s_axis_cmd_write;
+                write_multiple_reg <= s_axis_cmd_write_multiple;
+                stop_reg <= s_axis_cmd_stop;
+            end
+
+            // Capture data for write
+            if (state == S_SEND_DATA && bit_cnt == 3'd7 && s_axis_data_tvalid && data_tready_reg) begin
+                tx_data <= s_axis_data_tdata;
+            end
+
+            // Shift in received data
+            if (state == S_RECV_DATA && prescale_done && bit_cnt != 3'd0) begin
+                rx_data <= {sda_i, rx_data[7:1]};
+            end
+
+            // SCL control
+            case (state)
+                S_IDLE: begin
+                    scl_reg <= 1'b1;
+                    scl_t_reg <= 1'b1;
+                end
+                S_START: begin
+                    scl_reg <= 1'b1;
+                    scl_t_reg <= 1'b0;
+                end
+                S_SEND_ADDR: begin
+                    if (bit_cnt == 3'd7) begin
+                        scl_reg <= 1'b1;
+                        scl_t_reg <= 1'b0;
+                    end else if (prescale_done) begin
+                        scl_reg <= 1'b0;
+                        scl_t_reg <= 1'b0;
+                    end else begin
+                        scl_reg <= 1'b1;
+                        scl_t_reg <= 1'b0;
+                    end
+                end
+                S_CHECK_ACK: begin
+                    scl_reg <= 1'b1;
+                    scl_t_reg <= 1'b0;
+                end
+                S_SEND_DATA: begin
+                    if (bit_cnt == 3'd7) begin
+                        scl_reg <= 1'b1;
+                        scl_t_reg <= 1'b0;
+                    end else if (prescale_done) begin
+                        scl_reg <= 1'b0;
+                        scl_t_reg <= 1'b0;
+                    end else begin
+                        scl_reg <= 1'b1;
+                        scl_t_reg <= 1'b0;
+                    end
+                end
+                S_CHECK_DATA_ACK: begin
+                    scl_reg <= 1'b1;
+                    scl_t_reg <= 1'b0;
+                end
+                S_RECV_DATA: begin
+                    if (bit_cnt == 3'd7) begin
+                        scl_reg <= 1'b1;
+                        scl_t_reg <= 1'b0;
+                    end else if (prescale_done) begin
+                        scl_reg <= 1'b0;
+                        scl_t_reg <= 1'b0;
+                    end else begin
+                        scl_reg <= 1'b1;
+                        scl_t_reg <= 1'b0;
+                    end
+                end
+                S_SEND_NACK: begin
+                    scl_reg <= 1'b1;
+                    scl_t_reg <= 1'b0;
+                end
+                S_STOP: begin
+                    scl_reg <= 1'b1;
+                    scl_t_reg <= 1'b0;
+                end
+                S_DONE: begin
+                    scl_reg <= 1'b1;
+                    scl_t_reg <= 1'b1;
+                end
+                default: begin
+                    scl_reg <= 1'b1;
+                    scl_t_reg <= 1'b1;
+                end
+            endcase
+
+            // SDA control
+            case (state)
+                S_IDLE: begin
+                    sda_reg <= 1'b1;
+                    sda_t_reg <= 1'b1;
+                end
+                S_START: begin
+                    // START: SDA goes from high to low while SCL is high
+                    if (cnt == 16'd0) begin
+                        sda_reg <= 1'b1;
+                        sda_t_reg <= 1'b0;
+                    end else begin
+                        sda_reg <= 1'b0;
+                        sda_t_reg <= 1'b0;
+                    end
+                end
+                S_SEND_ADDR: begin
+                    if (bit_cnt == 3'd7) begin
+                        // First bit: address[6]
+                        sda_reg <= addr_reg[6];
+                        sda_t_reg <= 1'b0;
+                    end else if (prescale_done) begin
+                        // Next bit
+                        case (bit_cnt)
+                            3'd6: sda_reg <= addr_reg[5];
+                            3'd5: sda_reg <= addr_reg[4];
+                            3'd4: sda_reg <= addr_reg[3];
+                            3'd3: sda_reg <= addr_reg[2];
+                            3'd2: sda_reg <= addr_reg[1];
+                            3'd1: sda_reg <= addr_reg[0];
+                            3'd0: sda_reg <= read_reg; // R/W bit
+                            default: sda_reg <= 1'b1;
+                        endcase
+                        sda_t_reg <= 1'b0;
+                    end else begin
+                        sda_t_reg <= 1'b0;
+                    end
+                end
+                S_CHECK_ACK: begin
+                    // Release SDA to read ACK
+                    sda_reg <= 1'b1;
+                    sda_t_reg <= 1'b1;
+                end
+                S_SEND_DATA: begin
+                    if (bit_cnt == 3'd7) begin
+                        sda_reg <= tx_data[7];
+                        sda_t_reg <= 1'b0;
+                    end else if (prescale_done) begin
+                        case (bit_cnt)
+                            3'd6: sda_reg <= tx_data[6];
+                            3'd5: sda_reg <= tx_data[5];
+                            3'd4: sda_reg <= tx_data[4];
+                            3'd3: sda_reg <= tx_data[3];
+                            3'd2: sda_reg <= tx_data[2];
+                            3'd1: sda_reg <= tx_data[1];
+                            3'd0: sda_reg <= tx_data[0];
+                            default: sda_reg <= 1'b1;
+                        endcase
+                        sda_t_reg <= 1'b0;
+                    end else begin
+                        sda_t_reg <= 1'b0;
+                    end
+                end
+                S_CHECK_DATA_ACK: begin
+                    // Release SDA to read ACK
+                    sda_reg <= 1'b1;
+                    sda_t_reg <= 1'b1;
+                end
+                S_RECV_DATA: begin
+                    // Release SDA to read data
+                    sda_reg <= 1'b1;
+                    sda_t_reg <= 1'b1;
+                end
+                S_SEND_NACK: begin
+                    // Send NACK (SDA high)
+                    sda_reg <= 1'b1;
+                    sda_t_reg <= 1'b0;
+                end
+                S_STOP: begin
+                    // STOP: SDA goes from low to high while SCL is high
+                    if (cnt == 16'd0) begin
+                        sda_reg <= 1'b0;
+                        sda_t_reg <= 1'b0;
+                    end else begin
+                        sda_reg <= 1'b1;
+                        sda_t_reg <= 1'b0;
+                    end
+                end
+                S_DONE: begin
+                    sda_reg <= 1'b1;
+                    sda_t_reg <= 1'b1;
+                end
+                default: begin
+                    sda_reg <= 1'b1;
+                    sda_t_reg <= 1'b1;
+                end
+            endcase
+
+            // Data output
+            if (state == S_RECV_DATA && prescale_done && bit_cnt == 3'd0) begin
+                data_valid_reg <= 1'b1;
+                data_last_reg <= 1'b1;
+            end else if (data_valid_reg && m_axis_data_tready) begin
+                data_valid_reg <= 1'b0;
+            end
+
+            // Data ready
+            if (state == S_SEND_DATA && bit_cnt == 3'd7) begin
+                data_tready_reg <= 1'b1;
+            end else if (data_tready_reg && s_axis_data_tvalid) begin
+                data_tready_reg <= 1'b0;
+            end
+        end
+    end
+
+    // Output assignments
+    assign scl_o = scl_reg;
+    assign scl_t = scl_t_reg;
+    assign sda_o = sda_reg;
+    assign sda_t = sda_t_reg;
+
+    assign s_axis_cmd_ready = cmd_ready_reg;
+    assign s_axis_data_tready = data_tready_reg;
+
+    assign m_axis_data_tdata = (state == S_RECV_DATA && prescale_done && bit_cnt == 3'd0) ? rx_data : 8'd0;
+    assign m_axis_data_tvalid = data_valid_reg;
+    assign m_axis_data_tlast = data_last_reg;
+
+    assign busy = busy_reg;
+    assign bus_control = bus_control_reg;
+    assign bus_active = bus_active_reg;
+    assign missed_ack = missed_ack_reg;
+
+endmodule

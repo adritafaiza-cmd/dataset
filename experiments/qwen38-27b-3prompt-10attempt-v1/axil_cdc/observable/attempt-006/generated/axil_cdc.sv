@@ -1,0 +1,484 @@
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ========================================================================
+    // Synchronous reset synchronizers
+    // ========================================================================
+    reg [2:0] s_rst_sync;
+    reg [2:0] m_rst_sync;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_rst_sync <= 3'b111;
+        else
+            s_rst_sync <= {s_rst_sync[1:0], 1'b0};
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_rst_sync <= 3'b111;
+        else
+            m_rst_sync <= {m_rst_sync[1:0], 1'b0};
+    end
+
+    wire s_rst_n = ~s_rst_sync[2];
+    wire m_rst_n = ~m_rst_sync[2];
+
+    // ========================================================================
+    // Write Address Channel: S -> M
+    // ========================================================================
+    // S-domain: capture AW when valid and ready
+    reg        s_aw_pending;
+    reg [ADDR_WIDTH-1:0] s_aw_addr;
+    reg [2:0]  s_aw_prot;
+    reg        s_aw_sent;
+
+    // M-domain: handshake
+    reg        m_aw_req;
+    reg [ADDR_WIDTH-1:0] m_aw_addr;
+    reg [2:0]  m_aw_prot;
+    reg        m_aw_ack;
+
+    // S-domain: acknowledge from M
+    reg        s_aw_ack;
+
+    // S-domain: AW ready logic
+    // We can accept a new AW if we don't have a pending one that hasn't been sent yet
+    // Actually, let's use a simple 2-phase handshake:
+    // S sets req, M sees req, M sets ack, S sees ack, S clears req, M clears ack.
+    // But we need to transfer data too.
+    
+    // Let's use a 4-phase handshake for safety, or a 2-phase with data.
+    // 2-phase: 
+    // S: aw_valid_s -> sets m_aw_req (via FF)
+    // M: sees m_aw_req, captures data, sets m_aw_ack
+    // S: sees m_aw_ack, clears m_aw_req
+    // M: sees m_aw_req clear, clears m_aw_ack
+    
+    // Let's implement a simple 2-phase handshake for AW.
+    
+    // S-domain registers
+    reg        s_aw_req;
+    reg [ADDR_WIDTH-1:0] s_aw_addr_reg;
+    reg [2:0]  s_aw_prot_reg;
+    reg        s_aw_ack;
+
+    // M-domain registers
+    reg        m_aw_req;
+    reg [ADDR_WIDTH-1:0] m_aw_addr_reg;
+    reg [2:0]  m_aw_prot_reg;
+    reg        m_aw_ack;
+
+    // S-domain: AW ready
+    // We can accept AW if s_aw_req is low (no pending request)
+    assign s_axil_awready = s_rst_n & ~s_aw_req;
+
+    // S-domain: capture AW
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_aw_req      <= 1'b0;
+            s_aw_addr_reg <= {ADDR_WIDTH{1'b0}};
+            s_aw_prot_reg <= 3'b000;
+            s_aw_ack      <= 1'b0;
+        end else begin
+            if (s_axil_awvalid && s_axil_awready) begin
+                s_aw_req      <= 1'b1;
+                s_aw_addr_reg <= s_axil_awaddr;
+                s_aw_prot_reg <= s_axil_awprot;
+            end else if (s_aw_req && s_aw_ack) begin
+                s_aw_req <= 1'b0;
+            end
+        end
+    end
+
+    // S-domain: acknowledge from M (synchronized)
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_aw_ack <= 1'b0;
+        else
+            s_aw_ack <= m_aw_ack;
+    end
+
+    // M-domain: request from S (synchronized)
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_aw_req <= 1'b0;
+        else
+            m_aw_req <= s_aw_req;
+    end
+
+    // M-domain: data from S (synchronized)
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_aw_addr_reg <= {ADDR_WIDTH{1'b0}};
+            m_aw_prot_reg <= 3'b000;
+        end else begin
+            m_aw_addr_reg <= s_aw_addr_reg;
+            m_aw_prot_reg <= s_aw_prot_reg;
+        end
+    end
+
+    // M-domain: AW valid and ready
+    assign m_axil_awvalid = m_rst_n & m_aw_req;
+    assign m_axil_awaddr  = m_aw_addr_reg;
+    assign m_axil_awprot  = m_aw_prot_reg;
+
+    // M-domain: acknowledge
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_aw_ack <= 1'b0;
+        else begin
+            if (m_aw_req && m_axil_awready)
+                m_aw_ack <= 1'b1;
+            else if (!m_aw_req)
+                m_aw_ack <= 1'b0;
+        end
+    end
+
+    // ========================================================================
+    // Write Data Channel: S -> M
+    // ========================================================================
+    // Similar handshake for W channel
+    reg        s_w_req;
+    reg [DATA_WIDTH-1:0] s_w_data_reg;
+    reg [STRB_WIDTH-1:0] s_w_strb_reg;
+    reg        s_w_ack;
+
+    reg        m_w_req;
+    reg [DATA_WIDTH-1:0] m_w_data_reg;
+    reg [STRB_WIDTH-1:0] m_w_strb_reg;
+    reg        m_w_ack;
+
+    assign s_axil_wready = s_rst_n & ~s_w_req;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_w_req      <= 1'b0;
+            s_w_data_reg <= {DATA_WIDTH{1'b0}};
+            s_w_strb_reg <= {STRB_WIDTH{1'b0}};
+            s_w_ack      <= 1'b0;
+        end else begin
+            if (s_axil_wvalid && s_axil_wready) begin
+                s_w_req      <= 1'b1;
+                s_w_data_reg <= s_axil_wdata;
+                s_w_strb_reg <= s_axil_wstrb;
+            end else if (s_w_req && s_w_ack) begin
+                s_w_req <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_w_ack <= 1'b0;
+        else
+            s_w_ack <= m_w_ack;
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_w_req <= 1'b0;
+        else
+            m_w_req <= s_w_req;
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_w_data_reg <= {DATA_WIDTH{1'b0}};
+            m_w_strb_reg <= {STRB_WIDTH{1'b0}};
+        end else begin
+            m_w_data_reg <= s_w_data_reg;
+            m_w_strb_reg <= s_w_strb_reg;
+        end
+    end
+
+    assign m_axil_wvalid = m_rst_n & m_w_req;
+    assign m_axil_wdata  = m_w_data_reg;
+    assign m_axil_wstrb  = m_w_strb_reg;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_w_ack <= 1'b0;
+        else begin
+            if (m_w_req && m_axil_wready)
+                m_w_ack <= 1'b1;
+            else if (!m_w_req)
+                m_w_ack <= 1'b0;
+        end
+    end
+
+    // ========================================================================
+    // Write Response Channel: M -> S
+    // ========================================================================
+    // M-domain: capture B response
+    reg        m_b_pending;
+    reg [1:0]  m_b_resp_reg;
+    reg        m_b_req;
+    reg        m_b_ack;
+
+    // S-domain: acknowledge
+    reg        s_b_req;
+    reg        s_b_ack;
+    reg [1:0]  s_b_resp_reg;
+
+    // M-domain: B valid
+    assign m_axil_bready = m_rst_n & ~m_b_req;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_b_req      <= 1'b0;
+            m_b_resp_reg <= 2'b00;
+            m_b_ack      <= 1'b0;
+        end else begin
+            if (m_axil_bvalid && m_axil_bready) begin
+                m_b_req      <= 1'b1;
+                m_b_resp_reg <= m_axil_bresp;
+            end else if (m_b_req && m_b_ack) begin
+                m_b_req <= 1'b0;
+            end
+        end
+    end
+
+    // M-domain: acknowledge from S
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_b_ack <= 1'b0;
+        else
+            m_b_ack <= s_b_req;
+    end
+
+    // S-domain: request from M (synchronized)
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_b_req <= 1'b0;
+        else
+            s_b_req <= m_b_req;
+    end
+
+    // S-domain: data from M (synchronized)
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_b_resp_reg <= 2'b00;
+        else
+            s_b_resp_reg <= m_b_resp_reg;
+    end
+
+    // S-domain: B valid and ready
+    assign s_axil_bvalid = s_rst_n & s_b_req;
+    assign s_axil_bresp  = s_b_resp_reg;
+
+    // S-domain: acknowledge
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_b_ack <= 1'b0;
+        else begin
+            if (s_b_req && s_axil_bready)
+                s_b_ack <= 1'b1;
+            else if (!s_b_req)
+                s_b_ack <= 1'b0;
+        end
+    end
+
+    // ========================================================================
+    // Read Address Channel: S -> M
+    // ========================================================================
+    reg        s_ar_req;
+    reg [ADDR_WIDTH-1:0] s_ar_addr_reg;
+    reg [2:0]  s_ar_prot_reg;
+    reg        s_ar_ack;
+
+    reg        m_ar_req;
+    reg [ADDR_WIDTH-1:0] m_ar_addr_reg;
+    reg [2:0]  m_ar_prot_reg;
+    reg        m_ar_ack;
+
+    assign s_axil_arready = s_rst_n & ~s_ar_req;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_ar_req      <= 1'b0;
+            s_ar_addr_reg <= {ADDR_WIDTH{1'b0}};
+            s_ar_prot_reg <= 3'b000;
+            s_ar_ack      <= 1'b0;
+        end else begin
+            if (s_axil_arvalid && s_axil_arready) begin
+                s_ar_req      <= 1'b1;
+                s_ar_addr_reg <= s_axil_araddr;
+                s_ar_prot_reg <= s_axil_arprot;
+            end else if (s_ar_req && s_ar_ack) begin
+                s_ar_req <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_ar_ack <= 1'b0;
+        else
+            s_ar_ack <= m_ar_ack;
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_ar_req <= 1'b0;
+        else
+            m_ar_req <= s_ar_req;
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_ar_addr_reg <= {ADDR_WIDTH{1'b0}};
+            m_ar_prot_reg <= 3'b000;
+        end else begin
+            m_ar_addr_reg <= s_ar_addr_reg;
+            m_ar_prot_reg <= s_ar_prot_reg;
+        end
+    end
+
+    assign m_axil_arvalid = m_rst_n & m_ar_req;
+    assign m_axil_araddr  = m_ar_addr_reg;
+    assign m_axil_arprot  = m_ar_prot_reg;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_ar_ack <= 1'b0;
+        else begin
+            if (m_ar_req && m_axil_arready)
+                m_ar_ack <= 1'b1;
+            else if (!m_ar_req)
+                m_ar_ack <= 1'b0;
+        end
+    end
+
+    // ========================================================================
+    // Read Data Channel: M -> S
+    // ========================================================================
+    reg        m_r_req;
+    reg [DATA_WIDTH-1:0] m_r_data_reg;
+    reg [1:0]  m_r_resp_reg;
+    reg        m_r_ack;
+
+    reg        s_r_req;
+    reg [DATA_WIDTH-1:0] s_r_data_reg;
+    reg [1:0]  s_r_resp_reg;
+    reg        s_r_ack;
+
+    // M-domain: R valid
+    assign m_axil_rready = m_rst_n & ~m_r_req;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_r_req      <= 1'b0;
+            m_r_data_reg <= {DATA_WIDTH{1'b0}};
+            m_r_resp_reg <= 2'b00;
+            m_r_ack      <= 1'b0;
+        end else begin
+            if (m_axil_rvalid && m_axil_rready) begin
+                m_r_req      <= 1'b1;
+                m_r_data_reg <= m_axil_rdata;
+                m_r_resp_reg <= m_axil_rresp;
+            end else if (m_r_req && m_r_ack) begin
+                m_r_req <= 1'b0;
+            end
+        end
+    end
+
+    // M-domain: acknowledge from S
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_r_ack <= 1'b0;
+        else
+            m_r_ack <= s_r_req;
+    end
+
+    // S-domain: request from M (synchronized)
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_r_req <= 1'b0;
+        else
+            s_r_req <= m_r_req;
+    end
+
+    // S-domain: data from M (synchronized)
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_r_data_reg <= {DATA_WIDTH{1'b0}};
+            s_r_resp_reg <= 2'b00;
+        end else begin
+            s_r_data_reg <= m_r_data_reg;
+            s_r_resp_reg <= m_r_resp_reg;
+        end
+    end
+
+    // S-domain: R valid and ready
+    assign s_axil_rvalid = s_rst_n & s_r_req;
+    assign s_axil_rdata  = s_r_data_reg;
+    assign s_axil_rresp  = s_r_resp_reg;
+
+    // S-domain: acknowledge
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_r_ack <= 1'b0;
+        else begin
+            if (s_r_req && s_axil_rready)
+                s_r_ack <= 1'b1;
+            else if (!s_r_req)
+                s_r_ack <= 1'b0;
+        end
+    end
+
+endmodule

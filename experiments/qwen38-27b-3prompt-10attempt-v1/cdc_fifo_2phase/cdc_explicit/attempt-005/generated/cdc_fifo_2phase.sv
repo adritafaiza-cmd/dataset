@@ -1,0 +1,117 @@
+module cdc_fifo_2phase #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3
+)(
+    input                  src_rst_ni,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input  [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i,
+    input                  src_clk_i,
+    input                  dst_clk_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam ADDR_WIDTH = LOG_DEPTH;
+    localparam PTR_WIDTH = LOG_DEPTH + 1;
+
+    // Source domain
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg [ADDR_WIDTH-1:0] wr_ptr;
+    reg [PTR_WIDTH-1:0] wr_ptr_full;
+    reg [PTR_WIDTH-1:0] rd_ptr_src;
+
+    // Destination domain
+    reg [ADDR_WIDTH-1:0] rd_ptr;
+    reg [PTR_WIDTH-1:0] rd_ptr_full;
+    reg [PTR_WIDTH-1:0] wr_ptr_dst;
+    reg [WIDTH-1:0] dst_reg;
+    reg dst_valid_reg;
+
+    // CDC synchronizers for write pointer (to destination domain)
+    reg [PTR_WIDTH-1:0] wr_ptr_sync1;
+    reg [PTR_WIDTH-1:0] wr_ptr_sync2;
+    reg [PTR_WIDTH-1:0] wr_ptr_sync3;
+
+    // CDC synchronizers for read pointer (to source domain)
+    reg [PTR_WIDTH-1:0] rd_ptr_sync1;
+    reg [PTR_WIDTH-1:0] rd_ptr_sync2;
+    reg [PTR_WIDTH-1:0] rd_ptr_sync3;
+
+    // Source domain logic
+    wire src_wr_en = src_valid_i & src_ready_o;
+    wire src_full = (wr_ptr_full == rd_ptr_src);
+    assign src_ready_o = ~src_full;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            wr_ptr <= {ADDR_WIDTH{1'b0}};
+            wr_ptr_full <= {PTR_WIDTH{1'b0}};
+        end else begin
+            if (src_wr_en) begin
+                mem[wr_ptr] <= src_data_i;
+                wr_ptr <= wr_ptr + 1'b1;
+                wr_ptr_full <= wr_ptr_full + 1'b1;
+            end
+        end
+    end
+
+    // Synchronize read pointer to source domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            rd_ptr_sync1 <= {PTR_WIDTH{1'b0}};
+            rd_ptr_sync2 <= {PTR_WIDTH{1'b0}};
+            rd_ptr_sync3 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            rd_ptr_sync1 <= rd_ptr_full;
+            rd_ptr_sync2 <= rd_ptr_sync1;
+            rd_ptr_sync3 <= rd_ptr_sync2;
+        end
+    end
+
+    assign rd_ptr_src = rd_ptr_sync3;
+
+    // Destination domain logic
+    wire dst_rd_en = dst_valid_o & dst_ready_i;
+    wire dst_empty = (rd_ptr_full == wr_ptr_dst);
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            rd_ptr <= {ADDR_WIDTH{1'b0}};
+            rd_ptr_full <= {PTR_WIDTH{1'b0}};
+            dst_reg <= {WIDTH{1'b0}};
+            dst_valid_reg <= 1'b0;
+        end else begin
+            if (dst_rd_en) begin
+                rd_ptr <= rd_ptr + 1'b1;
+                rd_ptr_full <= rd_ptr_full + 1'b1;
+                dst_valid_reg <= 1'b0;
+            end else if (!dst_empty && !dst_valid_reg) begin
+                dst_reg <= mem[rd_ptr];
+                dst_valid_reg <= 1'b1;
+            end
+        end
+    end
+
+    assign dst_data_o = dst_reg;
+    assign dst_valid_o = dst_valid_reg;
+
+    // Synchronize write pointer to destination domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            wr_ptr_sync1 <= {PTR_WIDTH{1'b0}};
+            wr_ptr_sync2 <= {PTR_WIDTH{1'b0}};
+            wr_ptr_sync3 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            wr_ptr_sync1 <= wr_ptr_full;
+            wr_ptr_sync2 <= wr_ptr_sync1;
+            wr_ptr_sync3 <= wr_ptr_sync2;
+        end
+    end
+
+    assign wr_ptr_dst = wr_ptr_sync3;
+
+endmodule

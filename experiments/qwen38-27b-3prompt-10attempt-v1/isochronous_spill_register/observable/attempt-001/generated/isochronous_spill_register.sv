@@ -1,0 +1,164 @@
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    // Source clock domain signals
+    reg [WIDTH-1:0] src_data_reg;
+    reg             src_valid_reg;
+    wire            src_ready;
+
+    // Destination clock domain signals
+    reg [WIDTH-1:0] dst_data_reg;
+    reg             dst_valid_reg;
+    wire            dst_ready;
+
+    // Synchronization of src_ready to dst domain
+    reg [1:0] src_ready_sync;
+    wire      src_ready_dst;
+
+    // Synchronization of dst_ready to src domain
+    reg [1:0] dst_ready_sync;
+    wire      dst_ready_src;
+
+    // Synchronization of src_valid to dst domain
+    reg [1:0] src_valid_sync;
+    wire      src_valid_dst;
+
+    // Synchronization of dst_valid to src domain
+    reg [1:0] dst_valid_sync;
+    wire      dst_valid_src;
+
+    // Data synchronization (2-stage for each direction)
+    reg [WIDTH-1:0] data_sync_1;
+    reg [WIDTH-1:0] data_sync_2;
+    reg [WIDTH-1:0] data_sync_3;
+    reg [WIDTH-1:0] data_sync_4;
+
+    // Source domain: ready is high when buffer is empty or when dst can accept
+    // We need to know if dst can accept. Use synchronized dst_ready.
+    // src_ready = !src_valid_reg || dst_ready_src
+    // But we also need to ensure we don't accept if dst is not ready and buffer is full.
+    // Since it's a 2-deep buffer, we can have up to 2 entries.
+    // Let's use a simple approach:
+    // src_ready = !src_valid_reg || (dst_ready_src && !dst_valid_src)
+    // Actually, let's think about this more carefully.
+
+    // The buffer has 2 slots. Let's track occupancy.
+    // Slot 0: src_data_reg, src_valid_reg
+    // Slot 1: dst_data_reg, dst_valid_reg (but this is in dst domain)
+
+    // Actually, for a 2-deep buffer between related clocks, we can use a simpler approach:
+    // The source can write when the buffer is not full.
+    // The destination can read when the buffer is not empty.
+
+    // Let's use a different approach:
+    // src_ready = !src_valid_reg || dst_ready_src
+    // This means: source is ready if the first slot is empty, or if the destination is ready to accept.
+    // But we need to be careful about the second slot.
+
+    // Let me reconsider. A 2-deep valid/ready buffer:
+    // - Source writes to slot 0 when slot 0 is empty
+    // - Slot 0 data is moved to slot 1 when slot 1 is empty and dst is ready
+    // - dst reads from slot 1
+
+    // Actually, for simplicity and correctness with related clocks, let's use:
+    // src_ready = !src_valid_reg || dst_ready_src
+    // dst_valid = dst_valid_reg || src_valid_reg (synchronized)
+
+    // Let's implement a proper 2-deep buffer:
+
+    // Source domain
+    // src_ready_o = !src_valid_reg || dst_ready_src
+    assign src_ready_o = !src_valid_reg || dst_ready_src;
+
+    // When src_valid and src_ready, capture data
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_data_reg  <= {WIDTH{1'b0}};
+            src_valid_reg <= 1'b0;
+        end else begin
+            if (src_valid_i && src_ready_o) begin
+                src_data_reg  <= src_data_i;
+                src_valid_reg <= 1'b1;
+            end else if (dst_ready_src) begin
+                src_valid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // Synchronize src_valid to dst domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_valid_sync <= 2'b00;
+        end else begin
+            src_valid_sync <= {src_valid_sync[0], src_valid_reg};
+        end
+    end
+    assign src_valid_dst = src_valid_sync[1];
+
+    // Synchronize src_data to dst domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            data_sync_1 <= {WIDTH{1'b0}};
+            data_sync_2 <= {WIDTH{1'b0}};
+        end else begin
+            data_sync_1 <= src_data_reg;
+            data_sync_2 <= data_sync_1;
+        end
+    end
+
+    // Synchronize dst_ready to src domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_ready_sync <= 2'b00;
+        end else begin
+            dst_ready_sync <= {dst_ready_sync[0], dst_ready_i};
+        end
+    end
+    assign dst_ready_src = dst_ready_sync[1];
+
+    // Synchronize dst_valid to src domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_valid_sync <= 2'b00;
+        end else begin
+            dst_valid_sync <= {dst_valid_sync[0], dst_valid_reg};
+        end
+    end
+    assign dst_valid_src = dst_valid_sync[1];
+
+    // Destination domain
+    // dst_valid_o = dst_valid_reg || src_valid_dst
+    // dst_data_o = dst_valid_reg ? dst_data_reg : data_sync_2
+    // When dst_valid and dst_ready, clear dst_valid_reg
+    // When src_valid_dst and !dst_valid_reg, move data to dst_data_reg
+
+    assign dst_valid_o = dst_valid_reg || src_valid_dst;
+    assign dst_data_o  = dst_valid_reg ? dst_data_reg : data_sync_2;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_data_reg  <= {WIDTH{1'b0}};
+            dst_valid_reg <= 1'b0;
+        end else begin
+            if (dst_valid_o && dst_ready_i) begin
+                dst_valid_reg <= 1'b0;
+            end else if (src_valid_dst && !dst_valid_reg) begin
+                dst_data_reg  <= data_sync_2;
+                dst_valid_reg <= 1'b1;
+            end
+        end
+    end
+
+endmodule

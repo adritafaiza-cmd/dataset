@@ -1,0 +1,102 @@
+```verilog
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    // Source domain: capture data and generate a pulse
+    reg [WIDTH-1:0] src_data_reg;
+    reg             src_data_valid;
+    reg             src_pulse;
+
+    wire src_accept = src_valid_i & src_ready_o;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_data_reg   <= {WIDTH{1'b0}};
+            src_data_valid <= 1'b0;
+            src_pulse      <= 1'b0;
+        end else begin
+            if (src_accept) begin
+                src_data_reg   <= src_data_i;
+                src_data_valid <= 1'b1;
+                src_pulse      <= 1'b1;
+            end else begin
+                src_data_valid <= 1'b0;
+                src_pulse      <= 1'b0;
+            end
+        end
+    end
+
+    // Synchronize the pulse into the destination domain
+    reg [2:0] pulse_sync;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            pulse_sync <= 3'b000;
+        end else begin
+            pulse_sync <= {pulse_sync[1:0], src_pulse};
+        end
+    end
+
+    // Detect rising edge of the synchronized pulse
+    wire pulse_rise = pulse_sync[1] & ~pulse_sync[0];
+
+    // Destination domain: two-stage buffer
+    reg [WIDTH-1:0] buf0_data;
+    reg             buf0_valid;
+    reg [WIDTH-1:0] buf1_data;
+    reg             buf1_valid;
+
+    wire dst_accept = dst_valid_o & dst_ready_i;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            buf0_data  <= {WIDTH{1'b0}};
+            buf0_valid <= 1'b0;
+            buf1_data  <= {WIDTH{1'b0}};
+            buf1_valid <= 1'b0;
+        end else begin
+            // Stage 0: accept new data from source
+            if (pulse_rise) begin
+                buf0_data  <= src_data_reg;
+                buf0_valid <= 1'b1;
+            end else if (buf0_valid & buf1_valid) begin
+                // Both stages full, cannot accept new data
+                // (should not happen if src_ready is properly managed)
+            end else if (buf0_valid & ~buf1_valid) begin
+                // Move stage 0 to stage 1
+                buf1_data  <= buf0_data;
+                buf1_valid <= 1'b1;
+                buf0_valid <= 1'b0;
+            end else if (~buf0_valid & buf1_valid) begin
+                // Stage 0 empty, stage 1 has data
+                // If stage 1 is being consumed, it will be cleared
+            end
+
+            // Stage 1: output
+            if (dst_accept) begin
+                buf1_valid <= 1'b0;
+            end
+        end
+    end
+
+    // Output
+    assign dst_valid_o = buf1_valid;
+    assign dst_data_o  = buf1_data;
+
+    // Source ready: can accept if stage 0 is empty
+    assign src_ready_o = ~buf0_valid;
+
+endmodule
+```<|im_end|>

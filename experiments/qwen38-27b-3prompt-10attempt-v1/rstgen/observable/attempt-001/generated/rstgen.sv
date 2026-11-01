@@ -1,0 +1,53 @@
+module rstgen (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic test_mode_i,
+    output logic rst_no,
+    output logic init_no
+);
+
+    // Synchronize the external reset into the clk_i domain
+    logic [1:0] rst_sync;
+
+    always_ff @(posedge clk_i) begin
+        rst_sync <= {rst_sync[0], rst_ni};
+    end
+
+    // Synchronized reset (active-low)
+    logic rst_sync_no;
+    assign rst_sync_no = rst_sync[1];
+
+    // Test-mode bypass: if test_mode_i is high, force reset released
+    logic rst_no_internal;
+    assign rst_no_internal = test_mode_i ? 1'b1 : rst_sync_no;
+
+    // Detect initialization: first cycle after reset is released
+    // init_no is high when the reset has been released and we are in the first cycle
+    // We use a counter or a simple flag that goes high for one cycle after reset release
+
+    logic init_flag;
+    logic rst_no_prev;
+
+    always_ff @(posedge clk_i) begin
+        rst_no_prev <= rst_no_internal;
+    end
+
+    // init_no is high for one cycle after reset is released (i.e., when rst_no_internal transitions from 0 to 1)
+    // But we also need to handle the case where test_mode bypasses reset
+    // init_no should indicate that the system is initialized (reset has been released)
+    
+    // Let's use a simple approach: init_no is high when rst_no_internal is high and we've seen at least one cycle
+    // Actually, "initialization indication" typically means a pulse or level indicating reset is done
+    
+    // Common approach: init_no is a level that goes high after reset is released and stays high
+    // Or it could be a single-cycle pulse. Let's assume it's a level that indicates reset is released.
+    
+    // Re-reading: "initialization indication for the local clock" - this is typically a signal that goes high
+    // when the reset has been deasserted, indicating the system is ready.
+    
+    // Let's make init_no a level that is high when rst_no_internal is high
+    assign init_no = rst_no_internal;
+
+    assign rst_no = rst_no_internal;
+
+endmodule

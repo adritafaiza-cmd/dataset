@@ -1,0 +1,149 @@
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    // Synchronizers for reset signals
+    reg [1:0] src_rst_sync;
+    reg [1:0] dst_rst_sync;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_rst_sync <= 2'b00;
+        else
+            src_rst_sync <= {src_rst_sync[0], src_rst_ni};
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_rst_sync <= 2'b00;
+        else
+            dst_rst_sync <= {dst_rst_sync[0], dst_rst_ni};
+    end
+
+    // Synchronized reset signals
+    wire src_rst_synced = src_rst_sync[1];
+    wire dst_rst_synced = dst_rst_sync[1];
+
+    // 2-deep FIFO using two registers
+    // Stage 0: first slot
+    // Stage 1: second slot
+    reg [WIDTH-1:0] stage0_data;
+    reg [WIDTH-1:0] stage1_data;
+    reg             stage0_valid;
+    reg             stage1_valid;
+
+    // Write pointer (0 or 1) - in src domain
+    reg             wr_ptr;
+    // Read pointer (0 or 1) - in dst domain
+    reg             rd_ptr;
+
+    // Synchronize read pointer to src domain
+    reg [1:0] rd_ptr_sync;
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            rd_ptr_sync <= 2'b00;
+        else
+            rd_ptr_sync <= {rd_ptr_sync[0], rd_ptr};
+    end
+    wire rd_ptr_synced = rd_ptr_sync[1];
+
+    // Synchronize write pointer to dst domain
+    reg [1:0] wr_ptr_sync;
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            wr_ptr_sync <= 2'b00;
+        else
+            wr_ptr_sync <= {wr_ptr_sync[0], wr_ptr};
+    end
+    wire wr_ptr_synced = wr_ptr_sync[1];
+
+    // FIFO full: wr_ptr != rd_ptr_synced and both slots occupied
+    // For 2-deep FIFO with pointers 0/1:
+    // Full when wr_ptr == rd_ptr_synced and both valid bits are set
+    // Actually, let's use a simpler approach with explicit valid bits.
+
+    // Let me redesign with explicit valid bits and a count.
+    // Actually, for a 2-deep buffer, let's use:
+    // - Two data registers
+    // - Two valid bits
+    // - Write enable when not full
+    // - Read enable when not empty
+
+    // Full condition: both slots valid
+    wire full = stage0_valid & stage1_valid;
+    // Empty condition: neither slot valid
+    wire empty = ~stage0_valid & ~stage1_valid;
+
+    // Write pointer: which slot to write next
+    // If stage0 is empty, write to stage0
+    // Else if stage1 is empty, write to stage1
+    // Else full
+    wire wr_en = src_valid_i & ~full;
+    wire wr_slot0 = ~stage0_valid;
+    wire wr_slot1 = stage0_valid & ~stage1_valid;
+
+    // Read pointer: which slot to read from
+    // If stage0 is valid, read from stage0
+    // Else if stage1 is valid, read from stage1
+    // Else empty
+    wire rd_en = dst_ready_i & ~empty;
+    wire rd_slot0 = stage0_valid;
+    wire rd_slot1 = ~stage0_valid & stage1_valid;
+
+    // Source ready
+    assign src_ready_o = ~full;
+
+    // Destination valid
+    assign dst_valid_o = ~empty;
+
+    // Destination data: from the slot being read
+    assign dst_data_o = rd_slot0 ? stage0_data : stage1_data;
+
+    // Write logic (src domain)
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            stage0_data  <= {WIDTH{1'b0}};
+            stage1_data  <= {WIDTH{1'b0}};
+            stage0_valid <= 1'b0;
+            stage1_valid <= 1'b0;
+        end else begin
+            if (wr_en) begin
+                if (wr_slot0) begin
+                    stage0_data  <= src_data_i;
+                    stage0_valid <= 1'b1;
+                end else if (wr_slot1) begin
+                    stage1_data  <= src_data_i;
+                    stage1_valid <= 1'b1;
+                end
+            end
+        end
+    end
+
+    // Read logic (dst domain)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            stage0_valid <= 1'b0;
+            stage1_valid <= 1'b0;
+        end else begin
+            if (rd_en) begin
+                if (rd_slot0) begin
+                    stage0_valid <= 1'b0;
+                end else if (rd_slot1) begin
+                    stage1_valid <= 1'b0;
+                end
+            end
+        end
+    end
+
+endmodule

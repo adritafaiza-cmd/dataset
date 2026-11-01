@@ -1,0 +1,77 @@
+```systemverilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  localparam int unsigned ADDR_SHIFT = (AddrOffset == 0) ? 0 : $clog2(AddrOffset);
+  localparam int unsigned REG_INDEX_WIDTH = (NoApbRegs <= 1) ? 1 : $clog2(NoApbRegs);
+
+  // Extract APB signals from req_t
+  wire        psel   = req_i[0];
+  wire        penable= req_i[1];
+  wire        pwrite = req_i[2];
+  wire [ApbAddrWidth-1:0] paddr = req_i[ApbAddrWidth+2:3];
+  wire [ApbDataWidth-1:0] pwdata = req_i[ApbDataWidth+ApbAddrWidth+2:3];
+
+  // Compute register index from address
+  wire [ApbAddrWidth-1:0] offset_addr = paddr - base_addr_i;
+  wire [REG_INDEX_WIDTH-1:0] reg_index = (REG_INDEX_WIDTH == 1) ? 1'b0 : offset_addr[ADDR_SHIFT +: REG_INDEX_WIDTH];
+
+  // Check if address is valid (within range)
+  wire addr_valid = (NoApbRegs == 0) ? 1'b0 :
+                    (REG_INDEX_WIDTH == 1) ? 1'b1 :
+                    (reg_index < NoApbRegs);
+
+  // Read data
+  wire [RegDataWidth-1:0] rdata = (NoApbRegs == 0) ? '0 : reg_q_o[reg_index];
+
+  // Write enable
+  wire write_en = psel & penable & pwrite & addr_valid;
+
+  // Register file
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        reg_q_o[i] <= reg_init_i[i];
+      end
+    end else begin
+      if (write_en) begin
+        if (!ReadOnly[reg_index]) begin
+          reg_q_o[reg_index] <= pwdata[RegDataWidth-1:0];
+        end
+      end
+    end
+  end
+
+  // APB response
+  always_comb begin
+    resp_o = '0;
+    if (psel & penable) begin
+      if (pwrite) begin
+        resp_o[0] = addr_valid; // PREADY
+      end else begin
+        resp_o[0] = addr_valid; // PREADY
+        resp_o[ApbDataWidth+1:1] = rdata[ApbDataWidth-1:0]; // PRDATA
+      end
+    end
+  end
+
+endmodule
+```<|im_end|>

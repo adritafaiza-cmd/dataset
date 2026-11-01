@@ -1,0 +1,135 @@
+module cdc_fifo_2phase #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_WIDTH = LOG_DEPTH + 1;
+
+    // Storage
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+
+    // Source domain pointers
+    reg [PTR_WIDTH-1:0] src_wr_ptr;
+    reg [PTR_WIDTH-1:0] src_rd_ptr_sync;
+
+    // Destination domain pointers
+    reg [PTR_WIDTH-1:0] dst_rd_ptr;
+    reg [PTR_WIDTH-1:0] dst_wr_ptr_sync;
+
+    // Synchronizers
+    reg [PTR_WIDTH-1:0] src_wr_ptr_sync1, src_wr_ptr_sync2;
+    reg [PTR_WIDTH-1:0] dst_rd_ptr_sync1, dst_rd_ptr_sync2;
+
+    // Destination output register
+    reg [WIDTH-1:0] dst_data_reg;
+    reg dst_valid_reg;
+
+    // Source ready
+    wire src_full;
+    wire src_can_write;
+
+    // Destination read enable
+    wire dst_read_en;
+
+    // Source write enable
+    wire src_write_en;
+
+    // Full condition: source write pointer equals destination read pointer + DEPTH
+    // In binary with extra bit, full when upper bits match and lower bits match
+    // Actually, full when src_wr_ptr == {~dst_rd_ptr_sync[LOG_DEPTH], dst_rd_ptr_sync[LOG_DEPTH-1:0]}
+    // Let's use the standard approach:
+    // Full when the upper bit of src_wr_ptr differs from upper bit of dst_rd_ptr_sync
+    // and the lower bits are equal.
+
+    wire [PTR_WIDTH-1:0] src_wr_ptr_next;
+    wire [PTR_WIDTH-1:0] dst_rd_ptr_next;
+
+    // Source domain
+    assign src_full = (src_wr_ptr[PTR_WIDTH-1] != src_rd_ptr_sync[PTR_WIDTH-1]) &&
+                      (src_wr_ptr[PTR_WIDTH-1:1] == src_rd_ptr_sync[PTR_WIDTH-1:1]);
+
+    assign src_can_write = src_valid_i && !src_full;
+    assign src_ready_o = !src_full;
+    assign src_write_en = src_can_write;
+
+    // Destination domain
+    // dst_valid_reg indicates there is data available to read
+    // We read when dst_valid_reg && dst_ready_i
+    assign dst_read_en = dst_valid_reg && dst_ready_i;
+
+    // Destination output
+    assign dst_data_o = dst_data_reg;
+    assign dst_valid_o = dst_valid_reg;
+
+    // Source clock domain: write pointer and memory write
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_wr_ptr <= {PTR_WIDTH{1'b0}};
+        end else begin
+            if (src_write_en) begin
+                mem[src_wr_ptr[LOG_DEPTH-1:0]] <= src_data_i;
+                src_wr_ptr <= src_wr_ptr + 1'b1;
+            end
+        end
+    end
+
+    // Synchronize source write pointer to destination domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_wr_ptr_sync1 <= {PTR_WIDTH{1'b0}};
+            src_wr_ptr_sync2 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            src_wr_ptr_sync1 <= src_wr_ptr;
+            src_wr_ptr_sync2 <= src_wr_ptr_sync1;
+        end
+    end
+
+    // Synchronize destination read pointer to source domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_rd_ptr_sync1 <= {PTR_WIDTH{1'b0}};
+            dst_rd_ptr_sync2 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            dst_rd_ptr_sync1 <= dst_rd_ptr;
+            dst_rd_ptr_sync2 <= dst_rd_ptr_sync1;
+        end
+    end
+
+    // Destination domain: read pointer and output register
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_rd_ptr <= {PTR_WIDTH{1'b0}};
+            dst_data_reg <= {WIDTH{1'b0}};
+            dst_valid_reg <= 1'b0;
+        end else begin
+            // Check if there is data available: src_wr_ptr_sync2 != dst_rd_ptr
+            wire has_data = (src_wr_ptr_sync2 != dst_rd_ptr);
+
+            if (dst_read_en) begin
+                // Read from memory
+                dst_data_reg <= mem[dst_rd_ptr[LOG_DEPTH-1:0]];
+                dst_rd_ptr <= dst_rd_ptr + 1'b1;
+                // After reading, valid becomes 1 if there is still data
+                // has_data was computed before increment, so after increment,
+                // new has_data = (src_wr_ptr_sync2 != (dst_rd_ptr + 1))
+                dst_valid_reg <= (src_wr_ptr_sync2 != (dst_rd_ptr + 1'b1));
+            end else begin
+                // No read, valid stays the same
+                dst_valid_reg <= has_data;
+            end
+        end
+    end
+
+endmodule

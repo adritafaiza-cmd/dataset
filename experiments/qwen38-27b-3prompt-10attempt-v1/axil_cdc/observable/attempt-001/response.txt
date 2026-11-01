@@ -1,0 +1,467 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ========================================================================
+    // Synchronous reset synchronizers
+    // ========================================================================
+    reg [1:0] s_rst_sync;
+    reg [1:0] m_rst_sync;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_rst_sync <= 2'b11;
+        else
+            s_rst_sync <= {s_rst_sync[0], 1'b0};
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_rst_sync <= 2'b11;
+        else
+            m_rst_sync <= {m_rst_sync[0], 1'b0};
+    end
+
+    wire s_rst_n = ~s_rst_sync[1];
+    wire m_rst_n = ~m_rst_sync[1];
+
+    // ========================================================================
+    // Write Address Channel (S -> M)
+    // ========================================================================
+    // S-domain: capture AW when valid and ready
+    reg        s_aw_valid;
+    reg [ADDR_WIDTH-1:0] s_aw_addr;
+    reg [2:0]  s_aw_prot;
+
+    // M-domain: handshake
+    reg        m_aw_valid;
+    reg [ADDR_WIDTH-1:0] m_aw_addr;
+    reg [2:0]  m_aw_prot;
+    reg        m_aw_ready_int;
+
+    // S-domain: AW ready is high when M-domain is not waiting for an AW
+    // We use a simple 2-phase handshake: S asserts aw_valid, M acknowledges with aw_ready
+    // To avoid complexity, we use a "pending" flag in S-domain that is cleared when M accepts.
+
+    // Let's use a different approach: 
+    // S-domain holds the AW transaction until M-domain signals it has been accepted.
+    // We'll use a "s_aw_pending" flag.
+
+    reg s_aw_pending;
+    reg [ADDR_WIDTH-1:0] s_aw_addr_reg;
+    reg [2:0] s_aw_prot_reg;
+
+    // M-domain: m_aw_valid is asserted when s_aw_pending is high (synchronized)
+    // We need to synchronize s_aw_pending to M-domain.
+
+    // Synchronizer for s_aw_pending
+    reg [1:0] s_aw_pending_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_aw_pending_sync <= 2'b00;
+        else
+            s_aw_pending_sync <= {s_aw_pending_sync[0], s_aw_pending};
+    end
+
+    // Synchronizer for s_aw_addr
+    reg [ADDR_WIDTH-1:0] s_aw_addr_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_aw_addr_sync <= {ADDR_WIDTH{1'b0}};
+        else
+            s_aw_addr_sync <= s_aw_addr_reg;
+    end
+
+    // Synchronizer for s_aw_prot
+    reg [2:0] s_aw_prot_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_aw_prot_sync <= 3'b000;
+        else
+            s_aw_prot_sync <= s_aw_prot_reg;
+    end
+
+    // M-domain: AW valid is high when s_aw_pending_sync[1] is high
+    assign m_axil_awvalid = s_aw_pending_sync[1];
+    assign m_axil_awaddr  = s_aw_addr_sync;
+    assign m_axil_awprot  = s_aw_prot_sync;
+
+    // M-domain: when m_axil_awready is high and m_axil_awvalid is high, the AW is accepted.
+    // We need to signal back to S-domain that the AW has been accepted.
+    // Use a "m_aw_done" flag that is synchronized back to S-domain.
+
+    reg m_aw_done;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_aw_done <= 1'b0;
+        else if (m_axil_awvalid && m_axil_awready)
+            m_aw_done <= 1'b1;
+        else if (m_aw_done && !s_aw_pending_sync[1])
+            m_aw_done <= 1'b0;
+    end
+
+    // Synchronizer for m_aw_done
+    reg [1:0] m_aw_done_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_aw_done_sync <= 2'b00;
+        else
+            m_aw_done_sync <= {m_aw_done_sync[0], m_aw_done};
+    end
+
+    // S-domain: AW ready is high when not pending or when done
+    assign s_axil_awready = !s_aw_pending || m_aw_done_sync[1];
+
+    // S-domain: capture AW when valid and ready
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_aw_pending <= 1'b0;
+            s_aw_addr_reg <= {ADDR_WIDTH{1'b0}};
+            s_aw_prot_reg <= 3'b000;
+        end else begin
+            if (s_axil_awvalid && s_axil_awready) begin
+                s_aw_pending <= 1'b1;
+                s_aw_addr_reg <= s_axil_awaddr;
+                s_aw_prot_reg <= s_axil_awprot;
+            end else if (m_aw_done_sync[1] && s_aw_pending) begin
+                s_aw_pending <= 1'b0;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Write Data Channel (S -> M)
+    // ========================================================================
+    // Similar to AW, but we need to ensure W is sent after AW is accepted.
+    // For simplicity, we'll assume W can be sent independently, but in AXI4-Lite,
+    // W must be sent after AW. We'll use a similar handshake.
+
+    reg s_w_pending;
+    reg [DATA_WIDTH-1:0] s_w_data_reg;
+    reg [STRB_WIDTH-1:0] s_w_strb_reg;
+
+    // Synchronizer for s_w_pending
+    reg [1:0] s_w_pending_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_w_pending_sync <= 2'b00;
+        else
+            s_w_pending_sync <= {s_w_pending_sync[0], s_w_pending};
+    end
+
+    // Synchronizer for s_w_data
+    reg [DATA_WIDTH-1:0] s_w_data_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_w_data_sync <= {DATA_WIDTH{1'b0}};
+        else
+            s_w_data_sync <= s_w_data_reg;
+    end
+
+    // Synchronizer for s_w_strb
+    reg [STRB_WIDTH-1:0] s_w_strb_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_w_strb_sync <= {STRB_WIDTH{1'b0}};
+        else
+            s_w_strb_sync <= s_w_strb_reg;
+    end
+
+    assign m_axil_wvalid = s_w_pending_sync[1];
+    assign m_axil_wdata  = s_w_data_sync;
+    assign m_axil_wstrb  = s_w_strb_sync;
+
+    reg m_w_done;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_w_done <= 1'b0;
+        else if (m_axil_wvalid && m_axil_wready)
+            m_w_done <= 1'b1;
+        else if (m_w_done && !s_w_pending_sync[1])
+            m_w_done <= 1'b0;
+    end
+
+    reg [1:0] m_w_done_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_w_done_sync <= 2'b00;
+        else
+            m_w_done_sync <= {m_w_done_sync[0], m_w_done};
+    end
+
+    assign s_axil_wready = !s_w_pending || m_w_done_sync[1];
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_w_pending <= 1'b0;
+            s_w_data_reg <= {DATA_WIDTH{1'b0}};
+            s_w_strb_reg <= {STRB_WIDTH{1'b0}};
+        end else begin
+            if (s_axil_wvalid && s_axil_wready) begin
+                s_w_pending <= 1'b1;
+                s_w_data_reg <= s_axil_wdata;
+                s_w_strb_reg <= s_axil_wstrb;
+            end else if (m_w_done_sync[1] && s_w_pending) begin
+                s_w_pending <= 1'b0;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Write Response Channel (M -> S)
+    // ========================================================================
+    // M-domain: capture B when valid
+    reg m_b_valid;
+    reg [1:0] m_b_resp;
+
+    assign m_axil_bready = !m_b_valid;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_b_valid <= 1'b0;
+            m_b_resp <= 2'b00;
+        end else if (m_axil_bvalid && m_axil_bready) begin
+            m_b_valid <= 1'b1;
+            m_b_resp <= m_axil_bresp;
+        end else if (m_b_valid && s_b_done_sync[1]) begin
+            m_b_valid <= 1'b0;
+        end
+    end
+
+    // Synchronizer for m_b_valid
+    reg [1:0] m_b_valid_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_b_valid_sync <= 2'b00;
+        else
+            m_b_valid_sync <= {m_b_valid_sync[0], m_b_valid};
+    end
+
+    // Synchronizer for m_b_resp
+    reg [1:0] m_b_resp_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_b_resp_sync <= 2'b00;
+        else
+            m_b_resp_sync <= m_b_resp;
+    end
+
+    assign s_axil_bvalid = m_b_valid_sync[1];
+    assign s_axil_bresp  = m_b_resp_sync;
+
+    // S-domain: when bvalid and bready, signal done back to M-domain
+    reg s_b_done;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_b_done <= 1'b0;
+        else if (s_axil_bvalid && s_axil_bready)
+            s_b_done <= 1'b1;
+        else if (s_b_done && !m_b_valid_sync[1])
+            s_b_done <= 1'b0;
+    end
+
+    // Synchronizer for s_b_done
+    reg [1:0] s_b_done_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_b_done_sync <= 2'b00;
+        else
+            s_b_done_sync <= {s_b_done_sync[0], s_b_done};
+    end
+
+    // ========================================================================
+    // Read Address Channel (S -> M)
+    // ========================================================================
+    reg s_ar_pending;
+    reg [ADDR_WIDTH-1:0] s_ar_addr_reg;
+    reg [2:0] s_ar_prot_reg;
+
+    reg [1:0] s_ar_pending_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_ar_pending_sync <= 2'b00;
+        else
+            s_ar_pending_sync <= {s_ar_pending_sync[0], s_ar_pending};
+    end
+
+    reg [ADDR_WIDTH-1:0] s_ar_addr_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_ar_addr_sync <= {ADDR_WIDTH{1'b0}};
+        else
+            s_ar_addr_sync <= s_ar_addr_reg;
+    end
+
+    reg [2:0] s_ar_prot_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_ar_prot_sync <= 3'b000;
+        else
+            s_ar_prot_sync <= s_ar_prot_reg;
+    end
+
+    assign m_axil_arvalid = s_ar_pending_sync[1];
+    assign m_axil_araddr  = s_ar_addr_sync;
+    assign m_axil_arprot  = s_ar_prot_sync;
+
+    reg m_ar_done;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_ar_done <= 1'b0;
+        else if (m_axil_arvalid && m_axil_arready)
+            m_ar_done <= 1'b1;
+        else if (m_ar_done && !s_ar_pending_sync[1])
+            m_ar_done <= 1'b0;
+    end
+
+    reg [1:0] m_ar_done_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_ar_done_sync <= 2'b00;
+        else
+            m_ar_done_sync <= {m_ar_done_sync[0], m_ar_done};
+    end
+
+    assign s_axil_arready = !s_ar_pending || m_ar_done_sync[1];
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_ar_pending <= 1'b0;
+            s_ar_addr_reg <= {ADDR_WIDTH{1'b0}};
+            s_ar_prot_reg <= 3'b000;
+        end else begin
+            if (s_axil_arvalid && s_axil_arready) begin
+                s_ar_pending <= 1'b1;
+                s_ar_addr_reg <= s_axil_araddr;
+                s_ar_prot_reg <= s_axil_arprot;
+            end else if (m_ar_done_sync[1] && s_ar_pending) begin
+                s_ar_pending <= 1'b0;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Read Data Channel (M -> S)
+    // ========================================================================
+    reg m_r_valid;
+    reg [DATA_WIDTH-1:0] m_r_data;
+    reg [1:0] m_r_resp;
+
+    assign m_axil_rready = !m_r_valid;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_r_valid <= 1'b0;
+            m_r_data <= {DATA_WIDTH{1'b0}};
+            m_r_resp <= 2'b00;
+        end else if (m_axil_rvalid && m_axil_rready) begin
+            m_r_valid <= 1'b1;
+            m_r_data <= m_axil_rdata;
+            m_r_resp <= m_axil_rresp;
+        end else if (m_r_valid && s_r_done_sync[1]) begin
+            m_r_valid <= 1'b0;
+        end
+    end
+
+    reg [1:0] m_r_valid_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_r_valid_sync <= 2'b00;
+        else
+            m_r_valid_sync <= {m_r_valid_sync[0], m_r_valid};
+    end
+
+    reg [DATA_WIDTH-1:0] m_r_data_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_r_data_sync <= {DATA_WIDTH{1'b0}};
+        else
+            m_r_data_sync <= m_r_data;
+    end
+
+    reg [1:0] m_r_resp_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_r_resp_sync <= 2'b00;
+        else
+            m_r_resp_sync <= m_r_resp;
+    end
+
+    assign s_axil_rvalid = m_r_valid_sync[1];
+    assign s_axil_rdata  = m_r_data_sync;
+    assign s_axil_rresp  = m_r_resp_sync;
+
+    reg s_r_done;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_r_done <= 1'b0;
+        else if (s_axil_rvalid && s_axil_rready)
+            s_r_done <= 1'b1;
+        else if (s_r_done && !m_r_valid_sync[1])
+            s_r_done <= 1'b0;
+    end
+
+    reg [1:0] s_r_done_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_r_done_sync <= 2'b00;
+        else
+            s_r_done_sync <= {s_r_done_sync[0], s_r_done};
+    end
+
+endmodule
+```<|im_end|>

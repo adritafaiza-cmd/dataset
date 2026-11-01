@@ -1,0 +1,39 @@
+module sync_wedge #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    reg [STAGES-1:0] sync_reg;
+    reg              serial_q;
+    reg              serial_q1;
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            sync_reg <= {STAGES{1'b0}};
+        end else begin
+            sync_reg <= {sync_reg[STAGES-2:0], serial_i};
+        end
+    end
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            serial_q  <= 1'b0;
+            serial_q1 <= 1'b0;
+        end else begin
+            serial_q  <= sync_reg[STAGES-1];
+            serial_q1 <= serial_q;
+        end
+    end
+
+    assign serial_o = serial_q;
+    assign r_edge_o = en_i & serial_q & ~serial_q1;
+    assign f_edge_o = en_i & ~serial_q & serial_q1;
+
+endmodule

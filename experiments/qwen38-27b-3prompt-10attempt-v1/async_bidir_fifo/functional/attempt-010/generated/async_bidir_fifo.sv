@@ -1,0 +1,280 @@
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam PTR_W = ASIZE + 1;
+
+  // Internal FIFO storage
+  reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+  // Side A: write pointer (when a_dir=1), read pointer (when a_dir=0)
+  // Side B: write pointer (when b_dir=1), read pointer (when b_dir=0)
+
+  // We need to handle bidirectional operation.
+  // The FIFO is shared. Writes from either side go into the same memory.
+  // Reads from either side read from the same memory.
+  // The direction signals determine which side is writing and which is reading.
+  // But both sides can potentially write and read? No, the problem says:
+  // "a_dir / b_dir select the direction on that side: 1 means write, 0 means read."
+  // So at any given time, side A is either writing or reading, and side B is either writing or reading.
+  // But they are independent. So we could have A writing and B writing, or A reading and B reading, etc.
+  // However, a FIFO typically has one write port and one read port. 
+  // Re-reading: "Accepted writes must appear in order on the opposite side when that side reads."
+  // This implies that writes from A are read by B, and writes from B are read by A.
+  // So it's a bidirectional FIFO where data can flow A->B or B->A.
+  // The direction signals control which side is the writer and which is the reader.
+  // But both sides have write and read controls. 
+  // I think the interpretation is:
+  // - When a_dir=1, side A is in write mode. a_winc and a_wdata are used to write.
+  // - When a_dir=0, side A is in read mode. a_rinc is used to read, a_rdata is the output.
+  // - Similarly for side B.
+  // - The FIFO stores data. Writes from A go into the FIFO, and can be read by B.
+  // - Writes from B go into the FIFO, and can be read by A.
+  // - So the FIFO is a single shared buffer.
+  // - The write pointer is shared: it advances when either side writes.
+  // - The read pointer is shared: it advances when either side reads.
+  // - But the direction signals determine which side is allowed to write/read.
+  // - Actually, I think the design is:
+  //   - There is one write pointer and one read pointer for the FIFO.
+  //   - When a_dir=1, A can write. When b_dir=1, B can write.
+  //   - When a_dir=0, A can read. When b_dir=0, B can read.
+  //   - The write pointer advances on a write from either side.
+  //   - The read pointer advances on a read from either side.
+  //   - The data written by A is read by B, and vice versa.
+  //   - But the FIFO is just a buffer. The data doesn't care which side wrote it.
+  //   - So we have a single FIFO with a shared write pointer and read pointer.
+  //   - The write enable is (a_dir & a_winc) | (b_dir & b_winc).
+  //   - The read enable is (~a_dir & a_rinc) | (~b_dir & b_rinc).
+  //   - But we need to be careful: if both sides try to write at the same time, we need to handle that.
+  //   - Similarly for reads.
+  //   - But the problem says "Accepted writes must appear in order". So we need to ensure that writes are serialized.
+  //   - I think the simplest approach is to have a single write pointer and read pointer, and use the direction signals to determine which side is writing/reading.
+  //   - But if both sides write at the same time, we need to pick one. Let's assume that the design ensures that only one side writes at a time, or we need to handle it.
+  //   - Actually, re-reading the problem: "a_dir / b_dir select the direction on that side: 1 means write, 0 means read."
+  //   - This suggests that each side is either in write mode or read mode. So if a_dir=1, A is writing, and if b_dir=1, B is writing. But they can both be writing at the same time?
+  //   - I think the intended design is that the FIFO is bidirectional, meaning data can flow in either direction, but at any given time, the FIFO is either being written to by A or by B, and read by the other side.
+  //   - But the problem doesn't explicitly say that. Let me re-read.
+  //   - "Accepted writes must appear in order on the opposite side when that side reads."
+  //   - This implies that writes from A are read by B, and writes from B are read by A.
+  //   - So the FIFO is a single buffer, and the write pointer and read pointer are shared.
+  //   - The write enable is the OR of the write enables from both sides, but we need to ensure that only one write happens at a time.
+  //   - I think the safest approach is to assume that the design ensures that only one side writes at a time, and only one side reads at a time.
+  //   - But to be safe, let's handle the case where both sides try to write or read at the same time by prioritizing one side.
+  //   - Let's prioritize side A for writes and reads.
+  //   - So:
+  //     - Write enable: (a_dir & a_winc) | (~a_dir & b_dir & b_winc)
+  //     - Read enable: (~a_dir & a_rinc) | (a_dir & ~b_dir & b_rinc)
+  //   - But this is getting complicated. Let me think differently.
+  //   - Actually, I think the problem is simpler than I'm making it. The FIFO is a standard asynchronous FIFO, but with bidirectional control.
+  //   - The direction signals determine which side is the writer and which is the reader.
+  //   - So if a_dir=1 and b_dir=0, A is writing and B is reading.
+  //   - If a_dir=0 and b_dir=1, B is writing and A is reading.
+  //   - If both are 1, both are writing? That doesn't make sense for a FIFO.
+  //   - If both are 0, both are reading? That doesn't make sense either.
+  //   - I think the intended behavior is that the FIFO is used in one direction at a time. The direction signals are used to configure the FIFO for A->B or B->A.
+  //   - So the design should handle the case where a_dir and b_dir are complementary.
+  //   - Let's assume that a_dir and b_dir are always complementary. So if a_dir=1, b_dir=0, and vice versa.
+  //   - In that case, the write enable is (a_dir & a_winc) | (b_dir & b_winc), and the read enable is (~a_dir & a_rinc) | (~b_dir & b_rinc).
+  //   - But since a_dir and b_dir are complementary, only one of a_dir or b_dir is 1, so only one side is writing and only one side is reading.
+  //   - So the write enable is simply (a_dir & a_winc) | (b_dir & b_winc), and the read enable is (~a_dir & a_rinc) | (~b_dir & b_rinc).
+  //   - But if a_dir=1, then b_dir=0, so the write enable is a_winc, and the read enable is b_rinc.
+  //   - If a_dir=0, then b_dir=1, so the write enable is b_winc, and the read enable is a_rinc.
+  //   - This makes sense.
+  //   - So let's proceed with this assumption.
+
+  // Write pointer and read pointer
+  reg [PTR_W-1:0] wptr_a; // Write pointer in A's clock domain
+  reg [PTR_W-1:0] rptr_a; // Read pointer in A's clock domain
+  reg [PTR_W-1:0] wptr_b; // Write pointer in B's clock domain
+  reg [PTR_W-1:0] rptr_b; // Read pointer in B's clock domain
+
+  // Gray code pointers for CDC
+  reg [ASIZE:0] wptr_a_gray;
+  reg [ASIZE:0] rptr_a_gray;
+  reg [ASIZE:0] wptr_b_gray;
+  reg [ASIZE:0] rptr_b_gray;
+
+  // Synchronized pointers
+  reg [ASIZE:0] wptr_a_gray_sync1, wptr_a_gray_sync2;
+  reg [ASIZE:0] rptr_a_gray_sync1, rptr_a_gray_sync2;
+  reg [ASIZE:0] wptr_b_gray_sync1, wptr_b_gray_sync2;
+  reg [ASIZE:0] rptr_b_gray_sync1, rptr_b_gray_sync2;
+
+  // Write and read enables
+  wire a_write_en = a_dir & a_winc;
+  wire b_write_en = b_dir & b_winc;
+  wire a_read_en  = ~a_dir & a_rinc;
+  wire b_read_en  = ~b_dir & b_rinc;
+
+  wire write_en = a_write_en | b_write_en;
+  wire read_en  = a_read_en | b_read_en;
+
+  // Write data
+  wire [DSIZE-1:0] wdata = a_write_en ? a_wdata : b_wdata;
+
+  // Write pointer update
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      wptr_a <= {PTR_W{1'b0}};
+      rptr_a <= {PTR_W{1'b0}};
+    end else begin
+      if (write_en)
+        wptr_a <= wptr_a + 1'b1;
+      if (read_en)
+        rptr_a <= rptr_a + 1'b1;
+    end
+  end
+
+  // Gray code conversion for A's pointers
+  always @(*) begin
+    wptr_a_gray = wptr_a ^ (wptr_a >> 1);
+    rptr_a_gray = rptr_a ^ (rptr_a >> 1);
+  end
+
+  // Synchronize A's pointers to B's clock domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      wptr_a_gray_sync1 <= {ASIZE+1{1'b0}};
+      wptr_a_gray_sync2 <= {ASIZE+1{1'b0}};
+      rptr_a_gray_sync1 <= {ASIZE+1{1'b0}};
+      rptr_a_gray_sync2 <= {ASIZE+1{1'b0}};
+    end else begin
+      wptr_a_gray_sync1 <= wptr_a_gray;
+      wptr_a_gray_sync2 <= wptr_a_gray_sync1;
+      rptr_a_gray_sync1 <= rptr_a_gray;
+      rptr_a_gray_sync2 <= rptr_a_gray_sync1;
+    end
+  end
+
+  // Write pointer update in B's clock domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      wptr_b <= {PTR_W{1'b0}};
+      rptr_b <= {PTR_W{1'b0}};
+    end else begin
+      if (write_en)
+        wptr_b <= wptr_b + 1'b1;
+      if (read_en)
+        rptr_b <= rptr_b + 1'b1;
+    end
+  end
+
+  // Gray code conversion for B's pointers
+  always @(*) begin
+    wptr_b_gray = wptr_b ^ (wptr_b >> 1);
+    rptr_b_gray = rptr_b ^ (rptr_b >> 1);
+  end
+
+  // Synchronize B's pointers to A's clock domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      wptr_b_gray_sync1 <= {ASIZE+1{1'b0}};
+      wptr_b_gray_sync2 <= {ASIZE+1{1'b0}};
+      rptr_b_gray_sync1 <= {ASIZE+1{1'b0}};
+      rptr_b_gray_sync2 <= {ASIZE+1{1'b0}};
+    end else begin
+      wptr_b_gray_sync1 <= wptr_b_gray;
+      wptr_b_gray_sync2 <= wptr_b_gray_sync1;
+      rptr_b_gray_sync1 <= rptr_b_gray;
+      rptr_b_gray_sync2 <= rptr_b_gray_sync1;
+    end
+  end
+
+  // Convert gray code to binary
+  function [ASIZE:0] gray_to_bin;
+    input [ASIZE:0] gray;
+    integer i;
+    begin
+      gray_to_bin[ASIZE] = gray[ASIZE];
+      for (i = ASIZE-1; i >= 0; i = i - 1)
+        gray_to_bin[i] = gray_to_bin[i+1] ^ gray[i];
+    end
+  endfunction
+
+  // Full and empty flags
+  wire [ASIZE:0] wptr_a_bin = gray_to_bin(wptr_a_gray);
+  wire [ASIZE:0] rptr_a_bin = gray_to_bin(rptr_a_gray);
+  wire [ASIZE:0] wptr_b_bin = gray_to_bin(wptr_b_gray);
+  wire [ASIZE:0] rptr_b_bin = gray_to_bin(rptr_b_gray);
+
+  // Full: write pointer has lapped read pointer
+  wire a_full = (wptr_a_bin[ASIZE] != rptr_a_bin[ASIZE]) && (wptr_a_bin[ASIZE-1:0] == rptr_a_bin[ASIZE-1:0]);
+  wire b_full = (wptr_b_bin[ASIZE] != rptr_b_bin[ASIZE]) && (wptr_b_bin[ASIZE-1:0] == rptr_b_bin[ASIZE-1:0]);
+
+  // Empty: write pointer equals read pointer
+  wire a_empty = (wptr_a_bin == rptr_a_bin);
+  wire b_empty = (wptr_b_bin == rptr_b_bin);
+
+  // Almost full and almost empty
+  wire [ASIZE:0] wptr_a_bin_sync = gray_to_bin(wptr_a_gray_sync2);
+  wire [ASIZE:0] rptr_a_bin_sync = gray_to_bin(rptr_a_gray_sync2);
+  wire [ASIZE:0] wptr_b_bin_sync = gray_to_bin(wptr_b_gray_sync2);
+  wire [ASIZE:0] rptr_b_bin_sync = gray_to_bin(rptr_b_gray_sync2);
+
+  wire a_afull = (wptr_a_bin[ASIZE] != rptr_a_bin[ASIZE]) && (wptr_a_bin[ASIZE-1:0] == rptr_a_bin[ASIZE-1:0] + (DEPTH-2));
+  wire b_afull = (wptr_b_bin[ASIZE] != rptr_b_bin[ASIZE]) && (wptr_b_bin[ASIZE-1:0] == rptr_b_bin[ASIZE-1:0] + (DEPTH-2));
+
+  wire a_aempty = (wptr_a_bin[ASIZE] == rptr_a_bin[ASIZE]) && (wptr_a_bin[ASIZE-1:0] == rptr_a_bin[ASIZE-1:0] + 1);
+  wire b_aempty = (wptr_b_bin[ASIZE] == rptr_b_bin[ASIZE]) && (wptr_b_bin[ASIZE-1:0] == rptr_b_bin[ASIZE-1:0] + 1);
+
+  // Memory write
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      // No action
+    end else if (write_en) begin
+      mem[wptr_a[ASIZE-1:0]] <= wdata;
+    end
+  end
+
+  // Memory read
+  reg [DSIZE-1:0] rdata_reg;
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      rdata_reg <= {DSIZE{1'b0}};
+    end else if (read_en) begin
+      rdata_reg <= mem[rptr_a[ASIZE-1:0]];
+    end
+  end
+
+  // Output data
+  assign a_rdata = a_dir ? {DSIZE{1'b0}} : rdata_reg;
+  assign b_rdata = b_dir ? {DSIZE{1'b0}} : rdata_reg;
+
+  // Output flags
+  assign a_full   = a_full;
+  assign a_afull  = a_afull;
+  assign a_empty  = a_empty;
+  assign a_aempty = a_aempty;
+  assign b_full   = b_full;
+  assign b_afull  = b_afull;
+  assign b_empty  = b_empty;
+  assign b_aempty = b_aempty;
+
+endmodule

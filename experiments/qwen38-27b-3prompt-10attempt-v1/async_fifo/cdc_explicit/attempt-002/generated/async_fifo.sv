@@ -1,0 +1,168 @@
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWFULL_THRESH = DEPTH - 2;
+    localparam AEMPTY_THRESH = 1;
+
+    // Write pointer (write domain)
+    reg [ASIZE:0] wptr;
+    // Read pointer (read domain)
+    reg [ASIZE:0] rptr;
+
+    // Synchronized read pointer in write domain
+    reg [ASIZE:0] rptr_sync1;
+    reg [ASIZE:0] rptr_sync2;
+
+    // Synchronized write pointer in read domain
+    reg [ASIZE:0] wptr_sync1;
+    reg [ASIZE:0] wptr_sync2;
+
+    // Memory
+    reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+    // Write enable
+    wire wvalid = winc & ~wfull;
+
+    // Read enable
+    wire rvalid = rinc & ~rempty;
+
+    // Write pointer update
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            wptr <= {(ASIZE+1){1'b0}};
+        else if (wvalid)
+            wptr <= wptr + 1'b1;
+    end
+
+    // Read pointer update
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rptr <= {(ASIZE+1){1'b0}};
+        else if (rvalid)
+            rptr <= rptr + 1'b1;
+    end
+
+    // Synchronize read pointer to write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_sync1 <= {(ASIZE+1){1'b0}};
+            rptr_sync2 <= {(ASIZE+1){1'b0}};
+        end else begin
+            rptr_sync1 <= rptr;
+            rptr_sync2 <= rptr_sync1;
+        end
+    end
+
+    // Synchronize write pointer to read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_sync1 <= {(ASIZE+1){1'b0}};
+            wptr_sync2 <= {(ASIZE+1){1'b0}};
+        end else begin
+            wptr_sync1 <= wptr;
+            wptr_sync2 <= wptr_sync1;
+        end
+    end
+
+    // Full condition: write pointer has lapped read pointer by DEPTH
+    // wfull is high when the upper bits of wptr and rptr_sync2 are the same
+    // and the lower ASIZE bits of wptr are one more than rptr_sync2
+    wire [ASIZE:0] wptr_diff = wptr - rptr_sync2;
+    wire wfull = (wptr[ASIZE] == rptr_sync2[ASIZE]) &&
+                 (wptr[ASIZE-1:0] == rptr_sync2[ASIZE-1:0] + 1'b1);
+
+    // Almost full: number of entries >= AWFULL_THRESH
+    // Count = wptr - rptr_sync2 (mod 2^(ASIZE+1))
+    // We want count >= AWFULL_THRESH
+    // Since count is in range [0, DEPTH], we can check:
+    // count >= AWFULL_THRESH
+    // AWFULL_THRESH = DEPTH - 2
+    // So count >= DEPTH - 2 means count is DEPTH-2, DEPTH-1, or DEPTH
+    // But max count is DEPTH (when full)
+    // Let's compute the count properly.
+    // The number of valid entries is (wptr - rptr_sync2) mod 2^(ASIZE+1)
+    // But since wptr and rptr_sync2 are (ASIZE+1) bits, the difference wraps.
+    // Actually, the standard approach:
+    // count = wptr - rptr_sync2 (in 2^(ASIZE+1) space)
+    // If wptr[ASIZE] != rptr_sync2[ASIZE], then count = wptr[ASIZE-1:0] - rptr_sync2[ASIZE-1:0] + DEPTH
+    // If wptr[ASIZE] == rptr_sync2[ASIZE], then count = wptr[ASIZE-1:0] - rptr_sync2[ASIZE-1:0]
+    // But this is tricky. Let's use a different approach.
+    // awfull is high when the FIFO has at least AWFULL_THRESH entries.
+    // AWFULL_THRESH = DEPTH - 2
+    // So awfull is high when count >= DEPTH - 2
+    // This is equivalent to: NOT (count <= DEPTH - 3)
+    // count <= DEPTH - 3 means the FIFO has at most DEPTH-3 entries.
+    // Let's think of it as: awfull is high when the write pointer is within 2 of lapping the read pointer.
+    // i.e., wptr[ASIZE-1:0] - rptr_sync2[ASIZE-1:0] >= DEPTH - 2 (mod DEPTH)
+    // Or more simply, awfull is high when:
+    // (wptr[ASIZE] == rptr_sync2[ASIZE]) && (wptr[ASIZE-1:0] - rptr_sync2[ASIZE-1:0] >= DEPTH - 2)
+    // OR
+    // (wptr[ASIZE] != rptr_sync2[ASIZE]) && (wptr[ASIZE-1:0] - rptr_sync2[ASIZE-1:0] >= 0) -- this is always true if the upper bits differ in the right way
+    // Actually, let's just compute the count and compare.
+    
+    // Compute count in write domain
+    wire [ASIZE:0] count_w = wptr - rptr_sync2;
+    // count_w is in range [0, 2^(ASIZE+1)-1]
+    // But the actual number of entries is count_w if count_w <= DEPTH, else count_w - 2^(ASIZE+1)
+    // Since wptr and rptr_sync2 are both (ASIZE+1) bits, and the FIFO can hold at most DEPTH entries,
+    // count_w will be in [0, DEPTH] when the FIFO is not in an invalid state.
+    // Actually, count_w can be up to 2^(ASIZE+1)-1, but the valid range is [0, DEPTH].
+    // For awfull, we want count_w >= AWFULL_THRESH = DEPTH - 2
+    // Since DEPTH = 2^ASIZE, AWFULL_THRESH = 2^ASIZE - 2
+    // count_w >= 2^ASIZE - 2
+    // This is a simple comparison.
+    
+    wire awfull = (count_w >= AWFULL_THRESH[ASIZE:0]);
+
+    // Empty condition: write pointer equals read pointer
+    wire rempty = (wptr_sync2 == rptr);
+
+    // Almost empty: number of entries <= AEMPTY_THRESH
+    // AEMPTY_THRESH = 1
+    // So arempty is high when count <= 1
+    // count = wptr_sync2 - rptr (in read domain)
+    wire [ASIZE:0] count_r = wptr_sync2 - rptr;
+    wire arempty = (count_r <= AEMPTY_THRESH[ASIZE:0]);
+
+    // Memory write
+    always @(posedge wclk) begin
+        if (wvalid)
+            mem[wptr[ASIZE-1:0]] <= wdata;
+    end
+
+    // Read data
+    // If FALLTHROUGH is "TRUE", rdata is the current oldest unread word
+    // The oldest unread word is at address rptr[ASIZE-1:0]
+    // If FALLTHROUGH is not "TRUE", rdata is updated by an accepted read
+    // In that case, we need a register to hold the read data
+    
+    reg [DSIZE-1:0] rdata_reg;
+    
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rdata_reg <= {DSIZE{1'b0}};
+        else if (rvalid)
+            rdata_reg <= mem[rptr[ASIZE-1:0]];
+    end
+
+    assign rdata = (FALLTHROUGH == "TRUE") ? mem[rptr[ASIZE-1:0]] : rdata_reg;
+
+endmodule

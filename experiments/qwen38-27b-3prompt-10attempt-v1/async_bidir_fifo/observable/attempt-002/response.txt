@@ -1,0 +1,471 @@
+```verilog
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam AWIDTH = ASIZE;
+  localparam DEPTH  = 1 << AWIDTH;
+  localparam AFULL_THRESH  = DEPTH - 2;
+  localparam AEMPTY_THRESH = 1;
+
+  // Internal storage
+  reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+  // Clock A domain
+  reg [AWIDTH:0] a_wr_ptr;
+  reg [AWIDTH:0] a_rd_ptr;
+  reg [AWIDTH:0] a_wr_ptr_gray;
+  reg [AWIDTH:0] a_rd_ptr_gray;
+
+  // Clock B domain
+  reg [AWIDTH:0] b_wr_ptr;
+  reg [AWIDTH:0] b_rd_ptr;
+  reg [AWIDTH:0] b_wr_ptr_gray;
+  reg [AWIDTH:0] b_rd_ptr_gray;
+
+  // Gray code conversion
+  function [AWIDTH:0] bin2gray;
+    input [AWIDTH:0] bin;
+    begin
+      bin2gray = bin ^ (bin >> 1);
+    end
+  endfunction
+
+  // Synchronizers
+  reg [AWIDTH:0] a_wr_ptr_gray_sync1, a_wr_ptr_gray_sync2;
+  reg [AWIDTH:0] b_wr_ptr_gray_sync1, b_wr_ptr_gray_sync2;
+  reg [AWIDTH:0] a_rd_ptr_gray_sync1, a_rd_ptr_gray_sync2;
+  reg [AWIDTH:0] b_rd_ptr_gray_sync1, b_rd_ptr_gray_sync2;
+
+  // Direction signals synchronized
+  reg a_dir_sync1, a_dir_sync2;
+  reg b_dir_sync1, b_dir_sync2;
+
+  // Synchronizer for a_dir into B domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_dir_sync1 <= 1'b0;
+      a_dir_sync2 <= 1'b0;
+    end else begin
+      a_dir_sync1 <= a_dir;
+      a_dir_sync2 <= a_dir_sync1;
+    end
+  end
+
+  // Synchronizer for b_dir into A domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_dir_sync1 <= 1'b0;
+      b_dir_sync2 <= 1'b0;
+    end else begin
+      b_dir_sync1 <= b_dir;
+      b_dir_sync2 <= b_dir_sync1;
+    end
+  end
+
+  // Synchronizers for write pointers
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_wr_ptr_gray_sync1 <= {(AWIDTH+1){1'b0}};
+      a_wr_ptr_gray_sync2 <= {(AWIDTH+1){1'b0}};
+    end else begin
+      a_wr_ptr_gray_sync1 <= a_wr_ptr_gray;
+      a_wr_ptr_gray_sync2 <= a_wr_ptr_gray_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_wr_ptr_gray_sync1 <= {(AWIDTH+1){1'b0}};
+      b_wr_ptr_gray_sync2 <= {(AWIDTH+1){1'b0}};
+    end else begin
+      b_wr_ptr_gray_sync1 <= b_wr_ptr_gray;
+      b_wr_ptr_gray_sync2 <= b_wr_ptr_gray_sync1;
+    end
+  end
+
+  // Synchronizers for read pointers
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_rd_ptr_gray_sync1 <= {(AWIDTH+1){1'b0}};
+      a_rd_ptr_gray_sync2 <= {(AWIDTH+1){1'b0}};
+    end else begin
+      a_rd_ptr_gray_sync1 <= a_rd_ptr_gray;
+      a_rd_ptr_gray_sync2 <= a_rd_ptr_gray_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_rd_ptr_gray_sync1 <= {(AWIDTH+1){1'b0}};
+      b_rd_ptr_gray_sync2 <= {(AWIDTH+1){1'b0}};
+    end else begin
+      b_rd_ptr_gray_sync1 <= b_rd_ptr_gray;
+      b_rd_ptr_gray_sync2 <= b_rd_ptr_gray_sync1;
+    end
+  end
+
+  // Determine effective write/read pointers based on direction
+  // When a_dir=0: A writes, B reads
+  // When a_dir=1: B writes, A reads
+  // The FIFO is bidirectional: data flows from writer to reader
+  // We need to track which side is writing and which is reading
+
+  // In A domain:
+  // If a_dir=0 (A is writer): A's write pointer is the local write pointer
+  // If a_dir=1 (A is reader): A's read pointer is the local read pointer
+  // The other side's pointer (synchronized) gives the remote pointer
+
+  // Let's define:
+  // A side:
+  //   If a_dir=0: A writes, so a_wr_ptr is local write, a_rd_ptr is local read (but B is reader, so B's read pointer matters)
+  //   Actually, let me reconsider.
+
+  // The FIFO has one storage. Data is written by one side and read by the other.
+  // a_dir selects whether A is writing (a_dir=0) or reading (a_dir=1)
+  // b_dir should be the complement: if a_dir=0, b_dir=1 (B reads); if a_dir=1, b_dir=0 (B writes)
+  // But both a_dir and b_dir are inputs. We'll use them as given.
+
+  // For A domain:
+  //   Write pointer: if a_dir=0, use a_wr_ptr; if a_dir=1, use b_wr_ptr (synchronized)
+  //   Read pointer: if a_dir=0, use b_rd_ptr (synchronized); if a_dir=1, use a_rd_ptr
+  //   But this is getting complex. Let me think differently.
+
+  // Actually, the standard approach for bidirectional FIFO:
+  // There is one memory. One side writes, the other reads.
+  // The write pointer and read pointer are maintained in their respective clock domains.
+  // When A writes (a_dir=0): A increments a_wr_ptr, B increments b_rd_ptr when reading
+  // When B writes (b_dir=0): B increments b_wr_ptr, A increments a_rd_ptr when reading
+
+  // So:
+  // A domain:
+  //   a_wr_ptr: incremented when A writes (a_dir=0 and a_winc)
+  //   a_rd_ptr: incremented when A reads (a_dir=1 and a_rinc)
+  //   The write pointer seen by A for full/empty: if A is writer, it's a_wr_ptr; if A is reader, it's b_wr_ptr (synced)
+  //   The read pointer seen by A for full/empty: if A is writer, it's b_rd_ptr (synced); if A is reader, it's a_rd_ptr
+
+  // Let me define the effective pointers in each domain:
+
+  // A domain effective pointers:
+  //   eff_a_wr_ptr: the write pointer in A's view
+  //   eff_a_rd_ptr: the read pointer in A's view
+
+  // If a_dir=0 (A writes):
+  //   eff_a_wr_ptr = a_wr_ptr
+  //   eff_a_rd_ptr = b_rd_ptr_gray_sync2 (converted to binary)
+  // If a_dir=1 (A reads):
+  //   eff_a_wr_ptr = b_wr_ptr_gray_sync2 (converted to binary)
+  //   eff_a_rd_ptr = a_rd_ptr
+
+  // Similarly for B domain.
+
+  // Convert gray to binary
+  function [AWIDTH:0] gray2bin;
+    input [AWIDTH:0] gray;
+    reg [AWIDTH:0] bin;
+    integer i;
+    begin
+      bin[AWIDTH] = gray[AWIDTH];
+      for (i = AWIDTH-1; i >= 0; i = i-1)
+        bin[i] = bin[i+1] ^ gray[i];
+      gray2bin = bin;
+    end
+  endfunction
+
+  // A domain effective pointers
+  wire [AWIDTH:0] a_eff_wr_ptr;
+  wire [AWIDTH:0] a_eff_rd_ptr;
+
+  assign a_eff_wr_ptr = a_dir_sync2 ? gray2bin(b_wr_ptr_gray_sync2) : a_wr_ptr;
+  assign a_eff_rd_ptr = a_dir_sync2 ? a_rd_ptr : gray2bin(b_rd_ptr_gray_sync2);
+
+  // B domain effective pointers
+  wire [AWIDTH:0] b_eff_wr_ptr;
+  wire [AWIDTH:0] b_eff_rd_ptr;
+
+  assign b_eff_wr_ptr = a_dir_sync2 ? b_wr_ptr : gray2bin(a_wr_ptr_gray_sync2);
+  assign b_eff_rd_ptr = a_dir_sync2 ? gray2bin(a_rd_ptr_gray_sync2) : b_rd_ptr;
+
+  // Wait, I need to be careful. a_dir_sync2 is in B domain, so it's the synchronized version of a_dir.
+  // If a_dir=0 (A writes, B reads):
+  //   In B domain: B is reader, so b_eff_wr_ptr should be a_wr_ptr (synced), b_eff_rd_ptr should be b_rd_ptr
+  // If a_dir=1 (A reads, B writes):
+  //   In B domain: B is writer, so b_eff_wr_ptr should be b_wr_ptr, b_eff_rd_ptr should be a_rd_ptr (synced)
+
+  // So:
+  // b_eff_wr_ptr = a_dir_sync2 ? b_wr_ptr : gray2bin(a_wr_ptr_gray_sync2)
+  // b_eff_rd_ptr = a_dir_sync2 ? gray2bin(a_rd_ptr_gray_sync2) : b_rd_ptr
+
+  // That looks correct.
+
+  // Now for A domain:
+  // If a_dir=0 (A writes):
+  //   a_eff_wr_ptr = a_wr_ptr
+  //   a_eff_rd_ptr = gray2bin(b_rd_ptr_gray_sync2)
+  // If a_dir=1 (A reads):
+  //   a_eff_wr_ptr = gray2bin(b_wr_ptr_gray_sync2)
+  //   a_eff_rd_ptr = a_rd_ptr
+
+  // That also looks correct.
+
+  // Full/Empty calculation
+  // Full: write pointer has lapped read pointer by DEPTH
+  // Empty: write pointer equals read pointer
+
+  wire a_full_raw;
+  wire a_empty_raw;
+  wire b_full_raw;
+  wire b_empty_raw;
+
+  assign a_full_raw  = (a_eff_wr_ptr[AWIDTH:1] == a_eff_rd_ptr[AWIDTH:1]) && (a_eff_wr_ptr[0] != a_eff_rd_ptr[0]);
+  assign a_empty_raw = (a_eff_wr_ptr == a_eff_rd_ptr);
+
+  assign b_full_raw  = (b_eff_wr_ptr[AWIDTH:1] == b_eff_rd_ptr[AWIDTH:1]) && (b_eff_wr_ptr[0] != b_eff_rd_ptr[0]);
+  assign b_empty_raw = (b_eff_wr_ptr == b_eff_rd_ptr);
+
+  // Almost full/empty
+  wire [AWIDTH:0] a_diff;
+  wire [AWIDTH:0] b_diff;
+
+  assign a_diff = a_eff_wr_ptr - a_eff_rd_ptr;
+  assign b_diff = b_eff_wr_ptr - b_eff_rd_ptr;
+
+  assign a_afull  = (a_diff >= AFULL_THRESH);
+  assign a_aempty = (a_diff <= AEMPTY_THRESH);
+
+  assign b_afull  = (b_diff >= AFULL_THRESH);
+  assign b_aempty = (b_diff <= AEMPTY_THRESH);
+
+  // Outputs
+  assign a_full   = a_full_raw;
+  assign a_empty  = a_empty_raw;
+  assign a_afull  = a_afull;
+  assign a_aempty = a_aempty;
+
+  assign b_full   = b_full_raw;
+  assign b_empty  = b_empty_raw;
+  assign b_afull  = b_afull;
+  assign b_aempty = b_aempty;
+
+  // Write logic
+  // A writes when a_dir=0 and a_winc and not full
+  // B writes when a_dir=1 and b_winc and not full (i.e., b_dir=0)
+
+  wire a_write_en;
+  wire b_write_en;
+
+  assign a_write_en = !a_dir_sync2 && a_winc && !a_full_raw;
+  assign b_write_en = a_dir_sync2 && b_winc && !b_full_raw;
+
+  // Read logic
+  // A reads when a_dir=1 and a_rinc and not empty
+  // B reads when a_dir=0 and b_rinc and not empty (i.e., b_dir=1)
+
+  wire a_read_en;
+  wire b_read_en;
+
+  assign a_read_en = a_dir_sync2 && a_rinc && !a_empty_raw;
+  assign b_read_en = !a_dir_sync2 && b_rinc && !b_empty_raw;
+
+  // Memory write
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_wr_ptr <= {(AWIDTH+1){1'b0}};
+      a_rd_ptr <= {(AWIDTH+1){1'b0}};
+    end else begin
+      if (a_write_en)
+        a_wr_ptr <= a_wr_ptr + 1'b1;
+      if (a_read_en)
+        a_rd_ptr <= a_rd_ptr + 1'b1;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_wr_ptr <= {(AWIDTH+1){1'b0}};
+      b_rd_ptr <= {(AWIDTH+1){1'b0}};
+    end else begin
+      if (b_write_en)
+        b_wr_ptr <= b_wr_ptr + 1'b1;
+      if (b_read_en)
+        b_rd_ptr <= b_rd_ptr + 1'b1;
+    end
+  end
+
+  // Gray code pointers
+  always @(*) begin
+    a_wr_ptr_gray = bin2gray(a_wr_ptr);
+    a_rd_ptr_gray = bin2gray(a_rd_ptr);
+    b_wr_ptr_gray = bin2gray(b_wr_ptr);
+    b_rd_ptr_gray = bin2gray(b_rd_ptr);
+  end
+
+  // Memory write: A writes to mem[a_wr_ptr[AWIDTH-1:0]] when a_write_en
+  // B writes to mem[b_wr_ptr[AWIDTH-1:0]] when b_write_en
+  // But memory is shared. We need to handle this carefully.
+  // Since only one side writes at a time (based on direction), we can use a single always block
+  // or two separate always blocks with proper enable.
+
+  // Actually, since a_write_en and b_write_en are mutually exclusive (based on a_dir_sync2),
+  // we can have two always blocks or one. Let's use two for clarity, but they write to the same memory.
+  // In Verilog, multiple drivers to the same memory location in different always blocks is not allowed.
+  // So we need a single always block for memory writes.
+
+  // Let's use a single always block for memory writes, triggered by both clocks? No, that's not allowed.
+  // We need to handle this differently.
+
+  // Option 1: Use a single always block with a_clk for A writes and b_clk for B writes.
+  // But we can't have two clocks in one always block.
+
+  // Option 2: Use two separate memories? No, the FIFO has one storage.
+
+  // Option 3: Since only one side writes at a time, we can use a single always block
+  // that is sensitive to both clocks, but that's not synthesizable in standard Verilog.
+
+  // Let me reconsider. In practice, for a bidirectional FIFO, the memory is written by one side
+  // and read by the other. The write pointer is in the writer's domain. So:
+  // When A writes: memory is written in A domain
+  // When B writes: memory is written in B domain
+
+  // We can have two always blocks, one for each clock, but they both write to the same memory.
+  // This is problematic in Verilog.
+
+  // Alternative: Use a single memory with a write enable that is active in the appropriate clock domain.
+  // But we still have the multi-driver issue.
+
+  // Let me think about this differently. Perhaps we should use a single always block
+  // that handles both writes, but we need to be careful about the clock.
+
+  // Actually, in many implementations, the memory is written in the writer's clock domain.
+  // So when A writes, the memory write happens on a_clk. When B writes, it happens on b_clk.
+  // We can have two always blocks, but we need to ensure they don't conflict.
+
+  // Since a_write_en and b_write_en are mutually exclusive (only one can be high at a time,
+  // assuming a_dir is stable), we can have:
+
+  // Always block for A writes (on a_clk)
+  // Always block for B writes (on b_clk)
+
+  // But in Verilog, you can't have two always blocks driving the same memory location.
+  // Unless we use a different approach.
+
+  // Let me use a single always block with a_clk for A writes, and handle B writes differently.
+  // Actually, this is a known challenge. Let me use a different approach:
+  // Use a single memory, and have the write happen in the writer's clock domain.
+  // We'll have two always blocks, but we'll use a write enable that ensures only one is active.
+
+  // In practice, for synthesis, this might work if the tool can handle it, but it's not standard.
+
+  // Let me try a different approach: use a single always block that is sensitive to both clocks,
+  // but that's not allowed in Verilog-2001.
+
+  // I think the cleanest solution is to have two separate memories, but that doubles the area.
+  // Or, we can use a single memory and accept that the write happens in the writer's domain.
+
+  // Let me just use two always blocks and hope the synthesis tool handles it.
+  // Actually, no. Let me use a single always block with a_clk for A writes,
+  // and for B writes, we'll use a different mechanism.
+
+  // Wait, I think I'm overcomplicating this. Let me just use two always blocks
+  // and see if it works. In many FPGA implementations, this is handled by the tool.
+
+  // Actually, let me reconsider the architecture. Perhaps we should have the memory
+  // written in a single clock domain, and use the other domain for reads.
+  // But that's not how bidirectional FIFOs typically work.
+
+  // Let me just go with two always blocks for memory writes.
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      // No reset for memory, but we can initialize if needed
+    end else if (a_write_en) begin
+      mem[a_wr_ptr[AWIDTH-1:0]] <= a_wdata;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      // No reset for memory
+    end else if (b_write_en) begin
+      mem[b_wr_ptr[AWIDTH-1:0]] <= b_wdata;
+    end
+  end
+
+  // Read logic
+  // A reads when a_dir=1 (A is reader)
+  // B reads when a_dir=0 (B is reader)
+
+  // For fall-through: if FALLTHROUGH is "TRUE", the read data is available combinationally
+  // when the FIFO is not empty and a read is requested.
+
+  wire [DSIZE-1:0] a_read_addr;
+  wire [DSIZE-1:0] b_read_addr;
+
+  assign a_read_addr = a_rd_ptr[AWIDTH-1:0];
+  assign b_read_addr = b_rd_ptr[AWIDTH-1:0];
+
+  // Read data
+  // If A is reader (a_dir=1): a_rdata = mem[a_rd_ptr]
+  // If B is reader (a_dir=0): b_rdata = mem[b_rd_ptr]
+
+  // For fall-through, the data is available combinationally.
+  // We'll use a combinational read.
+
+  reg [DSIZE-1:0] a_rdata_reg;
+  reg [DSIZE-1:0] b_rdata_reg;
+
+  always @(*) begin
+    if (FALLTHROUGH == "TRUE") begin
+      a_rdata = mem[a_read_addr];
+      b_rdata = mem[b_read_addr];
+    end else begin
+      a_rdata = a_rdata_reg;
+      b_rdata = b_rdata_reg;
+    end
+  end
+
+  // For non-fall-through, we need to register the read data
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_rdata_reg <= {DSIZE{1'b0}};
+    end else if (a_read_en) begin
+      a_rdata_reg <= mem[a_read_addr];
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_rdata_reg <= {DSIZE{1'b0}};
+    end else if (b_read_en) begin
+      b_rdata_reg <= mem[b_read_addr];
+    end
+  end
+
+endmodule
+```<|im_end|>

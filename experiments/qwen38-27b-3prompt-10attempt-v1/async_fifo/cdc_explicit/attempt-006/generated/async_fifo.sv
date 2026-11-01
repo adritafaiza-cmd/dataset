@@ -1,0 +1,261 @@
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWIDTH = ASIZE + 1;
+    localparam FULL_THRESHOLD = DEPTH - 1;
+    localparam EMPTY_THRESHOLD = 1;
+
+    // Write domain
+    reg [AWIDTH-1:0] wptr;
+    reg [ASIZE-1:0]  wptr_gray;
+    reg [ASIZE-1:0]  rptr_gray_w;
+    reg [ASIZE-1:0]  rptr_gray_w_sync1;
+    reg [ASIZE-1:0]  rptr_gray_w_sync2;
+
+    // Read domain
+    reg [AWIDTH-1:0] rptr;
+    reg [ASIZE-1:0]  rptr_gray;
+    reg [ASIZE-1:0]  wptr_gray_r;
+    reg [ASIZE-1:0]  wptr_gray_r_sync1;
+    reg [ASIZE-1:0]  wptr_gray_r_sync2;
+
+    // Memory
+    reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+    // Write enable
+    wire wvalid = winc & ~wfull;
+
+    // Read enable
+    wire rvalid = rinc & ~rempty;
+
+    // Gray code conversion
+    function [ASIZE-1:0] bin2gray;
+        input [AWIDTH-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    // Write pointer update
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {AWIDTH{1'b0}};
+        end else if (wvalid) begin
+            wptr <= wptr + 1'b1;
+        end
+    end
+
+    // Write pointer gray code
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr_gray <= {ASIZE{1'b0}};
+        end else begin
+            wptr_gray <= bin2gray(wptr)[ASIZE:1];
+        end
+    end
+
+    // Synchronize read pointer gray code into write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_w_sync1 <= {ASIZE{1'b0}};
+            rptr_gray_w_sync2 <= {ASIZE{1'b0}};
+        end else begin
+            rptr_gray_w_sync1 <= rptr_gray;
+            rptr_gray_w_sync2 <= rptr_gray_w_sync1;
+        end
+    end
+
+    // Write full detection
+    // Full when write pointer has lapped read pointer by DEPTH
+    // In gray code, full when wptr_gray[ASIZE:1] == rptr_gray_sync2[ASIZE:1] and wptr[0] != rptr_gray_sync2[0]
+    // Actually, for a FIFO of size 2^ASIZE, we use ASIZE+1 bits for pointers.
+    // Full condition: wptr_gray (ASIZE+1 bits) == {~rptr_gray_sync2[ASIZE], rptr_gray_sync2[ASIZE-1:0]}
+    // Let's use the standard approach:
+    // wfull = (wptr_gray == {~rptr_gray_w_sync2[ASIZE-1], rptr_gray_w_sync2[ASIZE-2:0]})
+    // But we need to be careful with bit widths.
+
+    // Let me reconsider. The standard Cummings FIFO uses:
+    // wptr is AWIDTH bits, rptr is AWIDTH bits
+    // wptr_gray is AWIDTH bits, rptr_gray is AWIDTH bits
+    // wfull = (wptr_gray == {~rptr_gray_sync2[AWIDTH-1], rptr_gray_sync2[AWIDTH-2:0]})
+    // rempty = (rptr_gray == wptr_gray_sync2)
+
+    // Let me redo with AWIDTH bits for gray codes.
+
+    // Actually, let me restart the pointer logic with proper widths.
+
+    // I'll use a cleaner approach. Let me rewrite.
+
+endmodule
+
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWIDTH = ASIZE + 1;
+    localparam FULL_THRESHOLD = DEPTH - 1;
+    localparam EMPTY_THRESHOLD = 1;
+
+    // Write domain
+    reg [AWIDTH-1:0] wptr;
+    reg [AWIDTH-1:0] wptr_gray;
+    reg [AWIDTH-1:0] rptr_gray_w_sync1;
+    reg [AWIDTH-1:0] rptr_gray_w_sync2;
+
+    // Read domain
+    reg [AWIDTH-1:0] rptr;
+    reg [AWIDTH-1:0] rptr_gray;
+    reg [AWIDTH-1:0] wptr_gray_r_sync1;
+    reg [AWIDTH-1:0] wptr_gray_r_sync2;
+
+    // Memory
+    reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+    // Write enable
+    wire wvalid = winc & ~wfull;
+
+    // Read enable
+    wire rvalid = rinc & ~rempty;
+
+    // Gray code conversion
+    function [AWIDTH-1:0] bin2gray;
+        input [AWIDTH-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    // Write pointer update
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {AWIDTH{1'b0}};
+        end else if (wvalid) begin
+            wptr <= wptr + 1'b1;
+        end
+    end
+
+    // Write pointer gray code
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr_gray <= {AWIDTH{1'b0}};
+        end else begin
+            wptr_gray <= bin2gray(wptr);
+        end
+    end
+
+    // Synchronize read pointer gray code into write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_w_sync1 <= {AWIDTH{1'b0}};
+            rptr_gray_w_sync2 <= {AWIDTH{1'b0}};
+        end else begin
+            rptr_gray_w_sync1 <= rptr_gray;
+            rptr_gray_w_sync2 <= rptr_gray_w_sync1;
+        end
+    end
+
+    // Write full detection
+    wire wfull = (wptr_gray == {~rptr_gray_w_sync2[AWIDTH-1], rptr_gray_w_sync2[AWIDTH-2:0]});
+
+    // Almost full detection
+    wire awfull = (wptr_gray == {~rptr_gray_w_sync2[AWIDTH-1], rptr_gray_w_sync2[AWIDTH-2:0]}) ||
+                  (wptr_gray == {~rptr_gray_w_sync2[AWIDTH-1], rptr_gray_w_sync2[AWIDTH-2:0]} + 1'b1);
+
+    // Read pointer update
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= {AWIDTH{1'b0}};
+        end else if (rvalid) begin
+            rptr <= rptr + 1'b1;
+        end
+    end
+
+    // Read pointer gray code
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr_gray <= {AWIDTH{1'b0}};
+        end else begin
+            rptr_gray <= bin2gray(rptr);
+        end
+    end
+
+    // Synchronize write pointer gray code into read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_gray_r_sync1 <= {AWIDTH{1'b0}};
+            wptr_gray_r_sync2 <= {AWIDTH{1'b0}};
+        end else begin
+            wptr_gray_r_sync1 <= wptr_gray;
+            wptr_gray_r_sync2 <= wptr_gray_r_sync1;
+        end
+    end
+
+    // Read empty detection
+    wire rempty = (rptr_gray == wptr_gray_r_sync2);
+
+    // Almost empty detection
+    wire arempty = (rptr_gray == wptr_gray_r_sync2) ||
+                   (rptr_gray == wptr_gray_r_sync2 + 1'b1);
+
+    // Memory write
+    always @(posedge wclk) begin
+        if (wvalid) begin
+            mem[wptr[ASIZE-1:0]] <= wdata;
+        end
+    end
+
+    // Read data
+    reg [DSIZE-1:0] rdata_reg;
+    wire [ASIZE-1:0] raddr = rptr[ASIZE-1:0];
+
+    generate
+        if (FALLTHROUGH == "TRUE") begin
+            assign rdata = mem[raddr];
+        end else begin
+            always @(posedge rclk or negedge rrst_n) begin
+                if (!rrst_n) begin
+                    rdata_reg <= {DSIZE{1'b0}};
+                end else if (rvalid) begin
+                    rdata_reg <= mem[raddr];
+                end
+            end
+            assign rdata = rdata_reg;
+        end
+    endgenerate
+
+endmodule

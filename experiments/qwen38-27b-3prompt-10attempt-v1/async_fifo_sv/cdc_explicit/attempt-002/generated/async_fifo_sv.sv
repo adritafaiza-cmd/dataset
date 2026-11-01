@@ -1,0 +1,108 @@
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam DEPTH = 1 << ADDR_WIDTH;
+
+    // Write domain
+    reg [ADDR_WIDTH:0] wptr;
+    reg [ADDR_WIDTH:0] wptr_sync_r; // read-domain synced write pointer
+
+    // Read domain
+    reg [ADDR_WIDTH:0] rptr;
+    reg [ADDR_WIDTH:0] rptr_sync_w; // write-domain synced read pointer
+
+    // Storage
+    reg [DATA_WIDTH-1:0] mem [0:DEPTH-1];
+
+    // Write enable
+    wire wvalid = winc & ~wfull;
+
+    // Read enable
+    wire rvalid = rinc & ~rempty;
+
+    // Full condition: write pointer has lapped read pointer by DEPTH
+    wire wfull = (wptr[ADDR_WIDTH] != rptr_sync_w[ADDR_WIDTH]) &&
+                 (wptr[ADDR_WIDTH-1:0] == rptr_sync_w[ADDR_WIDTH-1:0]);
+
+    // Empty condition: read pointer equals write pointer
+    wire rempty = (rptr == wptr_sync_r);
+
+    // Write pointer update
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            wptr <= {(ADDR_WIDTH+1){1'b0}};
+        else if (wvalid)
+            wptr <= wptr + 1'b1;
+    end
+
+    // Read pointer update
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rptr <= {(ADDR_WIDTH+1){1'b0}};
+        else if (rvalid)
+            rptr <= rptr + 1'b1;
+    end
+
+    // Memory write
+    always @(posedge wclk) begin
+        if (wvalid)
+            mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+    end
+
+    // Memory read (combinational for rdata)
+    assign rdata = mem[rptr[ADDR_WIDTH-1:0]];
+
+    // Synchronize write pointer to read domain
+    // Use SYNC_STAGES flip-flops
+    reg [ADDR_WIDTH:0] wptr_sync_r_ff [0:SYNC_STAGES-1];
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            for (int i = 0; i < SYNC_STAGES; i = i + 1)
+                wptr_sync_r_ff[i] <= {(ADDR_WIDTH+1){1'b0}};
+        end else begin
+            wptr_sync_r_ff[0] <= wptr;
+            for (int i = 1; i < SYNC_STAGES; i = i + 1)
+                wptr_sync_r_ff[i] <= wptr_sync_r_ff[i-1];
+        end
+    end
+
+    assign wptr_sync_r = wptr_sync_r_ff[SYNC_STAGES-1];
+
+    // Synchronize read pointer to write domain
+    reg [ADDR_WIDTH:0] rptr_sync_w_ff [0:SYNC_STAGES-1];
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            for (int i = 0; i < SYNC_STAGES; i = i + 1)
+                rptr_sync_w_ff[i] <= {(ADDR_WIDTH+1){1'b0}};
+        end else begin
+            rptr_sync_w_ff[0] <= rptr;
+            for (int i = 1; i < SYNC_STAGES; i = i + 1)
+                rptr_sync_w_ff[i] <= rptr_sync_w_ff[i-1];
+        end
+    end
+
+    assign rptr_sync_w = rptr_sync_w_ff[SYNC_STAGES-1];
+
+    // Debug pointer outputs
+    assign waddr = wptr;
+    assign raddr = rptr;
+
+endmodule

@@ -1,0 +1,285 @@
+```systemverilog
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire [WIDTH-1:0] src_data_reg;
+  wire             src_valid_reg;
+  wire             src_ready_int;
+  wire             src_clear_pending_int;
+
+  wire             dst_valid_reg;
+  wire [WIDTH-1:0] dst_data_reg;
+  wire             dst_ready_int;
+  wire             dst_clear_pending_int;
+
+  // Clear pending outputs
+  assign src_clear_pending_o = src_clear_pending_int;
+  assign dst_clear_pending_o = dst_clear_pending_int;
+
+  // Source domain logic
+  // We use a simple handshake: src_valid_i && src_ready_o indicates transfer.
+  // The channel holds one outstanding item.
+  // src_ready_o is high when the channel is empty and not in clear state.
+
+  // Clear state machine for source side
+  // When src_clear_i is asserted, we need to:
+  // 1. Stop accepting new data
+  // 2. Wait for any in-flight data to be cleared
+  // 3. Return to idle
+
+  // For simplicity, we'll use a flag to track if we're in clear mode
+  reg src_in_clear;
+  reg src_clear_done;
+
+  // Destination domain logic
+  reg dst_in_clear;
+  reg dst_clear_done;
+
+  // Synchronization of clear requests
+  // src_clear_i needs to be synchronized to dst domain
+  // dst_clear_i needs to be synchronized to src domain
+
+  // Sync src_clear_i to dst domain
+  reg [SYNC_STAGES-1:0] src_clear_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_clear_sync <= {SYNC_STAGES{1'b0}};
+    else
+      src_clear_sync <= {src_clear_sync[SYNC_STAGES-2:0], src_clear_i};
+  end
+  wire src_clear_dst = src_clear_sync[SYNC_STAGES-1];
+
+  // Sync dst_clear_i to src domain
+  reg [SYNC_STAGES-1:0] dst_clear_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_clear_sync <= {SYNC_STAGES{1'b0}};
+    else
+      dst_clear_sync <= {dst_clear_sync[SYNC_STAGES-2:0], dst_clear_i};
+  end
+  wire dst_clear_src = dst_clear_sync[SYNC_STAGES-1];
+
+  // Source domain: track if there's data in flight
+  // The channel holds one item. We need to know if the destination has accepted it.
+  // We'll use a simple approach: src_ready is high when no data is pending.
+
+  // Let's use a different approach:
+  // src_ready_o is high when the channel is empty (no outstanding item)
+  // When src_valid_i && src_ready_o, the item is accepted and becomes outstanding.
+  // The item remains outstanding until dst_ready_i accepts it.
+
+  // We need to synchronize the "outstanding" status between domains.
+  // Let's use a flag: src_has_outstanding
+  // When src_valid_i && src_ready_o, src_has_outstanding becomes 1.
+  // When dst_ready_i && dst_valid_o, the item is consumed, and we need to notify src.
+
+  // Sync dst_ready_i && dst_valid_o to src domain
+  // Actually, we need to sync the "consumed" event.
+
+  // Let's define:
+  // src_outstanding: 1 when there's an item in the channel
+  // dst_outstanding: 1 when there's an item in the channel (from dst perspective)
+
+  // These should be the same, but we need to synchronize.
+
+  // Simpler approach: Use a single "valid" flag that is synchronized.
+  // But valid/ready handshake across CDC is tricky.
+
+  // Let's use a different strategy:
+  // The source holds the data and valid flag.
+  // The destination sees the synchronized valid and data.
+  // When dst_ready_i && dst_valid_o, the destination consumes the item.
+  // We need to tell the source that the item was consumed.
+
+  // Sync the "consumed" signal from dst to src.
+  // consumed = dst_ready_i && dst_valid_o
+
+  reg [SYNC_STAGES-1:0] consumed_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      consumed_sync <= {SYNC_STAGES{1'b0}};
+    else
+      consumed_sync <= {consumed_sync[SYNC_STAGES-2:0], dst_ready_i && dst_valid_reg};
+  end
+  wire consumed_src = consumed_sync[SYNC_STAGES-1];
+
+  // Source domain: track outstanding item
+  reg src_outstanding;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      src_outstanding <= 1'b0;
+    else if (src_valid_i && src_ready_int)
+      src_outstanding <= 1'b1;
+    else if (consumed_src)
+      src_outstanding <= 1'b0;
+  end
+
+  // src_ready is high when no outstanding item and not in clear
+  assign src_ready_int = !src_outstanding && !src_in_clear;
+  assign src_ready_o = src_ready_int;
+
+  // Source data and valid registers
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_reg <= {WIDTH{1'b0}};
+      src_valid_reg <= 1'b0;
+    end else if (src_valid_i && src_ready_int) begin
+      src_data_reg <= src_data_i;
+      src_valid_reg <= 1'b1;
+    end else if (consumed_src) begin
+      src_valid_reg <= 1'b0;
+    end
+  end
+
+  // Synchronize src_valid_reg and src_data_reg to dst domain
+  reg [SYNC_STAGES-1:0] src_valid_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_valid_sync <= {SYNC_STAGES{1'b0}};
+    else
+      src_valid_sync <= {src_valid_sync[SYNC_STAGES-2:0], src_valid_reg};
+  end
+  wire src_valid_dst = src_valid_sync[SYNC_STAGES-1];
+
+  // Data synchronization: use a mux to select data based on valid
+  // When valid transitions from 0 to 1, we need to capture the data.
+  // We'll use a simple approach: synchronize the data when valid is high.
+  // But data can change while valid is high, so we need to be careful.
+
+  // Better approach: use a data synchronizer that captures data when valid goes high.
+  // We'll use a register that captures src_data_reg when src_valid_reg rises.
+
+  reg [WIDTH-1:0] dst_data_sync;
+  reg             dst_valid_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_sync <= {WIDTH{1'b0}};
+      dst_valid_sync <= 1'b0;
+    end else begin
+      if (src_valid_dst && !dst_valid_sync) begin
+        // Valid rising edge: capture data
+        dst_data_sync <= src_data_reg;
+        dst_valid_sync <= 1'b1;
+      end else if (dst_ready_i && dst_valid_sync) begin
+        // Data consumed
+        dst_valid_sync <= 1'b0;
+      end
+    end
+  end
+
+  assign dst_valid_o = dst_valid_sync;
+  assign dst_data_o = dst_data_sync;
+
+  // Clear handling
+  // When src_clear_i is asserted, we need to clear the source side.
+  // When dst_clear_i is asserted, we need to clear the destination side.
+  // The clear is coordinated: both sides must be cleared.
+
+  // Source clear:
+  // When src_clear_i is high, set src_in_clear.
+  // Clear src_outstanding and src_valid_reg.
+  // Wait until dst_clear_src is also high (or until the clear is complete).
+  // Actually, the clear should be coordinated: when either side requests clear,
+  // both sides should clear.
+
+  // Let's define: clear_request = src_clear_i || dst_clear_src (in src domain)
+  // And: clear_request_dst = src_clear_dst || dst_clear_i (in dst domain)
+
+  wire src_clear_request = src_clear_i || dst_clear_src;
+  wire dst_clear_request = src_clear_dst || dst_clear_i;
+
+  // Source clear state machine
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_in_clear <= 1'b0;
+      src_clear_done <= 1'b0;
+    end else if (src_clear_request) begin
+      src_in_clear <= 1'b1;
+      src_clear_done <= 1'b0;
+    end else if (src_in_clear && dst_clear_src) begin
+      // Both sides have acknowledged the clear
+      src_in_clear <= 1'b0;
+      src_clear_done <= 1'b1;
+    end
+  end
+
+  // When in clear, force src_outstanding and src_valid_reg to 0
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_outstanding <= 1'b0;
+      src_valid_reg <= 1'b0;
+    end else if (src_in_clear) begin
+      src_outstanding <= 1'b0;
+      src_valid_reg <= 1'b0;
+    end else if (src_valid_i && src_ready_int) begin
+      src_outstanding <= 1'b1;
+      src_valid_reg <= 1'b1;
+    end else if (consumed_src) begin
+      src_outstanding <= 1'b0;
+      src_valid_reg <= 1'b0;
+    end
+  end
+
+  // Destination clear state machine
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_in_clear <= 1'b0;
+      dst_clear_done <= 1'b0;
+    end else if (dst_clear_request) begin
+      dst_in_clear <= 1'b1;
+      dst_clear_done <= 1'b0;
+    end else if (dst_in_clear && src_clear_dst) begin
+      // Both sides have acknowledged the clear
+      dst_in_clear <= 1'b0;
+      dst_clear_done <= 1'b1;
+    end
+  end
+
+  // When in clear, force dst_valid_sync to 0
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_sync <= 1'b0;
+      dst_data_sync <= {WIDTH{1'b0}};
+    end else if (dst_in_clear) begin
+      dst_valid_sync <= 1'b0;
+    end else begin
+      if (src_valid_dst && !dst_valid_sync) begin
+        dst_data_sync <= src_data_reg;
+        dst_valid_sync <= 1'b1;
+      end else if (dst_ready_i && dst_valid_sync) begin
+        dst_valid_sync <= 1'b0;
+      end
+    end
+  end
+
+  // Clear pending outputs
+  // src_clear_pending_o is high while src_in_clear is high
+  // dst_clear_pending_o is high while dst_in_clear is high
+  assign src_clear_pending_int = src_in_clear;
+  assign dst_clear_pending_int = dst_in_clear;
+
+  // Handle CLEAR_ON_ASYNC_RESET
+  // When CLEAR_ON_ASYNC_RESET is set, async reset should also flush the channel.
+  // This is already handled by the reset logic above.
+
+endmodule
+```<|im_end|>

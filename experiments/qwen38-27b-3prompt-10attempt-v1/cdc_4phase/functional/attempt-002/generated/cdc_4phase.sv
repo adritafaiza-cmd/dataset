@@ -1,0 +1,99 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain state
+  reg [WIDTH-1:0] src_data_reg;
+  reg             src_valid_reg;
+  reg             src_ready_reg;
+
+  // Destination domain state
+  reg [WIDTH-1:0] dst_data_reg;
+  reg             dst_valid_reg;
+  reg             dst_ready_reg;
+
+  // Handshake signals (synchronized)
+  reg             src_to_dst_valid;
+  reg             dst_to_src_ready;
+
+  // Synchronizers
+  reg [1:0] src_to_dst_valid_sync;
+  reg [1:0] dst_to_src_ready_sync;
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_reg  <= {WIDTH{1'b0}};
+      src_valid_reg <= 1'b0;
+      src_ready_reg <= 1'b1;
+      src_to_dst_valid <= 1'b0;
+    end else begin
+      // Synchronize dst_to_src_ready
+      dst_to_src_ready_sync <= {dst_to_src_ready_sync[0], dst_to_src_ready};
+
+      // Determine if we can accept new data
+      // In non-decoupled mode, we wait for the previous transfer to complete
+      // In decoupled mode, we can accept new data as soon as the previous one is sent
+
+      if (src_valid_i && src_ready_reg) begin
+        // Accept new data
+        src_data_reg  <= src_data_i;
+        src_valid_reg <= 1'b1;
+        src_to_dst_valid <= 1'b1;
+        src_ready_reg <= 1'b0;
+      end else if (src_valid_reg && dst_to_src_ready_sync[1]) begin
+        // Previous transfer completed, ready for next
+        src_valid_reg <= 1'b0;
+        src_to_dst_valid <= 1'b0;
+        src_ready_reg <= 1'b1;
+      end
+    end
+  end
+
+  assign src_ready_o = src_ready_reg;
+
+  // Destination domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_reg  <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+      dst_ready_reg <= 1'b1;
+      dst_to_src_ready <= 1'b0;
+    end else begin
+      // Synchronize src_to_dst_valid
+      src_to_dst_valid_sync <= {src_to_dst_valid_sync[0], src_to_dst_valid};
+
+      // Determine if we can accept new data from source
+      if (src_to_dst_valid_sync[1] && dst_ready_reg) begin
+        // Accept new data from source
+        dst_data_reg  <= src_data_reg;
+        dst_valid_reg <= 1'b1;
+        dst_ready_reg <= 1'b0;
+        dst_to_src_ready <= 1'b0;
+      end else if (dst_valid_reg && dst_ready_i) begin
+        // Destination consumed the data
+        dst_valid_reg <= 1'b0;
+        dst_ready_reg <= 1'b1;
+        dst_to_src_ready <= 1'b1;
+      end
+    end
+  end
+
+  assign dst_data_o  = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+endmodule

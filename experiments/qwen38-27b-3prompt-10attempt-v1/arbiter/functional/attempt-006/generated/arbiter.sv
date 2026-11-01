@@ -1,0 +1,295 @@
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam W = $clog2(PORTS);
+
+    reg [W-1:0] rr_ptr;
+    reg [PORTS-1:0] grant_reg;
+    reg grant_valid_reg;
+
+    wire [PORTS-1:0] grant_comb;
+    wire grant_valid_comb;
+    wire [W-1:0] grant_encoded_comb;
+
+    // Fixed priority arbiter
+    // If ARB_LSB_HIGH_PRIORITY is 1, LSB has highest priority
+    // If ARB_LSB_HIGH_PRIORITY is 0, MSB has highest priority (standard)
+
+    // For fixed priority, we need to find the highest priority request
+    // Let's create a priority encoder
+
+    // Helper: find first set bit from LSB (LSB high priority)
+    // Helper: find first set bit from MSB (MSB high priority)
+
+    // We'll use a combinational block to compute the grant
+
+    // For round robin, we rotate the request vector based on rr_ptr
+    // Then apply fixed priority logic
+
+    // Let's define a function to find the index of the first set bit
+    // starting from a given position, wrapping around
+
+    // Simpler approach: 
+    // 1. Compute the "effective request" vector based on round robin pointer
+    // 2. Apply fixed priority to get the grant index
+    // 3. Map back to original port index
+
+    // For round robin:
+    //   Rotate request left by rr_ptr, find highest priority (based on ARB_LSB_HIGH_PRIORITY),
+    //   then rotate the result back
+
+    // Let's use a combinational approach
+
+    // Step 1: Create rotated request
+    wire [PORTS-1:0] req_rotated;
+    wire [PORTS-1:0] req_fixed;
+
+    assign req_fixed = request;
+
+    // For round robin, rotate request left by rr_ptr
+    // We need to handle the rotation
+    // req_rotated[i] = request[(i - rr_ptr) mod PORTS]
+    // But since rr_ptr is W bits and PORTS may not be power of 2, we need to be careful
+    // Actually, for simplicity, let's assume PORTS is a power of 2, or handle it generally
+
+    // Let's use a general approach: for each bit i in req_rotated,
+    // req_rotated[i] = request[(i - rr_ptr + PORTS) % PORTS]
+
+    // This is complex in Verilog. Let's use a different approach.
+
+    // Alternative: Use a priority encoder that takes into account the round robin pointer
+    // by masking out lower priority requests that have already been served
+
+    // Actually, let's use a simpler method:
+    // For round robin, we can use the following:
+    //   - Create a mask of requests that are "eligible" (not yet granted in this cycle)
+    //   - But this is getting complex
+
+    // Let's use a standard approach:
+    //   1. If round robin, rotate the request vector
+    //   2. Apply fixed priority
+    //   3. Rotate the grant back
+
+    // For rotation, we can use:
+    //   req_rotated = {request[rr_ptr-1:0], request[PORTS-1:rr_ptr]}
+    // But this requires variable indexing which is tricky
+
+    // Let's use a case statement or a loop
+
+    // Actually, let's use a simpler approach for round robin:
+    //   - Use a priority encoder that starts from rr_ptr and wraps around
+    //   - This can be done by creating two priority encoders:
+    //     one for bits [PORTS-1:rr_ptr] and one for bits [rr_ptr-1:0]
+    //   - The one with a valid request wins, with the higher priority one winning
+
+    // Let's implement this
+
+    // For fixed priority:
+    //   If ARB_LSB_HIGH_PRIORITY: LSB wins
+    //   Else: MSB wins
+
+    // Let's create a priority encoder function
+
+    // Function to find the index of the first set bit from LSB
+    function [W-1:0] find_lsb;
+        input [PORTS-1:0] vec;
+        integer i;
+        begin
+            find_lsb = 0;
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (vec[i]) begin
+                    find_lsb = i[W-1:0];
+                    disable find_lsb;
+                end
+            end
+        end
+    endfunction
+
+    // Function to find the index of the first set bit from MSB
+    function [W-1:0] find_msb;
+        input [PORTS-1:0] vec;
+        integer i;
+        begin
+            find_msb = 0;
+            for (i = PORTS-1; i >= 0; i = i - 1) begin
+                if (vec[i]) begin
+                    find_msb = i[W-1:0];
+                    disable find_msb;
+                end
+            end
+        end
+    endfunction
+
+    // For round robin, we need to find the first set bit starting from rr_ptr
+    // wrapping around
+
+    // Let's create a function for round robin priority
+    function [W-1:0] find_rr;
+        input [PORTS-1:0] vec;
+        input [W-1:0] ptr;
+        integer i;
+        integer start;
+        begin
+            find_rr = 0;
+            start = ptr;
+            // Search from ptr to PORTS-1
+            for (i = start; i < PORTS; i = i + 1) begin
+                if (vec[i]) begin
+                    find_rr = i[W-1:0];
+                    disable find_rr;
+                end
+            end
+            // Search from 0 to ptr-1
+            for (i = 0; i < start; i = i + 1) begin
+                if (vec[i]) begin
+                    find_rr = i[W-1:0];
+                    disable find_rr;
+                end
+            end
+        end
+    endfunction
+
+    // Now compute the grant index
+    reg [W-1:0] grant_idx_comb;
+    reg grant_valid_comb_reg;
+
+    always @* begin
+        grant_idx_comb = 0;
+        grant_valid_comb_reg = 0;
+
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            if (request != 0) begin
+                grant_idx_comb = find_rr(request, rr_ptr);
+                grant_valid_comb_reg = 1;
+            end
+        end else begin
+            if (ARB_LSB_HIGH_PRIORITY) begin
+                if (request != 0) begin
+                    grant_idx_comb = find_lsb(request);
+                    grant_valid_comb_reg = 1;
+                end
+            end else begin
+                if (request != 0) begin
+                    grant_idx_comb = find_msb(request);
+                    grant_valid_comb_reg = 1;
+                end
+            end
+        end
+    end
+
+    // Create one-hot grant from index
+    reg [PORTS-1:0] grant_onehot_comb;
+    integer j;
+    always @* begin
+        grant_onehot_comb = 0;
+        for (j = 0; j < PORTS; j = j + 1) begin
+            if (j == grant_idx_comb) begin
+                grant_onehot_comb[j] = 1;
+            end
+        end
+    end
+
+    assign grant_comb = grant_onehot_comb;
+    assign grant_valid_comb = grant_valid_comb_reg;
+    assign grant_encoded_comb = grant_idx_comb;
+
+    // Now handle the blocking logic
+    // If ARB_BLOCK is set:
+    //   - Hold the grant until acknowledge (if ARB_BLOCK_ACK) or until request drops
+    //   - Otherwise, grant is combinational
+
+    // Let's use a register to hold the grant when blocking is enabled
+
+    // Determine if we should update the grant
+    wire update_grant;
+
+    // If not blocking, grant is always combinational
+    // If blocking:
+    //   - If ARB_BLOCK_ACK: hold until acknowledge
+    //   - Else: hold until request drops
+
+    // Let's define the condition for updating the grant register
+    // When blocking is enabled:
+    //   - If no current grant, take new grant
+    //   - If current grant, check if we should release it
+    //     - If ARB_BLOCK_ACK: release when acknowledge is asserted for the granted port
+    //     - Else: release when the request for the granted port drops
+
+    wire ack_granted;
+    wire req_dropped;
+
+    // Check if acknowledge is asserted for the currently granted port
+    assign ack_granted = (grant_reg & acknowledge) != 0;
+
+    // Check if the request for the currently granted port has dropped
+    assign req_dropped = (grant_reg & request) == 0;
+
+    // Determine if we should update
+    wire should_update;
+
+    assign should_update = !ARB_BLOCK || 
+                           !grant_valid_reg || 
+                           (ARB_BLOCK_ACK ? ack_granted : req_dropped);
+
+    // Now compute the next state
+    reg [PORTS-1:0] grant_next;
+    reg grant_valid_next;
+    reg [W-1:0] rr_ptr_next;
+
+    always @* begin
+        grant_next = grant_comb;
+        grant_valid_next = grant_valid_comb;
+        rr_ptr_next = rr_ptr;
+
+        if (should_update) begin
+            grant_next = grant_comb;
+            grant_valid_next = grant_valid_comb;
+            
+            // Update round robin pointer
+            if (grant_valid_comb) begin
+                // Move pointer to the next port after the granted one
+                if (grant_idx_comb == PORTS-1) begin
+                    rr_ptr_next = 0;
+                end else begin
+                    rr_ptr_next = grant_idx_comb + 1;
+                end
+            end
+        end
+    end
+
+    // Sequential logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            grant_reg <= 0;
+            grant_valid_reg <= 0;
+            rr_ptr <= 0;
+        end else begin
+            grant_reg <= grant_next;
+            grant_valid_reg <= grant_valid_next;
+            rr_ptr <= rr_ptr_next;
+        end
+    end
+
+    // Output assignment
+    // If blocking is enabled, use the registered grant
+    // Otherwise, use the combinational grant
+    assign grant = ARB_BLOCK ? grant_reg : grant_comb;
+    assign grant_valid = ARB_BLOCK ? grant_valid_reg : grant_valid_comb;
+    assign grant_encoded = ARB_BLOCK ? (grant_valid_reg ? grant_idx_comb : 0) : grant_encoded_comb;
+
+endmodule

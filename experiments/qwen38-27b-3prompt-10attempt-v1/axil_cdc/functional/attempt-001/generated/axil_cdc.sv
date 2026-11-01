@@ -1,0 +1,444 @@
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // Write channel: AW
+    reg [ADDR_WIDTH-1:0] s_awaddr_r;
+    reg [2:0]            s_awprot_r;
+    reg                  s_awvalid_r;
+    reg                  s_awready_r;
+    reg                  s_awreq_r;
+    reg                  s_awack_r;
+
+    // Write channel: W
+    reg [DATA_WIDTH-1:0] s_wdata_r;
+    reg [STRB_WIDTH-1:0] s_wstrb_r;
+    reg                  s_wvalid_r;
+    reg                  s_wready_r;
+    reg                  s_wreq_r;
+    reg                  s_wack_r;
+
+    // Write channel: B
+    reg [1:0] s_bresp_r;
+    reg       s_bvalid_r;
+    reg       s_bready_r;
+    reg       s_breq_r;
+    reg       s_back_r;
+
+    // Read channel: AR
+    reg [ADDR_WIDTH-1:0] s_araddr_r;
+    reg [2:0]            s_arprot_r;
+    reg                  s_arvalid_r;
+    reg                  s_arready_r;
+    reg                  s_arreq_r;
+    reg                  s_arack_r;
+
+    // Read channel: R
+    reg [DATA_WIDTH-1:0] s_rdata_r;
+    reg [1:0]            s_rresp_r;
+    reg                  s_rvalid_r;
+    reg                  s_rready_r;
+    reg                  s_rreq_r;
+    reg                  s_rack_r;
+
+    // Master side registers
+    reg [ADDR_WIDTH-1:0] m_awaddr_r;
+    reg [2:0]            m_awprot_r;
+    reg                  m_awvalid_r;
+    reg                  m_awready_r;
+    reg                  m_awreq_r;
+    reg                  m_awack_r;
+
+    reg [DATA_WIDTH-1:0] m_wdata_r;
+    reg [STRB_WIDTH-1:0] m_wstrb_r;
+    reg                  m_wvalid_r;
+    reg                  m_wready_r;
+    reg                  m_wreq_r;
+    reg                  m_wack_r;
+
+    reg [1:0] m_bresp_r;
+    reg       m_bvalid_r;
+    reg       m_bready_r;
+    reg       m_breq_r;
+    reg       m_back_r;
+
+    reg [ADDR_WIDTH-1:0] m_araddr_r;
+    reg [2:0]            m_arprot_r;
+    reg                  m_arvalid_r;
+    reg                  m_arready_r;
+    reg                  m_arreq_r;
+    reg                  m_arack_r;
+
+    reg [DATA_WIDTH-1:0] m_rdata_r;
+    reg [1:0]            m_rresp_r;
+    reg                  m_rvalid_r;
+    reg                  m_rready_r;
+    reg                  m_rreq_r;
+    reg                  m_rack_r;
+
+    // Handshake signals between domains
+    wire s_aw_to_m_req;
+    wire s_aw_to_m_ack;
+    wire s_w_to_m_req;
+    wire s_w_to_m_ack;
+    wire m_b_to_s_req;
+    wire m_b_to_s_ack;
+    wire s_ar_to_m_req;
+    wire s_ar_to_m_ack;
+    wire m_r_to_s_req;
+    wire m_r_to_s_ack;
+
+    // AW channel: Slave side
+    assign s_axil_awready = s_awready_r;
+    assign s_aw_to_m_req  = s_awreq_r;
+    assign s_aw_to_m_ack  = s_awack_r;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_awaddr_r  <= {ADDR_WIDTH{1'b0}};
+            s_awprot_r  <= 3'b000;
+            s_awvalid_r <= 1'b0;
+            s_awready_r <= 1'b0;
+            s_awreq_r   <= 1'b0;
+            s_awack_r   <= 1'b0;
+        end else begin
+            if (s_axil_awvalid && s_awready_r) begin
+                s_awaddr_r  <= s_axil_awaddr;
+                s_awprot_r  <= s_axil_awprot;
+                s_awvalid_r <= 1'b1;
+                s_awready_r <= 1'b0;
+                s_awreq_r   <= 1'b1;
+            end else if (s_awack_r) begin
+                s_awreq_r   <= 1'b0;
+                s_awvalid_r <= 1'b0;
+                s_awready_r <= 1'b1;
+            end
+        end
+    end
+
+    // AW channel: Master side
+    assign m_axil_awaddr  = m_awaddr_r;
+    assign m_axil_awprot  = m_awprot_r;
+    assign m_axil_awvalid = m_awvalid_r;
+    assign m_aw_to_s_req  = m_awreq_r;
+    assign m_aw_to_s_ack  = m_awack_r;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_awaddr_r  <= {ADDR_WIDTH{1'b0}};
+            m_awprot_r  <= 3'b000;
+            m_awvalid_r <= 1'b0;
+            m_awready_r <= 1'b0;
+            m_awreq_r   <= 1'b0;
+            m_awack_r   <= 1'b0;
+        end else begin
+            if (s_aw_to_m_req && !m_awreq_r) begin
+                m_awaddr_r  <= s_awaddr_r;
+                m_awprot_r  <= s_awprot_r;
+                m_awvalid_r <= 1'b1;
+                m_awready_r <= 1'b0;
+                m_awreq_r   <= 1'b1;
+            end else if (m_axil_awready && m_awvalid_r) begin
+                m_awvalid_r <= 1'b0;
+                m_awready_r <= 1'b1;
+                m_awack_r   <= 1'b1;
+            end else if (m_awack_r) begin
+                m_awack_r   <= 1'b0;
+                m_awreq_r   <= 1'b0;
+            end
+        end
+    end
+
+    // W channel: Slave side
+    assign s_axil_wready = s_wready_r;
+    assign s_w_to_m_req  = s_wreq_r;
+    assign s_w_to_m_ack  = s_wack_r;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_wdata_r  <= {DATA_WIDTH{1'b0}};
+            s_wstrb_r  <= {STRB_WIDTH{1'b0}};
+            s_wvalid_r <= 1'b0;
+            s_wready_r <= 1'b0;
+            s_wreq_r   <= 1'b0;
+            s_wack_r   <= 1'b0;
+        end else begin
+            if (s_axil_wvalid && s_wready_r) begin
+                s_wdata_r  <= s_axil_wdata;
+                s_wstrb_r  <= s_axil_wstrb;
+                s_wvalid_r <= 1'b1;
+                s_wready_r <= 1'b0;
+                s_wreq_r   <= 1'b1;
+            end else if (s_wack_r) begin
+                s_wreq_r   <= 1'b0;
+                s_wvalid_r <= 1'b0;
+                s_wready_r <= 1'b1;
+            end
+        end
+    end
+
+    // W channel: Master side
+    assign m_axil_wdata  = m_wdata_r;
+    assign m_axil_wstrb  = m_wstrb_r;
+    assign m_axil_wvalid = m_wvalid_r;
+    assign m_w_to_s_req  = m_wreq_r;
+    assign m_w_to_s_ack  = m_wack_r;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_wdata_r  <= {DATA_WIDTH{1'b0}};
+            m_wstrb_r  <= {STRB_WIDTH{1'b0}};
+            m_wvalid_r <= 1'b0;
+            m_wready_r <= 1'b0;
+            m_wreq_r   <= 1'b0;
+            m_wack_r   <= 1'b0;
+        end else begin
+            if (s_w_to_m_req && !m_wreq_r) begin
+                m_wdata_r  <= s_wdata_r;
+                m_wstrb_r  <= s_wstrb_r;
+                m_wvalid_r <= 1'b1;
+                m_wready_r <= 1'b0;
+                m_wreq_r   <= 1'b1;
+            end else if (m_axil_wready && m_wvalid_r) begin
+                m_wvalid_r <= 1'b0;
+                m_wready_r <= 1'b1;
+                m_wack_r   <= 1'b1;
+            end else if (m_wack_r) begin
+                m_wack_r   <= 1'b0;
+                m_wreq_r   <= 1'b0;
+            end
+        end
+    end
+
+    // B channel: Master side
+    assign m_axil_bready = m_bready_r;
+    assign m_b_to_s_req  = m_breq_r;
+    assign m_b_to_s_ack  = m_back_r;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_bresp_r  <= 2'b00;
+            m_bvalid_r <= 1'b0;
+            m_bready_r <= 1'b0;
+            m_breq_r   <= 1'b0;
+            m_back_r   <= 1'b0;
+        end else begin
+            if (m_axil_bvalid && m_bready_r) begin
+                m_bresp_r  <= m_axil_bresp;
+                m_bvalid_r <= 1'b1;
+                m_bready_r <= 1'b0;
+                m_breq_r   <= 1'b1;
+            end else if (m_back_r) begin
+                m_breq_r   <= 1'b0;
+                m_bvalid_r <= 1'b0;
+                m_bready_r <= 1'b1;
+            end
+        end
+    end
+
+    // B channel: Slave side
+    assign s_axil_bresp  = s_bresp_r;
+    assign s_axil_bvalid = s_bvalid_r;
+    assign s_b_to_m_req  = s_breq_r;
+    assign s_b_to_m_ack  = s_back_r;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_bresp_r  <= 2'b00;
+            s_bvalid_r <= 1'b0;
+            s_bready_r <= 1'b0;
+            s_breq_r   <= 1'b0;
+            s_back_r   <= 1'b0;
+        end else begin
+            if (m_b_to_s_req && !s_breq_r) begin
+                s_bresp_r  <= m_bresp_r;
+                s_bvalid_r <= 1'b1;
+                s_bready_r <= 1'b0;
+                s_breq_r   <= 1'b1;
+            end else if (s_axil_bready && s_bvalid_r) begin
+                s_bvalid_r <= 1'b0;
+                s_bready_r <= 1'b1;
+                s_back_r   <= 1'b1;
+            end else if (s_back_r) begin
+                s_back_r   <= 1'b0;
+                s_breq_r   <= 1'b0;
+            end
+        end
+    end
+
+    // AR channel: Slave side
+    assign s_axil_arready = s_arready_r;
+    assign s_ar_to_m_req  = s_arreq_r;
+    assign s_ar_to_m_ack  = s_arack_r;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_araddr_r  <= {ADDR_WIDTH{1'b0}};
+            s_arprot_r  <= 3'b000;
+            s_arvalid_r <= 1'b0;
+            s_arready_r <= 1'b0;
+            s_arreq_r   <= 1'b0;
+            s_arack_r   <= 1'b0;
+        end else begin
+            if (s_axil_arvalid && s_arready_r) begin
+                s_araddr_r  <= s_axil_araddr;
+                s_arprot_r  <= s_axil_arprot;
+                s_arvalid_r <= 1'b1;
+                s_arready_r <= 1'b0;
+                s_arreq_r   <= 1'b1;
+            end else if (s_arack_r) begin
+                s_arreq_r   <= 1'b0;
+                s_arvalid_r <= 1'b0;
+                s_arready_r <= 1'b1;
+            end
+        end
+    end
+
+    // AR channel: Master side
+    assign m_axil_araddr  = m_araddr_r;
+    assign m_axil_arprot  = m_arprot_r;
+    assign m_axil_arvalid = m_arvalid_r;
+    assign m_ar_to_s_req  = m_arreq_r;
+    assign m_ar_to_s_ack  = m_arack_r;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_araddr_r  <= {ADDR_WIDTH{1'b0}};
+            m_arprot_r  <= 3'b000;
+            m_arvalid_r <= 1'b0;
+            m_arready_r <= 1'b0;
+            m_arreq_r   <= 1'b0;
+            m_arack_r   <= 1'b0;
+        end else begin
+            if (s_ar_to_m_req && !m_arreq_r) begin
+                m_araddr_r  <= s_araddr_r;
+                m_arprot_r  <= s_arprot_r;
+                m_arvalid_r <= 1'b1;
+                m_arready_r <= 1'b0;
+                m_arreq_r   <= 1'b1;
+            end else if (m_axil_arready && m_arvalid_r) begin
+                m_arvalid_r <= 1'b0;
+                m_arready_r <= 1'b1;
+                m_arack_r   <= 1'b1;
+            end else if (m_arack_r) begin
+                m_arack_r   <= 1'b0;
+                m_arreq_r   <= 1'b0;
+            end
+        end
+    end
+
+    // R channel: Master side
+    assign m_axil_rready = m_rready_r;
+    assign m_r_to_s_req  = m_rreq_r;
+    assign m_r_to_s_ack  = m_rack_r;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rdata_r  <= {DATA_WIDTH{1'b0}};
+            m_rresp_r  <= 2'b00;
+            m_rvalid_r <= 1'b0;
+            m_rready_r <= 1'b0;
+            m_rreq_r   <= 1'b0;
+            m_rack_r   <= 1'b0;
+        end else begin
+            if (m_axil_rvalid && m_rready_r) begin
+                m_rdata_r  <= m_axil_rdata;
+                m_rresp_r  <= m_axil_rresp;
+                m_rvalid_r <= 1'b1;
+                m_rready_r <= 1'b0;
+                m_rreq_r   <= 1'b1;
+            end else if (m_rack_r) begin
+                m_rreq_r   <= 1'b0;
+                m_rvalid_r <= 1'b0;
+                m_rready_r <= 1'b1;
+            end
+        end
+    end
+
+    // R channel: Slave side
+    assign s_axil_rdata  = s_rdata_r;
+    assign s_axil_rresp  = s_rresp_r;
+    assign s_axil_rvalid = s_rvalid_r;
+    assign s_r_to_m_req  = s_rreq_r;
+    assign s_r_to_m_ack  = s_rack_r;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_rdata_r  <= {DATA_WIDTH{1'b0}};
+            s_rresp_r  <= 2'b00;
+            s_rvalid_r <= 1'b0;
+            s_rready_r <= 1'b0;
+            s_rreq_r   <= 1'b0;
+            s_rack_r   <= 1'b0;
+        end else begin
+            if (m_r_to_s_req && !s_rreq_r) begin
+                s_rdata_r  <= m_rdata_r;
+                s_rresp_r  <= m_rresp_r;
+                s_rvalid_r <= 1'b1;
+                s_rready_r <= 1'b0;
+                s_rreq_r   <= 1'b1;
+            end else if (s_axil_rready && s_rvalid_r) begin
+                s_rvalid_r <= 1'b0;
+                s_rready_r <= 1'b1;
+                s_rack_r   <= 1'b1;
+            end else if (s_rack_r) begin
+                s_rack_r   <= 1'b0;
+                s_rreq_r   <= 1'b0;
+            end
+        end
+    end
+
+endmodule

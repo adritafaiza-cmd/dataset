@@ -1,0 +1,233 @@
+module cdc_fifo_2phase #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_WIDTH = LOG_DEPTH + 1;
+
+    // Storage
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+
+    // Source domain pointers
+    reg [PTR_WIDTH-1:0] src_wr_ptr;
+    reg [PTR_WIDTH-1:0] src_rd_ptr;
+
+    // Destination domain pointers
+    reg [PTR_WIDTH-1:0] dst_wr_ptr;
+    reg [PTR_WIDTH-1:0] dst_rd_ptr;
+
+    // Synchronizers for write pointer (src -> dst)
+    reg [PTR_WIDTH-1:0] src_wr_ptr_sync1;
+    reg [PTR_WIDTH-1:0] src_wr_ptr_sync2;
+
+    // Synchronizers for read pointer (dst -> src)
+    reg [PTR_WIDTH-1:0] dst_rd_ptr_sync1;
+    reg [PTR_WIDTH-1:0] dst_rd_ptr_sync2;
+
+    // Synchronizers for write pointer (dst -> src) - for dst_wr_ptr
+    reg [PTR_WIDTH-1:0] dst_wr_ptr_sync1;
+    reg [PTR_WIDTH-1:0] dst_wr_ptr_sync2;
+
+    // Synchronizers for read pointer (src -> dst) - for src_rd_ptr
+    reg [PTR_WIDTH-1:0] src_rd_ptr_sync1;
+    reg [PTR_WIDTH-1:0] src_rd_ptr_sync2;
+
+    // Source domain: write pointer synchronization to dst
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_wr_ptr_sync1 <= {PTR_WIDTH{1'b0}};
+            src_wr_ptr_sync2 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            src_wr_ptr_sync1 <= src_wr_ptr;
+            src_wr_ptr_sync2 <= src_wr_ptr_sync1;
+        end
+    end
+
+    // Destination domain: read pointer synchronization to src
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_rd_ptr_sync1 <= {PTR_WIDTH{1'b0}};
+            dst_rd_ptr_sync2 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            dst_rd_ptr_sync1 <= dst_rd_ptr;
+            dst_rd_ptr_sync2 <= dst_rd_ptr_sync1;
+        end
+    end
+
+    // Destination domain: write pointer synchronization to src
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_wr_ptr_sync1 <= {PTR_WIDTH{1'b0}};
+            dst_wr_ptr_sync2 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            dst_wr_ptr_sync1 <= dst_wr_ptr;
+            dst_wr_ptr_sync2 <= dst_wr_ptr_sync1;
+        end
+    end
+
+    // Source domain: read pointer synchronization to dst
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_rd_ptr_sync1 <= {PTR_WIDTH{1'b0}};
+            src_rd_ptr_sync2 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            src_rd_ptr_sync1 <= src_rd_ptr;
+            src_rd_ptr_sync2 <= src_rd_ptr_sync1;
+        end
+    end
+
+    // Source domain: compute full condition
+    // Full when src_wr_ptr - src_rd_ptr_sync2 == DEPTH
+    // Using the synchronized read pointer from dst domain
+    wire [PTR_WIDTH-1:0] src_wr_ptr_minus_rd = src_wr_ptr - src_rd_ptr_sync2;
+    wire src_full = (src_wr_ptr_minus_rd == DEPTH[PTR_WIDTH-1:0]);
+
+    // Destination domain: compute empty condition
+    // Empty when dst_wr_ptr_sync2 - dst_rd_ptr == 0
+    wire [PTR_WIDTH-1:0] dst_wr_ptr_minus_rd = dst_wr_ptr_sync2 - dst_rd_ptr;
+    wire dst_empty = (dst_wr_ptr_minus_rd == {PTR_WIDTH{1'b0}});
+
+    // Source domain: ready signal
+    assign src_ready_o = ~src_full;
+
+    // Source domain: write to memory and update write pointer
+    wire src_write = src_valid_i & src_ready_o;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_wr_ptr <= {PTR_WIDTH{1'b0}};
+            src_rd_ptr <= {PTR_WIDTH{1'b0}};
+        end else begin
+            if (src_write) begin
+                mem[src_wr_ptr[PTR_WIDTH-2:0]] <= src_data_i;
+                src_wr_ptr <= src_wr_ptr + 1'b1;
+            end
+            // src_rd_ptr is updated when dst reads from src's perspective
+            // Actually, src_rd_ptr tracks how many items have been read by dst
+            // We need to update src_rd_ptr based on dst's read activity
+            // But dst reads from the same memory. Let's rethink.
+        end
+    end
+
+    // Actually, let's use a simpler approach:
+    // The FIFO has one memory. Writes happen in src domain, reads in dst domain.
+    // We need to track:
+    // - src_wr_ptr: number of items written (src domain)
+    // - dst_rd_ptr: number of items read (dst domain)
+    // 
+    // For full check in src domain: src_wr_ptr - dst_rd_ptr_sync2 == DEPTH
+    // For empty check in dst domain: src_wr_ptr_sync2 - dst_rd_ptr == 0
+
+    // Let me redo this properly.
+
+    // Source domain: write pointer
+    reg [PTR_WIDTH-1:0] src_wr_ptr_r;
+    // Destination domain: read pointer
+    reg [PTR_WIDTH-1:0] dst_rd_ptr_r;
+
+    // Synchronize src_wr_ptr to dst domain
+    reg [PTR_WIDTH-1:0] src_wr_ptr_s1;
+    reg [PTR_WIDTH-1:0] src_wr_ptr_s2;
+
+    // Synchronize dst_rd_ptr to src domain
+    reg [PTR_WIDTH-1:0] dst_rd_ptr_s1;
+    reg [PTR_WIDTH-1:0] dst_rd_ptr_s2;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_wr_ptr_r <= {PTR_WIDTH{1'b0}};
+        end else if (src_write) begin
+            src_wr_ptr_r <= src_wr_ptr_r + 1'b1;
+        end
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_rd_ptr_r <= {PTR_WIDTH{1'b0}};
+        end else if (dst_valid_o & dst_ready_i) begin
+            dst_rd_ptr_r <= dst_rd_ptr_r + 1'b1;
+        end
+    end
+
+    // Synchronizers
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_wr_ptr_s1 <= {PTR_WIDTH{1'b0}};
+            src_wr_ptr_s2 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            src_wr_ptr_s1 <= src_wr_ptr_r;
+            src_wr_ptr_s2 <= src_wr_ptr_s1;
+        end
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_rd_ptr_s1 <= {PTR_WIDTH{1'b0}};
+            dst_rd_ptr_s2 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            dst_rd_ptr_s1 <= dst_rd_ptr_r;
+            dst_rd_ptr_s2 <= dst_rd_ptr_s1;
+        end
+    end
+
+    // Full check in src domain
+    wire [PTR_WIDTH-1:0] fill_level_src = src_wr_ptr_r - dst_rd_ptr_s2;
+    wire src_full_r = (fill_level_src == DEPTH[PTR_WIDTH-1:0]);
+
+    // Empty check in dst domain
+    wire [PTR_WIDTH-1:0] fill_level_dst = src_wr_ptr_s2 - dst_rd_ptr_r;
+    wire dst_empty_r = (fill_level_dst == {PTR_WIDTH{1'b0}});
+
+    assign src_ready_o = ~src_full_r;
+
+    // Write to memory in src domain
+    always @(posedge src_clk_i) begin
+        if (src_write) begin
+            mem[src_wr_ptr_r[PTR_WIDTH-2:0]] <= src_data_i;
+        end
+    end
+
+    // Read from memory in dst domain
+    // dst_data_o is a registered sample
+    reg [WIDTH-1:0] dst_data_r;
+    reg dst_valid_r;
+
+    wire dst_read = dst_valid_r & dst_ready_i;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_data_r <= {WIDTH{1'b0}};
+            dst_valid_r <= 1'b0;
+        end else begin
+            if (dst_read) begin
+                // After reading, check if there's another item
+                if (fill_level_dst > 1) begin
+                    dst_data_r <= mem[(dst_rd_ptr_r + 1'b1)[PTR_WIDTH-2:0]];
+                    dst_valid_r <= 1'b1;
+                end else begin
+                    dst_valid_r <= 1'b0;
+                end
+            end else if (!dst_valid_r & ~dst_empty_r) begin
+                // Load first item when not valid and not empty
+                dst_data_r <= mem[dst_rd_ptr_r[PTR_WIDTH-2:0]];
+                dst_valid_r <= 1'b1;
+            end
+        end
+    end
+
+    assign dst_data_o = dst_data_r;
+    assign dst_valid_o = dst_valid_r;
+
+endmodule

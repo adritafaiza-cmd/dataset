@@ -1,0 +1,442 @@
+module axidma #(
+	parameter	C_AXI_ID_WIDTH = 1,
+	parameter	C_AXI_ADDR_WIDTH = 32,
+	parameter	C_AXI_DATA_WIDTH = 32,
+	localparam	C_AXIL_ADDR_WIDTH = 5,
+	localparam	C_AXIL_DATA_WIDTH = 32,
+	parameter [0:0]	OPT_UNALIGNED = 1'b1,
+	parameter [0:0]	OPT_WRAPMEM = 1'b1,
+	parameter	LGFIFO = LGMAXBURST+1,
+	parameter	LGLEN = C_AXI_ADDR_WIDTH,
+	parameter [0:0]	OPT_LOWPOWER = 1'b0,
+	parameter [0:0]	OPT_CLKGATE = OPT_LOWPOWER,
+	parameter	[C_AXI_ID_WIDTH-1:0]	AXI_READ_ID = 0,
+	parameter	[C_AXI_ID_WIDTH-1:0]	AXI_WRITE_ID = 0,
+	parameter	[7:0]			ABORT_KEY  = 8'h6d,
+	localparam	ADDRLSB= $clog2(C_AXI_DATA_WIDTH)-3,
+	localparam	AXILLSB= $clog2(C_AXIL_DATA_WIDTH)-3,
+	localparam	LGLENW= LGLEN-ADDRLSB
+) (
+	input	wire	S_AXI_ACLK,
+	input	wire	S_AXI_ARESETN,
+	input	wire				S_AXIL_AWVALID,
+	output	wire				S_AXIL_AWREADY,
+	input	wire [C_AXIL_ADDR_WIDTH-1:0]	S_AXIL_AWADDR,
+	input	wire 	[2:0]			S_AXIL_AWPROT,
+	input	wire				S_AXIL_WVALID,
+	output	wire				S_AXIL_WREADY,
+	input	wire [C_AXIL_DATA_WIDTH-1:0]	S_AXIL_WDATA,
+	input	wire [C_AXIL_DATA_WIDTH/8-1:0]	S_AXIL_WSTRB,
+	output	reg				S_AXIL_BVALID,
+	input	wire				S_AXIL_BREADY,
+	output	wire	[1:0]			S_AXIL_BRESP,
+	input	wire				S_AXIL_ARVALID,
+	output	wire				S_AXIL_ARREADY,
+	input	wire [C_AXIL_ADDR_WIDTH-1:0]	S_AXIL_ARADDR,
+	input	wire 	[2:0]			S_AXIL_ARPROT,
+	output	reg				S_AXIL_RVALID,
+	input	wire				S_AXIL_RREADY,
+	output	reg [C_AXIL_DATA_WIDTH-1:0]	S_AXIL_RDATA,
+	output	wire	[1:0]			S_AXIL_RRESP,
+	output	reg				M_AXI_AWVALID,
+	input	wire				M_AXI_AWREADY,
+	output	reg	[C_AXI_ID_WIDTH-1:0]	M_AXI_AWID,
+	output	reg	[C_AXI_ADDR_WIDTH-1:0]	M_AXI_AWADDR,
+	output	reg	[2:0]			M_AXI_AWSIZE,
+	output	reg	[1:0]			M_AXI_AWBURST,
+	output	reg				M_AXI_AWLOCK,
+	output	reg	[3:0]			M_AXI_AWCACHE,
+	output	reg	[2:0]			M_AXI_AWPROT,
+	output	reg	[3:0]			M_AXI_AWQOS,
+	output	reg				M_AXI_WVALID,
+	input	wire				M_AXI_WREADY,
+	output	reg	[C_AXI_DATA_WIDTH-1:0]	M_AXI_WDATA,
+	output	reg [C_AXI_DATA_WIDTH/8-1:0]	M_AXI_WSTRB,
+	output	reg				M_AXI_WLAST,
+	input	wire				M_AXI_BVALID,
+	output	reg				M_AXI_BREADY,
+	input	wire	[C_AXI_ID_WIDTH-1:0]	M_AXI_BID,
+	input	wire	[1:0]			M_AXI_BRESP,
+	output	reg				M_AXI_ARVALID,
+	input	wire				M_AXI_ARREADY,
+	output	wire	[C_AXI_ID_WIDTH-1:0]	M_AXI_ARID,
+	output	reg	[C_AXI_ADDR_WIDTH-1:0]	M_AXI_ARADDR,
+	output	wire	[2:0]			M_AXI_ARSIZE,
+	output	wire	[1:0]			M_AXI_ARBURST,
+	output	wire				M_AXI_ARLOCK,
+	output	wire	[3:0]			M_AXI_ARCACHE,
+	output	wire	[2:0]			M_AXI_ARPROT,
+	output	wire	[3:0]			M_AXI_ARQOS,
+	input	wire				M_AXI_RVALID,
+	output	wire				M_AXI_RREADY,
+	input	wire	[C_AXI_ID_WIDTH-1:0]	M_AXI_RID,
+	input	wire	[C_AXI_DATA_WIDTH-1:0]	M_AXI_RDATA,
+	input	wire				M_AXI_RLAST,
+	input	wire	[1:0]			M_AXI_RRESP,
+	output	reg				o_int
+);
+
+	// Register file for AXI-Lite control
+	reg [C_AXI_ADDR_WIDTH-1:0] src_addr;
+	reg [C_AXI_ADDR_WIDTH-1:0] dst_addr;
+	reg [C_AXI_ADDR_WIDTH-1:0] xfer_len;
+	reg [7:0] ctrl_reg;
+	reg [31:0] status_reg;
+
+	// State machine
+	localparam S_IDLE = 2'd0;
+	localparam S_READ = 2'd1;
+	localparam S_WRITE = 2'd2;
+	localparam S_DONE = 2'd3;
+
+	reg [1:0] state;
+	reg [C_AXI_ADDR_WIDTH-1:0] cur_src_addr;
+	reg [C_AXI_ADDR_WIDTH-1:0] cur_dst_addr;
+	reg [C_AXI_ADDR_WIDTH-1:0] remaining;
+	reg [C_AXI_ADDR_WIDTH-1:0] burst_len;
+	reg [C_AXI_ADDR_WIDTH-1:0] burst_count;
+	reg [C_AXI_ADDR_WIDTH-1:0] read_offset;
+	reg [C_AXI_ADDR_WIDTH-1:0] write_offset;
+	reg [C_AXI_DATA_WIDTH-1:0] data_buf;
+	reg data_valid;
+	reg write_pending;
+	reg [C_AXI_ADDR_WIDTH-1:0] write_addr;
+	reg [C_AXI_ADDR_WIDTH-1:0] write_len;
+
+	// AXI-Lite write address/data
+	reg axil_awaddr_reg;
+	reg axil_wdata_reg;
+	reg axil_wstrb_reg;
+	reg axil_write_pending;
+	reg axil_write_addr;
+	reg [C_AXIL_DATA_WIDTH-1:0] axil_write_data;
+	reg [C_AXIL_DATA_WIDTH/8-1:0] axil_write_strb;
+
+	// AXI-Lite read address
+	reg axil_araddr_reg;
+	reg axil_read_pending;
+	reg axil_read_addr;
+
+	// AXI-Lite response
+	reg axil_bvalid_reg;
+	reg axil_rvalid_reg;
+	reg [C_AXIL_DATA_WIDTH-1:0] axil_rdata_reg;
+
+	// AXI master signals
+	reg axi_awvalid_reg;
+	reg [C_AXI_ID_WIDTH-1:0] axi_awid_reg;
+	reg [C_AXI_ADDR_WIDTH-1:0] axi_awaddr_reg;
+	reg [2:0] axi_awsize_reg;
+	reg [1:0] axi_awburst_reg;
+	reg axi_awlock_reg;
+	reg [3:0] axi_awcache_reg;
+	reg [2:0] axi_awprot_reg;
+	reg [3:0] axi_awqos_reg;
+
+	reg axi_wvalid_reg;
+	reg [C_AXI_DATA_WIDTH-1:0] axi_wdata_reg;
+	reg [C_AXI_DATA_WIDTH/8-1:0] axi_wstrb_reg;
+	reg axi_wlast_reg;
+
+	reg axi_bready_reg;
+
+	reg axi_arvalid_reg;
+	reg [C_AXI_ID_WIDTH-1:0] axi_arid_reg;
+	reg [C_AXI_ADDR_WIDTH-1:0] axi_araddr_reg;
+	reg [2:0] axi_arsize_reg;
+	reg [1:0] axi_arburst_reg;
+	reg axi_arlock_reg;
+	reg [3:0] axi_arcache_reg;
+	reg [2:0] axi_arprot_reg;
+	reg [3:0] axi_arqos_reg;
+
+	reg axi_rready_reg;
+
+	// Burst length calculation
+	wire [C_AXI_ADDR_WIDTH-1:0] max_burst = (1 << LGLEN) - 1;
+	wire [C_AXI_ADDR_WIDTH-1:0] calc_burst = (remaining < max_burst) ? remaining : max_burst;
+
+	// AXI-Lite ready signals
+	assign S_AXIL_AWREADY = (state == S_IDLE) && !axil_write_pending;
+	assign S_AXIL_WREADY = (state == S_IDLE) && !axil_write_pending;
+	assign S_AXIL_ARREADY = (state == S_IDLE) && !axil_read_pending;
+	assign S_AXIL_BRESP = 2'b00;
+	assign S_AXIL_RRESP = 2'b00;
+
+	// AXI master output assignments
+	assign M_AXI_AWVALID = axi_awvalid_reg;
+	assign M_AXI_AWID = axi_awid_reg;
+	assign M_AXI_AWADDR = axi_awaddr_reg;
+	assign M_AXI_AWSIZE = axi_awsize_reg;
+	assign M_AXI_AWBURST = axi_awburst_reg;
+	assign M_AXI_AWLOCK = axi_awlock_reg;
+	assign M_AXI_AWCACHE = axi_awcache_reg;
+	assign M_AXI_AWPROT = axi_awprot_reg;
+	assign M_AXI_AWQOS = axi_awqos_reg;
+
+	assign M_AXI_WVALID = axi_wvalid_reg;
+	assign M_AXI_WDATA = axi_wdata_reg;
+	assign M_AXI_WSTRB = axi_wstrb_reg;
+	assign M_AXI_WLAST = axi_wlast_reg;
+
+	assign M_AXI_BREADY = axi_bready_reg;
+
+	assign M_AXI_ARVALID = axi_arvalid_reg;
+	assign M_AXI_ARID = axi_arid_reg;
+	assign M_AXI_ARADDR = axi_araddr_reg;
+	assign M_AXI_ARSIZE = axi_arsize_reg;
+	assign M_AXI_ARBURST = axi_arburst_reg;
+	assign M_AXI_ARLOCK = axi_arlock_reg;
+	assign M_AXI_ARCACHE = axi_arcache_reg;
+	assign M_AXI_ARPROT = axi_arprot_reg;
+	assign M_AXI_ARQOS = axi_arqos_reg;
+
+	assign M_AXI_RREADY = axi_rready_reg;
+
+	// AXI-Lite output assignments
+	assign S_AXIL_BVALID = axil_bvalid_reg;
+	assign S_AXIL_RVALID = axil_rvalid_reg;
+	assign S_AXIL_RDATA = axil_rdata_reg;
+
+	// AXI-Lite register addresses
+	localparam ADDR_SRC = 5'h00;
+	localparam ADDR_DST = 5'h04;
+	localparam ADDR_LEN = 5'h08;
+	localparam ADDR_CTRL = 5'h0C;
+	localparam ADDR_STATUS = 5'h10;
+
+	// AXI-Lite write handling
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			axil_write_pending <= 1'b0;
+			axil_write_addr <= {C_AXIL_ADDR_WIDTH{1'b0}};
+			axil_write_data <= {C_AXIL_DATA_WIDTH{1'b0}};
+			axil_write_strb <= {C_AXIL_DATA_WIDTH/8{1'b0}};
+			axil_bvalid_reg <= 1'b0;
+			axil_rvalid_reg <= 1'b0;
+			axil_rdata_reg <= {C_AXIL_DATA_WIDTH{1'b0}};
+			axil_read_pending <= 1'b0;
+			axil_read_addr <= {C_AXIL_ADDR_WIDTH{1'b0}};
+			src_addr <= {C_AXI_ADDR_WIDTH{1'b0}};
+			dst_addr <= {C_AXI_ADDR_WIDTH{1'b0}};
+			xfer_len <= {C_AXI_ADDR_WIDTH{1'b0}};
+			ctrl_reg <= 8'h00;
+			status_reg <= 32'h00;
+			state <= S_IDLE;
+			cur_src_addr <= {C_AXI_ADDR_WIDTH{1'b0}};
+			cur_dst_addr <= {C_AXI_ADDR_WIDTH{1'b0}};
+			remaining <= {C_AXI_ADDR_WIDTH{1'b0}};
+			burst_len <= {C_AXI_ADDR_WIDTH{1'b0}};
+			burst_count <= {C_AXI_ADDR_WIDTH{1'b0}};
+			read_offset <= {C_AXI_ADDR_WIDTH{1'b0}};
+			write_offset <= {C_AXI_ADDR_WIDTH{1'b0}};
+			data_buf <= {C_AXI_DATA_WIDTH{1'b0}};
+			data_valid <= 1'b0;
+			write_pending <= 1'b0;
+			write_addr <= {C_AXI_ADDR_WIDTH{1'b0}};
+			write_len <= {C_AXI_ADDR_WIDTH{1'b0}};
+			axi_awvalid_reg <= 1'b0;
+			axi_awid_reg <= {C_AXI_ID_WIDTH{1'b0}};
+			axi_awaddr_reg <= {C_AXI_ADDR_WIDTH{1'b0}};
+			axi_awsize_reg <= 3'b000;
+			axi_awburst_reg <= 2'b00;
+			axi_awlock_reg <= 1'b0;
+			axi_awcache_reg <= 4'b0000;
+			axi_awprot_reg <= 3'b000;
+			axi_awqos_reg <= 4'b0000;
+			axi_wvalid_reg <= 1'b0;
+			axi_wdata_reg <= {C_AXI_DATA_WIDTH{1'b0}};
+			axi_wstrb_reg <= {C_AXI_DATA_WIDTH/8{1'b0}};
+			axi_wlast_reg <= 1'b0;
+			axi_bready_reg <= 1'b0;
+			axi_arvalid_reg <= 1'b0;
+			axi_arid_reg <= {C_AXI_ID_WIDTH{1'b0}};
+			axi_araddr_reg <= {C_AXI_ADDR_WIDTH{1'b0}};
+			axi_arsize_reg <= 3'b000;
+			axi_arburst_reg <= 2'b00;
+			axi_arlock_reg <= 1'b0;
+			axi_arcache_reg <= 4'b0000;
+			axi_arprot_reg <= 3'b000;
+			axi_arqos_reg <= 4'b0000;
+			axi_rready_reg <= 1'b0;
+			o_int <= 1'b0;
+		end else begin
+			// AXI-Lite write address
+			if (S_AXIL_AWVALID && S_AXIL_AWREADY) begin
+				axil_write_addr <= S_AXIL_AWADDR;
+			end
+
+			// AXI-Lite write data
+			if (S_AXIL_WVALID && S_AXIL_WREADY) begin
+				axil_write_data <= S_AXIL_WDATA;
+				axil_write_strb <= S_AXIL_WSTRB;
+				axil_write_pending <= 1'b1;
+			end
+
+			// AXI-Lite write response
+			if (axil_write_pending) begin
+				if (S_AXIL_BREADY) begin
+					axil_write_pending <= 1'b0;
+					axil_bvalid_reg <= 1'b0;
+				end else begin
+					axil_bvalid_reg <= 1'b1;
+				end
+			end else begin
+				axil_bvalid_reg <= 1'b0;
+			end
+
+			// AXI-Lite read address
+			if (S_AXIL_ARVALID && S_AXIL_ARREADY) begin
+				axil_read_addr <= S_AXIL_ARADDR;
+				axil_read_pending <= 1'b1;
+			end
+
+			// AXI-Lite read response
+			if (axil_read_pending) begin
+				if (S_AXIL_RREADY) begin
+					axil_read_pending <= 1'b0;
+					axil_rvalid_reg <= 1'b0;
+				end else begin
+					axil_rvalid_reg <= 1'b1;
+				end
+			end else begin
+				axil_rvalid_reg <= 1'b0;
+			end
+
+			// AXI-Lite register writes
+			if (axil_write_pending && S_AXIL_BREADY) begin
+				case (axil_write_addr)
+					ADDR_SRC: src_addr <= axil_write_data;
+					ADDR_DST: dst_addr <= axil_write_data;
+					ADDR_LEN: xfer_len <= axil_write_data;
+					ADDR_CTRL: begin
+						ctrl_reg <= axil_write_data;
+						if (axil_write_data[0]) begin
+							// Start DMA
+							state <= S_READ;
+							cur_src_addr <= src_addr;
+							cur_dst_addr <= dst_addr;
+							remaining <= xfer_len;
+							burst_len <= calc_burst;
+							burst_count <= 0;
+							read_offset <= 0;
+							write_offset <= 0;
+							data_valid <= 1'b0;
+							write_pending <= 1'b0;
+							o_int <= 1'b0;
+							status_reg <= 32'h00;
+						end
+					end
+					ADDR_STATUS: status_reg <= axil_write_data;
+					default: ;
+				endcase
+			end
+
+			// AXI-Lite register reads
+			if (axil_read_pending && S_AXIL_RREADY) begin
+				case (axil_read_addr)
+					ADDR_SRC: axil_rdata_reg <= src_addr;
+					ADDR_DST: axil_rdata_reg <= dst_addr;
+					ADDR_LEN: axil_rdata_reg <= xfer_len;
+					ADDR_CTRL: axil_rdata_reg <= ctrl_reg;
+					ADDR_STATUS: axil_rdata_reg <= status_reg;
+					default: axil_rdata_reg <= 32'h00;
+				endcase
+			end
+
+			// DMA state machine
+			case (state)
+				S_IDLE: begin
+					axi_awvalid_reg <= 1'b0;
+					axi_wvalid_reg <= 1'b0;
+					axi_arvalid_reg <= 1'b0;
+					axi_bready_reg <= 1'b0;
+					axi_rready_reg <= 1'b0;
+				end
+
+				S_READ: begin
+					// Issue AXI read
+					if (!axi_arvalid_reg) begin
+						if (remaining > 0) begin
+							axi_arvalid_reg <= 1'b1;
+							axi_arid_reg <= AXI_READ_ID;
+							axi_araddr_reg <= cur_src_addr;
+							axi_arsize_reg <= ADDRLSB;
+							axi_arburst_reg <= 2'b01; // INCR
+							axi_arlock_reg <= 1'b0;
+							axi_arcache_reg <= 4'b0000;
+							axi_arprot_reg <= 3'b000;
+							axi_arqos_reg <= 4'b0000;
+						end else begin
+							state <= S_WRITE;
+						end
+					end
+
+					// Handle AXI read response
+					if (M_AXI_RVALID && M_AXI_RREADY) begin
+						data_buf <= M_AXI_RDATA;
+						data_valid <= 1'b1;
+						cur_src_addr <= cur_src_addr + C_AXI_DATA_WIDTH;
+						remaining <= remaining - 1;
+						if (M_AXI_RLAST) begin
+							state <= S_WRITE;
+						end
+					end
+
+					axi_rready_reg <= 1'b1;
+					axi_awvalid_reg <= 1'b0;
+					axi_wvalid_reg <= 1'b0;
+					axi_bready_reg <= 1'b0;
+				end
+
+				S_WRITE: begin
+					// Issue AXI write
+					if (!axi_awvalid_reg && data_valid) begin
+						axi_awvalid_reg <= 1'b1;
+						axi_awid_reg <= AXI_WRITE_ID;
+						axi_awaddr_reg <= cur_dst_addr;
+						axi_awsize_reg <= ADDRLSB;
+						axi_awburst_reg <= 2'b01; // INCR
+						axi_awlock_reg <= 1'b0;
+						axi_awcache_reg <= 4'b0000;
+						axi_awprot_reg <= 3'b000;
+						axi_awqos_reg <= 4'b0000;
+						axi_wvalid_reg <= 1'b1;
+						axi_wdata_reg <= data_buf;
+						axi_wstrb_reg <= {C_AXI_DATA_WIDTH/8{1'b1}};
+						axi_wlast_reg <= 1'b1;
+						data_valid <= 1'b0;
+					end
+
+					// Handle AXI write response
+					if (M_AXI_BVALID && M_AXI_BREADY) begin
+						cur_dst_addr <= cur_dst_addr + C_AXI_DATA_WIDTH;
+						if (remaining > 0) begin
+							state <= S_READ;
+						end else begin
+							state <= S_DONE;
+						end
+					end
+
+					axi_arvalid_reg <= 1'b0;
+					axi_rready_reg <= 1'b0;
+					axi_bready_reg <= 1'b1;
+				end
+
+				S_DONE: begin
+					o_int <= 1'b1;
+					status_reg <= 32'h01;
+					state <= S_IDLE;
+					axi_awvalid_reg <= 1'b0;
+					axi_wvalid_reg <= 1'b0;
+					axi_arvalid_reg <= 1'b0;
+					axi_bready_reg <= 1'b0;
+					axi_rready_reg <= 1'b0;
+				end
+
+				default: state <= S_IDLE;
+			endcase
+		end
+	end
+
+endmodule

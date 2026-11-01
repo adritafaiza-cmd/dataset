@@ -1,0 +1,547 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ========================================================================
+    // Internal signals
+    // ========================================================================
+
+    // Write channel: S -> M
+    wire [ADDR_WIDTH-1:0] s2m_awaddr;
+    wire [2:0]            s2m_awprot;
+    wire                  s2m_awvalid;
+    wire                  m2s_awready;
+
+    wire [DATA_WIDTH-1:0] s2m_wdata;
+    wire [STRB_WIDTH-1:0] s2m_wstrb;
+    wire                  s2m_wvalid;
+    wire                  m2s_wready;
+
+    // Write response: M -> S
+    wire [1:0]            m2s_bresp;
+    wire                  m2s_bvalid;
+    wire                  s2m_bready;
+
+    // Read channel: S -> M
+    wire [ADDR_WIDTH-1:0] s2m_araddr;
+    wire [2:0]            s2m_arprot;
+    wire                  s2m_arvalid;
+    wire                  m2s_arready;
+
+    // Read response: M -> S
+    wire [DATA_WIDTH-1:0] m2s_rdata;
+    wire [1:0]            m2s_rresp;
+    wire                  m2s_rvalid;
+    wire                  s2m_rready;
+
+    // ========================================================================
+    // CDC: Write Address Channel (S -> M)
+    // ========================================================================
+
+    // S-side: capture AW when valid and not busy
+    reg  s_aw_pending;
+    reg  [ADDR_WIDTH-1:0] s_awaddr_reg;
+    reg  [2:0]            s_awprot_reg;
+
+    wire s_aw_fire = s_axil_awvalid && s_axil_awready;
+
+    assign s_axil_awready = ~s_aw_pending;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_aw_pending <= 1'b0;
+            s_awaddr_reg <= {ADDR_WIDTH{1'b0}};
+            s_awprot_reg <= 3'b000;
+        end else begin
+            if (s_axil_awvalid && ~s_aw_pending) begin
+                s_aw_pending <= 1'b1;
+                s_awaddr_reg <= s_axil_awaddr;
+                s_awprot_reg <= s_axil_awprot;
+            end else if (m2s_awready) begin
+                s_aw_pending <= 1'b0;
+            end
+        end
+    end
+
+    // M-side: handshake with master
+    reg  m_aw_pending;
+    reg  [ADDR_WIDTH-1:0] m_awaddr_reg;
+    reg  [2:0]            m_awprot_reg;
+
+    wire m_aw_fire = m_axil_awvalid && m_axil_awready;
+
+    assign m_axil_awvalid = m_aw_pending;
+    assign m_axil_awaddr  = m_awaddr_reg;
+    assign m_axil_awprot  = m_awprot_reg;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_aw_pending <= 1'b0;
+            m_awaddr_reg <= {ADDR_WIDTH{1'b0}};
+            m_awprot_reg <= 3'b000;
+        end else begin
+            if (s2m_awvalid && ~m_aw_pending) begin
+                m_aw_pending <= 1'b1;
+                m_awaddr_reg <= s2m_awaddr;
+                m_awprot_reg <= s2m_awprot;
+            end else if (m_axil_awready && m_aw_pending) begin
+                m_aw_pending <= 1'b0;
+            end
+        end
+    end
+
+    // CDC: s_aw_pending -> m_clk (2FF)
+    reg [1:0] s2m_awvalid_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s2m_awvalid_sync <= 2'b00;
+        else
+            s2m_awvalid_sync <= {s2m_awvalid_sync[0], s_aw_pending};
+    end
+    assign s2m_awvalid = s2m_awvalid_sync[1];
+
+    // CDC: m_aw_pending -> s_clk (2FF) for awready
+    reg [1:0] m2s_awready_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m2s_awready_sync <= 2'b00;
+        else
+            m2s_awready_sync <= {m2s_awready_sync[0], m_aw_pending};
+    end
+    assign m2s_awready = m2s_awready_sync[1];
+
+    // CDC: s_awaddr_reg -> m_clk (2FF)
+    reg [ADDR_WIDTH-1:0] s2m_awaddr_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s2m_awaddr_sync <= {ADDR_WIDTH{1'b0}};
+        else
+            s2m_awaddr_sync <= s_awaddr_reg;
+    end
+    assign s2m_awaddr = s2m_awaddr_sync;
+
+    // CDC: s_awprot_reg -> m_clk (2FF)
+    reg [2:0] s2m_awprot_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s2m_awprot_sync <= 3'b000;
+        else
+            s2m_awprot_sync <= s_awprot_reg;
+    end
+    assign s2m_awprot = s2m_awprot_sync;
+
+    // ========================================================================
+    // CDC: Write Data Channel (S -> M)
+    // ========================================================================
+
+    reg  s_w_pending;
+    reg  [DATA_WIDTH-1:0] s_wdata_reg;
+    reg  [STRB_WIDTH-1:0] s_wstrb_reg;
+
+    wire s_w_fire = s_axil_wvalid && s_axil_wready;
+
+    assign s_axil_wready = ~s_w_pending;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_w_pending <= 1'b0;
+            s_wdata_reg <= {DATA_WIDTH{1'b0}};
+            s_wstrb_reg <= {STRB_WIDTH{1'b0}};
+        end else begin
+            if (s_axil_wvalid && ~s_w_pending) begin
+                s_w_pending <= 1'b1;
+                s_wdata_reg <= s_axil_wdata;
+                s_wstrb_reg <= s_axil_wstrb;
+            end else if (m2s_wready) begin
+                s_w_pending <= 1'b0;
+            end
+        end
+    end
+
+    reg  m_w_pending;
+    reg  [DATA_WIDTH-1:0] m_wdata_reg;
+    reg  [STRB_WIDTH-1:0] m_wstrb_reg;
+
+    wire m_w_fire = m_axil_wvalid && m_axil_wready;
+
+    assign m_axil_wvalid = m_w_pending;
+    assign m_axil_wdata  = m_wdata_reg;
+    assign m_axil_wstrb  = m_wstrb_reg;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_w_pending <= 1'b0;
+            m_wdata_reg <= {DATA_WIDTH{1'b0}};
+            m_wstrb_reg <= {STRB_WIDTH{1'b0}};
+        end else begin
+            if (s2m_wvalid && ~m_w_pending) begin
+                m_w_pending <= 1'b1;
+                m_wdata_reg <= s2m_wdata;
+                m_wstrb_reg <= s2m_wstrb;
+            end else if (m_axil_wready && m_w_pending) begin
+                m_w_pending <= 1'b0;
+            end
+        end
+    end
+
+    // CDC: s_w_pending -> m_clk (2FF)
+    reg [1:0] s2m_wvalid_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s2m_wvalid_sync <= 2'b00;
+        else
+            s2m_wvalid_sync <= {s2m_wvalid_sync[0], s_w_pending};
+    end
+    assign s2m_wvalid = s2m_wvalid_sync[1];
+
+    // CDC: m_w_pending -> s_clk (2FF) for wready
+    reg [1:0] m2s_wready_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m2s_wready_sync <= 2'b00;
+        else
+            m2s_wready_sync <= {m2s_wready_sync[0], m_w_pending};
+    end
+    assign m2s_wready = m2s_wready_sync[1];
+
+    // CDC: s_wdata_reg -> m_clk (2FF)
+    reg [DATA_WIDTH-1:0] s2m_wdata_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s2m_wdata_sync <= {DATA_WIDTH{1'b0}};
+        else
+            s2m_wdata_sync <= s_wdata_reg;
+    end
+    assign s2m_wdata = s2m_wdata_sync;
+
+    // CDC: s_wstrb_reg -> m_clk (2FF)
+    reg [STRB_WIDTH-1:0] s2m_wstrb_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s2m_wstrb_sync <= {STRB_WIDTH{1'b0}};
+        else
+            s2m_wstrb_sync <= s_wstrb_reg;
+    end
+    assign s2m_wstrb = s2m_wstrb_sync;
+
+    // ========================================================================
+    // CDC: Write Response Channel (M -> S)
+    // ========================================================================
+
+    reg  m_b_pending;
+    reg  [1:0] m_bresp_reg;
+
+    wire m_b_fire = m_axil_bvalid && m_axil_bready;
+
+    assign m_axil_bready = ~m_b_pending;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_b_pending <= 1'b0;
+            m_bresp_reg <= 2'b00;
+        end else begin
+            if (m_axil_bvalid && ~m_b_pending) begin
+                m_b_pending <= 1'b1;
+                m_bresp_reg <= m_axil_bresp;
+            end else if (s2m_bready) begin
+                m_b_pending <= 1'b0;
+            end
+        end
+    end
+
+    reg  s_b_pending;
+    reg  [1:0] s_bresp_reg;
+
+    wire s_b_fire = s_axil_bvalid && s_axil_bready;
+
+    assign s_axil_bvalid = s_b_pending;
+    assign s_axil_bresp  = s_bresp_reg;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_b_pending <= 1'b0;
+            s_bresp_reg <= 2'b00;
+        end else begin
+            if (m2s_bvalid && ~s_b_pending) begin
+                s_b_pending <= 1'b1;
+                s_bresp_reg <= m2s_bresp;
+            end else if (s_axil_bready && s_b_pending) begin
+                s_b_pending <= 1'b0;
+            end
+        end
+    end
+
+    // CDC: m_b_pending -> s_clk (2FF)
+    reg [1:0] m2s_bvalid_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m2s_bvalid_sync <= 2'b00;
+        else
+            m2s_bvalid_sync <= {m2s_bvalid_sync[0], m_b_pending};
+    end
+    assign m2s_bvalid = m2s_bvalid_sync[1];
+
+    // CDC: s_b_pending -> m_clk (2FF) for bready
+    reg [1:0] s2m_bready_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s2m_bready_sync <= 2'b00;
+        else
+            s2m_bready_sync <= {s2m_bready_sync[0], s_b_pending};
+    end
+    assign s2m_bready = s2m_bready_sync[1];
+
+    // CDC: m_bresp_reg -> s_clk (2FF)
+    reg [1:0] m2s_bresp_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m2s_bresp_sync <= 2'b00;
+        else
+            m2s_bresp_sync <= m_bresp_reg;
+    end
+    assign m2s_bresp = m2s_bresp_sync;
+
+    // ========================================================================
+    // CDC: Read Address Channel (S -> M)
+    // ========================================================================
+
+    reg  s_ar_pending;
+    reg  [ADDR_WIDTH-1:0] s_araddr_reg;
+    reg  [2:0]            s_arprot_reg;
+
+    wire s_ar_fire = s_axil_arvalid && s_axil_arready;
+
+    assign s_axil_arready = ~s_ar_pending;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_ar_pending <= 1'b0;
+            s_araddr_reg <= {ADDR_WIDTH{1'b0}};
+            s_arprot_reg <= 3'b000;
+        end else begin
+            if (s_axil_arvalid && ~s_ar_pending) begin
+                s_ar_pending <= 1'b1;
+                s_araddr_reg <= s_axil_araddr;
+                s_arprot_reg <= s_axil_arprot;
+            end else if (m2s_arready) begin
+                s_ar_pending <= 1'b0;
+            end
+        end
+    end
+
+    reg  m_ar_pending;
+    reg  [ADDR_WIDTH-1:0] m_araddr_reg;
+    reg  [2:0]            m_arprot_reg;
+
+    wire m_ar_fire = m_axil_arvalid && m_axil_arready;
+
+    assign m_axil_arvalid = m_ar_pending;
+    assign m_axil_araddr  = m_araddr_reg;
+    assign m_axil_arprot  = m_arprot_reg;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_ar_pending <= 1'b0;
+            m_araddr_reg <= {ADDR_WIDTH{1'b0}};
+            m_arprot_reg <= 3'b000;
+        end else begin
+            if (s2m_arvalid && ~m_ar_pending) begin
+                m_ar_pending <= 1'b1;
+                m_araddr_reg <= s2m_araddr;
+                m_arprot_reg <= s2m_arprot;
+            end else if (m_axil_arready && m_ar_pending) begin
+                m_ar_pending <= 1'b0;
+            end
+        end
+    end
+
+    // CDC: s_ar_pending -> m_clk (2FF)
+    reg [1:0] s2m_arvalid_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s2m_arvalid_sync <= 2'b00;
+        else
+            s2m_arvalid_sync <= {s2m_arvalid_sync[0], s_ar_pending};
+    end
+    assign s2m_arvalid = s2m_arvalid_sync[1];
+
+    // CDC: m_ar_pending -> s_clk (2FF) for arready
+    reg [1:0] m2s_arready_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m2s_arready_sync <= 2'b00;
+        else
+            m2s_arready_sync <= {m2s_arready_sync[0], m_ar_pending};
+    end
+    assign m2s_arready = m2s_arready_sync[1];
+
+    // CDC: s_araddr_reg -> m_clk (2FF)
+    reg [ADDR_WIDTH-1:0] s2m_araddr_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s2m_araddr_sync <= {ADDR_WIDTH{1'b0}};
+        else
+            s2m_araddr_sync <= s_araddr_reg;
+    end
+    assign s2m_araddr = s2m_araddr_sync;
+
+    // CDC: s_arprot_reg -> m_clk (2FF)
+    reg [2:0] s2m_arprot_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s2m_arprot_sync <= 3'b000;
+        else
+            s2m_arprot_sync <= s_arprot_reg;
+    end
+    assign s2m_arprot = s2m_arprot_sync;
+
+    // ========================================================================
+    // CDC: Read Response Channel (M -> S)
+    // ========================================================================
+
+    reg  m_r_pending;
+    reg  [DATA_WIDTH-1:0] m_rdata_reg;
+    reg  [1:0]            m_rresp_reg;
+
+    wire m_r_fire = m_axil_rvalid && m_axil_rready;
+
+    assign m_axil_rready = ~m_r_pending;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_r_pending <= 1'b0;
+            m_rdata_reg <= {DATA_WIDTH{1'b0}};
+            m_rresp_reg <= 2'b00;
+        end else begin
+            if (m_axil_rvalid && ~m_r_pending) begin
+                m_r_pending <= 1'b1;
+                m_rdata_reg <= m_axil_rdata;
+                m_rresp_reg <= m_axil_rresp;
+            end else if (s2m_rready) begin
+                m_r_pending <= 1'b0;
+            end
+        end
+    end
+
+    reg  s_r_pending;
+    reg  [DATA_WIDTH-1:0] s_rdata_reg;
+    reg  [1:0]            s_rresp_reg;
+
+    wire s_r_fire = s_axil_rvalid && s_axil_rready;
+
+    assign s_axil_rvalid = s_r_pending;
+    assign s_axil_rdata  = s_rdata_reg;
+    assign s_axil_rresp  = s_rresp_reg;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_r_pending <= 1'b0;
+            s_rdata_reg <= {DATA_WIDTH{1'b0}};
+            s_rresp_reg <= 2'b00;
+        end else begin
+            if (m2s_rvalid && ~s_r_pending) begin
+                s_r_pending <= 1'b1;
+                s_rdata_reg <= m2s_rdata;
+                s_rresp_reg <= m2s_rresp;
+            end else if (s_axil_rready && s_r_pending) begin
+                s_r_pending <= 1'b0;
+            end
+        end
+    end
+
+    // CDC: m_r_pending -> s_clk (2FF)
+    reg [1:0] m2s_rvalid_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m2s_rvalid_sync <= 2'b00;
+        else
+            m2s_rvalid_sync <= {m2s_rvalid_sync[0], m_r_pending};
+    end
+    assign m2s_rvalid = m2s_rvalid_sync[1];
+
+    // CDC: s_r_pending -> m_clk (2FF) for rready
+    reg [1:0] s2m_rready_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s2m_rready_sync <= 2'b00;
+        else
+            s2m_rready_sync <= {s2m_rready_sync[0], s_r_pending};
+    end
+    assign s2m_rready = s2m_rready_sync[1];
+
+    // CDC: m_rdata_reg -> s_clk (2FF)
+    reg [DATA_WIDTH-1:0] m2s_rdata_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m2s_rdata_sync <= {DATA_WIDTH{1'b0}};
+        else
+            m2s_rdata_sync <= m_rdata_reg;
+    end
+    assign m2s_rdata = m2s_rdata_sync;
+
+    // CDC: m_rresp_reg -> s_clk (2FF)
+    reg [1:0] m2s_rresp_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m2s_rresp_sync <= 2'b00;
+        else
+            m2s_rresp_sync <= m_rresp_reg;
+    end
+    assign m2s_rresp = m2s_rresp_sync;
+
+endmodule
+```<|im_end|>

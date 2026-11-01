@@ -1,0 +1,62 @@
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  // TX domain: detect rising edge of edge_i and generate a toggle
+  logic edge_i_d1;
+  logic edge_i_d2;
+  logic edge_detected;
+  logic toggle_tx;
+
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      edge_i_d1 <= 1'b0;
+      edge_i_d2 <= 1'b0;
+      toggle_tx <= 1'b0;
+    end else begin
+      edge_i_d1 <= edge_i;
+      edge_i_d2 <= edge_i_d1;
+      edge_detected <= (edge_i & ~edge_i_d1);
+      if (edge_i & ~edge_i_d1)
+        toggle_tx <= ~toggle_tx;
+    end
+  end
+
+  // RX domain: synchronize toggle_tx with two flip-flops
+  logic toggle_rx_d1;
+  logic toggle_rx_d2;
+  logic toggle_rx_d3;
+
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      toggle_rx_d1 <= 1'b0;
+      toggle_rx_d2 <= 1'b0;
+      toggle_rx_d3 <= 1'b0;
+    end else begin
+      toggle_rx_d1 <= toggle_tx;
+      toggle_rx_d2 <= toggle_rx_d1;
+      toggle_rx_d3 <= toggle_rx_d2;
+    end
+  end
+
+  // Detect rising edge of the synchronized toggle signal
+  logic toggle_edge;
+
+  always_comb begin
+    toggle_edge = toggle_rx_d2 & ~toggle_rx_d3;
+  end
+
+  // Generate a single-cycle pulse on edge_o
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i)
+      edge_o <= 1'b0;
+    else
+      edge_o <= toggle_edge;
+  end
+
+endmodule

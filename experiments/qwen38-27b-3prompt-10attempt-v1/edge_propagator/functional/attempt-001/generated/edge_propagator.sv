@@ -1,0 +1,131 @@
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  // TX domain: detect edge and generate a level signal
+  logic edge_d1, edge_d2;
+  logic tx_pulse;
+  logic tx_level;
+
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      edge_d1 <= 1'b0;
+      edge_d2 <= 1'b0;
+      tx_pulse <= 1'b0;
+      tx_level <= 1'b0;
+    end else begin
+      edge_d1 <= edge_i;
+      edge_d2 <= edge_d1;
+      tx_pulse <= edge_i & ~edge_d1;
+      tx_level <= tx_level | tx_pulse;
+    end
+  end
+
+  // Synchronize tx_level to RX domain
+  logic rx_sync1, rx_sync2;
+
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      rx_sync1 <= 1'b0;
+      rx_sync2 <= 1'b0;
+    end else begin
+      rx_sync1 <= tx_level;
+      rx_sync2 <= rx_sync1;
+    end
+  end
+
+  // RX domain: detect rising edge of synchronized level and generate pulse
+  logic rx_level_d1;
+  logic rx_pulse;
+
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      rx_level_d1 <= 1'b0;
+      rx_pulse <= 1'b0;
+    end else begin
+      rx_level_d1 <= rx_sync2;
+      rx_pulse <= rx_sync2 & ~rx_level_d1;
+    end
+  end
+
+  // Clear the TX level after it has been captured in RX domain
+  // We need to clear tx_level when rx_sync2 goes high (meaning RX has seen it)
+  // But we need to be careful: we should clear tx_level only after RX has captured it.
+  // Actually, a simpler approach: use a toggle-based or handshake-based method.
+  
+  // Let me reconsider. The above approach has a problem: tx_level stays high forever,
+  // so rx_sync2 will stay high, and we'll only get one pulse. But if another edge comes
+  // in TX while tx_level is still high, we won't detect it.
+  
+  // Better approach: Use a toggle bit or a proper handshake.
+  
+  // Let me redo this with a proper edge propagator using a toggle bit.
+
+  // Actually, let me use a different approach:
+  // 1. In TX domain, detect edge and toggle a bit.
+  // 2. Synchronize the toggle bit to RX domain.
+  // 3. In RX domain, detect the toggle and generate a pulse.
+  // 4. This way, each edge toggles the bit, and each toggle in RX generates a pulse.
+
+  // But we need to handle the case where multiple edges occur before synchronization.
+  // A toggle bit can only represent parity, so if two edges occur before sync, we lose one.
+  
+  // For a robust solution, we should use a level-based approach with proper clearing.
+  
+  // Let me use a different approach:
+  // 1. In TX domain, detect edge and set a level.
+  // 2. Synchronize the level to RX domain.
+  // 3. In RX domain, detect rising edge of the synchronized level and generate a pulse.
+  // 4. After the pulse is generated in RX, send an acknowledgment back to TX to clear the level.
+  
+  // This requires a bidirectional handshake, which is more complex.
+  
+  // For simplicity and correctness with isolated edges, let's use the toggle approach
+  // but ensure that edges are not lost. Actually, for isolated edges (one at a time),
+  // the toggle approach works fine.
+  
+  // Let me implement the toggle approach properly.
+
+  // TX domain: toggle on edge
+  logic tx_toggle;
+
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      tx_toggle <= 1'b0;
+    end else begin
+      tx_toggle <= tx_toggle ^ (edge_i & ~edge_d1);
+    end
+  end
+
+  // Synchronize tx_toggle to RX domain
+  logic rx_toggle1, rx_toggle2;
+
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      rx_toggle1 <= 1'b0;
+      rx_toggle2 <= 1'b0;
+    end else begin
+      rx_toggle1 <= tx_toggle;
+      rx_toggle2 <= rx_toggle1;
+    end
+  end
+
+  // RX domain: detect toggle and generate pulse
+  logic rx_toggle_d1;
+
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      rx_toggle_d1 <= 1'b0;
+      edge_o <= 1'b0;
+    end else begin
+      rx_toggle_d1 <= rx_toggle2;
+      edge_o <= rx_toggle2 ^ rx_toggle_d1;
+    end
+  end
+
+endmodule

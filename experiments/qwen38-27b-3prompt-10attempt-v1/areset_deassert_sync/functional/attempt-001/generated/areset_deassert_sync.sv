@@ -1,0 +1,34 @@
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    localparam ACTIVE = RST_POL;
+    localparam INACTIVE = ~RST_POL;
+
+    reg [CHAINS-1:0] sync_reg;
+    reg sync_rst;
+
+    // Initialize all stages to active reset state
+    initial begin
+        sync_reg = {CHAINS{ACTIVE}};
+        sync_rst = ACTIVE;
+    end
+
+    // Synchronous pipeline for deassertion
+    always @(posedge clk) begin
+        sync_reg[0] <= async_rst_i;
+        for (integer i = 1; i < CHAINS; i = i + 1) begin
+            sync_reg[i] <= sync_reg[i-1];
+        end
+    end
+
+    // Combinational output: active if async_rst_i is active OR any sync stage is active
+    // This ensures immediate assertion and delayed release
+    assign sync_rst_o = async_rst_i | sync_reg[CHAINS-1];
+
+endmodule

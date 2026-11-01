@@ -1,0 +1,174 @@
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam NUM_BITS = $clog2(PORTS);
+
+    reg [PORTS-1:0] grant_reg;
+    reg [NUM_BITS-1:0] grant_encoded_reg;
+    reg grant_valid_reg;
+
+    // For round-robin, track the last granted port
+    reg [NUM_BITS-1:0] last_grant;
+
+    // Function to find the lowest set bit (LSB priority)
+    function [PORTS-1:0] find_lsb;
+        input [PORTS-1:0] req;
+        integer i;
+        begin
+            find_lsb = {PORTS{1'b0}};
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (req[i] && find_lsb == {PORTS{1'b0}}) begin
+                    find_lsb[i] = 1'b1;
+                end
+            end
+        end
+    endfunction
+
+    // Function to find the highest set bit (MSB priority)
+    function [PORTS-1:0] find_msb;
+        input [PORTS-1:0] req;
+        integer i;
+        begin
+            find_msb = {PORTS{1'b0}};
+            for (i = PORTS-1; i >= 0; i = i - 1) begin
+                if (req[i] && find_msb == {PORTS{1'b0}}) begin
+                    find_msb[i] = 1'b1;
+                end
+            end
+        end
+    endfunction
+
+    // Function to find the next set bit after a given index (wrapping around)
+    // This is used for round-robin arbitration
+    function [PORTS-1:0] find_next_rr;
+        input [PORTS-1:0] req;
+        input [NUM_BITS-1:0] last;
+        integer i;
+        integer start;
+        begin
+            find_next_rr = {PORTS{1'b0}};
+            // Start searching from last+1, wrapping around
+            start = (last + 1) % PORTS;
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (find_next_rr == {PORTS{1'b0}}) begin
+                    if (req[(start + i) % PORTS]) begin
+                        find_next_rr[(start + i) % PORTS] = 1'b1;
+                    end
+                end
+            end
+        end
+    endfunction
+
+    // Function to encode one-hot to binary
+    function [NUM_BITS-1:0] encode_onehot;
+        input [PORTS-1:0] onehot;
+        integer i;
+        begin
+            encode_onehot = {NUM_BITS{1'b0}};
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (onehot[i]) begin
+                    encode_onehot = i[NUM_BITS-1:0];
+                end
+            end
+        end
+    endfunction
+
+    wire [PORTS-1:0] grant_comb;
+    wire grant_valid_comb;
+    wire [NUM_BITS-1:0] grant_encoded_comb;
+
+    // Determine the grant based on arbitration type
+    wire [PORTS-1:0] arb_grant;
+    wire arb_valid;
+    wire [NUM_BITS-1:0] arb_encoded;
+
+    // Fixed priority arbitration
+    wire [PORTS-1:0] fixed_grant;
+    wire fixed_valid;
+    wire [NUM_BITS-1:0] fixed_encoded;
+
+    // Round-robin arbitration
+    wire [PORTS-1:0] rr_grant;
+    wire rr_valid;
+    wire [NUM_BITS-1:0] rr_encoded;
+
+    // Fixed priority: LSB or MSB wins
+    assign fixed_grant = ARB_LSB_HIGH_PRIORITY ? find_lsb(request) : find_msb(request);
+    assign fixed_valid = (fixed_grant != {PORTS{1'b0}});
+    assign fixed_encoded = encode_onehot(fixed_grant);
+
+    // Round-robin: next after last grant
+    assign rr_grant = find_next_rr(request, last_grant);
+    assign rr_valid = (rr_grant != {PORTS{1'b0}});
+    assign rr_encoded = encode_onehot(rr_grant);
+
+    // Select arbitration type
+    assign arb_grant = ARB_TYPE_ROUND_ROBIN ? rr_grant : fixed_grant;
+    assign arb_valid = ARB_TYPE_ROUND_ROBIN ? rr_valid : fixed_valid;
+    assign arb_encoded = ARB_TYPE_ROUND_ROBIN ? rr_encoded : fixed_encoded;
+
+    // Blocking logic
+    // When ARB_BLOCK is set, hold the grant until acknowledge or request drops
+    wire block_release;
+    wire [PORTS-1:0] held_grant;
+    wire held_valid;
+    wire [NUM_BITS-1:0] held_encoded;
+
+    // Check if the held grant's request is still active
+    wire held_request_active;
+    assign held_request_active = (grant_reg & request) != {PORTS{1'b0}};
+
+    // Check if acknowledge is received for the held grant
+    wire held_ack;
+    assign held_ack = (grant_reg & acknowledge) != {PORTS{1'b0}};
+
+    // Determine if we should release the held grant
+    // If ARB_BLOCK_ACK is nonzero, release on acknowledge
+    // If ARB_BLOCK_ACK is zero, release when request drops
+    assign block_release = ARB_BLOCK_ACK ? held_ack : !held_request_active;
+
+    // If blocking is enabled and we have a held grant, use it
+    // Otherwise, use the new arbitration result
+    assign grant_comb = (ARB_BLOCK && grant_valid_reg && !block_release) ? grant_reg : arb_grant;
+    assign grant_valid_comb = (ARB_BLOCK && grant_valid_reg && !block_release) ? grant_valid_reg : arb_valid;
+    assign grant_encoded_comb = (ARB_BLOCK && grant_valid_reg && !block_release) ? grant_encoded_reg : arb_encoded;
+
+    // Register outputs
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            grant_reg <= {PORTS{1'b0}};
+            grant_encoded_reg <= {NUM_BITS{1'b0}};
+            grant_valid_reg <= 1'b0;
+            last_grant <= {NUM_BITS{1'b0}};
+        end else begin
+            grant_reg <= grant_comb;
+            grant_encoded_reg <= grant_encoded_comb;
+            grant_valid_reg <= grant_valid_comb;
+            
+            // Update last grant for round-robin
+            if (grant_valid_comb) begin
+                last_grant <= grant_encoded_comb;
+            end
+        end
+    end
+
+    assign grant = grant_reg;
+    assign grant_valid = grant_valid_reg;
+    assign grant_encoded = grant_encoded_reg;
+
+endmodule

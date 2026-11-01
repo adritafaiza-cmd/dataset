@@ -1,0 +1,107 @@
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire src_req;
+  wire dst_ack;
+  wire dst_req;
+  wire src_ack;
+
+  // Source side: generate request
+  reg src_req_reg;
+  assign src_req = src_req_reg;
+
+  // Destination side: generate acknowledge
+  reg dst_ack_reg;
+  assign dst_ack = dst_ack_reg;
+
+  // Destination side: generate request
+  reg dst_req_reg;
+  assign dst_req = dst_req_reg;
+
+  // Source side: generate acknowledge
+  reg src_ack_reg;
+  assign src_ack = src_ack_reg;
+
+  // Data path: source holds data, destination captures
+  reg [WIDTH-1:0] src_data_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+  assign dst_data_o = dst_data_reg;
+
+  // Valid/ready logic
+  assign src_ready_o = ~src_req_reg | dst_ack_reg;
+  assign dst_valid_o = dst_req_reg & ~src_ack_reg;
+
+  // Source clock domain: request generation
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_req_reg <= 1'b0;
+      src_ack_reg <= 1'b0;
+      src_data_reg <= {WIDTH{1'b0}};
+    end else begin
+      // Clear handling
+      if (src_clear_i) begin
+        src_req_reg <= 1'b0;
+        src_ack_reg <= 1'b0;
+      end else begin
+        // Two-phase handshake: toggle request when valid and ready
+        if (src_valid_i & src_ready_o) begin
+          src_req_reg <= ~src_req_reg;
+          src_data_reg <= src_data_i;
+        end
+        // Toggle acknowledge when destination acknowledges
+        if (dst_ack_reg) begin
+          src_ack_reg <= ~src_ack_reg;
+        end
+      end
+    end
+  end
+
+  // Destination clock domain: acknowledge generation
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_ack_reg <= 1'b0;
+      dst_req_reg <= 1'b0;
+      dst_data_reg <= {WIDTH{1'b0}};
+    end else begin
+      // Clear handling
+      if (dst_clear_i) begin
+        dst_ack_reg <= 1'b0;
+        dst_req_reg <= 1'b0;
+      end else begin
+        // Two-phase handshake: toggle acknowledge when source requests
+        if (src_req_reg) begin
+          dst_ack_reg <= ~dst_ack_reg;
+        end
+        // Toggle request when valid and ready
+        if (dst_valid_o & dst_ready_i) begin
+          dst_req_reg <= ~dst_req_reg;
+          dst_data_reg <= src_data_reg;
+        end
+      end
+    end
+  end
+
+  // Clear pending signals
+  assign src_clear_pending_o = src_req_reg | src_ack_reg;
+  assign dst_clear_pending_o = dst_req_reg | dst_ack_reg;
+
+endmodule

@@ -1,0 +1,177 @@
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    // Source clock domain state
+    reg [WIDTH-1:0] src_buf_0;
+    reg [WIDTH-1:0] src_buf_1;
+    reg             src_buf_0_valid;
+    reg             src_buf_1_valid;
+    reg             src_buf_0_ready;
+    reg             src_buf_1_ready;
+
+    // Destination clock domain state
+    reg [WIDTH-1:0] dst_buf_0;
+    reg [WIDTH-1:0] dst_buf_1;
+    reg             dst_buf_0_valid;
+    reg             dst_buf_1_valid;
+    reg             dst_buf_0_ready;
+    reg             dst_buf_1_ready;
+
+    // Synchronization signals from source to destination
+    reg             src_to_dst_0_valid;
+    reg             src_to_dst_1_valid;
+    reg             src_to_dst_0_ready;
+    reg             src_to_dst_1_ready;
+
+    // Synchronization signals from destination to source
+    reg             dst_to_src_0_valid;
+    reg             dst_to_src_1_valid;
+    reg             dst_to_src_0_ready;
+    reg             dst_to_src_1_ready;
+
+    // Synchronizers for source-to-destination valid signals
+    reg [1:0] sync_0_valid;
+    reg [1:0] sync_1_valid;
+
+    // Synchronizers for source-to-destination ready signals
+    reg [1:0] sync_0_ready;
+    reg [1:0] sync_1_ready;
+
+    // Synchronizers for destination-to-source valid signals
+    reg [1:0] sync_dst_0_valid;
+    reg [1:0] sync_dst_1_valid;
+
+    // Synchronizers for destination-to-source ready signals
+    reg [1:0] sync_dst_0_ready;
+    reg [1:0] sync_dst_1_ready;
+
+    // Source clock domain logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_buf_0_valid <= 1'b0;
+            src_buf_1_valid <= 1'b0;
+            src_buf_0 <= {WIDTH{1'b0}};
+            src_buf_1 <= {WIDTH{1'b0}};
+        end else begin
+            // Buffer 0
+            if (src_valid_i && src_ready_o && !src_buf_0_valid) begin
+                src_buf_0 <= src_data_i;
+                src_buf_0_valid <= 1'b1;
+            end else if (src_to_dst_0_ready && src_buf_0_valid) begin
+                src_buf_0_valid <= 1'b0;
+            end
+
+            // Buffer 1
+            if (src_valid_i && src_ready_o && src_buf_0_valid && !src_buf_1_valid) begin
+                src_buf_1 <= src_data_i;
+                src_buf_1_valid <= 1'b1;
+            end else if (src_to_dst_1_ready && src_buf_1_valid) begin
+                src_buf_1_valid <= 1'b0;
+            end
+        end
+    end
+
+    // Source ready: can accept if at least one buffer is empty
+    assign src_ready_o = !src_buf_0_valid || !src_buf_1_valid;
+
+    // Destination clock domain logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_buf_0_valid <= 1'b0;
+            dst_buf_1_valid <= 1'b0;
+            dst_buf_0 <= {WIDTH{1'b0}};
+            dst_buf_1 <= {WIDTH{1'b0}};
+        end else begin
+            // Buffer 0
+            if (sync_0_valid[1] && !dst_buf_0_valid) begin
+                dst_buf_0 <= src_buf_0;
+                dst_buf_0_valid <= 1'b1;
+            end else if (dst_valid_o && dst_ready_i && dst_buf_0_valid) begin
+                dst_buf_0_valid <= 1'b0;
+            end
+
+            // Buffer 1
+            if (sync_1_valid[1] && !dst_buf_1_valid) begin
+                dst_buf_1 <= src_buf_1;
+                dst_buf_1_valid <= 1'b1;
+            end else if (dst_valid_o && dst_ready_i && dst_buf_0_valid && dst_buf_1_valid) begin
+                dst_buf_1_valid <= 1'b0;
+            end
+        end
+    end
+
+    // Destination valid: buffer 0 has data, or buffer 0 empty and buffer 1 has data
+    assign dst_valid_o = dst_buf_0_valid || (dst_buf_1_valid && !dst_buf_0_valid);
+
+    // Destination data: output from buffer 0 if valid, else buffer 1
+    assign dst_data_o = dst_buf_0_valid ? dst_buf_0 : dst_buf_1;
+
+    // Synchronizers for source-to-destination valid signals
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            sync_0_valid <= 2'b00;
+            sync_1_valid <= 2'b00;
+        end else begin
+            sync_0_valid <= {sync_0_valid[0], src_buf_0_valid};
+            sync_1_valid <= {sync_1_valid[0], src_buf_1_valid};
+        end
+    end
+
+    // Synchronizers for source-to-destination ready signals
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            sync_0_ready <= 2'b00;
+            sync_1_ready <= 2'b00;
+        end else begin
+            sync_0_ready <= {sync_0_ready[0], !dst_buf_0_valid};
+            sync_1_ready <= {sync_1_ready[0], !dst_buf_1_valid};
+        end
+    end
+
+    // Synchronizers for destination-to-source valid signals
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            sync_dst_0_valid <= 2'b00;
+            sync_dst_1_valid <= 2'b00;
+        end else begin
+            sync_dst_0_valid <= {sync_dst_0_valid[0], dst_buf_0_valid};
+            sync_dst_1_valid <= {sync_dst_1_valid[0], dst_buf_1_valid};
+        end
+    end
+
+    // Synchronizers for destination-to-source ready signals
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            sync_dst_0_ready <= 2'b00;
+            sync_dst_1_ready <= 2'b00;
+        end else begin
+            sync_dst_0_ready <= {sync_dst_0_ready[0], !dst_buf_0_valid};
+            sync_dst_1_ready <= {sync_dst_1_ready[0], !dst_buf_1_valid};
+        end
+    end
+
+    // Source-to-destination ready signals (synchronized)
+    assign src_to_dst_0_ready = sync_0_ready[1];
+    assign src_to_dst_1_ready = sync_1_ready[1];
+
+    // Destination-to-source valid signals (synchronized)
+    assign dst_to_src_0_valid = sync_dst_0_valid[1];
+    assign dst_to_src_1_valid = sync_dst_1_valid[1];
+
+    // Destination-to-source ready signals (synchronized)
+    assign dst_to_src_0_ready = sync_dst_0_ready[1];
+    assign dst_to_src_1_ready = sync_dst_1_ready[1];
+
+endmodule

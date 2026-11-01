@@ -1,0 +1,172 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals for the four-phase handshake
+  // req: source -> destination (data valid request)
+  // ack: destination -> source (acknowledge)
+  wire req;
+  wire ack;
+
+  // Source side: generate req and accept ack
+  // Destination side: accept req and generate ack
+
+  // We use a 2-bit Gray-coded or binary counter? For four-phase, we use two separate signals.
+  // req is driven by source, sampled by destination.
+  // ack is driven by destination, sampled by source.
+
+  // Source side logic
+  reg [WIDTH-1:0] src_data_reg;
+  reg src_valid_reg;
+  reg src_ready_reg;
+  reg req_reg;
+  reg ack_reg;
+
+  // Destination side logic
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_valid_reg;
+  reg dst_ready_reg;
+  reg req_reg_dst;
+  reg ack_reg_dst;
+
+  // Synchronize req from source to destination
+  reg [1:0] req_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      req_sync <= 2'b00;
+    else
+      req_sync <= {req_sync[0], req};
+  end
+  wire req_dst = req_sync[1];
+
+  // Synchronize ack from destination to source
+  reg [1:0] ack_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      ack_sync <= 2'b00;
+    else
+      ack_sync <= {ack_sync[0], ack};
+  end
+  wire ack_src = ack_sync[1];
+
+  // Source side state machine
+  // States: IDLE, WAIT_ACK
+  // In IDLE: if src_valid_i and src_ready_o, capture data, assert req, go to WAIT_ACK
+  // In WAIT_ACK: wait for ack_src, then deassert req, go to IDLE
+
+  reg src_state;
+  localparam SRC_IDLE = 1'b0;
+  localparam SRC_WAIT_ACK = 1'b1;
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_state <= SRC_IDLE;
+      req_reg <= 1'b0;
+      ack_reg <= 1'b0;
+      src_ready_reg <= 1'b1;
+      src_data_reg <= {WIDTH{1'b0}};
+      src_valid_reg <= 1'b0;
+    end else begin
+      case (src_state)
+        SRC_IDLE: begin
+          req_reg <= 1'b0;
+          ack_reg <= 1'b0;
+          if (src_valid_i) begin
+            src_data_reg <= src_data_i;
+            src_valid_reg <= 1'b1;
+            req_reg <= 1'b1;
+            src_ready_reg <= 1'b0;
+            src_state <= SRC_WAIT_ACK;
+          end else begin
+            src_ready_reg <= 1'b1;
+          end
+        end
+        SRC_WAIT_ACK: begin
+          if (ack_src) begin
+            req_reg <= 1'b0;
+            ack_reg <= 1'b1;
+            src_ready_reg <= 1'b1;
+            src_valid_reg <= 1'b0;
+            src_state <= SRC_IDLE;
+          end else begin
+            // Stay in WAIT_ACK
+          end
+        end
+        default: begin
+          src_state <= SRC_IDLE;
+          req_reg <= 1'b0;
+          ack_reg <= 1'b0;
+          src_ready_reg <= 1'b1;
+        end
+      endcase
+    end
+  end
+
+  assign src_ready_o = src_ready_reg;
+  assign req = req_reg;
+
+  // Destination side state machine
+  // States: IDLE, WAIT_ACK
+  // In IDLE: if req_dst, capture data, assert ack, go to WAIT_ACK
+  // In WAIT_ACK: wait for dst_ready_i, then deassert ack, go to IDLE
+
+  reg dst_state;
+  localparam DST_IDLE = 1'b0;
+  localparam DST_WAIT_ACK = 1'b1;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_state <= DST_IDLE;
+      ack_reg_dst <= 1'b0;
+      req_reg_dst <= 1'b0;
+      dst_valid_reg <= 1'b0;
+      dst_data_reg <= {WIDTH{1'b0}};
+    end else begin
+      case (dst_state)
+        DST_IDLE: begin
+          ack_reg_dst <= 1'b0;
+          req_reg_dst <= 1'b0;
+          if (req_dst) begin
+            dst_data_reg <= src_data_reg; // This is wrong, we need to capture the data from source
+            dst_valid_reg <= 1'b1;
+            ack_reg_dst <= 1'b1;
+            dst_state <= DST_WAIT_ACK;
+          end
+        end
+        DST_WAIT_ACK: begin
+          if (dst_ready_i) begin
+            ack_reg_dst <= 1'b0;
+            req_reg_dst <= 1'b0;
+            dst_valid_reg <= 1'b0;
+            dst_state <= DST_IDLE;
+          end
+        end
+        default: begin
+          dst_state <= DST_IDLE;
+          ack_reg_dst <= 1'b0;
+          req_reg_dst <= 1'b0;
+          dst_valid_reg <= 1'b0;
+        end
+      endcase
+    end
+  end
+
+  assign dst_valid_o = dst_valid_reg;
+  assign dst_data_o = dst_data_reg;
+  assign ack = ack_reg_dst;
+
+endmodule

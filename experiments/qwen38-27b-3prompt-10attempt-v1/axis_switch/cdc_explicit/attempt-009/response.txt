@@ -1,0 +1,238 @@
+```verilog
+module axis_switch #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter S_ID_WIDTH = 8,
+    parameter M_ID_WIDTH = S_ID_WIDTH+$clog2(S_COUNT),
+    parameter M_DEST_WIDTH = 1,
+    parameter S_DEST_WIDTH = M_DEST_WIDTH+$clog2(M_COUNT),
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter M_BASE = 0,
+    parameter M_TOP = 0,
+    parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
+    parameter UPDATE_TID = 0,
+    parameter S_REG_TYPE = 0,
+    parameter M_REG_TYPE = 2,
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 1
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    /*
+     * AXI Stream inputs
+     */
+    input  wire [S_COUNT*DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [S_COUNT*KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire [S_COUNT-1:0]               s_axis_tvalid,
+    output wire [S_COUNT-1:0]               s_axis_tready,
+    input  wire [S_COUNT-1:0]               s_axis_tlast,
+    input  wire [S_COUNT*S_ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [S_COUNT*USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI Stream outputs
+     */
+    output wire [M_COUNT*DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [M_COUNT*KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire [M_COUNT-1:0]               m_axis_tvalid,
+    input  wire [M_COUNT-1:0]               m_axis_tready,
+    output wire [M_COUNT-1:0]               m_axis_tlast,
+    output wire [M_COUNT*M_ID_WIDTH-1:0]    m_axis_tid,
+    output wire [M_COUNT*M_DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [M_COUNT*USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    // Internal signals
+    wire [S_COUNT-1:0] s_tready_int;
+    wire [M_COUNT-1:0] m_tvalid_int;
+    wire [M_COUNT-1:0] m_tlast_int;
+    wire [M_COUNT*DATA_WIDTH-1:0] m_tdata_int;
+    wire [M_COUNT*KEEP_WIDTH-1:0] m_tkeep_int;
+    wire [M_COUNT*M_ID_WIDTH-1:0] m_tid_int;
+    wire [M_COUNT*M_DEST_WIDTH-1:0] m_tdest_int;
+    wire [M_COUNT*USER_WIDTH-1:0] m_tuser_int;
+
+    // Per-output arbitration and routing
+    genvar m;
+    genvar s;
+
+    // For each output port m, determine which input s is selected
+    // and whether the output is valid
+    wire [S_COUNT-1:0] m_req [0:M_COUNT-1];
+    wire [S_COUNT-1:0] m_grant [0:M_COUNT-1];
+    wire [M_COUNT-1:0] m_valid;
+
+    // Round-robin state per output
+    reg [S_COUNT-1:0] rr_state [0:M_COUNT-1];
+
+    // Generate per-output logic
+    generate
+        for (m = 0; m < M_COUNT; m = m + 1) begin : gen_out
+            // Request: input s wants to send to output m
+            // An input s requests output m if:
+            // 1. s_axis_tvalid[s] is high
+            // 2. The destination of input s matches output m (after base/top adjustment)
+            // 3. The connection is allowed by M_CONNECT
+
+            // Extract destination for input s
+            wire [S_DEST_WIDTH-1:0] s_dest = s_axis_tdest[s*S_DEST_WIDTH +: S_DEST_WIDTH];
+
+            // Determine if input s targets output m
+            // The actual output index is s_dest - M_BASE, but we need to check if it maps to m
+            // Simplified: assume s_dest directly encodes the output index, with M_BASE/M_TOP for range
+            // For now, use direct comparison: s_dest == (m + M_BASE)
+            // But we also need to respect M_CONNECT[m][s]
+
+            wire s_wants_m = s_axis_tvalid[s] && 
+                             (s_dest == (m + M_BASE)) && 
+                             M_CONNECT[m*S_COUNT + s];
+
+            // Build request vector for output m
+            assign m_req[m][s] = s_wants_m;
+
+            // Arbitration
+            // If ARB_TYPE_ROUND_ROBIN, use round-robin
+            // Else if ARB_LSB_HIGH_PRIORITY, lowest set bit wins
+            // Else, highest set bit wins (default)
+
+            wire [S_COUNT-1:0] req_vec = m_req[m];
+
+            // Round-robin arbitration
+            wire [S_COUNT-1:0] rr_grant;
+            wire [S_COUNT-1:0] fixed_grant;
+
+            if (ARB_TYPE_ROUND_ROBIN) begin : gen_rr
+                // Round-robin: rotate request by rr_state, find first set bit, rotate back
+                wire [S_COUNT-1:0] rotated_req;
+                wire [S_COUNT-1:0] rotated_grant;
+                wire [S_COUNT-1:0] grant_rotated;
+
+                // Rotate left by rr_state
+                assign rotated_req = (req_vec << rr_state) | (req_vec >> (S_COUNT - rr_state));
+                
+                // Find first set bit (LSB)
+                assign grant_rotated = rotated_req & (~rotated_req + 1'b1);
+                
+                // Rotate back
+                assign rotated_grant = (grant_rotated >> rr_state) | (grant_rotated << (S_COUNT - rr_state));
+                
+                assign rr_grant = rotated_grant;
+
+                // Update round-robin state on grant
+                always @(posedge clk or posedge rst) begin
+                    if (rst)
+                        rr_state[m] <= {S_COUNT{1'b0}};
+                    else if (m_tvalid[m] && m_axis_tready[m])
+                        rr_state[m] <= (rr_state[m] + 1'b1) % S_COUNT;
+                end
+            end else begin : gen_fixed
+                if (ARB_LSB_HIGH_PRIORITY) begin : gen_lsb
+                    // Lowest set bit
+                    assign fixed_grant = req_vec & (~req_vec + 1'b1);
+                end else begin : gen_msb
+                    // Highest set bit
+                    wire [S_COUNT-1:0] inv_req = ~req_vec;
+                    wire [S_COUNT-1:0] inv_plus1 = inv_req + 1'b1;
+                    wire [S_COUNT-1:0] msb_mask = inv_plus1 & ~inv_req;
+                    assign fixed_grant = msb_mask;
+                end
+                assign rr_grant = fixed_grant;
+            end
+
+            assign m_grant[m] = rr_grant;
+            assign m_tvalid[m] = |rr_grant;
+        end
+    endgenerate
+
+    // Output data routing
+    // For each output m, select the data from the granted input s
+    generate
+        for (m = 0; m < M_COUNT; m = m + 1) begin : gen_out_data
+            // Data
+            wire [DATA_WIDTH-1:0] out_data;
+            wire [KEEP_WIDTH-1:0] out_keep;
+            wire out_last;
+            wire [S_ID_WIDTH-1:0] out_sid;
+            wire [M_ID_WIDTH-1:0] out_tid;
+            wire [M_DEST_WIDTH-1:0] out_tdest;
+            wire [USER_WIDTH-1:0] out_user;
+
+            // Select from granted input
+            for (s = 0; s < S_COUNT; s = s + 1) begin : gen_sel
+                wire sel = m_grant[m][s];
+                assign out_data = sel ? s_axis_tdata[s*DATA_WIDTH +: DATA_WIDTH] : out_data;
+                assign out_keep = sel ? s_axis_tkeep[s*KEEP_WIDTH +: KEEP_WIDTH] : out_keep;
+                assign out_last = sel ? s_axis_tlast[s] : out_last;
+                assign out_sid = sel ? s_axis_tid[s*S_ID_WIDTH +: S_ID_WIDTH] : out_sid;
+                assign out_tdest = sel ? s_axis_tdest[s*S_DEST_WIDTH +: S_DEST_WIDTH] : out_tdest;
+                assign out_user = sel ? s_axis_tuser[s*USER_WIDTH +: USER_WIDTH] : out_user;
+            end
+
+            // Update TID if enabled
+            if (UPDATE_TID) begin : gen_update_tid
+                // New TID = original TID + input index (or some transformation)
+                // For simplicity, append input index to original ID
+                wire [M_ID_WIDTH-1:1] tid_high = out_sid;
+                wire [S_COUNT-1:0] s_idx;
+                // Find which s was granted
+                for (s = 0; s < S_COUNT; s = s + 1) begin : gen_sidx
+                    assign s_idx[s] = m_grant[m][s];
+                end
+                assign out_tid = {tid_high, s_idx};
+            end else begin : gen_no_update_tid
+                assign out_tid = out_sid;
+            end
+
+            // Drive outputs
+            assign m_tdata_int[m*DATA_WIDTH +: DATA_WIDTH] = out_data;
+            assign m_tkeep_int[m*KEEP_WIDTH +: KEEP_WIDTH] = out_keep;
+            assign m_tlast_int[m] = out_last;
+            assign m_tid_int[m*M_ID_WIDTH +: M_ID_WIDTH] = out_tid;
+            assign m_tdest_int[m*M_DEST_WIDTH +: M_DEST_WIDTH] = out_tdest;
+            assign m_tuser_int[m*USER_WIDTH +: USER_WIDTH] = out_user;
+        end
+    endgenerate
+
+    // Input ready logic
+    // Input s is ready if:
+    // 1. The output it targets is ready (m_axis_tready[m])
+    // 2. Input s is granted for that output
+    generate
+        for (s = 0; s < S_COUNT; s = s + 1) begin : gen_in_ready
+            wire [S_DEST_WIDTH-1:0] s_dest = s_axis_tdest[s*S_DEST_WIDTH +: S_DEST_WIDTH];
+            wire [M_COUNT-1:0] target_mask;
+            
+            // Determine which outputs this input could target
+            for (m = 0; m < M_COUNT; m = m + 1) begin : gen_target
+                assign target_mask[m] = (s_dest == (m + M_BASE)) && M_CONNECT[m*S_COUNT + s];
+            end
+
+            // Input is ready if any target output is ready AND input is granted
+            wire [M_COUNT-1:0] ready_targets;
+            for (m = 0; m < M_COUNT; m = m + 1) begin : gen_ready
+                assign ready_targets[m] = target_mask[m] && m_axis_tready[m] && m_grant[m][s];
+            end
+
+            assign s_tready_int[s] = |ready_targets;
+        end
+    endgenerate
+
+    // Final output assignments
+    assign s_axis_tready = s_tready_int;
+    assign m_axis_tvalid = m_tvalid_int;
+    assign m_axis_tlast = m_tlast_int;
+    assign m_axis_tdata = m_tdata_int;
+    assign m_axis_tkeep = m_tkeep_int;
+    assign m_axis_tid = m_tid_int;
+    assign m_axis_tdest = m_tdest_int;
+    assign m_axis_tuser = m_tuser_int;
+
+endmodule
+```<|im_end|>

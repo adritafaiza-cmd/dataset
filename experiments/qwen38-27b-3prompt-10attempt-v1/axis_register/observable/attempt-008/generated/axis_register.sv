@@ -1,0 +1,240 @@
+module axis_register #
+(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser
+);
+
+    // REG_TYPE: 0 = wire, 1 = buffer, 2 = skid buffer
+
+    // Wire mode (REG_TYPE == 0)
+    wire wire_mode = (REG_TYPE == 0);
+    // Buffer mode (REG_TYPE == 1)
+    wire buffer_mode = (REG_TYPE == 1);
+    // Skid buffer mode (REG_TYPE == 2)
+    wire skid_mode = (REG_TYPE == 2);
+
+    // Internal signals for buffer/skid modes
+    reg [DATA_WIDTH-1:0]  buf_tdata;
+    reg [KEEP_WIDTH-1:0]  buf_tkeep;
+    reg                   buf_tlast;
+    reg [ID_WIDTH-1:0]    buf_tid;
+    reg [DEST_WIDTH-1:0]  buf_tdest;
+    reg [USER_WIDTH-1:0]  buf_tuser;
+    reg                   buf_valid;
+
+    // Skid buffer second stage
+    reg [DATA_WIDTH-1:0]  skid_tdata;
+    reg [KEEP_WIDTH-1:0]  skid_tkeep;
+    reg                   skid_tlast;
+    reg [ID_WIDTH-1:0]    skid_tid;
+    reg [DEST_WIDTH-1:0]  skid_tdest;
+    reg [USER_WIDTH-1:0]  skid_tuser;
+    reg                   skid_valid;
+
+    // For skid buffer: main register and skid register
+    // main register holds the first beat, skid holds the second
+
+    // Wire mode outputs
+    assign m_axis_tdata  = wire_mode ? s_axis_tdata  : (skid_mode ? (skid_valid ? skid_tdata : buf_tdata) : buf_tdata);
+    assign m_axis_tkeep  = wire_mode ? s_axis_tkeep  : (skid_mode ? (skid_valid ? skid_tkeep : buf_tkeep) : buf_tkeep);
+    assign m_axis_tlast  = wire_mode ? s_axis_tlast  : (skid_mode ? (skid_valid ? skid_tlast : buf_tlast) : buf_tlast);
+    assign m_axis_tid    = wire_mode ? s_axis_tid    : (skid_mode ? (skid_valid ? skid_tid : buf_tid) : buf_tid);
+    assign m_axis_tdest  = wire_mode ? s_axis_tdest  : (skid_mode ? (skid_valid ? skid_tdest : buf_tdest) : buf_tdest);
+    assign m_axis_tuser  = wire_mode ? s_axis_tuser  : (skid_mode ? (skid_valid ? skid_tuser : buf_tuser) : buf_tuser);
+
+    assign m_axis_tvalid = wire_mode ? s_axis_tvalid : (skid_mode ? (skid_valid | buf_valid) : buf_valid);
+
+    // s_axis_tready logic
+    // Wire mode: ready = m_axis_tready
+    // Buffer mode: ready = !buf_valid || m_axis_tready
+    // Skid buffer: ready = !buf_valid || (!skid_valid && m_axis_tready)
+    //              Actually for skid buffer: ready = !buf_valid || (m_axis_tready && !skid_valid)
+    //              More precisely: ready = !buf_valid || (m_axis_tready && !skid_valid)
+    //              But we also need to consider that if buf is full and skid is empty, we can accept
+    //              if m_axis_tready is high. If buf is full and skid is full, we cannot accept.
+    //              So: ready = !buf_valid || (m_axis_tready && !skid_valid)
+
+    wire s_ready_wire   = m_axis_tready;
+    wire s_ready_buffer = !buf_valid || m_axis_tready;
+    wire s_ready_skid   = !buf_valid || (m_axis_tready && !skid_valid);
+
+    assign s_axis_tready = wire_mode ? s_ready_wire : (skid_mode ? s_ready_skid : s_ready_buffer);
+
+    // Transfer detection
+    wire s_transfer = s_axis_tvalid && s_axis_tready;
+    wire m_transfer = m_axis_tvalid && m_axis_tready;
+
+    // Buffer mode logic
+    // When s_transfer and (buf_valid and m_transfer), load new data into buffer
+    // When s_transfer and (!buf_valid or m_transfer), load new data into buffer
+    // Actually: if s_transfer, load into buffer. If buf_valid and m_transfer, clear buf_valid.
+    // But if both s_transfer and m_transfer happen, we load new data and clear valid in same cycle.
+
+    // Skid buffer logic:
+    // Two registers: buf (main) and skid.
+    // If buf is empty:
+    //   - If s_transfer: load into buf, set buf_valid
+    // If buf is full:
+    //   - If m_transfer and !skid_valid: move buf to output (handled by output mux), clear buf_valid
+    //   - If m_transfer and skid_valid: move skid to buf, clear skid_valid, set buf_valid (but buf was just cleared)
+    //     Actually: if m_transfer, the output takes from skid if skid_valid else buf.
+    //     Let's think more carefully.
+
+    // Skid buffer state machine:
+    // States: EMPTY (buf_valid=0, skid_valid=0), ONE (buf_valid=1, skid_valid=0), TWO (buf_valid=1, skid_valid=1)
+    //
+    // From EMPTY:
+    //   - s_transfer: load into buf, go to ONE
+    //
+    // From ONE:
+    //   - s_transfer and m_transfer: load new into buf (replacing old), stay in ONE
+    //   - s_transfer and !m_transfer: load into skid, go to TWO
+    //   - !s_transfer and m_transfer: clear buf, go to EMPTY
+    //   - !s_transfer and !m_transfer: stay in ONE
+    //
+    // From TWO:
+    //   - s_transfer: not possible (s_ready=0)
+    //   - m_transfer: move skid to buf, clear skid, go to ONE
+    //   - !m_transfer: stay in TWO
+
+    // Let's implement with registers
+
+    // For buffer mode (REG_TYPE == 1):
+    // Single register
+    // If s_transfer: load data into buf
+    // If m_transfer: clear buf_valid
+    // If both: load new data, buf_valid stays 1 (since new data loaded)
+
+    // For skid buffer (REG_TYPE == 2):
+    // Use buf and skid registers
+
+    // Let's use a unified approach with always blocks
+
+    // Buffer mode always block
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            buf_valid <= 1'b0;
+            buf_tdata <= {DATA_WIDTH{1'b0}};
+            buf_tkeep <= {KEEP_WIDTH{1'b0}};
+            buf_tlast <= 1'b0;
+            buf_tid   <= {ID_WIDTH{1'b0}};
+            buf_tdest <= {DEST_WIDTH{1'b0}};
+            buf_tuser <= {USER_WIDTH{1'b0}};
+        end else if (buffer_mode) begin
+            if (s_transfer) begin
+                buf_tdata <= s_axis_tdata;
+                buf_tkeep <= s_axis_tkeep;
+                buf_tlast <= s_axis_tlast;
+                buf_tid   <= s_axis_tid;
+                buf_tdest <= s_axis_tdest;
+                buf_tuser <= s_axis_tuser;
+                buf_valid <= 1'b1;
+            end else if (m_transfer) begin
+                buf_valid <= 1'b0;
+            end
+        end
+    end
+
+    // Skid buffer always block
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            buf_valid  <= 1'b0;
+            skid_valid <= 1'b0;
+            buf_tdata  <= {DATA_WIDTH{1'b0}};
+            buf_tkeep  <= {KEEP_WIDTH{1'b0}};
+            buf_tlast  <= 1'b0;
+            buf_tid    <= {ID_WIDTH{1'b0}};
+            buf_tdest  <= {DEST_WIDTH{1'b0}};
+            buf_tuser  <= {USER_WIDTH{1'b0}};
+            skid_tdata <= {DATA_WIDTH{1'b0}};
+            skid_tkeep <= {KEEP_WIDTH{1'b0}};
+            skid_tlast <= 1'b0;
+            skid_tid   <= {ID_WIDTH{1'b0}};
+            skid_tdest <= {DEST_WIDTH{1'b0}};
+            skid_tuser <= {USER_WIDTH{1'b0}};
+        end else if (skid_mode) begin
+            // Determine next state
+            if (buf_valid == 1'b0) begin
+                // EMPTY state
+                if (s_transfer) begin
+                    buf_tdata  <= s_axis_tdata;
+                    buf_tkeep  <= s_axis_tkeep;
+                    buf_tlast  <= s_axis_tlast;
+                    buf_tid    <= s_axis_tid;
+                    buf_tdest  <= s_axis_tdest;
+                    buf_tuser  <= s_axis_tuser;
+                    buf_valid  <= 1'b1;
+                    // skid_valid stays 0
+                end
+            end else if (skid_valid == 1'b0) begin
+                // ONE state (buf full, skid empty)
+                if (s_transfer && m_transfer) begin
+                    // Load new data into buf, output takes old buf
+                    buf_tdata  <= s_axis_tdata;
+                    buf_tkeep  <= s_axis_tkeep;
+                    buf_tlast  <= s_axis_tlast;
+                    buf_tid    <= s_axis_tid;
+                    buf_tdest  <= s_axis_tdest;
+                    buf_tuser  <= s_axis_tuser;
+                    // buf_valid stays 1
+                end else if (s_transfer && !m_transfer) begin
+                    // Load into skid
+                    skid_tdata <= s_axis_tdata;
+                    skid_tkeep <= s_axis_tkeep;
+                    skid_tlast <= s_axis_tlast;
+                    skid_tid   <= s_axis_tid;
+                    skid_tdest <= s_axis_tdest;
+                    skid_tuser <= s_axis_tuser;
+                    skid_valid <= 1'b1;
+                    // buf_valid stays 1
+                end else if (!s_transfer && m_transfer) begin
+                    // Output takes buf, clear buf
+                    buf_valid <= 1'b0;
+                end
+                // else: no change
+            end else begin
+                // TWO state (both full)
+                if (m_transfer) begin
+                    // Output takes skid, move buf to skid? No.
+                    // Output takes from skid (since skid_valid=1, output mux selects skid)
+                    // After m_transfer, skid is consumed. Move buf to skid? No.
+                    // Actually: output takes skid. Then skid becomes empty.
+                    // buf remains. So we go to ONE state.
+                    skid_valid <= 1'b0;
+                    // buf_valid stays 1
+                end
+                // s_transfer is not possible in TWO state (s_ready=0)
+            end
+        end
+    end
+
+endmodule

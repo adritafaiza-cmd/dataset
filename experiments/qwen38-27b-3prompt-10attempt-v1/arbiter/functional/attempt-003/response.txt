@@ -1,0 +1,334 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam NUM_PORTS = PORTS;
+    localparam ENC_WIDTH = $clog2(PORTS);
+
+    reg [NUM_PORTS-1:0] grant_reg;
+    reg [ENC_WIDTH-1:0] grant_enc_reg;
+    reg                 grant_valid_reg;
+
+    // For round-robin, track the last granted port to rotate priority
+    reg [ENC_WIDTH-1:0] last_grant_reg;
+
+    // Internal signals
+    wire [NUM_PORTS-1:0] priority_mask;
+    wire [NUM_PORTS-1:0] masked_request;
+    wire [NUM_PORTS-1:0] unmasked_request;
+    wire [NUM_PORTS-1:0] candidate;
+    wire [NUM_PORTS-1:0] grant_next;
+    wire [ENC_WIDTH-1:0] grant_enc_next;
+    wire                 grant_valid_next;
+
+    // Generate priority mask for round-robin
+    // If ARB_TYPE_ROUND_ROBIN is set, we rotate priority based on last_grant_reg
+    // The mask should have 1s for ports with higher priority than the last granted port
+    // For LSB high priority: lower index = higher priority
+    // For MSB high priority: higher index = higher priority
+
+    // Let's define the priority order
+    // If ARB_LSB_HIGH_PRIORITY is 1, port 0 has highest priority, port NUM_PORTS-1 has lowest
+    // If ARB_LSB_HIGH_PRIORITY is 0, port NUM_PORTS-1 has highest priority, port 0 has lowest
+
+    // For round-robin, we want to give priority to ports after the last granted port
+    // in the priority order.
+
+    // Let's create a function to determine the priority order
+    // Actually, let's think about this differently.
+
+    // For fixed priority:
+    // If ARB_LSB_HIGH_PRIORITY: grant the lowest index request
+    // If !ARB_LSB_HIGH_PRIORITY: grant the highest index request
+
+    // For round-robin:
+    // We rotate the priority so that the port after the last granted port (in priority order) gets highest priority.
+
+    // Let's define a helper to get the "next" port in priority order after a given port
+    // Priority order:
+    // If ARB_LSB_HIGH_PRIORITY: 0, 1, 2, ..., NUM_PORTS-1
+    // If !ARB_LSB_HIGH_PRIORITY: NUM_PORTS-1, NUM_PORTS-2, ..., 0
+
+    // For round-robin, we want to start searching from the port after last_grant in the priority order.
+
+    // Let's create a mask that indicates which ports are "after" last_grant in the priority order.
+    // Ports in the mask will be considered first.
+
+    // If ARB_LSB_HIGH_PRIORITY:
+    //   Priority order: 0 (highest), 1, 2, ..., NUM_PORTS-1 (lowest)
+    //   After last_grant = L, the next in priority order is L+1, L+2, ..., NUM_PORTS-1, 0, 1, ..., L-1
+    //   So the mask should have 1s for ports > L (in index), and then wrap around to 0..L-1
+    //   Actually, for round-robin, we want to give priority to ports that come after L in the cyclic priority order.
+    //   So if L=2, the order is 3, 0, 1, 2 (if LSB high priority, priority is 0>1>2>3, so after 2 is 3, then wrap to 0,1,2)
+    //   Wait, I need to be careful.
+
+    // Let me reconsider. In round-robin arbitration, the idea is that after granting to port L, the next grant should go to the next port in the cyclic order.
+    // The cyclic order depends on the priority direction.
+
+    // If ARB_LSB_HIGH_PRIORITY:
+    //   Natural priority: 0 > 1 > 2 > ... > NUM_PORTS-1
+    //   Cyclic order after L: (L+1) % NUM_PORTS, (L+2) % NUM_PORTS, ..., L
+    //   So we want to search in this order.
+
+    // If !ARB_LSB_HIGH_PRIORITY:
+    //   Natural priority: NUM_PORTS-1 > NUM_PORTS-2 > ... > 0
+    //   Cyclic order after L: (L-1+NUM_PORTS) % NUM_PORTS, (L-2+NUM_PORTS) % NUM_PORTS, ..., L
+    //   So we want to search in this order.
+
+    // To implement this, we can create a mask that has 1s for the ports that should be considered first (i.e., those after L in the cyclic order).
+
+    // For ARB_LSB_HIGH_PRIORITY:
+    //   Ports after L: L+1, L+2, ..., NUM_PORTS-1, 0, 1, ..., L-1
+    //   Mask: bits [NUM_PORTS-1:L+1] = 1, bits [L-1:0] = 1, bit L = 0
+    //   Actually, we want to search in the order L+1, L+2, ..., NUM_PORTS-1, 0, 1, ..., L-1
+    //   So the mask for the "first half" is bits [NUM_PORTS-1:L+1] set to 1
+    //   And the "second half" is bits [L-1:0] set to 1
+
+    // For !ARB_LSB_HIGH_PRIORITY:
+    //   Ports after L: L-1, L-2, ..., 0, NUM_PORTS-1, NUM_PORTS-2, ..., L+1
+    //   Mask: bits [L-1:0] = 1, bits [NUM_PORTS-1:L+1] = 1
+
+    // Let's create the mask
+    reg [NUM_PORTS-1:0] rr_mask;
+
+    always @(*) begin
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            if (ARB_LSB_HIGH_PRIORITY) begin
+                // Priority order: 0 > 1 > 2 > ... > NUM_PORTS-1
+                // After last_grant, search: last_grant+1, ..., NUM_PORTS-1, 0, ..., last_grant-1
+                rr_mask = {NUM_PORTS{1'b0}};
+                for (integer i = 0; i < NUM_PORTS; i = i + 1) begin
+                    if (i > last_grant_reg) begin
+                        rr_mask[i] = 1'b1;
+                    end
+                end
+            end else begin
+                // Priority order: NUM_PORTS-1 > NUM_PORTS-2 > ... > 0
+                // After last_grant, search: last_grant-1, ..., 0, NUM_PORTS-1, ..., last_grant+1
+                rr_mask = {NUM_PORTS{1'b0}};
+                for (integer i = 0; i < NUM_PORTS; i = i + 1) begin
+                    if (i < last_grant_reg) begin
+                        rr_mask[i] = 1'b1;
+                    end
+                end
+            end
+        end else begin
+            rr_mask = {NUM_PORTS{1'b0}};
+        end
+    end
+
+    // Now, for the actual arbitration:
+    // If ARB_TYPE_ROUND_ROBIN:
+    //   First, check if any request is in rr_mask. If so, grant the highest priority one among them.
+    //   If no request in rr_mask, grant the highest priority one among all requests.
+    // If !ARB_TYPE_ROUND_ROBIN:
+    //   Grant the highest priority one among all requests.
+
+    // "Highest priority" depends on ARB_LSB_HIGH_PRIORITY:
+    //   If ARB_LSB_HIGH_PRIORITY: lowest index wins
+    //   If !ARB_LSB_HIGH_PRIORITY: highest index wins
+
+    // Let's create a function to find the highest priority request in a given set of requests
+
+    // For ARB_LSB_HIGH_PRIORITY: find the lowest index with request=1
+    // For !ARB_LSB_HIGH_PRIORITY: find the highest index with request=1
+
+    // Let's create two versions of the request set:
+    //   masked_request: requests that are in rr_mask (for round-robin first pass)
+    //   unmasked_request: all requests (for round-robin second pass or fixed priority)
+
+    assign masked_request = request & rr_mask;
+    assign unmasked_request = request;
+
+    // Function to find the grant for a given request vector
+    // Returns the grant vector and encoded value
+
+    // Let's use a combinational block to determine the grant
+
+    reg [NUM_PORTS-1:0] grant_comb;
+    reg [ENC_WIDTH-1:0] grant_enc_comb;
+    reg                 grant_valid_comb;
+
+    always @(*) begin
+        grant_comb = {NUM_PORTS{1'b0}};
+        grant_enc_comb = {ENC_WIDTH{1'b0}};
+        grant_valid_comb = 1'b0;
+
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            // First, try to grant from masked_request
+            if (masked_request != 0) begin
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    // Find lowest index with request=1 in masked_request
+                    for (integer i = 0; i < NUM_PORTS; i = i + 1) begin
+                        if (masked_request[i]) begin
+                            grant_comb = {NUM_PORTS{1'b0}};
+                            grant_comb[i] = 1'b1;
+                            grant_enc_comb = i[ENC_WIDTH-1:0];
+                            grant_valid_comb = 1'b1;
+                            i = NUM_PORTS; // Break out of loop
+                        end
+                    end
+                end else begin
+                    // Find highest index with request=1 in masked_request
+                    for (integer i = NUM_PORTS-1; i >= 0; i = i - 1) begin
+                        if (masked_request[i]) begin
+                            grant_comb = {NUM_PORTS{1'b0}};
+                            grant_comb[i] = 1'b1;
+                            grant_enc_comb = i[ENC_WIDTH-1:0];
+                            grant_valid_comb = 1'b1;
+                            i = -1; // Break out of loop
+                        end
+                    end
+                end
+            end else begin
+                // No request in masked_request, try unmasked_request
+                if (unmasked_request != 0) begin
+                    if (ARB_LSB_HIGH_PRIORITY) begin
+                        for (integer i = 0; i < NUM_PORTS; i = i + 1) begin
+                            if (unmasked_request[i]) begin
+                                grant_comb = {NUM_PORTS{1'b0}};
+                                grant_comb[i] = 1'b1;
+                                grant_enc_comb = i[ENC_WIDTH-1:0];
+                                grant_valid_comb = 1'b1;
+                                i = NUM_PORTS;
+                            end
+                        end
+                    end else begin
+                        for (integer i = NUM_PORTS-1; i >= 0; i = i - 1) begin
+                            if (unmasked_request[i]) begin
+                                grant_comb = {NUM_PORTS{1'b0}};
+                                grant_comb[i] = 1'b1;
+                                grant_enc_comb = i[ENC_WIDTH-1:0];
+                                grant_valid_comb = 1'b1;
+                                i = -1;
+                            end
+                        end
+                    end
+                end
+            end
+        end else begin
+            // Fixed priority
+            if (unmasked_request != 0) begin
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    for (integer i = 0; i < NUM_PORTS; i = i + 1) begin
+                        if (unmasked_request[i]) begin
+                            grant_comb = {NUM_PORTS{1'b0}};
+                            grant_comb[i] = 1'b1;
+                            grant_enc_comb = i[ENC_WIDTH-1:0];
+                            grant_valid_comb = 1'b1;
+                            i = NUM_PORTS;
+                        end
+                    end
+                end else begin
+                    for (integer i = NUM_PORTS-1; i >= 0; i = i - 1) begin
+                        if (unmasked_request[i]) begin
+                            grant_comb = {NUM_PORTS{1'b0}};
+                            grant_comb[i] = 1'b1;
+                            grant_enc_comb = i[ENC_WIDTH-1:0];
+                            grant_valid_comb = 1'b1;
+                            i = -1;
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    // Now handle the blocking behavior
+    // If ARB_BLOCK is set:
+    //   If ARB_BLOCK_ACK is nonzero: hold grant until acknowledge is received
+    //   If ARB_BLOCK_ACK is zero: hold grant until request drops
+
+    // We need to track the current grant state
+
+    // Let's define the next state logic
+
+    always @(*) begin
+        if (rst) begin
+            grant_next = {NUM_PORTS{1'b0}};
+            grant_enc_next = {ENC_WIDTH{1'b0}};
+            grant_valid_next = 1'b0;
+        end else if (ARB_BLOCK) begin
+            if (grant_valid_reg) begin
+                // Currently granting
+                if (ARB_BLOCK_ACK) begin
+                    // Hold until acknowledge
+                    if (acknowledge & grant_reg) begin
+                        // Acknowledge received, can change grant
+                        grant_next = grant_comb;
+                        grant_enc_next = grant_enc_comb;
+                        grant_valid_next = grant_valid_comb;
+                    end else begin
+                        // Hold current grant
+                        grant_next = grant_reg;
+                        grant_enc_next = grant_enc_reg;
+                        grant_valid_next = 1'b1;
+                    end
+                end else begin
+                    // Hold until request drops
+                    if (request & grant_reg) begin
+                        // Request still present, hold
+                        grant_next = grant_reg;
+                        grant_enc_next = grant_enc_reg;
+                        grant_valid_next = 1'b1;
+                    end else begin
+                        // Request dropped, can change grant
+                        grant_next = grant_comb;
+                        grant_enc_next = grant_enc_comb;
+                        grant_valid_next = grant_valid_comb;
+                    end
+                end
+            end else begin
+                // Not currently granting, take new grant
+                grant_next = grant_comb;
+                grant_enc_next = grant_enc_comb;
+                grant_valid_next = grant_valid_comb;
+            end
+        end else begin
+            // No blocking, always update
+            grant_next = grant_comb;
+            grant_enc_next = grant_enc_comb;
+            grant_valid_next = grant_valid_comb;
+        end
+    end
+
+    // Sequential logic
+    always @(posedge clk) begin
+        if (rst) begin
+            grant_reg <= {NUM_PORTS{1'b0}};
+            grant_enc_reg <= {ENC_WIDTH{1'b0}};
+            grant_valid_reg <= 1'b0;
+            last_grant_reg <= {ENC_WIDTH{1'b0}};
+        end else begin
+            grant_reg <= grant_next;
+            grant_enc_reg <= grant_enc_next;
+            grant_valid_reg <= grant_valid_next;
+
+            // Update last_grant_reg for round-robin
+            if (grant_valid_next) begin
+                last_grant_reg <= grant_enc_next;
+            end
+        end
+    end
+
+    assign grant = grant_reg;
+    assign grant_valid = grant_valid_reg;
+    assign grant_encoded = grant_enc_reg;
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,135 @@
+module isochronous_4phase_handshake (
+    input  src_clk_i,
+    input  src_rst_ni,
+    input  src_valid_i,
+    output src_ready_o,
+    input  dst_clk_i,
+    input  dst_rst_ni,
+    output dst_valid_o,
+    input  dst_ready_i
+);
+
+    // Source domain state
+    reg src_valid_reg;
+    reg src_ready_reg;
+
+    // Destination domain state
+    reg dst_valid_reg;
+    reg dst_ready_reg;
+
+    // Synchronizers for crossing domains
+    // src_valid to dst domain
+    reg [1:0] src_valid_sync;
+    // src_ready to dst domain
+    reg [1:0] src_ready_sync;
+    // dst_valid to src domain
+    reg [1:0] dst_valid_sync;
+    // dst_ready to src domain
+    reg [1:0] dst_ready_sync;
+
+    // Synchronize src_valid into dst domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_valid_sync <= 2'b00;
+        else
+            src_valid_sync <= {src_valid_sync[0], src_valid_reg};
+    end
+
+    // Synchronize src_ready into dst domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_ready_sync <= 2'b00;
+        else
+            src_ready_sync <= {src_ready_sync[0], src_ready_reg};
+    end
+
+    // Synchronize dst_valid into src domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_valid_sync <= 2'b00;
+        else
+            dst_valid_sync <= {dst_valid_sync[0], dst_valid_reg};
+    end
+
+    // Synchronize dst_ready into src domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ready_sync <= 2'b00;
+        else
+            dst_ready_sync <= {dst_ready_sync[0], dst_ready_reg};
+    end
+
+    // Source domain logic
+    // Four-phase handshake:
+    // Idle: valid=0, ready=0
+    // Request: valid=1, ready=0
+    // Acknowledge: valid=1, ready=1
+    // De-assert: valid=0, ready=1 -> back to idle
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_valid_reg <= 1'b0;
+            src_ready_reg <= 1'b0;
+        end else begin
+            // src_valid: assert when src_valid_i is high and we are not already in a transaction
+            // De-assert when dst_ready is high (acknowledged)
+            if (src_valid_reg) begin
+                // Currently valid, wait for dst_ready to de-assert
+                if (dst_ready_sync[1])
+                    src_valid_reg <= 1'b0;
+            end else begin
+                // Not valid, assert if src_valid_i is high
+                if (src_valid_i)
+                    src_valid_reg <= 1'b1;
+            end
+
+            // src_ready: assert when dst_valid is high (destination has data)
+            // De-assert when src_valid is de-asserted (transaction complete)
+            if (src_ready_reg) begin
+                // Currently ready, de-assert when src_valid goes low
+                if (!src_valid_reg)
+                    src_ready_reg <= 1'b0;
+            end else begin
+                // Not ready, assert if dst_valid is high
+                if (dst_valid_sync[1])
+                    src_ready_reg <= 1'b1;
+            end
+        end
+    end
+
+    // Destination domain logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_valid_reg <= 1'b0;
+            dst_ready_reg <= 1'b0;
+        end else begin
+            // dst_valid: assert when src_valid is high (source has data)
+            // De-assert when dst_ready_i is high (destination consumed)
+            if (dst_valid_reg) begin
+                // Currently valid, wait for dst_ready_i to de-assert
+                if (dst_ready_i)
+                    dst_valid_reg <= 1'b0;
+            end else begin
+                // Not valid, assert if src_valid is high
+                if (src_valid_sync[1])
+                    dst_valid_reg <= 1'b1;
+            end
+
+            // dst_ready: assert when src_ready is high (source is ready)
+            // De-assert when dst_valid is de-asserted (transaction complete)
+            if (dst_ready_reg) begin
+                // Currently ready, de-assert when dst_valid goes low
+                if (!dst_valid_reg)
+                    dst_ready_reg <= 1'b0;
+            end else begin
+                // Not ready, assert if src_ready is high
+                if (src_ready_sync[1])
+                    dst_ready_reg <= 1'b1;
+            end
+        end
+    end
+
+    assign src_ready_o = src_ready_reg;
+    assign dst_valid_o = dst_valid_reg;
+
+endmodule

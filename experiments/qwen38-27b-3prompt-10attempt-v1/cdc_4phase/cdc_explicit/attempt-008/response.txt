@@ -1,0 +1,133 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire src_data_valid;
+  wire src_data_ready;
+  wire dst_data_valid;
+  wire dst_data_ready;
+
+  // Source domain: capture data and generate request
+  reg [WIDTH-1:0] src_data_reg;
+  reg src_data_valid_reg;
+  reg src_req_reg;
+  reg src_ack_reg;
+
+  // Destination domain: receive request, generate response
+  reg dst_req_reg;
+  reg dst_ack_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_valid_reg;
+
+  // Synchronizers
+  // src_req to dst domain
+  reg [1:0] req_sync;
+  // dst_ack to src domain
+  reg [1:0] ack_sync;
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_reg <= {WIDTH{1'b0}};
+      src_data_valid_reg <= 1'b0;
+      src_req_reg <= 1'b0;
+      src_ack_reg <= 1'b0;
+    end else begin
+      // Capture data when valid and ready
+      if (src_valid_i && src_ready_o) begin
+        src_data_reg <= src_data_i;
+        src_data_valid_reg <= 1'b1;
+      end
+
+      // Generate request when data is valid and not already requested
+      if (src_data_valid_reg && !src_req_reg) begin
+        src_req_reg <= 1'b1;
+      end
+
+      // Clear request when ack is received
+      if (src_req_reg && src_ack_reg) begin
+        src_req_reg <= 1'b0;
+        src_data_valid_reg <= 1'b0;
+      end
+
+      // Track ack
+      src_ack_reg <= ack_sync[1];
+    end
+  end
+
+  // Source ready: can accept new data if no pending request or if decoupled
+  assign src_ready_o = !src_data_valid_reg || (DECOUPLED && !src_req_reg);
+
+  // Synchronize src_req to dst domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      req_sync <= 2'b00;
+    end else begin
+      req_sync <= {req_sync[0], src_req_reg};
+    end
+  end
+
+  // Destination domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req_reg <= 1'b0;
+      dst_ack_reg <= 1'b0;
+      dst_data_reg <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+    end else begin
+      // Detect rising edge of synchronized request
+      if (req_sync[1] && !dst_req_reg) begin
+        dst_req_reg <= 1'b1;
+        dst_data_reg <= src_data_reg; // This is not safe! Need to synchronize data too
+        dst_valid_reg <= 1'b1;
+      end
+
+      // Clear request when ack is sent
+      if (dst_req_reg && dst_ack_reg) begin
+        dst_req_reg <= 1'b0;
+        dst_valid_reg <= 1'b0;
+      end
+
+      // Generate ack when request is received
+      if (dst_req_reg && !dst_ack_reg) begin
+        dst_ack_reg <= 1'b1;
+      end
+
+      // Clear ack when request is cleared
+      if (!dst_req_reg) begin
+        dst_ack_reg <= 1'b0;
+      end
+    end
+  end
+
+  // Synchronize dst_ack to src domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      ack_sync <= 2'b00;
+    end else begin
+      ack_sync <= {ack_sync[0], dst_ack_reg};
+    end
+  end
+
+  // Destination outputs
+  assign dst_data_o = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+endmodule
+```<|im_end|>

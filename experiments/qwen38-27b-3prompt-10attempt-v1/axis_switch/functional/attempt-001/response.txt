@@ -1,0 +1,338 @@
+```verilog
+module axis_switch #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter S_ID_WIDTH = 8,
+    parameter M_ID_WIDTH = S_ID_WIDTH+$clog2(S_COUNT),
+    parameter M_DEST_WIDTH = 1,
+    parameter S_DEST_WIDTH = M_DEST_WIDTH+$clog2(M_COUNT),
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter M_BASE = 0,
+    parameter M_TOP = 0,
+    parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
+    parameter UPDATE_TID = 0,
+    parameter S_REG_TYPE = 0,
+    parameter M_REG_TYPE = 2,
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 1
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    /*
+     * AXI Stream inputs
+     */
+    input  wire [S_COUNT*DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [S_COUNT*KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire [S_COUNT-1:0]               s_axis_tvalid,
+    output wire [S_COUNT-1:0]               s_axis_tready,
+    input  wire [S_COUNT-1:0]               s_axis_tlast,
+    input  wire [S_COUNT*S_ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [S_COUNT*USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI Stream outputs
+     */
+    output wire [M_COUNT*DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [M_COUNT*KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire [M_COUNT-1:0]               m_axis_tvalid,
+    input  wire [M_COUNT-1:0]               m_axis_tready,
+    output wire [M_COUNT-1:0]               m_axis_tlast,
+    output wire [M_COUNT*M_ID_WIDTH-1:0]    m_axis_tid,
+    output wire [M_COUNT*M_DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [M_COUNT*USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    // Internal signals
+    wire [S_COUNT-1:0] s_tvalid_int;
+    wire [S_COUNT-1:0] s_tready_int;
+    wire [S_COUNT-1:0] s_tlast_int;
+    wire [S_COUNT*DATA_WIDTH-1:0] s_tdata_int;
+    wire [S_COUNT*KEEP_WIDTH-1:0] s_tkeep_int;
+    wire [S_COUNT*S_ID_WIDTH-1:0] s_tid_int;
+    wire [S_COUNT*S_DEST_WIDTH-1:0] s_tdest_int;
+    wire [S_COUNT*USER_WIDTH-1:0] s_tuser_int;
+
+    // Input register stage
+    if (S_REG_TYPE != 0) begin
+        reg [S_COUNT-1:0] s_tvalid_reg;
+        reg [S_COUNT-1:0] s_tlast_reg;
+        reg [S_COUNT*DATA_WIDTH-1:0] s_tdata_reg;
+        reg [S_COUNT*KEEP_WIDTH-1:0] s_tkeep_reg;
+        reg [S_COUNT*S_ID_WIDTH-1:0] s_tid_reg;
+        reg [S_COUNT*S_DEST_WIDTH-1:0] s_tdest_reg;
+        reg [S_COUNT*USER_WIDTH-1:0] s_tuser_reg;
+
+        integer i;
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                s_tvalid_reg <= {S_COUNT{1'b0}};
+                s_tlast_reg <= {S_COUNT{1'b0}};
+                s_tdata_reg <= {S_COUNT*DATA_WIDTH{1'b0}};
+                s_tkeep_reg <= {S_COUNT*KEEP_WIDTH{1'b0}};
+                s_tid_reg <= {S_COUNT*S_ID_WIDTH{1'b0}};
+                s_tdest_reg <= {S_COUNT*S_DEST_WIDTH{1'b0}};
+                s_tuser_reg <= {S_COUNT*USER_WIDTH{1'b0}};
+            end else begin
+                for (i = 0; i < S_COUNT; i = i + 1) begin
+                    if (s_axis_tvalid[i] && s_tready_int[i]) begin
+                        s_tvalid_reg[i] <= 1'b1;
+                        s_tlast_reg[i] <= s_axis_tlast[i];
+                        s_tdata_reg[i*DATA_WIDTH +: DATA_WIDTH] <= s_axis_tdata[i*DATA_WIDTH +: DATA_WIDTH];
+                        s_tkeep_reg[i*KEEP_WIDTH +: KEEP_WIDTH] <= s_axis_tkeep[i*KEEP_WIDTH +: KEEP_WIDTH];
+                        s_tid_reg[i*S_ID_WIDTH +: S_ID_WIDTH] <= s_axis_tid[i*S_ID_WIDTH +: S_ID_WIDTH];
+                        s_tdest_reg[i*S_DEST_WIDTH +: S_DEST_WIDTH] <= s_axis_tdest[i*S_DEST_WIDTH +: S_DEST_WIDTH];
+                        s_tuser_reg[i*USER_WIDTH +: USER_WIDTH] <= s_axis_tuser[i*USER_WIDTH +: USER_WIDTH];
+                    end else if (s_tvalid_reg[i] && s_tready_int[i]) begin
+                        s_tvalid_reg[i] <= 1'b0;
+                    end
+                end
+            end
+        end
+
+        assign s_tvalid_int = s_tvalid_reg;
+        assign s_tlast_int = s_tlast_reg;
+        assign s_tdata_int = s_tdata_reg;
+        assign s_tkeep_int = s_tkeep_reg;
+        assign s_tid_int = s_tid_reg;
+        assign s_tdest_int = s_tdest_reg;
+        assign s_tuser_int = s_tuser_reg;
+        assign s_axis_tready = s_tready_int;
+    end else begin
+        assign s_tvalid_int = s_axis_tvalid;
+        assign s_tlast_int = s_axis_tlast;
+        assign s_tdata_int = s_axis_tdata;
+        assign s_tkeep_int = s_axis_tkeep;
+        assign s_tid_int = s_axis_tid;
+        assign s_tdest_int = s_axis_tdest;
+        assign s_tuser_int = s_axis_tuser;
+        assign s_axis_tready = s_tready_int;
+    end
+
+    // Routing logic
+    // For each output m, determine which input s is routed to it
+    // M_CONNECT[m*S_COUNT +: S_COUNT] is a bitmask of which inputs can connect to output m
+    // We need to arbitrate among valid inputs that want to go to output m
+
+    // For each output, collect requests from inputs
+    // request[m][s] = s_tvalid_int[s] && (s_tdest_int[s*S_DEST_WIDTH +: S_DEST_WIDTH] == m) && M_CONNECT[m*S_COUNT + s]
+
+    wire [M_COUNT-1:0] m_tvalid_int;
+    wire [M_COUNT-1:0] m_tlast_int;
+    wire [M_COUNT*DATA_WIDTH-1:0] m_tdata_int;
+    wire [M_COUNT*KEEP_WIDTH-1:0] m_tkeep_int;
+    wire [M_COUNT*S_ID_WIDTH-1:0] m_tid_int;
+    wire [M_COUNT*S_DEST_WIDTH-1:0] m_tdest_int;
+    wire [M_COUNT*USER_WIDTH-1:0] m_tuser_int;
+
+    // Arbitration state for round-robin
+    reg [M_COUNT-1:0] arb_ptr;
+
+    integer m, s;
+
+    // Generate request signals for each output
+    // req[m] is a S_COUNT-bit vector where bit s is set if input s wants to go to output m
+    wire [M_COUNT*S_COUNT-1:0] req;
+
+    genvar gm;
+    generate
+        for (gm = 0; gm < M_COUNT; gm = gm + 1) begin : gen_req
+            genvar gs;
+            for (gs = 0; gs < S_COUNT; gs = gs + 1) begin : gen_req_s
+                assign req[gm*S_COUNT + gs] = s_tvalid_int[gs] && 
+                    (s_tdest_int[gs*S_DEST_WIDTH +: S_DEST_WIDTH] == gm) && 
+                    M_CONNECT[gm*S_COUNT + gs];
+            end
+        end
+    endgenerate
+
+    // Arbitration logic
+    // For each output, select one input based on arbitration type
+    wire [M_COUNT-1:0] m_grant_valid;
+    wire [M_COUNT*S_COUNT-1:0] m_grant;
+
+    genvar ga;
+    generate
+        for (ga = 0; ga < M_COUNT; ga = ga + 1) begin : gen_arb
+            wire [S_COUNT-1:0] req_m = req[ga*S_COUNT +: S_COUNT];
+            wire [S_COUNT-1:0] grant_m;
+            wire grant_valid_m;
+
+            if (ARB_TYPE_ROUND_ROBIN) begin
+                // Round-robin arbitration
+                // Rotate req_m by arb_ptr[ga] to implement round-robin
+                wire [S_COUNT-1:0] rotated_req;
+                wire [S_COUNT-1:0] rotated_grant;
+
+                // Simple round-robin: find the lowest set bit in rotated request
+                // We'll use a priority encoder with rotation
+                // For simplicity, we'll implement a basic round-robin using a pointer
+
+                // Rotate req_m left by arb_ptr[ga]
+                wire [2*S_COUNT-1:0] req_ext = {req_m, req_m};
+                wire [S_COUNT-1:0] rotated_req_m = req_ext[arb_ptr[ga] +: S_COUNT];
+
+                // Find lowest set bit
+                wire [S_COUNT-1:0] lowest_set;
+                genvar gl;
+                for (gl = 0; gl < S_COUNT; gl = gl + 1) begin : gen_lowest
+                    wire any_lower = (gl == 0) ? 1'b0 : (|rotated_req_m[gl-1:0]);
+                    assign lowest_set[gl] = rotated_req_m[gl] && !any_lower;
+                end
+
+                // Rotate back
+                wire [2*S_COUNT-1:0] lowest_ext = {lowest_set, lowest_set};
+                assign rotated_grant = lowest_ext[(S_COUNT - arb_ptr[ga]) +: S_COUNT];
+
+                assign grant_m = rotated_grant;
+                assign grant_valid_m = |req_m;
+            end else begin
+                // Fixed priority: LSB high priority
+                wire [S_COUNT-1:0] lowest_set;
+                genvar gf;
+                for (gf = 0; gf < S_COUNT; gf = gf + 1) begin : gen_fixed
+                    wire any_lower = (gf == 0) ? 1'b0 : (|req_m[gf-1:0]);
+                    assign lowest_set[gf] = req_m[gf] && !any_lower;
+                end
+                assign grant_m = lowest_set;
+                assign grant_valid_m = |req_m;
+            end
+
+            assign m_grant_valid[ga] = grant_valid_m;
+            assign m_grant[ga*S_COUNT +: S_COUNT] = grant_m;
+        end
+    endgenerate
+
+    // Update round-robin pointers
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            arb_ptr <= {M_COUNT{1'b0}};
+        end else begin
+            for (m = 0; m < M_COUNT; m = m + 1) begin
+                if (m_grant_valid[m] && m_axis_tready[m]) begin
+                    // Find the granted input and update pointer to next
+                    // The granted input is the one with set bit in m_grant[m*S_COUNT +: S_COUNT]
+                    // We want to set arb_ptr[m] to (granted_index + 1) % S_COUNT
+                    // But we need to find which bit is set
+                    // For simplicity, we'll just increment the pointer
+                    // A more accurate implementation would track the actual granted index
+                    arb_ptr[m] <= (arb_ptr[m] + 1'b1) % S_COUNT;
+                end
+            end
+        end
+    end
+
+    // Output muxing
+    // For each output m, select the data from the granted input
+    genvar go;
+    generate
+        for (go = 0; go < M_COUNT; go = go + 1) begin : gen_out
+            wire [S_COUNT-1:0] grant_m = m_grant[go*S_COUNT +: S_COUNT];
+            wire grant_valid_m = m_grant_valid[go];
+
+            // Mux data
+            wire [DATA_WIDTH-1:0] data_sel;
+            wire [KEEP_WIDTH-1:0] keep_sel;
+            wire [S_ID_WIDTH-1:0] tid_sel;
+            wire [S_DEST_WIDTH-1:0] tdest_sel;
+            wire [USER_WIDTH-1:0] tuser_sel;
+            wire tlast_sel;
+
+            genvar gs2;
+            for (gs2 = 0; gs2 < S_COUNT; gs2 = gs2 + 1) begin : gen_mux
+                if (grant_m[gs2]) begin
+                    assign data_sel = s_tdata_int[gs2*DATA_WIDTH +: DATA_WIDTH];
+                    assign keep_sel = s_tkeep_int[gs2*KEEP_WIDTH +: KEEP_WIDTH];
+                    assign tid_sel = s_tid_int[gs2*S_ID_WIDTH +: S_ID_WIDTH];
+                    assign tdest_sel = s_tdest_int[gs2*S_DEST_WIDTH +: S_DEST_WIDTH];
+                    assign tuser_sel = s_tuser_int[gs2*USER_WIDTH +: USER_WIDTH];
+                    assign tlast_sel = s_tlast_int[gs2];
+                end
+            end
+
+            assign m_tdata_int[go*DATA_WIDTH +: DATA_WIDTH] = data_sel;
+            assign m_tkeep_int[go*KEEP_WIDTH +: KEEP_WIDTH] = keep_sel;
+            assign m_tid_int[go*S_ID_WIDTH +: S_ID_WIDTH] = tid_sel;
+            assign m_tdest_int[go*S_DEST_WIDTH +: S_DEST_WIDTH] = tdest_sel;
+            assign m_tuser_int[go*USER_WIDTH +: USER_WIDTH] = tuser_sel;
+            assign m_tlast_int[go] = tlast_sel;
+            assign m_tvalid_int[go] = grant_valid_m;
+        end
+    endgenerate
+
+    // Input ready signals
+    // An input is ready if it is valid, its destination output is ready, and it is granted
+    genvar gi;
+    generate
+        for (gi = 0; gi < S_COUNT; gi = gi + 1) begin : gen_ready
+            wire [M_COUNT-1:0] dest_ready;
+            genvar gm2;
+            for (gm2 = 0; gm2 < M_COUNT; gm2 = gm2 + 1) begin : gen_dest_ready
+                assign dest_ready[gm2] = m_axis_tready[gm2] && m_grant[gm2*S_COUNT + gi];
+            end
+            assign s_tready_int[gi] = |dest_ready;
+        end
+    endgenerate
+
+    // Output register stage
+    if (M_REG_TYPE != 0) begin
+        reg [M_COUNT-1:0] m_tvalid_reg;
+        reg [M_COUNT-1:0] m_tlast_reg;
+        reg [M_COUNT*DATA_WIDTH-1:0] m_tdata_reg;
+        reg [M_COUNT*KEEP_WIDTH-1:0] m_tkeep_reg;
+        reg [M_COUNT*S_ID_WIDTH-1:0] m_tid_reg;
+        reg [M_COUNT*S_DEST_WIDTH-1:0] m_tdest_reg;
+        reg [M_COUNT*USER_WIDTH-1:0] m_tuser_reg;
+
+        integer j;
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                m_tvalid_reg <= {M_COUNT{1'b0}};
+                m_tlast_reg <= {M_COUNT{1'b0}};
+                m_tdata_reg <= {M_COUNT*DATA_WIDTH{1'b0}};
+                m_tkeep_reg <= {M_COUNT*KEEP_WIDTH{1'b0}};
+                m_tid_reg <= {M_COUNT*S_ID_WIDTH{1'b0}};
+                m_tdest_reg <= {M_COUNT*S_DEST_WIDTH{1'b0}};
+                m_tuser_reg <= {M_COUNT*USER_WIDTH{1'b0}};
+            end else begin
+                for (j = 0; j < M_COUNT; j = j + 1) begin
+                    if (m_tvalid_int[j] && m_axis_tready[j]) begin
+                        m_tvalid_reg[j] <= 1'b1;
+                        m_tlast_reg[j] <= m_tlast_int[j];
+                        m_tdata_reg[j*DATA_WIDTH +: DATA_WIDTH] <= m_tdata_int[j*DATA_WIDTH +: DATA_WIDTH];
+                        m_tkeep_reg[j*KEEP_WIDTH +: KEEP_WIDTH] <= m_tkeep_int[j*KEEP_WIDTH +: KEEP_WIDTH];
+                        m_tid_reg[j*S_ID_WIDTH +: S_ID_WIDTH] <= m_tid_int[j*S_ID_WIDTH +: S_ID_WIDTH];
+                        m_tdest_reg[j*S_DEST_WIDTH +: S_DEST_WIDTH] <= m_tdest_int[j*S_DEST_WIDTH +: S_DEST_WIDTH];
+                        m_tuser_reg[j*USER_WIDTH +: USER_WIDTH] <= m_tuser_int[j*USER_WIDTH +: USER_WIDTH];
+                    end else if (m_tvalid_reg[j] && m_axis_tready[j]) begin
+                        m_tvalid_reg[j] <= 1'b0;
+                    end
+                end
+            end
+        end
+
+        assign m_axis_tvalid = m_tvalid_reg;
+        assign m_axis_tlast = m_tlast_reg;
+        assign m_axis_tdata = m_tdata_reg;
+        assign m_axis_tkeep = m_tkeep_reg;
+        assign m_axis_tid = m_tid_reg;
+        assign m_axis_tdest = m_tdest_reg;
+        assign m_axis_tuser = m_tuser_reg;
+    end else begin
+        assign m_axis_tvalid = m_tvalid_int;
+        assign m_axis_tlast = m_tlast_int;
+        assign m_axis_tdata = m_tdata_int;
+        assign m_axis_tkeep = m_tkeep_int;
+        assign m_axis_tid = m_tid_int;
+        assign m_axis_tdest = m_tdest_int;
+        assign m_axis_tuser = m_tuser_int;
+    end
+
+endmodule
+```<|im_end|>

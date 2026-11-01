@@ -1,0 +1,354 @@
+```verilog
+module axis_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   pause_req,
+    output wire                   pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] status_depth,
+    output wire [$clog2(DEPTH):0] status_depth_commit,
+    output wire                   status_overflow,
+    output wire                   status_bad_frame,
+    output wire                   status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam DEPTH_MASK = DEPTH - 1;
+
+    // Internal signal widths
+    localparam KEEP_W = KEEP_ENABLE ? KEEP_WIDTH : 0;
+    localparam ID_W   = ID_ENABLE   ? ID_WIDTH   : 0;
+    localparam DEST_W = DEST_ENABLE ? DEST_WIDTH : 0;
+    localparam USER_W = USER_ENABLE ? USER_WIDTH : 0;
+
+    // RAM storage
+    reg [DATA_WIDTH-1:0] ram_data [0:DEPTH-1];
+    reg [KEEP_W-1:0]     ram_keep [0:DEPTH-1];
+    reg                  ram_last [0:DEPTH-1];
+    reg [ID_W-1:0]       ram_id   [0:DEPTH-1];
+    reg [DEST_W-1:0]     ram_dest [0:DEPTH-1];
+    reg [USER_W-1:0]     ram_user [0:DEPTH-1];
+
+    // Pointers
+    reg [ADDR_WIDTH:0] wr_ptr;
+    reg [ADDR_WIDTH:0] rd_ptr;
+
+    // Control signals
+    wire wr_en;
+    wire rd_en;
+    wire full;
+    wire empty;
+
+    // Frame tracking
+    reg in_frame;
+    reg frame_bad;
+    reg frame_oversize;
+    reg [ADDR_WIDTH:0] frame_count;
+
+    // Pause logic
+    reg pause_active;
+    reg pause_at_frame_end;
+
+    // Status latches
+    reg status_overflow_reg;
+    reg status_bad_frame_reg;
+    reg status_good_frame_reg;
+
+    // Output registers
+    reg [DATA_WIDTH-1:0] out_data;
+    reg [KEEP_W-1:0]     out_keep;
+    reg                  out_last;
+    reg [ID_W-1:0]       out_id;
+    reg [DEST_W-1:0]     out_dest;
+    reg [USER_W-1:0]     out_user;
+    reg                  out_valid;
+
+    // Pipeline registers for RAM read
+    reg [ADDR_WIDTH:0] rd_ptr_pipe;
+    reg [DATA_WIDTH-1:0] pipe_data;
+    reg [KEEP_W-1:0]     pipe_keep;
+    reg                  pipe_last;
+    reg [ID_W-1:0]       pipe_id;
+    reg [DEST_W-1:0]     pipe_dest;
+    reg [USER_W-1:0]     pipe_user;
+    reg                  pipe_valid;
+
+    // Depth calculation
+    wire [$clog2(DEPTH):0] depth = wr_ptr - rd_ptr;
+    wire [$clog2(DEPTH):0] depth_commit = wr_ptr - rd_ptr;
+
+    // Full and empty
+    assign full  = (wr_ptr[ADDR_WIDTH] != rd_ptr[ADDR_WIDTH]) && 
+                   (wr_ptr[ADDR_WIDTH-1:0] == rd_ptr[ADDR_WIDTH-1:0]);
+    assign empty = (wr_ptr == rd_ptr);
+
+    // Write address
+    wire [ADDR_WIDTH-1:0] wr_addr = wr_ptr[ADDR_WIDTH-1:0];
+    wire [ADDR_WIDTH-1:0] rd_addr = rd_ptr[ADDR_WIDTH-1:0];
+
+    // Read address for pipeline
+    wire [ADDR_WIDTH-1:0] rd_addr_pipe = rd_ptr_pipe[ADDR_WIDTH-1:0];
+
+    // Handshake
+    wire s_axis_tready_internal;
+    wire m_axis_tready_internal;
+
+    // Determine if we can accept new data
+    wire can_write = !full && !pause_active;
+    
+    // Frame oversize check
+    wire frame_oversize_check = FRAME_FIFO && in_frame && (frame_count >= DEPTH[$clog2(DEPTH):0]);
+
+    // Bad frame detection
+    wire bad_frame_check = USER_ENABLE && (s_axis_tuser & USER_BAD_FRAME_MASK) == USER_BAD_FRAME_VALUE;
+
+    // Write enable logic
+    wire do_write = s_axis_tvalid && s_axis_tready_internal;
+
+    // Drop logic
+    wire drop_oversize = DROP_OVERSIZE_FRAME && in_frame && frame_oversize_check;
+    wire drop_bad = DROP_BAD_FRAME && bad_frame_check;
+    wire drop_when_full = DROP_WHEN_FULL && full;
+    wire mark_when_full = MARK_WHEN_FULL && full;
+
+    // Should we actually write to RAM?
+    wire write_to_ram = do_write && !drop_oversize && !drop_bad && !drop_when_full;
+
+    // Assign s_axis_tready
+    assign s_axis_tready = s_axis_tready_internal;
+
+    // Determine s_axis_tready_internal
+    // If dropping, we still accept to consume the data
+    // If not dropping, we need space
+    assign s_axis_tready_internal = !full && !pause_active;
+
+    // Read enable
+    assign rd_en = m_axis_tvalid && m_axis_tready;
+
+    // Output valid
+    assign m_axis_tvalid = out_valid;
+
+    // Output data
+    assign m_axis_tdata = out_data;
+    assign m_axis_tkeep = out_keep;
+    assign m_axis_tlast = out_last;
+    assign m_axis_tid   = out_id;
+    assign m_axis_tdest = out_dest;
+    assign m_axis_tuser = out_user;
+
+    // Pause
+    assign pause_ack = pause_active;
+
+    // Status
+    assign status_depth = depth;
+    assign status_depth_commit = depth_commit;
+    assign status_overflow = status_overflow_reg;
+    assign status_bad_frame = status_bad_frame_reg;
+    assign status_good_frame = status_good_frame_reg;
+
+    // RAM write
+    always @(posedge clk) begin
+        if (rst) begin
+            wr_ptr <= 0;
+            rd_ptr <= 0;
+            in_frame <= 0;
+            frame_bad <= 0;
+            frame_oversize <= 0;
+            frame_count <= 0;
+            pause_active <= 0;
+            pause_at_frame_end <= 0;
+            status_overflow_reg <= 0;
+            status_bad_frame_reg <= 0;
+            status_good_frame_reg <= 0;
+            out_data <= 0;
+            out_keep <= 0;
+            out_last <= 0;
+            out_id <= 0;
+            out_dest <= 0;
+            out_user <= 0;
+            out_valid <= 0;
+            rd_ptr_pipe <= 0;
+            pipe_data <= 0;
+            pipe_keep <= 0;
+            pipe_last <= 0;
+            pipe_id <= 0;
+            pipe_dest <= 0;
+            pipe_user <= 0;
+            pipe_valid <= 0;
+        end else begin
+            // Handle pause
+            if (PAUSE_ENABLE) begin
+                if (pause_req && !pause_active) begin
+                    pause_active <= 1;
+                    if (FRAME_PAUSE) begin
+                        pause_at_frame_end <= 1;
+                    end else begin
+                        pause_at_frame_end <= 0;
+                    end
+                end else if (!pause_req && pause_active) begin
+                    if (!FRAME_PAUSE || !in_frame || s_axis_tlast) begin
+                        pause_active <= 0;
+                        pause_at_frame_end <= 0;
+                    end
+                end
+            end
+
+            // Write to RAM
+            if (write_to_ram) begin
+                ram_data[wr_addr] <= s_axis_tdata;
+                if (KEEP_ENABLE) ram_keep[wr_addr] <= s_axis_tkeep;
+                if (LAST_ENABLE) ram_last[wr_addr] <= s_axis_tlast;
+                if (ID_ENABLE)   ram_id[wr_addr]   <= s_axis_tid;
+                if (DEST_ENABLE) ram_dest[wr_addr] <= s_axis_tdest;
+                if (USER_ENABLE) ram_user[wr_addr] <= s_axis_tuser;
+            end
+
+            // Update write pointer
+            if (do_write) begin
+                wr_ptr <= wr_ptr + 1;
+            end
+
+            // Frame tracking
+            if (do_write) begin
+                if (!in_frame) begin
+                    in_frame <= 1;
+                    frame_count <= 1;
+                    frame_bad <= 0;
+                    frame_oversize <= 0;
+                end else begin
+                    frame_count <= frame_count + 1;
+                    if (FRAME_FIFO && frame_count >= DEPTH[$clog2(DEPTH):0]) begin
+                        frame_oversize <= 1;
+                    end
+                    if (USER_ENABLE && bad_frame_check) begin
+                        frame_bad <= 1;
+                    end
+                end
+
+                if (s_axis_tlast) begin
+                    // Frame complete
+                    if (frame_bad || (DROP_OVERSIZE_FRAME && frame_oversize)) begin
+                        status_bad_frame_reg <= 1;
+                    end else begin
+                        status_good_frame_reg <= 1;
+                    end
+                    in_frame <= 0;
+                    frame_count <= 0;
+                    frame_bad <= 0;
+                    frame_oversize <= 0;
+                end
+            end
+
+            // Overflow detection
+            if (s_axis_tvalid && !s_axis_tready) begin
+                status_overflow_reg <= 1;
+            end
+
+            // Read from RAM (pipeline)
+            if (RAM_PIPELINE) begin
+                // Pipeline stage 1: read address
+                if (!empty) begin
+                    rd_ptr_pipe <= rd_ptr;
+                    pipe_data <= ram_data[rd_addr];
+                    if (KEEP_ENABLE) pipe_keep <= ram_keep[rd_addr];
+                    if (LAST_ENABLE) pipe_last <= ram_last[rd_addr];
+                    if (ID_ENABLE)   pipe_id   <= ram_id[rd_addr];
+                    if (DEST_ENABLE) pipe_dest  <= ram_dest[rd_addr];
+                    if (USER_ENABLE) pipe_user  <= ram_user[rd_addr];
+                    pipe_valid <= 1;
+                end else begin
+                    pipe_valid <= 0;
+                end
+
+                // Pipeline stage 2: output
+                if (pipe_valid) begin
+                    out_data <= pipe_data;
+                    out_keep <= pipe_keep;
+                    out_last <= pipe_last;
+                    out_id   <= pipe_id;
+                    out_dest <= pipe_dest;
+                    out_user <= pipe_user;
+                    out_valid <= 1;
+                end else begin
+                    out_valid <= 0;
+                end
+
+                // Update read pointer
+                if (rd_en) begin
+                    rd_ptr <= rd_ptr + 1;
+                end
+            end else begin
+                // No pipeline
+                if (!empty) begin
+                    out_data <= ram_data[rd_addr];
+                    if (KEEP_ENABLE) out_keep <= ram_keep[rd_addr];
+                    if (LAST_ENABLE) out_last <= ram_last[rd_addr];
+                    if (ID_ENABLE)   out_id   <= ram_id[rd_addr];
+                    if (DEST_ENABLE) out_dest <= ram_dest[rd_addr];
+                    if (USER_ENABLE) out_user <= ram_user[rd_addr];
+                    out_valid <= 1;
+                end else begin
+                    out_valid <= 0;
+                end
+
+                if (rd_en) begin
+                    rd_ptr <= rd_ptr + 1;
+                end
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

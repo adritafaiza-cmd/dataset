@@ -1,0 +1,125 @@
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWFULL_THRESH = DEPTH - 2;
+    localparam AEMPTY_THRESH = 1;
+
+    // Write pointer (binary)
+    reg [ASIZE:0] wptr;
+    // Read pointer (binary)
+    reg [ASIZE:0] rptr;
+
+    // Gray code pointers
+    wire [ASIZE:0] wptr_gray = wptr ^ {1'b0, wptr[ASIZE:0-1:0]};
+    wire [ASIZE:0] rptr_gray = rptr ^ {1'b0, rptr[ASIZE:0-1:0]};
+
+    // Synchronizers
+    reg [ASIZE:0] rptr_gray_sync1, rptr_gray_sync2;
+    reg [ASIZE:0] wptr_gray_sync1, wptr_gray_sync2;
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_sync1 <= {(ASIZE+1){1'b0}};
+            rptr_gray_sync2 <= {(ASIZE+1){1'b0}};
+        end else begin
+            rptr_gray_sync1 <= rptr_gray;
+            rptr_gray_sync2 <= rptr_gray_sync1;
+        end
+    end
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_gray_sync1 <= {(ASIZE+1){1'b0}};
+            wptr_gray_sync2 <= {(ASIZE+1){1'b0}};
+        end else begin
+            wptr_gray_sync1 <= wptr_gray;
+            wptr_gray_sync2 <= wptr_gray_sync1;
+        end
+    end
+
+    // Convert gray to binary for comparison
+    function [ASIZE:0] gray2bin;
+        input [ASIZE:0] gray;
+        integer i;
+        begin
+            gray2bin[ASIZE] = gray[ASIZE];
+            for (i = ASIZE-1; i >= 0; i = i-1)
+                gray2bin[i] = gray2bin[i+1] ^ gray[i];
+        end
+    endfunction
+
+    wire [ASIZE:0] rptr_gray_sync2_bin = gray2bin(rptr_gray_sync2);
+    wire [ASIZE:0] wptr_gray_sync2_bin = gray2bin(wptr_gray_sync2);
+
+    // Write domain: full and almost full
+    wire wfull_internal = (wptr[ASIZE] != rptr_gray_sync2_bin[ASIZE]) &&
+                          (wptr[ASIZE-1:0] == rptr_gray_sync2_bin[ASIZE-1:0]);
+    wire awfull_internal = (wptr[ASIZE-1:0] - rptr_gray_sync2_bin[ASIZE-1:0] == AWFULL_THRESH[ASIZE-1:0]) &&
+                           (wptr[ASIZE] == rptr_gray_sync2_bin[ASIZE]);
+
+    // Read domain: empty and almost empty
+    wire rempty_internal = (rptr == wptr_gray_sync2_bin);
+    wire arempty_internal = (wptr_gray_sync2_bin[ASIZE-1:0] - rptr[ASIZE-1:0] == AEMPTY_THRESH[ASIZE-1:0]) &&
+                            (wptr_gray_sync2_bin[ASIZE] == rptr[ASIZE]);
+
+    // Memory
+    reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+    // Write logic
+    wire winc_eff = winc & ~wfull_internal;
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            wptr <= {(ASIZE+1){1'b0}};
+        else if (winc_eff)
+            wptr <= wptr + 1'b1;
+    end
+
+    always @(posedge wclk) begin
+        if (winc_eff)
+            mem[wptr[ASIZE-1:0]] <= wdata;
+    end
+
+    // Read logic
+    wire rinc_eff = rinc & ~rempty_internal;
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rptr <= {(ASIZE+1){1'b0}};
+        else if (rinc_eff)
+            rptr <= rptr + 1'b1;
+    end
+
+    // Read data
+    reg [DSIZE-1:0] rdata_reg;
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rdata_reg <= {DSIZE{1'b0}};
+        else if (rinc_eff)
+            rdata_reg <= mem[rptr[ASIZE-1:0]];
+    end
+
+    assign rdata = (FALLTHROUGH == "TRUE") ? mem[rptr[ASIZE-1:0]] : rdata_reg;
+
+    assign wfull   = wfull_internal;
+    assign awfull  = awfull_internal;
+    assign rempty  = rempty_internal;
+    assign arempty = arempty_internal;
+
+endmodule

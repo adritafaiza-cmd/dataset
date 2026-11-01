@@ -1,0 +1,270 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam NUM_PORTS = PORTS;
+    localparam ENC_WIDTH = $clog2(PORTS);
+
+    reg [NUM_PORTS-1:0] grant_reg;
+    reg [ENC_WIDTH-1:0] grant_enc_reg;
+    reg                 grant_valid_reg;
+
+    // For round-robin, we need to track the last granted port
+    reg [ENC_WIDTH-1:0] last_grant_reg;
+
+    // Internal signals for arbitration
+    wire [NUM_PORTS-1:0] active_request;
+    wire [NUM_PORTS-1:0] rotated_request;
+    wire [NUM_PORTS-1:0] priority_grant;
+    wire [NUM_PORTS-1:0] final_grant;
+    wire [ENC_WIDTH-1:0] final_grant_enc;
+    wire                 final_grant_valid;
+
+    // Determine if we should block
+    wire block_active;
+    wire block_release;
+
+    // For fixed priority, we need to handle LSB high priority
+    // If ARB_LSB_HIGH_PRIORITY is 1, lower index has higher priority
+    // If ARB_LSB_HIGH_PRIORITY is 0, higher index has higher priority
+
+    // Function to find the first set bit from LSB (lowest index)
+    // This gives us the lowest index with a request
+    function [NUM_PORTS-1:0] find_lsb;
+        input [NUM_PORTS-1:0] req;
+        integer i;
+        begin
+            find_lsb = {NUM_PORTS{1'b0}};
+            for (i = 0; i < NUM_PORTS; i = i + 1) begin
+                if (req[i] && find_lsb == {NUM_PORTS{1'b0}}) begin
+                    find_lsb[i] = 1'b1;
+                end
+            end
+        end
+    endfunction
+
+    // Function to find the first set bit from MSB (highest index)
+    function [NUM_PORTS-1:0] find_msb;
+        input [NUM_PORTS-1:0] req;
+        integer i;
+        begin
+            find_msb = {NUM_PORTS{1'b0}};
+            for (i = NUM_PORTS-1; i >= 0; i = i - 1) begin
+                if (req[i] && find_msb == {NUM_PORTS{1'b0}}) begin
+                    find_msb[i] = 1'b1;
+                end
+            end
+        end
+    endfunction
+
+    // For round-robin, we rotate the request vector so that the port after
+    // the last grant becomes the highest priority
+    // We need to create a rotated version of the request
+
+    // Generate rotated request for round-robin
+    // The idea: shift the request vector so that the bit after last_grant is at position 0
+    // Then find the first set bit in the rotated vector, and map back to original index
+
+    wire [NUM_PORTS-1:0] rr_rotated_req;
+    wire [ENC_WIDTH-1:0] rr_offset;
+    wire [ENC_WIDTH-1:0] rr_grant_idx;
+    wire [NUM_PORTS-1:0] rr_grant;
+
+    assign rr_offset = last_grant_reg + 1'b1;
+
+    // Rotate request: rr_rotated_req[i] = request[(i + rr_offset) % NUM_PORTS]
+    genvar gi;
+    generate
+        for (gi = 0; gi < NUM_PORTS; gi = gi + 1) begin : gen_rr_rot
+            assign rr_rotated_req[gi] = request[(gi + rr_offset) % NUM_PORTS];
+        end
+    endgenerate
+
+    // Find first set bit in rotated request (LSB first)
+    wire [NUM_PORTS-1:0] rr_first_set = find_lsb(rr_rotated_req);
+
+    // Find the index of the first set bit in rr_first_set
+    // We need to find which bit is set in rr_first_set
+    wire [ENC_WIDTH-1:0] rr_first_idx;
+    genvar gj;
+    generate
+        for (gj = 0; gj < NUM_PORTS; gj = gj + 1) begin : gen_rr_idx
+            assign rr_first_idx[gj] = rr_first_set[gj];
+        end
+    endgenerate
+
+    // Actually, let's use a proper encoder
+    // Find the index of the set bit in rr_first_set
+    wire [ENC_WIDTH-1:0] rr_first_bit_idx;
+    reg [ENC_WIDTH-1:0] rr_first_bit_idx_reg;
+    always @(*) begin
+        rr_first_bit_idx_reg = {ENC_WIDTH{1'b0}};
+        for (integer k = 0; k < NUM_PORTS; k = k + 1) begin
+            if (rr_first_set[k]) begin
+                rr_first_bit_idx_reg = k[ENC_WIDTH-1:0];
+            end
+        end
+    end
+    assign rr_first_bit_idx = rr_first_bit_idx_reg;
+
+    // The actual grant index is (rr_first_bit_idx + rr_offset) % NUM_PORTS
+    wire [ENC_WIDTH:0] rr_sum = rr_first_bit_idx + rr_offset;
+    wire [ENC_WIDTH-1:0] rr_grant_idx_val = rr_sum[ENC_WIDTH-1:0];
+    wire rr_wrap = rr_sum[ENC_WIDTH];
+    wire [ENC_WIDTH-1:0] rr_final_idx = rr_wrap ? (rr_sum[ENC_WIDTH-1:0] - NUM_PORTS[ENC_WIDTH-1:0]) : rr_sum[ENC_WIDTH-1:0];
+
+    // Hmm, this is getting complicated. Let me use a different approach.
+    // For round-robin, we can use a priority encoder on the rotated request
+    // and then map back.
+
+    // Let me simplify: use a combinational approach for both fixed and round-robin
+
+    // For fixed priority:
+    // If ARB_LSB_HIGH_PRIORITY, lower index wins
+    // Otherwise, higher index wins
+
+    wire [NUM_PORTS-1:0] fixed_grant;
+    wire [ENC_WIDTH-1:0] fixed_grant_enc;
+    wire                 fixed_grant_valid;
+
+    // Fixed priority grant
+    // If ARB_LSB_HIGH_PRIORITY, find lowest index with request
+    // Otherwise, find highest index with request
+    wire [NUM_PORTS-1:0] fixed_grant_lsb = find_lsb(request);
+    wire [NUM_PORTS-1:0] fixed_grant_msb = find_msb(request);
+
+    assign fixed_grant = ARB_LSB_HIGH_PRIORITY ? fixed_grant_lsb : fixed_grant_msb;
+
+    // Encode fixed grant
+    reg [ENC_WIDTH-1:0] fixed_grant_enc_reg;
+    always @(*) begin
+        fixed_grant_enc_reg = {ENC_WIDTH{1'b0}};
+        for (integer k = 0; k < NUM_PORTS; k = k + 1) begin
+            if (fixed_grant[k]) begin
+                fixed_grant_enc_reg = k[ENC_WIDTH-1:0];
+            end
+        end
+    end
+    assign fixed_grant_enc = fixed_grant_enc_reg;
+    assign fixed_grant_valid = |fixed_grant;
+
+    // For round-robin, we need a different approach
+    // Let's use a priority encoder that considers the rotation
+
+    // Actually, let me use a simpler approach for round-robin:
+    // Create a mask where bits from last_grant+1 to end have higher priority
+    // and bits from 0 to last_grant have lower priority
+    // Then use a two-stage priority encoder
+
+    wire [NUM_PORTS-1:0] rr_high_priority_req;
+    wire [NUM_PORTS-1:0] rr_low_priority_req;
+
+    genvar gh;
+    generate
+        for (gh = 0; gh < NUM_PORTS; gh = gh + 1) begin : gen_rr_mask
+            // If gh > last_grant_reg, it's in the high priority group
+            // If gh <= last_grant_reg, it's in the low priority group
+            // But we need to handle wrap-around
+            // Actually, for round-robin, the priority order is:
+            // (last_grant+1), (last_grant+2), ..., (NUM_PORTS-1), 0, 1, ..., last_grant
+            // So high priority: indices > last_grant_reg
+            // Low priority: indices <= last_grant_reg
+            assign rr_high_priority_req[gh] = request[gh] & (gh > last_grant_reg);
+            assign rr_low_priority_req[gh]  = request[gh] & (gh <= last_grant_reg);
+        end
+    endgenerate
+
+    // Find grant in high priority group (LSB first, so lowest index wins)
+    wire [NUM_PORTS-1:0] rr_high_grant = find_lsb(rr_high_priority_req);
+    wire [NUM_PORTS-1:0] rr_low_grant  = find_lsb(rr_low_priority_req);
+
+    // If high priority group has a grant, use it; otherwise use low priority group
+    wire rr_use_high = |rr_high_grant;
+    wire [NUM_PORTS-1:0] rr_grant_comb = rr_use_high ? rr_high_grant : rr_low_grant;
+
+    // Encode rr_grant_comb
+    reg [ENC_WIDTH-1:0] rr_grant_enc_reg;
+    always @(*) begin
+        rr_grant_enc_reg = {ENC_WIDTH{1'b0}};
+        for (integer k = 0; k < NUM_PORTS; k = k + 1) begin
+            if (rr_grant_comb[k]) begin
+                rr_grant_enc_reg = k[ENC_WIDTH-1:0];
+            end
+        end
+    end
+
+    wire rr_grant_valid_comb = |rr_grant_comb;
+
+    // Select between fixed and round-robin
+    wire [NUM_PORTS-1:0] arb_grant = ARB_TYPE_ROUND_ROBIN ? rr_grant_comb : fixed_grant;
+    wire [ENC_WIDTH-1:0] arb_grant_enc = ARB_TYPE_ROUND_ROBIN ? rr_grant_enc_reg : fixed_grant_enc;
+    wire arb_grant_valid = ARB_TYPE_ROUND_ROBIN ? rr_grant_valid_comb : fixed_grant_valid;
+
+    // Block logic
+    // When ARB_BLOCK is set, hold the grant until:
+    // - If ARB_BLOCK_ACK is nonzero: until acknowledge is received
+    // - If ARB_BLOCK_ACK is zero: until request drops
+
+    wire block_hold;
+    wire block_release_ack;
+    wire block_release_req;
+
+    // Check if current grant is being acknowledged
+    wire ack_match = (grant_reg & acknowledge) != 0;
+
+    // Check if current grant's request is still active
+    wire req_match = (grant_reg & request) != 0;
+
+    assign block_hold = ARB_BLOCK && grant_valid_reg;
+    assign block_release_ack = ARB_BLOCK_ACK && ack_match;
+    assign block_release_req = !ARB_BLOCK_ACK && !req_match;
+
+    // If blocking and not released, hold the grant
+    // Otherwise, use the new arbitration result
+    wire use_new_arb = !block_hold || block_release_ack || block_release_req;
+
+    // Update logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            grant_reg <= {NUM_PORTS{1'b0}};
+            grant_enc_reg <= {ENC_WIDTH{1'b0}};
+            grant_valid_reg <= 1'b0;
+            last_grant_reg <= {ENC_WIDTH{1'b0}};
+        end else begin
+            if (use_new_arb) begin
+                grant_reg <= arb_grant;
+                grant_enc_reg <= arb_grant_enc;
+                grant_valid_reg <= arb_grant_valid;
+                if (arb_grant_valid) begin
+                    last_grant_reg <= arb_grant_enc;
+                end
+            end else begin
+                // Hold current grant
+                grant_reg <= grant_reg;
+                grant_enc_reg <= grant_enc_reg;
+                grant_valid_reg <= grant_valid_reg;
+            end
+        end
+    end
+
+    assign grant = grant_reg;
+    assign grant_encoded = grant_enc_reg;
+    assign grant_valid = grant_valid_reg;
+
+endmodule
+```<|im_end|>

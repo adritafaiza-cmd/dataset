@@ -1,0 +1,198 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // SPI clock divider
+    localparam SPI_CLK_DIV = SPI_2X_CLK_DIV;
+    reg [3:0] spi_clk_div_cnt;
+    wire spi_clk_en;
+    wire spi_clk;
+
+    // SPI state machine
+    localparam SPI_IDLE = 2'd0;
+    localparam SPI_TX   = 2'd1;
+    localparam SPI_RX   = 2'd2;
+    reg [1:0] spi_state;
+    reg [N-1:0] spi_tx_data;
+    reg [N-1:0] spi_rx_data;
+    reg [3:0] spi_bit_cnt;
+
+    // Parallel side FIFO
+    localparam FIFO_DEPTH = 4;
+    localparam FIFO_ADDR_WIDTH = 2;
+    reg [N-1:0] fifo_mem [0:FIFO_DEPTH-1];
+    reg [FIFO_ADDR_WIDTH:0] fifo_wr_ptr;
+    reg [FIFO_ADDR_WIDTH:0] fifo_rd_ptr;
+    wire fifo_empty = (fifo_wr_ptr == fifo_rd_ptr);
+    wire fifo_full  = (fifo_wr_ptr[FIFO_ADDR_WIDTH] != fifo_rd_ptr[FIFO_ADDR_WIDTH]) &&
+                      (fifo_wr_ptr[FIFO_ADDR_WIDTH-1:0] == fifo_rd_ptr[FIFO_ADDR_WIDTH-1:0]);
+
+    // Clock domain crossing for FIFO pointers
+    reg [FIFO_ADDR_WIDTH:0] fifo_wr_ptr_sync1, fifo_wr_ptr_sync2;
+    reg [FIFO_ADDR_WIDTH:0] fifo_rd_ptr_sync1, fifo_rd_ptr_sync2;
+
+    // Parallel side signals
+    reg di_req_reg;
+    reg wr_ack_reg;
+    reg do_valid_reg;
+    reg [N-1:0] do_reg;
+
+    // SPI clock generation
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_clk_div_cnt <= 0;
+        end else begin
+            spi_clk_div_cnt <= spi_clk_div_cnt + 1;
+        end
+    end
+
+    assign spi_clk_en = (spi_clk_div_cnt == SPI_CLK_DIV - 1);
+    assign spi_clk = spi_clk_div_cnt[0];
+
+    // SPI state machine
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_state     <= SPI_IDLE;
+            spi_ssel_o    <= 1'b1;
+            spi_sck_o     <= 1'b0;
+            spi_tx_data   <= {N{1'b0}};
+            spi_rx_data   <= {N{1'b0}};
+            spi_bit_cnt   <= 0;
+        end else if (spi_clk_en) begin
+            case (spi_state)
+                SPI_IDLE: begin
+                    if (!fifo_empty) begin
+                        spi_state   <= SPI_TX;
+                        spi_ssel_o  <= 1'b0;
+                        spi_bit_cnt <= 0;
+                        spi_tx_data <= fifo_mem[fifo_rd_ptr[FIFO_ADDR_WIDTH-1:0]];
+                        spi_rx_data <= {N{1'b0}};
+                    end
+                end
+                SPI_TX: begin
+                    if (spi_clk) begin
+                        // Shift out MSB, shift in MISO
+                        spi_tx_data <= {spi_tx_data[N-2:0], 1'b0};
+                        spi_rx_data <= {spi_rx_data[N-2:0], spi_miso_i};
+                        if (spi_bit_cnt == N-1) begin
+                            spi_state <= SPI_RX;
+                        end else begin
+                            spi_bit_cnt <= spi_bit_cnt + 1;
+                        end
+                    end
+                end
+                SPI_RX: begin
+                    // Deassert SSEL, go back to idle
+                    spi_ssel_o  <= 1'b1;
+                    spi_state   <= SPI_IDLE;
+                end
+                default: begin
+                    spi_state <= SPI_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // MOSI output
+    assign spi_mosi_o = spi_tx_data[N-1];
+
+    // SCK output
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_sck_o <= 1'b0;
+        end else if (spi_clk_en) begin
+            if (spi_state == SPI_TX) begin
+                spi_sck_o <= spi_clk;
+            end else begin
+                spi_sck_o <= 1'b0;
+            end
+        end
+    end
+
+    // Parallel side: FIFO write (accept new word)
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_o   <= 1'b0;
+            wr_ack_o   <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o       <= {N{1'b0}};
+            fifo_wr_ptr <= 0;
+            fifo_rd_ptr <= 0;
+        end else begin
+            // Accept new word if wren_i and FIFO not full
+            if (wren_i && !fifo_full) begin
+                fifo_mem[fifo_wr_ptr[FIFO_ADDR_WIDTH-1:0]] <= di_i;
+                fifo_wr_ptr <= fifo_wr_ptr + 1;
+                wr_ack_o <= 1'b1;
+            end else begin
+                wr_ack_o <= 1'b0;
+            end
+
+            // di_req_o: indicate that we can accept a new word
+            di_req_o <= !fifo_full;
+
+            // Output valid when SPI completes a transfer
+            // We need to detect when SPI state transitions from RX to IDLE
+            // This requires crossing from sclk domain to pclk domain
+        end
+    end
+
+    // Clock domain crossing for SPI completion signal
+    reg spi_done_sclk;
+    reg spi_done_sync1, spi_done_sync2;
+    reg spi_done_prev;
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_done_sclk <= 1'b0;
+        end else begin
+            spi_done_sclk <= (spi_state == SPI_RX);
+        end
+    end
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_done_sync1 <= 1'b0;
+            spi_done_sync2 <= 1'b0;
+            spi_done_prev  <= 1'b0;
+        end else begin
+            spi_done_sync1 <= spi_done_sclk;
+            spi_done_sync2 <= spi_done_sync1;
+            spi_done_prev  <= spi_done_sync2;
+        end
+    end
+
+    // Detect rising edge of spi_done in pclk domain
+    wire spi_done_pulse = spi_done_sync2 && !spi_done_prev;
+
+    // Output data when SPI completes
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            do_valid_o <= 1'b0;
+            do_o       <= {N{1'b0}};
+        end else begin
+            if (spi_done_pulse) begin
+                do_valid_o <= 1'b1;
+                do_o       <= spi_rx_data;
+            end else begin
+                do_valid_o <= 1'b0;
+            end
+        end
+    end
+
+endmodule

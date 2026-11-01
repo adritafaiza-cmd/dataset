@@ -1,0 +1,246 @@
+```verilog
+module axis_adapter #
+(
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    /*
+     * AXI input
+     */
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    // Calculate bytes per beat
+    localparam S_BYTES = (S_DATA_WIDTH + 7) / 8;
+    localparam M_BYTES = (M_DATA_WIDTH + 7) / 8;
+    
+    // Determine if we need to pack or unpack
+    // If S_DATA_WIDTH > M_DATA_WIDTH, we need to split (unpack)
+    // If S_DATA_WIDTH < M_DATA_WIDTH, we need to combine (pack)
+    // If equal, direct pass-through
+    
+    // For simplicity and correctness, we'll handle the general case using a byte-level buffer approach.
+    // However, for a single-clock domain, we can use a simpler state machine.
+    
+    // Let's define the ratio
+    // If S_DATA_WIDTH is a multiple of M_DATA_WIDTH, we can split
+    // If M_DATA_WIDTH is a multiple of S_DATA_WIDTH, we can pack
+    
+    // General approach: Use a shift register / byte buffer
+    // We'll accumulate bytes from the source and emit bytes to the destination.
+    
+    // Number of bytes to buffer
+    localparam MAX_BYTES = (S_DATA_WIDTH > M_DATA_WIDTH) ? S_DATA_WIDTH/8 : M_DATA_WIDTH/8;
+    
+    // We'll use a byte-level FIFO-like structure
+    // Actually, for a width converter, the simplest robust approach is:
+    // 1. If S_DATA_WIDTH == M_DATA_WIDTH: direct connection
+    // 2. If S_DATA_WIDTH > M_DATA_WIDTH: split each S beat into multiple M beats
+    // 3. If S_DATA_WIDTH < M_DATA_WIDTH: accumulate S beats into one M beat
+    
+    // Let's implement a general byte buffer approach
+    // Buffer size: max(S_DATA_WIDTH, M_DATA_WIDTH) bits
+    
+    localparam BUF_WIDTH = (S_DATA_WIDTH > M_DATA_WIDTH) ? S_DATA_WIDTH : M_DATA_WIDTH;
+    localparam BUF_BYTES = (BUF_WIDTH + 7) / 8;
+    
+    // State machine
+    // IDLE: waiting for data
+    // FILL: accumulating data
+    // DRAIN: sending data
+    
+    // For simplicity, let's handle the three cases separately
+    
+    // Case 1: Equal widths
+    wire eq_width = (S_DATA_WIDTH == M_DATA_WIDTH);
+    
+    // Case 2: S wider than M (split)
+    wire s_wider = (S_DATA_WIDTH > M_DATA_WIDTH);
+    
+    // Case 3: M wider than S (pack)
+    wire m_wider = (M_DATA_WIDTH > S_DATA_WIDTH);
+    
+    // For equal widths, direct pass-through
+    wire [S_DATA_WIDTH-1:0] m_axis_tdata_eq;
+    wire [S_KEEP_WIDTH-1:0] m_axis_tkeep_eq;
+    wire m_axis_tvalid_eq;
+    wire m_axis_tlast_eq;
+    wire [ID_WIDTH-1:0] m_axis_tid_eq;
+    wire [DEST_WIDTH-1:0] m_axis_tdest_eq;
+    wire [USER_WIDTH-1:0] m_axis_tuser_eq;
+    wire s_axis_tready_eq;
+    
+    assign m_axis_tdata_eq = s_axis_tdata;
+    assign m_axis_tkeep_eq = s_axis_tkeep;
+    assign m_axis_tvalid_eq = s_axis_tvalid;
+    assign m_axis_tlast_eq = s_axis_tlast;
+    assign m_axis_tid_eq = s_axis_tid;
+    assign m_axis_tdest_eq = s_axis_tdest;
+    assign m_axis_tuser_eq = s_axis_tuser;
+    assign s_axis_tready_eq = m_axis_tready;
+    
+    // For split case (S wider than M)
+    // We need to split each S beat into S_DATA_WIDTH/M_DATA_WIDTH M beats
+    // Assuming S_DATA_WIDTH is a multiple of M_DATA_WIDTH
+    
+    // For pack case (M wider than S)
+    // We need to accumulate M_DATA_WIDTH/S_DATA_WIDTH S beats into one M beat
+    // Assuming M_DATA_WIDTH is a multiple of S_DATA_WIDTH
+    
+    // Let's implement a general byte buffer approach that handles all cases
+    
+    // Byte buffer
+    reg [BUF_WIDTH-1:0] byte_buf;
+    reg [BUF_BYTES-1:0] byte_valid;
+    reg [BUF_BYTES-1:0] byte_last;
+    reg [ID_WIDTH-1:0] buf_tid;
+    reg [DEST_WIDTH-1:0] buf_tdest;
+    reg [USER_WIDTH-1:0] buf_tuser;
+    reg buf_valid;
+    
+    // State
+    localparam S_IDLE = 2'd0;
+    localparam S_FILL = 2'd1;
+    localparam S_DRAIN = 2'd2;
+    
+    reg [1:0] state;
+    
+    // Counters
+    reg [3:0] fill_count;
+    reg [3:0] drain_count;
+    
+    // Calculate how many S beats to fill one M beat (for pack)
+    // Or how many M beats to drain from one S beat (for split)
+    
+    // For now, let's implement a simpler approach:
+    // If widths are equal, direct pass-through
+    // If S is wider, split
+    // If M is wider, pack
+    
+    // Split implementation
+    reg [S_DATA_WIDTH-1:0] split_buf;
+    reg [3:0] split_count;
+    reg split_valid;
+    reg split_last;
+    reg [ID_WIDTH-1:0] split_tid;
+    reg [DEST_WIDTH-1:0] split_tdest;
+    reg [USER_WIDTH-1:0] split_tuser;
+    
+    // Pack implementation
+    reg [M_DATA_WIDTH-1:0] pack_buf;
+    reg [3:0] pack_count;
+    reg pack_valid;
+    reg pack_last;
+    reg [ID_WIDTH-1:0] pack_tid;
+    reg [DEST_WIDTH-1:0] pack_tdest;
+    reg [USER_WIDTH-1:0] pack_tuser;
+    
+    // Output mux
+    assign m_axis_tdata = eq_width ? m_axis_tdata_eq : (s_wider ? split_buf[0:M_DATA_WIDTH-1] : pack_buf);
+    assign m_axis_tkeep = eq_width ? m_axis_tkeep_eq : (s_wider ? {M_KEEP_WIDTH{1'b1}} : {M_KEEP_WIDTH{1'b1}});
+    assign m_axis_tvalid = eq_width ? m_axis_tvalid_eq : (s_wider ? split_valid : pack_valid);
+    assign m_axis_tlast = eq_width ? m_axis_tlast_eq : (s_wider ? split_last : pack_last);
+    assign m_axis_tid = eq_width ? m_axis_tid_eq : (s_wider ? split_tid : pack_tid);
+    assign m_axis_tdest = eq_width ? m_axis_tdest_eq : (s_wider ? split_tdest : pack_tdest);
+    assign m_axis_tuser = eq_width ? m_axis_tuser_eq : (s_wider ? split_tuser : pack_tuser);
+    
+    assign s_axis_tready = eq_width ? s_axis_tready_eq : (s_wider ? (split_valid == 0 || m_axis_tready) : (pack_valid == 0 || m_axis_tready));
+    
+    // Split logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            split_buf <= {S_DATA_WIDTH{1'b0}};
+            split_count <= 4'd0;
+            split_valid <= 1'b0;
+            split_last <= 1'b0;
+            split_tid <= {ID_WIDTH{1'b0}};
+            split_tdest <= {DEST_WIDTH{1'b0}};
+            split_tuser <= {USER_WIDTH{1'b0}};
+        end else begin
+            if (s_wider) begin
+                if (s_axis_tvalid && s_axis_tready) begin
+                    split_buf <= s_axis_tdata;
+                    split_count <= 4'd0;
+                    split_valid <= 1'b1;
+                    split_last <= s_axis_tlast;
+                    split_tid <= s_axis_tid;
+                    split_tdest <= s_axis_tdest;
+                    split_tuser <= s_axis_tuser;
+                end else if (split_valid && m_axis_tready) begin
+                    split_count <= split_count + 1'b1;
+                    if (split_count == (S_DATA_WIDTH/M_DATA_WIDTH - 1)) begin
+                        split_valid <= 1'b0;
+                        split_last <= 1'b0;
+                    end else begin
+                        split_buf <= {split_buf[M_DATA_WIDTH-1:0], {M_DATA_WIDTH{1'b0}}};
+                        split_last <= 1'b0;
+                    end
+                end
+            end
+        end
+    end
+    
+    // Pack logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            pack_buf <= {M_DATA_WIDTH{1'b0}};
+            pack_count <= 4'd0;
+            pack_valid <= 1'b0;
+            pack_last <= 1'b0;
+            pack_tid <= {ID_WIDTH{1'b0}};
+            pack_tdest <= {DEST_WIDTH{1'b0}};
+            pack_tuser <= {USER_WIDTH{1'b0}};
+        end else begin
+            if (m_wider) begin
+                if (s_axis_tvalid && s_axis_tready) begin
+                    pack_buf <= {pack_buf[S_DATA_WIDTH-1:0], s_axis_tdata};
+                    pack_count <= pack_count + 1'b1;
+                    if (pack_count == (M_DATA_WIDTH/S_DATA_WIDTH - 1)) begin
+                        pack_valid <= 1'b1;
+                        pack_last <= s_axis_tlast;
+                        pack_tid <= s_axis_tid;
+                        pack_tdest <= s_axis_tdest;
+                        pack_tuser <= s_axis_tuser;
+                    end
+                end else if (pack_valid && m_axis_tready) begin
+                    pack_valid <= 1'b0;
+                    pack_count <= 4'd0;
+                    pack_last <= 1'b0;
+                end
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

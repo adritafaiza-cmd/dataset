@@ -1,0 +1,396 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // ------------------------------------------------------------------
+    // Reset Synchronizers
+    // ------------------------------------------------------------------
+    // SCLK domain reset synchronizer
+    reg [1:0] rst_sclk_sync;
+    wire rst_sclk = rst_sclk_sync[1];
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i)
+            rst_sclk_sync <= 2'b00;
+        else
+            rst_sclk_sync <= {rst_sclk_sync[0], 1'b0};
+    end
+
+    // PCLK domain reset synchronizer
+    reg [1:0] rst_pclk_sync;
+    wire rst_pclk = rst_pclk_sync[1];
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i)
+            rst_pclk_sync <= 2'b00;
+        else
+            rst_pclk_sync <= {rst_pclk_sync[0], 1'b0};
+    end
+
+    // ------------------------------------------------------------------
+    // PCLK Domain: Parallel Interface Logic
+    // ------------------------------------------------------------------
+    // State machine for parallel side
+    // States: IDLE, WAIT_WR, LOAD, WAIT_DONE
+    localparam S_IDLE      = 2'd0;
+    localparam S_WAIT_WR   = 2'd1;
+    localparam S_LOAD      = 2'd2;
+    localparam S_WAIT_DONE = 2'd3;
+
+    reg [1:0] p_state;
+    reg [N-1:0] tx_word_reg;
+    reg [N-1:0] rx_word_reg;
+    reg         tx_valid_pclk;
+    reg         rx_valid_pclk;
+    reg         tx_req_pclk;
+    reg         rx_ack_pclk;
+
+    // Handshake signals to SCLK domain
+    // tx_req: PCLK -> SCLK (request to start transfer)
+    // rx_ack: SCLK -> PCLK (indicate transfer complete)
+    // tx_data: PCLK -> SCLK (the word to transmit)
+    // rx_data: SCLK -> PCLK (the word received)
+
+    // For multi-bit data crossing, we use a 2-phase handshake with
+    // data valid/ready to ensure coherence.
+    //
+    // TX path (PCLK -> SCLK):
+    //   PCLK asserts tx_req, tx_data is stable.
+    //   SCLK samples tx_data when tx_req is high, then asserts tx_ack.
+    //   PCLK deasserts tx_req when tx_ack is seen.
+    //
+    // RX path (SCLK -> PCLK):
+    //   SCLK asserts rx_valid, rx_data is stable.
+    //   PCLK samples rx_data when rx_valid is high, then asserts rx_ready.
+    //   SCLK deasserts rx_valid when rx_ready is seen.
+
+    // TX handshake signals
+    reg         tx_req_pclk;
+    reg         tx_ack_pclk;
+    reg [N-1:0] tx_data_pclk;
+
+    // RX handshake signals
+    reg         rx_valid_pclk;
+    reg         rx_ready_pclk;
+    reg [N-1:0] rx_data_pclk;
+
+    // PCLK domain state machine
+    always @(posedge pclk_i or posedge rst_pclk) begin
+        if (rst_pclk) begin
+            p_state       <= S_IDLE;
+            tx_word_reg   <= {N{1'b0}};
+            rx_word_reg   <= {N{1'b0}};
+            tx_valid_pclk <= 1'b0;
+            rx_valid_pclk <= 1'b0;
+            tx_req_pclk   <= 1'b0;
+            rx_ack_pclk   <= 1'b0;
+            di_req_o      <= 1'b0;
+            wr_ack_o      <= 1'b0;
+            do_valid_o    <= 1'b0;
+            do_o          <= {N{1'b0}};
+            tx_data_pclk  <= {N{1'b0}};
+            rx_ready_pclk <= 1'b0;
+        end else begin
+            case (p_state)
+                S_IDLE: begin
+                    di_req_o   <= 1'b0;
+                    wr_ack_o   <= 1'b0;
+                    do_valid_o <= 1'b0;
+                    if (wren_i) begin
+                        p_state <= S_WAIT_WR;
+                    end
+                end
+
+                S_WAIT_WR: begin
+                    di_req_o <= 1'b1;
+                    if (wren_i) begin
+                        tx_word_reg  <= di_i;
+                        tx_data_pclk <= di_i;
+                        tx_req_pclk  <= 1'b1;
+                        p_state      <= S_LOAD;
+                    end
+                end
+
+                S_LOAD: begin
+                    di_req_o <= 1'b0;
+                    // Wait for tx_ack from SCLK domain
+                    if (tx_ack_pclk) begin
+                        tx_req_pclk <= 1'b0;
+                        p_state     <= S_WAIT_DONE;
+                    end
+                end
+
+                S_WAIT_DONE: begin
+                    // Wait for rx_valid from SCLK domain
+                    if (rx_valid_pclk) begin
+                        rx_word_reg  <= rx_data_pclk;
+                        rx_ready_pclk <= 1'b1;
+                        do_o         <= rx_data_pclk;
+                        do_valid_o   <= 1'b1;
+                        wr_ack_o     <= 1'b1;
+                        p_state      <= S_IDLE;
+                    end
+                end
+
+                default: begin
+                    p_state <= S_IDLE;
+                end
+            endcase
+
+            // Clear one-cycle pulses
+            if (p_state != S_WAIT_DONE) begin
+                do_valid_o <= 1'b0;
+                wr_ack_o   <= 1'b0;
+            end
+
+            // Clear rx_ready after one cycle
+            if (p_state != S_WAIT_DONE) begin
+                rx_ready_pclk <= 1'b0;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // SCLK Domain: SPI Master Logic
+    // ------------------------------------------------------------------
+    // SPI state machine
+    // States: SPI_IDLE, SPI_SHIFT, SPI_DONE
+    localparam SPI_IDLE  = 2'd0;
+    localparam SPI_SHIFT = 2'd1;
+    localparam SPI_DONE  = 2'd2;
+
+    reg [1:0] spi_state;
+    reg [N-1:0] spi_tx_shift;
+    reg [N-1:0] spi_rx_shift;
+    reg [3:0]   spi_bit_cnt;
+    reg [3:0]   spi_clk_div_cnt;
+    reg         spi_clk_phase;
+    reg         spi_ssel_int;
+    reg         spi_sck_int;
+    reg         spi_mosi_int;
+
+    // Handshake signals from PCLK domain
+    reg         tx_req_sclk;
+    reg         tx_ack_sclk;
+    reg [N-1:0] tx_data_sclk;
+    reg         rx_valid_sclk;
+    reg         rx_ready_sclk;
+    reg [N-1:0] rx_data_sclk;
+
+    // SCLK domain state machine
+    always @(posedge sclk_i or posedge rst_sclk) begin
+        if (rst_sclk) begin
+            spi_state       <= SPI_IDLE;
+            spi_tx_shift    <= {N{1'b0}};
+            spi_rx_shift    <= {N{1'b0}};
+            spi_bit_cnt     <= 4'd0;
+            spi_clk_div_cnt <= 4'd0;
+            spi_clk_phase   <= 1'b0;
+            spi_ssel_o      <= 1'b0;
+            spi_sck_o       <= 1'b0;
+            spi_mosi_o      <= 1'b0;
+            tx_req_sclk     <= 1'b0;
+            tx_ack_sclk     <= 1'b0;
+            tx_data_sclk    <= {N{1'b0}};
+            rx_valid_sclk   <= 1'b0;
+            rx_ready_sclk   <= 1'b0;
+            rx_data_sclk    <= {N{1'b0}};
+        end else begin
+            case (spi_state)
+                SPI_IDLE: begin
+                    spi_ssel_o  <= 1'b0;
+                    spi_sck_o   <= 1'b0;
+                    spi_mosi_o  <= 1'b0;
+                    spi_bit_cnt <= 4'd0;
+                    spi_clk_div_cnt <= 4'd0;
+                    spi_clk_phase   <= 1'b0;
+                    tx_ack_sclk <= 1'b0;
+                    rx_valid_sclk <= 1'b0;
+
+                    // Check for new transfer request from PCLK
+                    if (tx_req_sclk) begin
+                        spi_tx_shift <= tx_data_sclk;
+                        spi_rx_shift <= {N{1'b0}};
+                        spi_bit_cnt  <= 4'd0;
+                        spi_clk_div_cnt <= 4'd0;
+                        spi_clk_phase   <= 1'b0;
+                        spi_ssel_o   <= 1'b1;
+                        tx_ack_sclk  <= 1'b1;
+                        spi_state    <= SPI_SHIFT;
+                    end
+                end
+
+                SPI_SHIFT: begin
+                    spi_ssel_o <= 1'b1;
+
+                    // Clock divider logic
+                    spi_clk_div_cnt <= spi_clk_div_cnt + 1'b1;
+
+                    if (spi_clk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                        spi_clk_div_cnt <= 4'd0;
+
+                        if (spi_clk_phase == 1'b0) begin
+                            // Rising edge of SCK
+                            spi_sck_o     <= 1'b1;
+                            spi_clk_phase <= 1'b1;
+                            // Sample MISO on rising edge (CPHA=0)
+                            spi_rx_shift  <= {spi_rx_shift[N-2:0], spi_miso_i};
+                        end else begin
+                            // Falling edge of SCK
+                            spi_sck_o     <= 1'b0;
+                            spi_clk_phase <= 1'b0;
+                            // Shift out next bit on falling edge (CPHA=0)
+                            spi_mosi_o    <= spi_tx_shift[N-1];
+                            spi_tx_shift  <= {spi_tx_shift[N-2:0], 1'b0};
+                            spi_bit_cnt   <= spi_bit_cnt + 1'b1;
+
+                            if (spi_bit_cnt == N - 1) begin
+                                spi_state <= SPI_DONE;
+                            end
+                        end
+                    end
+                end
+
+                SPI_DONE: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o  <= 1'b0;
+                    spi_mosi_o <= 1'b0;
+
+                    // Present received data to PCLK domain
+                    rx_data_sclk  <= spi_rx_shift;
+                    rx_valid_sclk <= 1'b1;
+
+                    // Wait for rx_ready from PCLK
+                    if (rx_ready_sclk) begin
+                        rx_valid_sclk <= 1'b0;
+                        spi_state     <= SPI_IDLE;
+                    end
+                end
+
+                default: begin
+                    spi_state <= SPI_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // CDC: TX Request (PCLK -> SCLK)
+    // ------------------------------------------------------------------
+    // tx_req_pclk is generated in PCLK domain, synchronized to SCLK
+    reg [1:0] tx_req_sync;
+    always @(posedge sclk_i or posedge rst_sclk) begin
+        if (rst_sclk)
+            tx_req_sync <= 2'b00;
+        else
+            tx_req_sync <= {tx_req_sync[0], tx_req_pclk};
+    end
+    assign tx_req_sclk = tx_req_sync[1];
+
+    // tx_ack_sclk is generated in SCLK domain, synchronized to PCLK
+    reg [1:0] tx_ack_sync;
+    always @(posedge pclk_i or posedge rst_pclk) begin
+        if (rst_pclk)
+            tx_ack_sync <= 2'b00;
+        else
+            tx_ack_sync <= {tx_ack_sync[0], tx_ack_sclk};
+    end
+    assign tx_ack_pclk = tx_ack_sync[1];
+
+    // TX data: Use a 2-phase handshake to ensure data stability
+    // Data is valid when tx_req is high. We use a data valid/ready scheme.
+    // For simplicity and safety, we use a 4-phase handshake for data.
+    // However, since tx_req is a single bit, we can use it as the valid signal.
+    // The data must be stable while tx_req is high.
+    // We synchronize tx_data_pclk to SCLK domain using a multi-bit synchronizer
+    // with a valid bit.
+
+    // TX Data Synchronizer (PCLK -> SCLK)
+    // Use a 2-stage synchronizer for the valid bit, and capture data when valid is high.
+    reg [1:0] tx_data_valid_sync;
+    reg [N-1:0] tx_data_sclk_reg;
+    reg         tx_data_valid_sclk;
+
+    always @(posedge sclk_i or posedge rst_sclk) begin
+        if (rst_sclk) begin
+            tx_data_valid_sync <= 2'b00;
+            tx_data_sclk_reg   <= {N{1'b0}};
+            tx_data_valid_sclk <= 1'b0;
+        end else begin
+            tx_data_valid_sync <= {tx_data_valid_sync[0], tx_req_pclk};
+            if (tx_data_valid_sync[1] && !tx_data_valid_sync[0]) begin
+                // Rising edge of synchronized valid
+                tx_data_sclk_reg   <= tx_data_pclk;
+                tx_data_valid_sclk <= 1'b1;
+            end else if (tx_ack_sclk) begin
+                tx_data_valid_sclk <= 1'b0;
+            end
+        end
+    end
+    assign tx_data_sclk = tx_data_sclk_reg;
+
+    // ------------------------------------------------------------------
+    // CDC: RX Valid (SCLK -> PCLK)
+    // ------------------------------------------------------------------
+    // rx_valid_sclk is generated in SCLK domain, synchronized to PCLK
+    reg [1:0] rx_valid_sync;
+    always @(posedge pclk_i or posedge rst_pclk) begin
+        if (rst_pclk)
+            rx_valid_sync <= 2'b00;
+        else
+            rx_valid_sync <= {rx_valid_sync[0], rx_valid_sclk};
+    end
+    assign rx_valid_pclk = rx_valid_sync[1];
+
+    // rx_ready_pclk is generated in PCLK domain, synchronized to SCLK
+    reg [1:0] rx_ready_sync;
+    always @(posedge sclk_i or posedge rst_sclk) begin
+        if (rst_sclk)
+            rx_ready_sync <= 2'b00;
+        else
+            rx_ready_sync <= {rx_ready_sync[0], rx_ready_pclk};
+    end
+    assign rx_ready_sclk = rx_ready_sync[1];
+
+    // RX Data Synchronizer (SCLK -> PCLK)
+    // Data is valid when rx_valid is high. Capture data when valid is high.
+    reg [1:0] rx_data_valid_sync;
+    reg [N-1:0] rx_data_pclk_reg;
+    reg         rx_data_valid_pclk;
+
+    always @(posedge pclk_i or posedge rst_pclk) begin
+        if (rst_pclk) begin
+            rx_data_valid_sync <= 2'b00;
+            rx_data_pclk_reg   <= {N{1'b0}};
+            rx_data_valid_pclk <= 1'b0;
+        end else begin
+            rx_data_valid_sync <= {rx_data_valid_sync[0], rx_valid_sclk};
+            if (rx_data_valid_sync[1] && !rx_data_valid_sync[0]) begin
+                // Rising edge of synchronized valid
+                rx_data_pclk_reg   <= rx_data_sclk;
+                rx_data_valid_pclk <= 1'b1;
+            end else if (rx_ready_pclk) begin
+                rx_data_valid_pclk <= 1'b0;
+            end
+        end
+    end
+    assign rx_data_pclk = rx_data_pclk_reg;
+
+endmodule
+```<|im_end|>

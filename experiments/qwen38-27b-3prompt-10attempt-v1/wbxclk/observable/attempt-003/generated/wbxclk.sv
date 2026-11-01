@@ -1,0 +1,180 @@
+module wbxclk #(
+	parameter AW=32,
+	parameter DW=32,
+	parameter LGFIFO = 5
+) (
+	input	wire			i_wb_clk, i_reset,
+	input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+	input	wire	[(AW-1):0]	i_wb_addr,
+	input	wire	[(DW-1):0]	i_wb_data,
+	input	wire	[(DW/8-1):0]	i_wb_sel,
+	output	wire			o_wb_stall,
+	output	reg			o_wb_ack,
+	output	reg	[(DW-1):0]	o_wb_data,
+	output	reg			o_wb_err,
+	input	wire			i_xclk_clk,
+	output	reg			o_xclk_cyc,
+	output	reg			o_xclk_stb,
+	output	reg			o_xclk_we,
+	output	reg	[(AW-1):0]	o_xclk_addr,
+	output	reg	[(DW-1):0]	o_xclk_data,
+	output	reg	[(DW/8-1):0]	o_xclk_sel,
+	input	wire			i_xclk_stall,
+	input	wire			i_xclk_ack,
+	input	wire	[(DW-1):0]	i_xclk_data,
+	input	wire			i_xclk_err
+);
+
+	localparam FIFO_DEPTH = 1 << LGFIFO;
+	localparam FIFO_WIDTH = AW + DW + DW/8 + 1; // addr + data + sel + we
+
+	// Request FIFO: WB side writes, XCLK side reads
+	reg [FIFO_WIDTH-1:0] req_fifo [0:FIFO_DEPTH-1];
+	reg [LGFIFO:0] req_wr_ptr, req_rd_ptr;
+	reg req_wr_en, req_rd_en;
+	wire req_full, req_empty;
+
+	// Response FIFO: XCLK side writes, WB side reads
+	reg [DW+1:0] rsp_fifo [0:FIFO_DEPTH-1]; // data + err
+	reg [LGFIFO:0] rsp_wr_ptr, rsp_rd_ptr;
+	reg rsp_wr_en, rsp_rd_en;
+	wire rsp_full, rsp_empty;
+
+	// Request FIFO full/empty
+	assign req_full  = (req_wr_ptr[LGFIFO] != req_rd_ptr[LGFIFO]) &&
+	                   (req_wr_ptr[LGFIFO-1:0] == req_rd_ptr[LGFIFO-1:0]);
+	assign req_empty = (req_wr_ptr == req_rd_ptr);
+
+	// Response FIFO full/empty
+	assign rsp_full  = (rsp_wr_ptr[LGFIFO] != rsp_rd_ptr[LGFIFO]) &&
+	                   (rsp_wr_ptr[LGFIFO-1:0] == rsp_rd_ptr[LGFIFO-1:0]);
+	assign rsp_empty = (rsp_wr_ptr == rsp_rd_ptr);
+
+	// WB side: write to request FIFO when not full
+	assign req_wr_en = i_wb_cyc && i_wb_stb && !req_full;
+
+	// XCLK side: read from request FIFO when not empty and not stalled
+	assign req_rd_en = !req_empty && !i_xclk_stall;
+
+	// XCLK side: write to response FIFO when ack received
+	assign rsp_wr_en = i_xclk_ack;
+
+	// WB side: read from response FIFO when not empty
+	assign rsp_rd_en = !rsp_empty;
+
+	// WB side stall: number of outstanding requests (requests in FIFO + one in flight if any)
+	// Outstanding = requests written but not yet acknowledged
+	// Count = (req_wr_ptr - req_rd_ptr) mod FIFO_DEPTH, but we need to account for the fact
+	// that a request is "outstanding" from when it's written until its response is read.
+	// Actually, o_wb_stall is the outstanding-request count. Let's track it properly.
+	// A request is outstanding from when it's written to req_fifo until its response is read from rsp_fifo.
+	// The number of outstanding requests = (req_wr_ptr - rsp_rd_ptr) mod FIFO_DEPTH? No.
+	// Let's think: each request written to req_fifo will eventually produce a response in rsp_fifo.
+	// The number of outstanding requests = number of requests written - number of responses read.
+	// = (req_wr_ptr - rsp_rd_ptr) mod FIFO_DEPTH? Not exactly, because the pointers are in different domains.
+	// Actually, we can compute it as: outstanding = (req_wr_ptr - rsp_rd_ptr) mod FIFO_DEPTH
+	// But we need to be careful with the modular arithmetic.
+	// Let's use a counter instead.
+
+	reg [LGFIFO:0] outstanding_cnt;
+	wire req_wr_pulse = i_wb_cyc && i_wb_stb && !req_full;
+	wire rsp_rd_pulse = !rsp_empty;
+
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset)
+			outstanding_cnt <= 0;
+		else
+			outstanding_cnt <= outstanding_cnt + req_wr_pulse - rsp_rd_pulse;
+	end
+
+	assign o_wb_stall = (outstanding_cnt != 0);
+
+	// WB side: write to request FIFO
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_wr_ptr <= 0;
+		end else if (req_wr_en) begin
+			req_fifo[req_wr_ptr[LGFIFO-1:0]] <= {i_wb_addr, i_wb_data, i_wb_sel, i_wb_we};
+			req_wr_ptr <= req_wr_ptr + 1;
+		end
+	end
+
+	// XCLK side: read from request FIFO
+	reg [FIFO_WIDTH-1:0] req_rd_data;
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_rd_ptr <= 0;
+			o_xclk_cyc  <= 0;
+			o_xclk_stb  <= 0;
+			o_xclk_we   <= 0;
+			o_xclk_addr <= 0;
+			o_xclk_data <= 0;
+			o_xclk_sel  <= 0;
+		end else if (req_rd_en) begin
+			req_rd_data <= req_fifo[req_rd_ptr[LGFIFO-1:0]];
+			req_rd_ptr  <= req_rd_ptr + 1;
+		end
+	end
+
+	// XCLK side: drive outputs from req_rd_data
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			o_xclk_cyc  <= 0;
+			o_xclk_stb  <= 0;
+			o_xclk_we   <= 0;
+			o_xclk_addr <= 0;
+			o_xclk_data <= 0;
+			o_xclk_sel  <= 0;
+		end else if (req_rd_en) begin
+			o_xclk_cyc  <= 1;
+			o_xclk_stb  <= 1;
+			o_xclk_we   <= req_rd_data[0];
+			o_xclk_sel  <= req_rd_data[DW/8+1:1];
+			o_xclk_data <= req_rd_data[DW+DW/8:DW/8+1];
+			o_xclk_addr <= req_rd_data[FIFO_WIDTH-1:DW+DW/8+1];
+		end else if (i_xclk_ack) begin
+			o_xclk_cyc  <= 0;
+			o_xclk_stb  <= 0;
+		end
+	end
+
+	// XCLK side: write to response FIFO
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rsp_wr_ptr <= 0;
+		end else if (rsp_wr_en) begin
+			rsp_fifo[rsp_wr_ptr[LGFIFO-1:0]] <= {i_xclk_data, i_xclk_err};
+			rsp_wr_ptr <= rsp_wr_ptr + 1;
+		end
+	end
+
+	// WB side: read from response FIFO
+	reg [DW+1:0] rsp_rd_data;
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rsp_rd_ptr <= 0;
+			o_wb_ack   <= 0;
+			o_wb_data  <= 0;
+			o_wb_err   <= 0;
+		end else if (rsp_rd_en) begin
+			rsp_rd_data <= rsp_fifo[rsp_rd_ptr[LGFIFO-1:0]];
+			rsp_rd_ptr  <= rsp_rd_ptr + 1;
+		end
+	end
+
+	// WB side: drive outputs from rsp_rd_data
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			o_wb_ack  <= 0;
+			o_wb_data <= 0;
+			o_wb_err  <= 0;
+		end else if (rsp_rd_en) begin
+			o_wb_ack  <= 1;
+			o_wb_data <= rsp_rd_data[DW:1];
+			o_wb_err  <= rsp_rd_data[0];
+		end else begin
+			o_wb_ack  <= 0;
+		end
+	end
+
+endmodule

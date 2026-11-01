@@ -1,0 +1,137 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain signals
+  reg [WIDTH-1:0] src_data_reg;
+  reg             src_valid_reg;
+  reg             src_ready_int;
+  reg             src_ack_reg;
+
+  // Destination domain signals
+  reg [WIDTH-1:0] dst_data_reg;
+  reg             dst_valid_reg;
+  reg             dst_ack_reg;
+
+  // CDC synchronizers
+  reg [1:0] src_valid_sync;
+  reg [1:0] src_ack_sync;
+  reg [1:0] dst_ack_sync;
+
+  // Source domain: synchronizer for dst_ack
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      dst_ack_sync <= 2'b00;
+    end else begin
+      dst_ack_sync <= {dst_ack_sync[0], dst_ack_reg};
+    end
+  end
+
+  // Destination domain: synchronizer for src_valid
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_valid_sync <= 2'b00;
+    end else begin
+      src_valid_sync <= {src_valid_sync[0], src_valid_reg};
+    end
+  end
+
+  // Source domain: synchronizer for src_ack (from dst)
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_ack_sync <= 2'b00;
+    end else begin
+      src_ack_sync <= {src_ack_sync[0], dst_ack_reg};
+    end
+  end
+
+  // Destination domain: synchronizer for dst_ack (to src)
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_ack_sync <= 2'b00;
+    end else begin
+      src_ack_sync <= {src_ack_sync[0], src_ack_reg};
+    end
+  end
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_reg  <= {WIDTH{1'b0}};
+      src_valid_reg <= 1'b0;
+      src_ready_int <= 1'b1;
+      src_ack_reg   <= 1'b0;
+    end else begin
+      // Check if destination has acknowledged
+      if (src_ack_sync[1]) begin
+        // Destination acknowledged, clear valid and set ready
+        src_valid_reg <= 1'b0;
+        src_ready_int <= 1'b1;
+        src_ack_reg   <= 1'b0;
+      end else if (src_valid_reg) begin
+        // Valid is high, wait for ack
+        // src_ready_int stays low
+      end else begin
+        // Not valid, can accept new data
+        if (src_valid_i) begin
+          src_data_reg  <= src_data_i;
+          src_valid_reg <= 1'b1;
+          src_ready_int <= 1'b0;
+        end else begin
+          src_ready_int <= 1'b1;
+        end
+      end
+    end
+  end
+
+  // Destination domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_reg  <= SEND_RESET_MSG ? RESET_MSG : {WIDTH{1'b0}};
+      dst_valid_reg <= SEND_RESET_MSG ? 1'b1 : 1'b0;
+      dst_ack_reg   <= 1'b0;
+    end else begin
+      if (dst_valid_reg) begin
+        if (dst_ready_i) begin
+          // Handshake complete, acknowledge to source
+          dst_ack_reg   <= 1'b1;
+          dst_valid_reg <= 1'b0;
+        end else begin
+          // Wait for ready
+          dst_ack_reg <= 1'b0;
+        end
+      end else begin
+        // Not valid, check if source has new data
+        if (src_valid_sync[1]) begin
+          dst_data_reg  <= src_data_reg;
+          dst_valid_reg <= 1'b1;
+          dst_ack_reg   <= 1'b0;
+        end else begin
+          dst_ack_reg <= 1'b0;
+        end
+      end
+    end
+  end
+
+  // Output assignments
+  assign src_ready_o = src_ready_int;
+  assign dst_data_o  = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+endmodule
+```<|im_end|>

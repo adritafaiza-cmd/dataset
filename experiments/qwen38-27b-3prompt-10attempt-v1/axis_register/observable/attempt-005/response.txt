@@ -1,0 +1,340 @@
+```verilog
+module axis_register #
+(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI Stream input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI Stream output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser
+);
+
+    // Internal signals
+    wire [DATA_WIDTH-1:0]  reg_tdata;
+    wire [KEEP_WIDTH-1:0]  reg_tkeep;
+    wire                   reg_tvalid;
+    wire                   reg_tready;
+    wire                   reg_tlast;
+    wire [ID_WIDTH-1:0]    reg_tid;
+    wire [DEST_WIDTH-1:0]  reg_tdest;
+    wire [USER_WIDTH-1:0]  reg_tuser;
+
+    // Skid buffer signals
+    wire [DATA_WIDTH-1:0]  skid_tdata;
+    wire [KEEP_WIDTH-1:0]  skid_tkeep;
+    wire                   skid_tvalid;
+    wire                   skid_tready;
+    wire                   skid_tlast;
+    wire [ID_WIDTH-1:0]    skid_tid;
+    wire [DEST_WIDTH-1:0]  skid_tdest;
+    wire [USER_WIDTH-1:0]  skid_tuser;
+
+    // Control signals
+    wire                   accept;
+    wire                   forward;
+    wire                   skid_accept;
+    wire                   skid_forward;
+
+    // For REG_TYPE 0: wire (no register)
+    // For REG_TYPE 1: buffer (single register)
+    // For REG_TYPE 2: skid buffer (two registers)
+
+    // Wire mode: direct connection
+    // Buffer mode: single register
+    // Skid buffer mode: two registers with skid logic
+
+    // Determine if we can accept new data
+    // For wire: always ready
+    // For buffer: ready if not valid or downstream ready
+    // For skid: ready if main not valid or (main valid and skid not valid)
+
+    // Main register
+    reg_tdata  <= 0;
+    reg_tkeep  <= 0;
+    reg_tvalid <= 0;
+    reg_tlast  <= 0;
+    reg_tid    <= 0;
+    reg_tdest  <= 0;
+    reg_tuser  <= 0;
+
+    // Skid register
+    skid_tdata  <= 0;
+    skid_tkeep  <= 0;
+    skid_tvalid <= 0;
+    skid_tlast  <= 0;
+    skid_tid    <= 0;
+    skid_tdest  <= 0;
+    skid_tuser  <= 0;
+
+    // Control logic
+    // accept: can we accept new data from source?
+    // forward: can we forward data to destination?
+
+    // For wire (REG_TYPE=0):
+    //   s_axis_tready = m_axis_tready
+    //   m_axis_tdata = s_axis_tdata
+    //   etc.
+
+    // For buffer (REG_TYPE=1):
+    //   Single register. s_axis_tready = !reg_tvalid || m_axis_tready
+    //   m_axis_tvalid = reg_tvalid
+    //   m_axis_tdata = reg_tdata
+    //   etc.
+
+    // For skid buffer (REG_TYPE=2):
+    //   Two registers. Main and skid.
+    //   s_axis_tready = !reg_tvalid || (!skid_tvalid && m_axis_tready)
+    //   m_axis_tvalid = reg_tvalid || skid_tvalid
+    //   m_axis_tdata = reg_tvalid ? reg_tdata : skid_tdata
+    //   etc.
+
+    // Let's implement all three modes using conditional logic
+
+    // Wire mode
+    wire wire_s_axis_tready;
+    wire wire_m_axis_tdata;
+    wire wire_m_axis_tkeep;
+    wire wire_m_axis_tvalid;
+    wire wire_m_axis_tlast;
+    wire wire_m_axis_tid;
+    wire wire_m_axis_tdest;
+    wire wire_m_axis_tuser;
+
+    assign wire_s_axis_tready = m_axis_tready;
+    assign wire_m_axis_tdata  = s_axis_tdata;
+    assign wire_m_axis_tkeep  = s_axis_tkeep;
+    assign wire_m_axis_tvalid = s_axis_tvalid;
+    assign wire_m_axis_tlast  = s_axis_tlast;
+    assign wire_m_axis_tid    = s_axis_tid;
+    assign wire_m_axis_tdest  = s_axis_tdest;
+    assign wire_m_axis_tuser  = s_axis_tuser;
+
+    // Buffer mode
+    wire buf_s_axis_tready;
+    wire buf_m_axis_tdata;
+    wire buf_m_axis_tkeep;
+    wire buf_m_axis_tvalid;
+    wire buf_m_axis_tlast;
+    wire buf_m_axis_tid;
+    wire buf_m_axis_tdest;
+    wire buf_m_axis_tuser;
+
+    assign buf_s_axis_tready = !reg_tvalid || m_axis_tready;
+    assign buf_m_axis_tdata  = reg_tdata;
+    assign buf_m_axis_tkeep  = reg_tkeep;
+    assign buf_m_axis_tvalid = reg_tvalid;
+    assign buf_m_axis_tlast  = reg_tlast;
+    assign buf_m_axis_tid    = reg_tid;
+    assign buf_m_axis_tdest  = reg_tdest;
+    assign buf_m_axis_tuser  = reg_tuser;
+
+    // Skid buffer mode
+    wire skid_s_axis_tready;
+    wire skid_m_axis_tdata;
+    wire skid_m_axis_tkeep;
+    wire skid_m_axis_tvalid;
+    wire skid_m_axis_tlast;
+    wire skid_m_axis_tid;
+    wire skid_m_axis_tdest;
+    wire skid_m_axis_tuser;
+
+    assign skid_s_axis_tready = !reg_tvalid || (!skid_tvalid && m_axis_tready);
+    assign skid_m_axis_tvalid = reg_tvalid || skid_tvalid;
+    assign skid_m_axis_tdata  = reg_tvalid ? reg_tdata : skid_tdata;
+    assign skid_m_axis_tkeep  = reg_tvalid ? reg_tkeep : skid_tkeep;
+    assign skid_m_axis_tlast  = reg_tvalid ? reg_tlast : skid_tlast;
+    assign skid_m_axis_tid    = reg_tvalid ? reg_tid : skid_tid;
+    assign skid_m_axis_tdest  = reg_tvalid ? reg_tdest : skid_tdest;
+    assign skid_m_axis_tuser  = reg_tvalid ? reg_tuser : skid_tuser;
+
+    // Output selection
+    assign s_axis_tready = (REG_TYPE == 0) ? wire_s_axis_tready :
+                           (REG_TYPE == 1) ? buf_s_axis_tready :
+                                             skid_s_axis_tready;
+
+    assign m_axis_tdata  = (REG_TYPE == 0) ? wire_m_axis_tdata :
+                           (REG_TYPE == 1) ? buf_m_axis_tdata :
+                                             skid_m_axis_tdata;
+    assign m_axis_tkeep  = (REG_TYPE == 0) ? wire_m_axis_tkeep :
+                           (REG_TYPE == 1) ? buf_m_axis_tkeep :
+                                             skid_m_axis_tkeep;
+    assign m_axis_tvalid = (REG_TYPE == 0) ? wire_m_axis_tvalid :
+                           (REG_TYPE == 1) ? buf_m_axis_tvalid :
+                                             skid_m_axis_tvalid;
+    assign m_axis_tlast  = (REG_TYPE == 0) ? wire_m_axis_tlast :
+                           (REG_TYPE == 1) ? buf_m_axis_tlast :
+                                             skid_m_axis_tlast;
+    assign m_axis_tid    = (REG_TYPE == 0) ? wire_m_axis_tid :
+                           (REG_TYPE == 1) ? buf_m_axis_tid :
+                                             skid_m_axis_tid;
+    assign m_axis_tdest  = (REG_TYPE == 0) ? wire_m_axis_tdest :
+                           (REG_TYPE == 1) ? buf_m_axis_tdest :
+                                             skid_m_axis_tdest;
+    assign m_axis_tuser  = (REG_TYPE == 0) ? wire_m_axis_tuser :
+                           (REG_TYPE == 1) ? buf_m_axis_tuser :
+                                             skid_m_axis_tuser;
+
+    // Register logic for buffer and skid buffer
+    // For buffer: accept when s_axis_tvalid && buf_s_axis_tready
+    // For skid: accept when s_axis_tvalid && skid_s_axis_tready
+
+    // Buffer register
+    wire buf_accept = s_axis_tvalid && buf_s_axis_tready;
+    wire buf_forward = reg_tvalid && m_axis_tready;
+
+    // Skid buffer registers
+    wire skid_accept = s_axis_tvalid && skid_s_axis_tready;
+    wire skid_forward = reg_tvalid && m_axis_tready;
+    wire skid_skid_forward = skid_tvalid && m_axis_tready;
+
+    // Main register update logic
+    // For buffer:
+    //   If accept and not forward: load main
+    //   If forward and not accept: clear main
+    //   If accept and forward: load main with new data
+    //   If not accept and not forward: hold
+
+    // For skid:
+    //   Main register:
+    //     If skid_forward and not skid_accept: clear main (skid moves to main)
+    //     If skid_accept and not skid_forward: load main with new data
+    //     If skid_accept and skid_forward: load main with new data
+    //     If not skid_accept and not skid_forward: hold
+    //   Skid register:
+    //     If skid_accept and skid_forward: load skid with new data
+    //     If not skid_accept and not skid_forward: hold
+    //     If skid_forward and not skid_accept: clear skid
+    //     If skid_accept and not skid_forward: hold (skid stays, main gets new)
+
+    // Let's simplify:
+    // For buffer:
+    //   reg_tvalid <= buf_accept ? 1'b1 : (buf_forward ? 1'b0 : reg_tvalid);
+    //   reg_tdata  <= buf_accept ? s_axis_tdata : reg_tdata;
+    //   etc.
+
+    // For skid:
+    //   Main register:
+    //     If skid_forward:
+    //       If skid_accept: main gets new data
+    //       Else: main gets skid data
+    //     Else:
+    //       If skid_accept: main gets new data
+    //       Else: hold
+    //   Skid register:
+    //     If skid_accept and skid_forward: skid gets new data
+    //     Else: hold or clear
+
+    // Let's implement this properly
+
+    // Buffer mode register
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            reg_tvalid <= 1'b0;
+            reg_tdata  <= {DATA_WIDTH{1'b0}};
+            reg_tkeep  <= {KEEP_WIDTH{1'b0}};
+            reg_tlast  <= 1'b0;
+            reg_tid    <= {ID_WIDTH{1'b0}};
+            reg_tdest  <= {DEST_WIDTH{1'b0}};
+            reg_tuser  <= {USER_WIDTH{1'b0}};
+        end else if (REG_TYPE == 1) begin
+            if (buf_accept) begin
+                reg_tvalid <= 1'b1;
+                reg_tdata  <= s_axis_tdata;
+                reg_tkeep  <= s_axis_tkeep;
+                reg_tlast  <= s_axis_tlast;
+                reg_tid    <= s_axis_tid;
+                reg_tdest  <= s_axis_tdest;
+                reg_tuser  <= s_axis_tuser;
+            end else if (buf_forward) begin
+                reg_tvalid <= 1'b0;
+            end
+        end else if (REG_TYPE == 2) begin
+            // Skid buffer main register
+            if (skid_forward) begin
+                if (skid_accept) begin
+                    reg_tvalid <= 1'b1;
+                    reg_tdata  <= s_axis_tdata;
+                    reg_tkeep  <= s_axis_tkeep;
+                    reg_tlast  <= s_axis_tlast;
+                    reg_tid    <= s_axis_tid;
+                    reg_tdest  <= s_axis_tdest;
+                    reg_tuser  <= s_axis_tuser;
+                end else begin
+                    reg_tvalid <= skid_tvalid;
+                    reg_tdata  <= skid_tdata;
+                    reg_tkeep  <= skid_tkeep;
+                    reg_tlast  <= skid_tlast;
+                    reg_tid    <= skid_tid;
+                    reg_tdest  <= skid_tdest;
+                    reg_tuser  <= skid_tuser;
+                end
+            end else if (skid_accept) begin
+                reg_tvalid <= 1'b1;
+                reg_tdata  <= s_axis_tdata;
+                reg_tkeep  <= s_axis_tkeep;
+                reg_tlast  <= s_axis_tlast;
+                reg_tid    <= s_axis_tid;
+                reg_tdest  <= s_axis_tdest;
+                reg_tuser  <= s_axis_tuser;
+            end
+        end
+    end
+
+    // Skid register
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            skid_tvalid <= 1'b0;
+            skid_tdata  <= {DATA_WIDTH{1'b0}};
+            skid_tkeep  <= {KEEP_WIDTH{1'b0}};
+            skid_tlast  <= 1'b0;
+            skid_tid    <= {ID_WIDTH{1'b0}};
+            skid_tdest  <= {DEST_WIDTH{1'b0}};
+            skid_tuser  <= {USER_WIDTH{1'b0}};
+        end else if (REG_TYPE == 2) begin
+            if (skid_accept && skid_forward) begin
+                skid_tvalid <= 1'b1;
+                skid_tdata  <= s_axis_tdata;
+                skid_tkeep  <= s_axis_tkeep;
+                skid_tlast  <= s_axis_tlast;
+                skid_tid    <= s_axis_tid;
+                skid_tdest  <= s_axis_tdest;
+                skid_tuser  <= s_axis_tuser;
+            end else if (skid_forward) begin
+                skid_tvalid <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

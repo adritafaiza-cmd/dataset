@@ -1,0 +1,298 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam ENC_WIDTH = $clog2(PORTS);
+
+    // Internal signals
+    wire [PORTS-1:0] raw_grant;
+    wire             raw_valid;
+    wire [ENC_WIDTH-1:0] raw_encoded;
+
+    // State for blocking
+    reg [PORTS-1:0] held_grant;
+    reg             held_valid;
+
+    // Round-robin pointer
+    reg [PORTS-1:0] rr_pointer;
+
+    // Combinational arbiter logic
+    // Determine the grant based on request and priority scheme
+
+    // For fixed priority:
+    //   If ARB_LSB_HIGH_PRIORITY: LSB has highest priority
+    //   Else: MSB has highest priority (i.e., highest index wins)
+
+    // For round-robin:
+    //   Rotate the request vector so that the pointer position becomes the "highest" priority
+    //   Then apply fixed-priority logic on the rotated vector
+
+    // Helper: find the index of the first set bit (LSB-first)
+    // We'll use a priority encoder approach
+
+    // Step 1: Compute the effective request vector based on round-robin
+    wire [PORTS-1:0] effective_request;
+
+    generate
+        if (ARB_TYPE_ROUND_ROBIN) begin : gen_rr
+            // Rotate request so that rr_pointer is at position 0 (highest priority in LSB-first scheme)
+            // We need to rotate left by rr_pointer amount
+            // But rr_pointer is a one-hot or index? Let's use index-based rotation.
+            // Actually, let's keep rr_pointer as a one-hot vector for simplicity.
+            
+            // rr_pointer is a one-hot vector indicating the next port to be granted
+            // We rotate the request vector so that the bit at rr_pointer position moves to bit 0
+            // Then we do LSB-first priority encoding, then rotate back
+            
+            // For each bit i in effective_request:
+            // effective_request[i] = request[(i + rr_index) % PORTS]
+            // where rr_index is the index of the set bit in rr_pointer
+            
+            // Since rr_pointer is one-hot, we can compute this with a mux
+            // But for synthesis, let's use a different approach:
+            // Create a rotated request where bit i corresponds to request[(i + rr_idx) % PORTS]
+            
+            // Let's define rr_idx as the index of the set bit in rr_pointer
+            // We'll use a priority encoder to get rr_idx from rr_pointer
+            
+            wire [ENC_WIDTH-1:0] rr_idx;
+            
+            // Priority encoder for rr_pointer (one-hot to binary)
+            genvar g;
+            always @(*) begin
+                rr_idx = 0;
+                for (g = 0; g < PORTS; g = g + 1) begin
+                    if (rr_pointer[g]) begin
+                        rr_idx = g[ENC_WIDTH-1:0];
+                    end
+                end
+            end
+            
+            // Now rotate request
+            genvar k;
+            always @(*) begin
+                for (k = 0; k < PORTS; k = k + 1) begin
+                    effective_request[k] = request[(k + rr_idx) % PORTS];
+                end
+            end
+        end else begin : gen_fixed
+            assign effective_request = request;
+        end
+    endgenerate
+
+    // Step 2: Priority encode effective_request
+    // If ARB_LSB_HIGH_PRIORITY: LSB (bit 0) has highest priority
+    // Else: MSB (bit PORTS-1) has highest priority
+
+    wire [PORTS-1:0] priority_grant;
+    wire             priority_valid;
+    wire [ENC_WIDTH-1:0] priority_encoded;
+
+    generate
+        if (ARB_LSB_HIGH_PRIORITY) begin : gen_lsb_high
+            // LSB has highest priority: find the lowest set bit
+            // priority_grant will be one-hot at the lowest set bit
+            genvar j;
+            always @(*) begin
+                priority_grant = {PORTS{1'b0}};
+                priority_valid = 1'b0;
+                priority_encoded = {ENC_WIDTH{1'b0}};
+                for (j = 0; j < PORTS; j = j + 1) begin
+                    if (effective_request[j] && !priority_valid) begin
+                        priority_grant[j] = 1'b1;
+                        priority_valid = 1'b1;
+                        priority_encoded = j[ENC_WIDTH-1:0];
+                    end
+                end
+            end
+        end else begin : gen_msb_high
+            // MSB has highest priority: find the highest set bit
+            genvar j;
+            always @(*) begin
+                priority_grant = {PORTS{1'b0}};
+                priority_valid = 1'b0;
+                priority_encoded = {ENC_WIDTH{1'b0}};
+                for (j = PORTS-1; j >= 0; j = j - 1) begin
+                    if (effective_request[j] && !priority_valid) begin
+                        priority_grant[j] = 1'b1;
+                        priority_valid = 1'b1;
+                        priority_encoded = j[ENC_WIDTH-1:0];
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // Step 3: If round-robin, rotate the grant back
+    wire [PORTS-1:0] unrotated_grant;
+    wire             unrotated_valid;
+    wire [ENC_WIDTH-1:0] unrotated_encoded;
+
+    generate
+        if (ARB_TYPE_ROUND_ROBIN) begin : gen_unrotate
+            // Rotate priority_grant back by rr_idx
+            // unrotated_grant[i] = priority_grant[(i - rr_idx + PORTS) % PORTS]
+            genvar k;
+            always @(*) begin
+                unrotated_grant = {PORTS{1'b0}};
+                unrotated_valid = priority_valid;
+                unrotated_encoded = {ENC_WIDTH{1'b0}};
+                for (k = 0; k < PORTS; k = k + 1) begin
+                    unrotated_grant[k] = priority_grant[(k - rr_idx + PORTS) % PORTS];
+                end
+                // Compute unrotated_encoded from unrotated_grant
+                genvar m;
+                for (m = 0; m < PORTS; m = m + 1) begin
+                    if (unrotated_grant[m]) begin
+                        unrotated_encoded = m[ENC_WIDTH-1:0];
+                    end
+                end
+            end
+        end else begin : gen_no_unrotate
+            assign unrotated_grant = priority_grant;
+            assign unrotated_valid = priority_valid;
+            assign unrotated_encoded = priority_encoded;
+        end
+    endgenerate
+
+    // Step 4: Blocking logic
+    // If ARB_BLOCK is set:
+    //   - If ARB_BLOCK_ACK is nonzero: hold grant until acknowledge is received
+    //   - If ARB_BLOCK_ACK is zero: hold grant until request drops
+    // Otherwise: no blocking, grant is combinational
+
+    generate
+        if (ARB_BLOCK) begin : gen_block
+            // Sequential logic for holding
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    held_grant <= {PORTS{1'b0}};
+                    held_valid <= 1'b0;
+                end else begin
+                    if (ARB_BLOCK_ACK) begin
+                        // Hold until acknowledge
+                        if (held_valid) begin
+                            if (acknowledge & held_grant) begin
+                                // Acknowledge received, release
+                                held_valid <= 1'b0;
+                                held_grant <= {PORTS{1'b0}};
+                            end
+                        end else begin
+                            // Not holding, check for new grant
+                            if (unrotated_valid) begin
+                                held_valid <= 1'b1;
+                                held_grant <= unrotated_grant;
+                            end
+                        end
+                    end else begin
+                        // Hold until request drops
+                        if (held_valid) begin
+                            if (!(request & held_grant)) begin
+                                // Request dropped, release
+                                held_valid <= 1'b0;
+                                held_grant <= {PORTS{1'b0}};
+                            end
+                        end else begin
+                            // Not holding, check for new grant
+                            if (unrotated_valid) begin
+                                held_valid <= 1'b1;
+                                held_grant <= unrotated_grant;
+                            end
+                        end
+                    end
+                end
+            end
+
+            assign raw_grant = held_grant;
+            assign raw_valid = held_valid;
+            
+            // Compute raw_encoded from held_grant
+            genvar e;
+            always @(*) begin
+                raw_encoded = {ENC_WIDTH{1'b0}};
+                for (e = 0; e < PORTS; e = e + 1) begin
+                    if (held_grant[e]) begin
+                        raw_encoded = e[ENC_WIDTH-1:0];
+                    end
+                end
+            end
+        end else begin : gen_no_block
+            assign raw_grant = unrotated_grant;
+            assign raw_valid = unrotated_valid;
+            assign raw_encoded = unrotated_encoded;
+        end
+    endgenerate
+
+    // Step 5: Update round-robin pointer
+    // When a grant is issued and (if blocking with ack) acknowledged, or (if no blocking) granted,
+    // advance the pointer to the next port
+
+    generate
+        if (ARB_TYPE_ROUND_ROBIN) begin : gen_rr_update
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    rr_pointer <= {PORTS{1'b0}};
+                    rr_pointer[0] <= 1'b1;
+                end else begin
+                    // Determine when to advance
+                    wire advance;
+                    if (ARB_BLOCK) begin
+                        if (ARB_BLOCK_ACK) begin
+                            // Advance when acknowledge is received
+                            advance = held_valid & (acknowledge & held_grant);
+                        end else begin
+                            // Advance when request drops
+                            advance = held_valid & !(request & held_grant);
+                        end
+                    end else begin
+                        // Advance when grant is valid
+                        advance = unrotated_valid;
+                    end
+                    
+                    if (advance) begin
+                        // Find the next port after the current grant
+                        // The current grant is at some index, move to the next
+                        // We need to find which bit is set in the grant and move to the next
+                        wire [PORTS-1:0] next_pointer;
+                        genvar n;
+                        always @(*) begin
+                            next_pointer = {PORTS{1'b0}};
+                            for (n = 0; n < PORTS; n = n + 1) begin
+                                if (raw_grant[n]) begin
+                                    next_pointer[(n + 1) % PORTS] = 1'b1;
+                                end
+                            end
+                        end
+                        rr_pointer <= next_pointer;
+                    end
+                end
+            end
+        end else begin : gen_no_rr_update
+            // No round-robin, no pointer to update
+            assign rr_pointer = {PORTS{1'b0}};
+            rr_pointer[0] = 1'b1;
+        end
+    endgenerate
+
+    // Final outputs
+    assign grant = raw_grant;
+    assign grant_valid = raw_valid;
+    assign grant_encoded = raw_encoded;
+
+endmodule
+```<|im_end|>

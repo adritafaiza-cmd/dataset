@@ -1,0 +1,626 @@
+module axi_dma #
+(
+    parameter AXI_DATA_WIDTH = 32,
+    parameter AXI_ADDR_WIDTH = 16,
+    parameter AXI_STRB_WIDTH = (AXI_DATA_WIDTH/8),
+    parameter AXI_ID_WIDTH = 8,
+    parameter AXI_MAX_BURST_LEN = 16,
+    parameter AXIS_DATA_WIDTH = AXI_DATA_WIDTH,
+    parameter AXIS_KEEP_ENABLE = (AXIS_DATA_WIDTH>8),
+    parameter AXIS_KEEP_WIDTH = (AXIS_DATA_WIDTH/8),
+    parameter AXIS_LAST_ENABLE = 1,
+    parameter AXIS_ID_ENABLE = 0,
+    parameter AXIS_ID_WIDTH = 8,
+    parameter AXIS_DEST_ENABLE = 0,
+    parameter AXIS_DEST_WIDTH = 8,
+    parameter AXIS_USER_ENABLE = 1,
+    parameter AXIS_USER_WIDTH = 1,
+    parameter LEN_WIDTH = 20,
+    parameter TAG_WIDTH = 8,
+    parameter ENABLE_SG = 0,
+    parameter ENABLE_UNALIGNED = 0
+)
+(
+    input  wire                       clk,
+    input  wire                       rst,
+    /*
+     * AXI read descriptor input
+     */
+    input  wire [AXI_ADDR_WIDTH-1:0]  s_axis_read_desc_addr,
+    input  wire [LEN_WIDTH-1:0]       s_axis_read_desc_len,
+    input  wire [TAG_WIDTH-1:0]       s_axis_read_desc_tag,
+    input  wire [AXIS_ID_WIDTH-1:0]   s_axis_read_desc_id,
+    input  wire [AXIS_DEST_WIDTH-1:0] s_axis_read_desc_dest,
+    input  wire [AXIS_USER_WIDTH-1:0] s_axis_read_desc_user,
+    input  wire                       s_axis_read_desc_valid,
+    output wire                       s_axis_read_desc_ready,
+    /*
+     * AXI read descriptor status output
+     */
+    output wire [TAG_WIDTH-1:0]       m_axis_read_desc_status_tag,
+    output wire [3:0]                 m_axis_read_desc_status_error,
+    output wire                       m_axis_read_desc_status_valid,
+    /*
+     * AXI stream read data output
+     */
+    output wire [AXIS_DATA_WIDTH-1:0] m_axis_read_data_tdata,
+    output wire [AXIS_KEEP_WIDTH-1:0] m_axis_read_data_tkeep,
+    output wire                       m_axis_read_data_tvalid,
+    input  wire                       m_axis_read_data_tready,
+    output wire                       m_axis_read_data_tlast,
+    output wire [AXIS_ID_WIDTH-1:0]   m_axis_read_data_tid,
+    output wire [AXIS_DEST_WIDTH-1:0] m_axis_read_data_tdest,
+    output wire [AXIS_USER_WIDTH-1:0] m_axis_read_data_tuser,
+    /*
+     * AXI write descriptor input
+     */
+    input  wire [AXI_ADDR_WIDTH-1:0]  s_axis_write_desc_addr,
+    input  wire [LEN_WIDTH-1:0]       s_axis_write_desc_len,
+    input  wire [TAG_WIDTH-1:0]       s_axis_write_desc_tag,
+    input  wire                       s_axis_write_desc_valid,
+    output wire                       s_axis_write_desc_ready,
+    /*
+     * AXI write descriptor status output
+     */
+    output wire [LEN_WIDTH-1:0]       m_axis_write_desc_status_len,
+    output wire [TAG_WIDTH-1:0]       m_axis_write_desc_status_tag,
+    output wire [AXIS_ID_WIDTH-1:0]   m_axis_write_desc_status_id,
+    output wire [AXIS_DEST_WIDTH-1:0] m_axis_write_desc_status_dest,
+    output wire [AXIS_USER_WIDTH-1:0] m_axis_write_desc_status_user,
+    output wire [3:0]                 m_axis_write_desc_status_error,
+    output wire                       m_axis_write_desc_status_valid,
+    /*
+     * AXI stream write data input
+     */
+    input  wire [AXIS_DATA_WIDTH-1:0] s_axis_write_data_tdata,
+    input  wire [AXIS_KEEP_WIDTH-1:0] s_axis_write_data_tkeep,
+    input  wire                       s_axis_write_data_tvalid,
+    output wire                       s_axis_write_data_tready,
+    input  wire                       s_axis_write_data_tlast,
+    input  wire [AXIS_ID_WIDTH-1:0]   s_axis_write_data_tid,
+    input  wire [AXIS_DEST_WIDTH-1:0] s_axis_write_data_tdest,
+    input  wire [AXIS_USER_WIDTH-1:0] s_axis_write_data_tuser,
+    /*
+     * AXI master interface
+     */
+    output wire [AXI_ID_WIDTH-1:0]    m_axi_awid,
+    output wire [AXI_ADDR_WIDTH-1:0]  m_axi_awaddr,
+    output wire [7:0]                 m_axi_awlen,
+    output wire [2:0]                 m_axi_awsize,
+    output wire [1:0]                 m_axi_awburst,
+    output wire                       m_axi_awlock,
+    output wire [3:0]                 m_axi_awcache,
+    output wire [2:0]                 m_axi_awprot,
+    output wire                       m_axi_awvalid,
+    input  wire                       m_axi_awready,
+    output wire [AXI_DATA_WIDTH-1:0]  m_axi_wdata,
+    output wire [AXI_STRB_WIDTH-1:0]  m_axi_wstrb,
+    output wire                       m_axi_wlast,
+    output wire                       m_axi_wvalid,
+    input  wire                       m_axi_wready,
+    input  wire [AXI_ID_WIDTH-1:0]    m_axi_bid,
+    input  wire [1:0]                 m_axi_bresp,
+    input  wire                       m_axi_bvalid,
+    output wire                       m_axi_bready,
+    output wire [AXI_ID_WIDTH-1:0]    m_axi_arid,
+    output wire [AXI_ADDR_WIDTH-1:0]  m_axi_araddr,
+    output wire [7:0]                 m_axi_arlen,
+    output wire [2:0]                 m_axi_arsize,
+    output wire [1:0]                 m_axi_arburst,
+    output wire                       m_axi_arlock,
+    output wire [3:0]                 m_axi_arcache,
+    output wire [2:0]                 m_axi_arprot,
+    output wire                       m_axi_arvalid,
+    input  wire                       m_axi_arready,
+    input  wire [AXI_ID_WIDTH-1:0]    m_axi_rid,
+    input  wire [AXI_DATA_WIDTH-1:0]  m_axi_rdata,
+    input  wire [1:0]                 m_axi_rresp,
+    input  wire                       m_axi_rlast,
+    input  wire                       m_axi_rvalid,
+    output wire                       m_axi_rready,
+    /*
+     * Configuration
+     */
+    input  wire                       read_enable,
+    input  wire                       write_enable,
+    input  wire                       write_abort
+);
+
+    localparam AXI_DATA_BYTES = AXI_DATA_WIDTH / 8;
+    localparam AXI_SIZE = $clog2(AXI_DATA_BYTES);
+    localparam AXI_SIZE_VAL = (AXI_DATA_BYTES == 1) ? 3'd0 :
+                              (AXI_DATA_BYTES == 2) ? 3'd1 :
+                              (AXI_DATA_BYTES == 4) ? 3'd2 :
+                              (AXI_DATA_BYTES == 8) ? 3'd3 :
+                              (AXI_DATA_BYTES == 16) ? 3'd4 :
+                              (AXI_DATA_BYTES == 32) ? 3'd5 :
+                              (AXI_DATA_BYTES == 64) ? 3'd6 : 3'd7;
+    localparam AXI_BURST_LEN_BITS = $clog2(AXI_MAX_BURST_LEN);
+    localparam AXI_BURST_LEN_MAX = AXI_MAX_BURST_LEN - 1;
+
+    // State machine states
+    localparam ST_IDLE = 2'd0;
+    localparam ST_READ = 2'd1;
+    localparam ST_WRITE = 2'd2;
+    localparam ST_DONE = 2'd3;
+
+    // Read channel state
+    reg [1:0] read_state;
+    reg [AXI_ADDR_WIDTH-1:0] read_addr;
+    reg [LEN_WIDTH-1:0] read_len;
+    reg [LEN_WIDTH-1:0] read_remaining;
+    reg [TAG_WIDTH-1:0] read_tag;
+    reg [AXIS_ID_WIDTH-1:0] read_id;
+    reg [AXIS_DEST_WIDTH-1:0] read_dest;
+    reg [AXIS_USER_WIDTH-1:0] read_user;
+    reg [7:0] read_burst_len;
+    reg [LEN_WIDTH-1:0] read_burst_remaining;
+    reg [3:0] read_error;
+    reg read_status_valid;
+    reg [TAG_WIDTH-1:0] read_status_tag;
+    reg [3:0] read_status_error;
+
+    // Write channel state
+    reg [1:0] write_state;
+    reg [AXI_ADDR_WIDTH-1:0] write_addr;
+    reg [LEN_WIDTH-1:0] write_len;
+    reg [LEN_WIDTH-1:0] write_remaining;
+    reg [TAG_WIDTH-1:0] write_tag;
+    reg [AXIS_ID_WIDTH-1:0] write_id;
+    reg [AXIS_DEST_WIDTH-1:0] write_dest;
+    reg [AXIS_USER_WIDTH-1:0] write_user;
+    reg [7:0] write_burst_len;
+    reg [LEN_WIDTH-1:0] write_burst_remaining;
+    reg [3:0] write_error;
+    reg write_status_valid;
+    reg [LEN_WIDTH-1:0] write_status_len;
+    reg [TAG_WIDTH-1:0] write_status_tag;
+    reg [AXIS_ID_WIDTH-1:0] write_status_id;
+    reg [AXIS_DEST_WIDTH-1:0] write_status_dest;
+    reg [AXIS_USER_WIDTH-1:0] write_status_user;
+    reg [3:0] write_status_error;
+
+    // AXI read address channel
+    reg [AXI_ID_WIDTH-1:0] arid_reg;
+    reg [AXI_ADDR_WIDTH-1:0] araddr_reg;
+    reg [7:0] arlen_reg;
+    reg [2:0] arsize_reg;
+    reg [1:0] arburst_reg;
+    reg arlock_reg;
+    reg [3:0] arcache_reg;
+    reg [2:0] arprot_reg;
+    reg arvalid_reg;
+
+    // AXI read data channel
+    reg rready_reg;
+
+    // AXI write address channel
+    reg [AXI_ID_WIDTH-1:0] awid_reg;
+    reg [AXI_ADDR_WIDTH-1:0] awaddr_reg;
+    reg [7:0] awlen_reg;
+    reg [2:0] awsize_reg;
+    reg [1:0] awburst_reg;
+    reg awlock_reg;
+    reg [3:0] awcache_reg;
+    reg [2:0] awprot_reg;
+    reg awvalid_reg;
+
+    // AXI write data channel
+    reg [AXI_DATA_WIDTH-1:0] wdata_reg;
+    reg [AXI_STRB_WIDTH-1:0] wstrb_reg;
+    reg wlast_reg;
+    reg wvalid_reg;
+
+    // AXI write response channel
+    reg bready_reg;
+
+    // Stream read data output
+    reg [AXIS_DATA_WIDTH-1:0] m_axis_read_data_tdata_reg;
+    reg [AXIS_KEEP_WIDTH-1:0] m_axis_read_data_tkeep_reg;
+    reg m_axis_read_data_tvalid_reg;
+    reg m_axis_read_data_tlast_reg;
+    reg [AXIS_ID_WIDTH-1:0] m_axis_read_data_tid_reg;
+    reg [AXIS_DEST_WIDTH-1:0] m_axis_read_data_tdest_reg;
+    reg [AXIS_USER_WIDTH-1:0] m_axis_read_data_tuser_reg;
+
+    // Stream write data input
+    reg s_axis_write_data_tready_reg;
+
+    // Descriptor ready
+    reg s_axis_read_desc_ready_reg;
+    reg s_axis_write_desc_ready_reg;
+
+    // Status valid
+    reg m_axis_read_desc_status_valid_reg;
+    reg m_axis_write_desc_status_valid_reg;
+
+    // Helper functions
+    function [7:0] calc_burst_len;
+        input [LEN_WIDTH-1:0] remaining;
+        begin
+            if (remaining > AXI_BURST_LEN_MAX)
+                calc_burst_len = AXI_BURST_LEN_MAX;
+            else
+                calc_burst_len = remaining[7:0];
+        end
+    endfunction
+
+    // Read descriptor acceptance
+    wire read_desc_accept = s_axis_read_desc_valid && s_axis_read_desc_ready_reg && read_enable;
+
+    // Write descriptor acceptance
+    wire write_desc_accept = s_axis_write_desc_valid && s_axis_write_desc_ready_reg && write_enable;
+
+    // Read data stream handshake
+    wire read_data_handshake = m_axis_read_data_tvalid_reg && m_axis_read_data_tready;
+
+    // Write data stream handshake
+    wire write_data_handshake = s_axis_write_data_tvalid && s_axis_write_data_tready_reg;
+
+    // AXI read address handshake
+    wire ar_handshake = arvalid_reg && m_axi_arready;
+
+    // AXI read data handshake
+    wire r_handshake = m_axi_rvalid && rready_reg;
+
+    // AXI write address handshake
+    wire aw_handshake = awvalid_reg && m_axi_awready;
+
+    // AXI write data handshake
+    wire w_handshake = wvalid_reg && m_axi_wready;
+
+    // AXI write response handshake
+    wire b_handshake = m_axi_bvalid && bready_reg;
+
+    // Read state machine
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            read_state <= ST_IDLE;
+            read_addr <= {AXI_ADDR_WIDTH{1'b0}};
+            read_len <= {LEN_WIDTH{1'b0}};
+            read_remaining <= {LEN_WIDTH{1'b0}};
+            read_tag <= {TAG_WIDTH{1'b0}};
+            read_id <= {AXIS_ID_WIDTH{1'b0}};
+            read_dest <= {AXIS_DEST_WIDTH{1'b0}};
+            read_user <= {AXIS_USER_WIDTH{1'b0}};
+            read_burst_len <= 8'd0;
+            read_burst_remaining <= {LEN_WIDTH{1'b0}};
+            read_error <= 4'd0;
+            read_status_valid <= 1'b0;
+            read_status_tag <= {TAG_WIDTH{1'b0}};
+            read_status_error <= 4'd0;
+            arid_reg <= {AXI_ID_WIDTH{1'b0}};
+            araddr_reg <= {AXI_ADDR_WIDTH{1'b0}};
+            arlen_reg <= 8'd0;
+            arsize_reg <= 3'd0;
+            arburst_reg <= 2'd0;
+            arlock_reg <= 1'b0;
+            arcache_reg <= 4'd0;
+            arprot_reg <= 3'd0;
+            arvalid_reg <= 1'b0;
+            rready_reg <= 1'b0;
+            m_axis_read_data_tdata_reg <= {AXIS_DATA_WIDTH{1'b0}};
+            m_axis_read_data_tkeep_reg <= {AXIS_KEEP_WIDTH{1'b0}};
+            m_axis_read_data_tvalid_reg <= 1'b0;
+            m_axis_read_data_tlast_reg <= 1'b0;
+            m_axis_read_data_tid_reg <= {AXIS_ID_WIDTH{1'b0}};
+            m_axis_read_data_tdest_reg <= {AXIS_DEST_WIDTH{1'b0}};
+            m_axis_read_data_tuser_reg <= {AXIS_USER_WIDTH{1'b0}};
+            s_axis_read_desc_ready_reg <= 1'b0;
+            m_axis_read_desc_status_valid_reg <= 1'b0;
+        end else begin
+            // Default: hold status valid until consumed (but no consumer signal for read status)
+            // We'll just pulse it for one cycle
+            m_axis_read_desc_status_valid_reg <= 1'b0;
+
+            case (read_state)
+                ST_IDLE: begin
+                    s_axis_read_desc_ready_reg <= read_enable;
+                    if (read_desc_accept) begin
+                        read_state <= ST_READ;
+                        read_addr <= s_axis_read_desc_addr;
+                        read_len <= s_axis_read_desc_len;
+                        read_remaining <= s_axis_read_desc_len;
+                        read_tag <= s_axis_read_desc_tag;
+                        read_id <= s_axis_read_desc_id;
+                        read_dest <= s_axis_read_desc_dest;
+                        read_user <= s_axis_read_desc_user;
+                        read_error <= 4'd0;
+                        read_burst_len <= calc_burst_len(s_axis_read_desc_len);
+                        read_burst_remaining <= s_axis_read_desc_len;
+                        // Prepare AXI read address
+                        arid_reg <= {AXI_ID_WIDTH{1'b0}};
+                        araddr_reg <= s_axis_read_desc_addr;
+                        arlen_reg <= read_burst_len - 8'd1;
+                        arsize_reg <= AXI_SIZE_VAL;
+                        arburst_reg <= 2'b01; // INCR
+                        arlock_reg <= 1'b0;
+                        arcache_reg <= 4'b0011;
+                        arprot_reg <= 3'b000;
+                        arvalid_reg <= 1'b1;
+                        rready_reg <= 1'b0;
+                    end
+                end
+
+                ST_READ: begin
+                    s_axis_read_desc_ready_reg <= 1'b0;
+                    // Wait for AR handshake
+                    if (ar_handshake) begin
+                        arvalid_reg <= 1'b0;
+                        rready_reg <= 1'b1;
+                    end
+
+                    // Handle read data
+                    if (r_handshake) begin
+                        // Output to stream
+                        m_axis_read_data_tdata_reg <= m_axi_rdata;
+                        m_axis_read_data_tkeep_reg <= {AXIS_KEEP_WIDTH{1'b1}};
+                        m_axis_read_data_tvalid_reg <= 1'b1;
+                        m_axis_read_data_tid_reg <= read_id;
+                        m_axis_read_data_tdest_reg <= read_dest;
+                        m_axis_read_data_tuser_reg <= read_user;
+
+                        // Check for error
+                        if (m_axi_rresp != 2'b00) begin
+                            read_error <= 4'b0001;
+                        end
+
+                        // Update remaining
+                        read_remaining <= read_remaining - 1'b1;
+                        read_burst_remaining <= read_burst_remaining - 1'b1;
+
+                        // Set tlast if this is the last beat of the burst
+                        if (m_axi_rlast) begin
+                            m_axis_read_data_tlast_reg <= 1'b1;
+                        end else begin
+                            m_axis_read_data_tlast_reg <= 1'b0;
+                        end
+
+                        // If burst is done, prepare next burst or finish
+                        if (m_axi_rlast) begin
+                            rready_reg <= 1'b0;
+                            if (read_remaining == 1'b1) begin
+                                // All data transferred
+                                read_state <= ST_DONE;
+                                read_status_tag <= read_tag;
+                                read_status_error <= read_error;
+                                m_axis_read_desc_status_valid_reg <= 1'b1;
+                            end else begin
+                                // Prepare next burst
+                                read_addr <= read_addr + AXI_DATA_BYTES;
+                                read_burst_len <= calc_burst_len(read_remaining - 1'b1);
+                                read_burst_remaining <= read_remaining - 1'b1;
+                                arid_reg <= {AXI_ID_WIDTH{1'b0}};
+                                araddr_reg <= read_addr;
+                                arlen_reg <= read_burst_len - 8'd1;
+                                arsize_reg <= AXI_SIZE_VAL;
+                                arburst_reg <= 2'b01;
+                                arlock_reg <= 1'b0;
+                                arcache_reg <= 4'b0011;
+                                arprot_reg <= 3'b000;
+                                arvalid_reg <= 1'b1;
+                            end
+                        end
+                    end
+
+                    // Clear tvalid when consumed
+                    if (read_data_handshake) begin
+                        m_axis_read_data_tvalid_reg <= 1'b0;
+                    end
+                end
+
+                ST_DONE: begin
+                    read_state <= ST_IDLE;
+                end
+
+                default: begin
+                    read_state <= ST_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Write state machine
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            write_state <= ST_IDLE;
+            write_addr <= {AXI_ADDR_WIDTH{1'b0}};
+            write_len <= {LEN_WIDTH{1'b0}};
+            write_remaining <= {LEN_WIDTH{1'b0}};
+            write_tag <= {TAG_WIDTH{1'b0}};
+            write_id <= {AXIS_ID_WIDTH{1'b0}};
+            write_dest <= {AXIS_DEST_WIDTH{1'b0}};
+            write_user <= {AXIS_USER_WIDTH{1'b0}};
+            write_burst_len <= 8'd0;
+            write_burst_remaining <= {LEN_WIDTH{1'b0}};
+            write_error <= 4'd0;
+            write_status_valid <= 1'b0;
+            write_status_len <= {LEN_WIDTH{1'b0}};
+            write_status_tag <= {TAG_WIDTH{1'b0}};
+            write_status_id <= {AXIS_ID_WIDTH{1'b0}};
+            write_status_dest <= {AXIS_DEST_WIDTH{1'b0}};
+            write_status_user <= {AXIS_USER_WIDTH{1'b0}};
+            write_status_error <= 4'd0;
+            awid_reg <= {AXI_ID_WIDTH{1'b0}};
+            awaddr_reg <= {AXI_ADDR_WIDTH{1'b0}};
+            awlen_reg <= 8'd0;
+            awsize_reg <= 3'd0;
+            awburst_reg <= 2'd0;
+            awlock_reg <= 1'b0;
+            awcache_reg <= 4'd0;
+            awprot_reg <= 3'd0;
+            awvalid_reg <= 1'b0;
+            wdata_reg <= {AXI_DATA_WIDTH{1'b0}};
+            wstrb_reg <= {AXI_STRB_WIDTH{1'b0}};
+            wlast_reg <= 1'b0;
+            wvalid_reg <= 1'b0;
+            bready_reg <= 1'b0;
+            s_axis_write_data_tready_reg <= 1'b0;
+            m_axis_write_desc_status_valid_reg <= 1'b0;
+        end else begin
+            // Default: hold status valid until consumed (but no consumer signal for write status)
+            // We'll just pulse it for one cycle
+            m_axis_write_desc_status_valid_reg <= 1'b0;
+
+            case (write_state)
+                ST_IDLE: begin
+                    s_axis_write_desc_ready_reg <= write_enable;
+                    if (write_desc_accept) begin
+                        write_state <= ST_WRITE;
+                        write_addr <= s_axis_write_desc_addr;
+                        write_len <= s_axis_write_desc_len;
+                        write_remaining <= s_axis_write_desc_len;
+                        write_tag <= s_axis_write_desc_tag;
+                        write_id <= {AXIS_ID_WIDTH{1'b0}};
+                        write_dest <= {AXIS_DEST_WIDTH{1'b0}};
+                        write_user <= {AXIS_USER_WIDTH{1'b0}};
+                        write_error <= 4'd0;
+                        write_burst_len <= calc_burst_len(s_axis_write_desc_len);
+                        write_burst_remaining <= s_axis_write_desc_len;
+                        // Prepare AXI write address
+                        awid_reg <= {AXI_ID_WIDTH{1'b0}};
+                        awaddr_reg <= s_axis_write_desc_addr;
+                        awlen_reg <= write_burst_len - 8'd1;
+                        awsize_reg <= AXI_SIZE_VAL;
+                        awburst_reg <= 2'b01; // INCR
+                        awlock_reg <= 1'b0;
+                        awcache_reg <= 4'b0011;
+                        awprot_reg <= 3'b000;
+                        awvalid_reg <= 1'b1;
+                        wvalid_reg <= 1'b0;
+                        bready_reg <= 1'b0;
+                        s_axis_write_data_tready_reg <= 1'b0;
+                    end
+                end
+
+                ST_WRITE: begin
+                    s_axis_write_desc_ready_reg <= 1'b0;
+                    // Wait for AW handshake
+                    if (aw_handshake) begin
+                        awvalid_reg <= 1'b0;
+                        s_axis_write_data_tready_reg <= 1'b1;
+                    end
+
+                    // Handle write data
+                    if (write_data_handshake) begin
+                        wdata_reg <= s_axis_write_data_tdata;
+                        wstrb_reg <= {AXI_STRB_WIDTH{1'b1}};
+                        wvalid_reg <= 1'b1;
+                        wlast_reg <= s_axis_write_data_tlast;
+                    end
+
+                    // Handle W handshake
+                    if (w_handshake) begin
+                        wvalid_reg <= 1'b0;
+                        write_remaining <= write_remaining - 1'b1;
+                        write_burst_remaining <= write_burst_remaining - 1'b1;
+
+                        // If this was the last beat of the burst
+                        if (wlast_reg) begin
+                            s_axis_write_data_tready_reg <= 1'b0;
+                            bready_reg <= 1'b1;
+                        end
+                    end
+
+                    // Handle B handshake
+                    if (b_handshake) begin
+                        bready_reg <= 1'b0;
+                        if (m_axi_bresp != 2'b00) begin
+                            write_error <= 4'b0001;
+                        end
+
+                        if (write_remaining == 1'b1) begin
+                            // All data transferred
+                            write_state <= ST_DONE;
+                            write_status_len <= write_len;
+                            write_status_tag <= write_tag;
+                            write_status_id <= write_id;
+                            write_status_dest <= write_dest;
+                            write_status_user <= write_user;
+                            write_status_error <= write_error;
+                            m_axis_write_desc_status_valid_reg <= 1'b1;
+                        end else begin
+                            // Prepare next burst
+                            write_addr <= write_addr + AXI_DATA_BYTES;
+                            write_burst_len <= calc_burst_len(write_remaining - 1'b1);
+                            write_burst_remaining <= write_remaining - 1'b1;
+                            awid_reg <= {AXI_ID_WIDTH{1'b0}};
+                            awaddr_reg <= write_addr;
+                            awlen_reg <= write_burst_len - 8'd1;
+                            awsize_reg <= AXI_SIZE_VAL;
+                            awburst_reg <= 2'b01;
+                            awlock_reg <= 1'b0;
+                            awcache_reg <= 4'b0011;
+                            awprot_reg <= 3'b000;
+                            awvalid_reg <= 1'b1;
+                            s_axis_write_data_tready_reg <= 1'b1;
+                        end
+                    end
+                end
+
+                ST_DONE: begin
+                    write_state <= ST_IDLE;
+                end
+
+                default: begin
+                    write_state <= ST_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Assign outputs
+    assign s_axis_read_desc_ready = s_axis_read_desc_ready_reg;
+    assign m_axis_read_desc_status_tag = read_status_tag;
+    assign m_axis_read_desc_status_error = read_status_error;
+    assign m_axis_read_desc_status_valid = m_axis_read_desc_status_valid_reg;
+
+    assign m_axis_read_data_tdata = m_axis_read_data_tdata_reg;
+    assign m_axis_read_data_tkeep = m_axis_read_data_tkeep_reg;
+    assign m_axis_read_data_tvalid = m_axis_read_data_tvalid_reg;
+    assign m_axis_read_data_tlast = m_axis_read_data_tlast_reg;
+    assign m_axis_read_data_tid = m_axis_read_data_tid_reg;
+    assign m_axis_read_data_tdest = m_axis_read_data_tdest_reg;
+    assign m_axis_read_data_tuser = m_axis_read_data_tuser_reg;
+
+    assign s_axis_write_desc_ready = s_axis_write_desc_ready_reg;
+    assign m_axis_write_desc_status_len = write_status_len;
+    assign m_axis_write_desc_status_tag = write_status_tag;
+    assign m_axis_write_desc_status_id = write_status_id;
+    assign m_axis_write_desc_status_dest = write_status_dest;
+    assign m_axis_write_desc_status_user = write_status_user;
+    assign m_axis_write_desc_status_error = write_status_error;
+    assign m_axis_write_desc_status_valid = m_axis_write_desc_status_valid_reg;
+
+    assign s_axis_write_data_tready = s_axis_write_data_tready_reg;
+
+    assign m_axi_awid = awid_reg;
+    assign m_axi_awaddr = awaddr_reg;
+    assign m_axi_awlen = awlen_reg;
+    assign m_axi_awsize = awsize_reg;
+    assign m_axi_awburst = awburst_reg;
+    assign m_axi_awlock = awlock_reg;
+    assign m_axi_awcache = awcache_reg;
+    assign m_axi_awprot = awprot_reg;
+    assign m_axi_awvalid = awvalid_reg;
+
+    assign m_axi_wdata = wdata_reg;
+    assign m_axi_wstrb = wstrb_reg;
+    assign m_axi_wlast = wlast_reg;
+    assign m_axi_wvalid = wvalid_reg;
+
+    assign m_axi_bready = bready_reg;
+
+    assign m_axi_arid = arid_reg;
+    assign m_axi_araddr = araddr_reg;
+    assign m_axi_arlen = arlen_reg;
+    assign m_axi_arsize = arsize_reg;
+    assign m_axi_arburst = arburst_reg;
+    assign m_axi_arlock = arlock_reg;
+    assign m_axi_arcache = arcache_reg;
+    assign m_axi_arprot = arprot_reg;
+    assign m_axi_arvalid = arvalid_reg;
+
+    assign m_axi_rready = rready_reg;
+
+endmodule

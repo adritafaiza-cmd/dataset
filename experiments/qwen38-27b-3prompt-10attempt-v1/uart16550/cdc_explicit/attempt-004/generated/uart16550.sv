@@ -1,0 +1,806 @@
+module uart_top (
+    input  wire wb_clk_i,
+    input  wire wb_rst_i,
+    input  wire [7:0] wb_adr_i,
+    input  wire [7:0] wb_dat_i,
+    output wire [7:0] wb_dat_o,
+    input  wire wb_we_i,
+    input  wire wb_stb_i,
+    input  wire wb_cyc_i,
+    output wire wb_ack_o,
+    input  wire [3:0] wb_sel_i,
+    output wire int_o,
+    output wire stx_pad_o,
+    input  wire srx_pad_i,
+    output wire rts_pad_o,
+    input  wire cts_pad_i,
+    output wire dtr_pad_o,
+    input  wire dsr_pad_i,
+    input  wire ri_pad_i,
+    input  wire dcd_pad_i
+);
+
+    // Wishbone signals
+    wire wb_valid = wb_cyc_i & wb_stb_i;
+    wire wb_write = wb_valid & wb_we_i;
+    wire wb_read  = wb_valid & ~wb_we_i;
+
+    // Register addresses
+    localparam ADDR_THR = 8'h00;
+    localparam ADDR_RBR = 8'h00;
+    localparam ADDR_IER = 8'h01;
+    localparam ADDR_FCR = 8'h02;
+    localparam ADDR_LCR = 8'h03;
+    localparam ADDR_MCR = 8'h04;
+    localparam ADDR_LSR = 8'h05;
+    localparam ADDR_MSR = 8'h06;
+    localparam ADDR_SCR = 8'h07;
+    localparam ADDR_DLL = 8'h00;
+    localparam ADDR_DLM = 8'h01;
+
+    // Internal signals
+    wire [7:0] reg_rbr;
+    wire [7:0] reg_thr;
+    wire [7:0] reg_ier;
+    wire [7:0] reg_fcr;
+    wire [7:0] reg_lcr;
+    wire [7:0] reg_mcr;
+    wire [7:0] reg_lsr;
+    wire [7:0] reg_msr;
+    wire [7:0] reg_scr;
+    wire [7:0] reg_dll;
+    wire [7:0] reg_dlm;
+
+    wire dlab = reg_lcr[7];
+
+    // FIFO control
+    wire fifo_enabled = reg_fcr[0];
+    wire fifo_reset_rx = reg_fcr[2];
+    wire fifo_reset_tx = reg_fcr[1];
+    wire [1:0] fifo_rx_trig = reg_fcr[3:2];
+    wire [1:0] fifo_tx_trig = reg_fcr[5:4];
+
+    // LCR bits
+    wire parity_enable = reg_lcr[0];
+    wire stop_bits = reg_lcr[1];
+    wire [1:0] word_length = reg_lcr[3:2];
+    wire break_int = reg_lcr[6];
+    wire send_break = reg_lcr[5];
+
+    // MCR bits
+    wire dtr = reg_mcr[0];
+    wire rts = reg_mcr[1];
+    wire out2 = reg_mcr[2];
+    wire out1 = reg_mcr[3];
+    wire loopback = reg_mcr[4];
+
+    // LSR bits
+    wire lsr_dr = reg_lsr[0];
+    wire lsr_ovr = reg_lsr[5];
+    wire lsr_pe = reg_lsr[6];
+    wire lsr_fe = reg_lsr[7];
+    wire lsr_bi = reg_lsr[8];
+    wire lsr_thre = reg_lsr[5];
+    wire lsr_temt = reg_lsr[6];
+
+    // MSR bits
+    wire msr_dcd = reg_msr[0];
+    wire msr_ri = reg_msr[1];
+    wire msr_ds = reg_msr[2];
+    wire msr_cts = reg_msr[3];
+    wire msr_dcd_d = reg_msr[4];
+    wire msr_ri_d = reg_msr[5];
+    wire msr_ds_d = reg_msr[6];
+    wire msr_cts_d = reg_msr[7];
+
+    // IER bits
+    wire ier_rlsi = reg_ier[3];
+    wire ier_thre = reg_ier[2];
+    wire ier_rx = reg_ier[1];
+    wire ier_tx = reg_ier[0];
+
+    // Interrupt generation
+    wire int_rlsi = ier_rlsi & (msr_dcd_d | msr_ri_d | msr_ds_d | msr_cts_d);
+    wire int_thre = ier_thre & lsr_thre;
+    wire int_rx = ier_rx & (lsr_dr | lsr_ovr | lsr_pe | lsr_fe | lsr_bi);
+    wire int_tx = ier_tx & lsr_temt;
+    
+    wire int_pending = int_rlsi | int_thre | int_rx | int_tx;
+    assign int_o = int_pending;
+
+    // Baud rate divisor
+    wire [15:0] baud_divisor = {reg_dlm, reg_dll};
+    wire [15:0] baud_divisor_eff = (baud_divisor == 16'd0) ? 16'd1 : baud_divisor;
+
+    // UART core signals
+    wire tx_start;
+    wire [7:0] tx_data;
+    wire tx_done;
+    wire rx_valid;
+    wire [7:0] rx_data;
+    wire rx_error;
+    wire rx_break;
+    wire tx_empty;
+    wire rx_empty;
+
+    // FIFO signals
+    wire [7:0] fifo_rx_data;
+    wire fifo_rx_valid;
+    wire fifo_rx_ready;
+    wire fifo_rx_overflow;
+    wire [7:0] fifo_tx_data;
+    wire fifo_tx_valid;
+    wire fifo_tx_ready;
+    wire fifo_tx_empty;
+    wire fifo_rx_count;
+    wire fifo_tx_count;
+
+    // Instantiate UART core
+    uart_core #(
+        .BAUD_DIVISOR(16'd1)
+    ) u_uart_core (
+        .clk(wb_clk_i),
+        .rst(wb_rst_i),
+        .baud_divisor(baud_divisor_eff),
+        .tx_start(tx_start),
+        .tx_data(tx_data),
+        .tx_done(tx_done),
+        .tx_empty(tx_empty),
+        .rx_valid(rx_valid),
+        .rx_data(rx_data),
+        .rx_error(rx_error),
+        .rx_break(rx_break),
+        .rx_empty(rx_empty),
+        .stx_pad_o(stx_pad_o),
+        .srx_pad_i(srx_pad_i),
+        .loopback(loopback)
+    );
+
+    // Instantiate RX FIFO
+    rx_fifo u_rx_fifo (
+        .clk(wb_clk_i),
+        .rst(wb_rst_i),
+        .reset(fifo_reset_rx),
+        .push(rx_valid),
+        .data_in(rx_data),
+        .error_in(rx_error),
+        .break_in(rx_break),
+        .pop(fifo_rx_valid),
+        .data_out(fifo_rx_data),
+        .error_out(),
+        .break_out(),
+        .count(fifo_rx_count),
+        .overflow(fifo_rx_overflow),
+        .empty(rx_empty)
+    );
+
+    // Instantiate TX FIFO
+    tx_fifo u_tx_fifo (
+        .clk(wb_clk_i),
+        .rst(wb_rst_i),
+        .reset(fifo_reset_tx),
+        .push(fifo_tx_valid),
+        .data_in(fifo_tx_data),
+        .pop(tx_start),
+        .data_out(tx_data),
+        .count(fifo_tx_count),
+        .empty(fifo_tx_empty)
+    );
+
+    // Register file
+    reg_file u_reg_file (
+        .clk(wb_clk_i),
+        .rst(wb_rst_i),
+        .wb_valid(wb_valid),
+        .wb_write(wb_write),
+        .wb_read(wb_read),
+        .wb_adr(wb_adr_i),
+        .wb_dat_i(wb_dat_i),
+        .wb_dat_o(wb_dat_o),
+        .wb_ack_o(wb_ack_o),
+        .dlab(dlab),
+        .reg_rbr(reg_rbr),
+        .reg_thr(reg_thr),
+        .reg_ier(reg_ier),
+        .reg_fcr(reg_fcr),
+        .reg_lcr(reg_lcr),
+        .reg_mcr(reg_mcr),
+        .reg_lsr(reg_lsr),
+        .reg_msr(reg_msr),
+        .reg_scr(reg_scr),
+        .reg_dll(reg_dll),
+        .reg_dlm(reg_dlm),
+        .fifo_rx_count(fifo_rx_count),
+        .fifo_tx_count(fifo_tx_count),
+        .fifo_rx_overflow(fifo_rx_overflow),
+        .fifo_tx_empty(fifo_tx_empty),
+        .rx_valid(rx_valid),
+        .rx_data(rx_data),
+        .rx_error(rx_error),
+        .rx_break(rx_break),
+        .tx_done(tx_done),
+        .tx_empty(tx_empty),
+        .msr_dcd(msr_dcd),
+        .msr_ri(msr_ri),
+        .msr_ds(msr_ds),
+        .msr_cts(msr_cts),
+        .msr_dcd_d(msr_dcd_d),
+        .msr_ri_d(msr_ri_d),
+        .msr_ds_d(msr_ds_d),
+        .msr_cts_d(msr_cts_d),
+        .dtr(dtr),
+        .rts(rts),
+        .out2(out2),
+        .out1(out1),
+        .loopback(loopback),
+        .parity_enable(parity_enable),
+        .stop_bits(stop_bits),
+        .word_length(word_length),
+        .break_int(break_int),
+        .send_break(send_break),
+        .fifo_enabled(fifo_enabled),
+        .fifo_reset_rx(fifo_reset_rx),
+        .fifo_reset_tx(fifo_reset_tx),
+        .fifo_rx_trig(fifo_rx_trig),
+        .fifo_tx_trig(fifo_tx_trig),
+        .ier_rlsi(ier_rlsi),
+        .ier_thre(ier_thre),
+        .ier_rx(ier_rx),
+        .ier_tx(ier_tx),
+        .lsr_dr(lsr_dr),
+        .lsr_ovr(lsr_ovr),
+        .lsr_pe(lsr_pe),
+        .lsr_fe(lsr_fe),
+        .lsr_bi(lsr_bi),
+        .lsr_thre(lsr_thre),
+        .lsr_temt(lsr_temt)
+    );
+
+    // Modem control
+    assign rts_pad_o = rts;
+    assign dtr_pad_o = dtr;
+
+    // MSR edge detection
+    reg msr_dcd_r, msr_ri_r, msr_ds_r, msr_cts_r;
+    reg msr_dcd_d_r, msr_ri_d_r, msr_ds_d_r, msr_cts_d_r;
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            msr_dcd_r <= 1'b0;
+            msr_ri_r <= 1'b0;
+            msr_ds_r <= 1'b0;
+            msr_cts_r <= 1'b0;
+            msr_dcd_d_r <= 1'b0;
+            msr_ri_d_r <= 1'b0;
+            msr_ds_d_r <= 1'b0;
+            msr_cts_d_r <= 1'b0;
+        end else begin
+            msr_dcd_r <= dcd_pad_i;
+            msr_ri_r <= ri_pad_i;
+            msr_ds_r <= dsr_pad_i;
+            msr_cts_r <= cts_pad_i;
+            
+            msr_dcd_d_r <= (dcd_pad_i != msr_dcd_r);
+            msr_ri_d_r <= (ri_pad_i != msr_ri_r);
+            msr_ds_d_r <= (dsr_pad_i != msr_ds_r);
+            msr_cts_d_r <= (cts_pad_i != msr_cts_r);
+        end
+    end
+
+    assign msr_dcd = dcd_pad_i;
+    assign msr_ri = ri_pad_i;
+    assign msr_ds = dsr_pad_i;
+    assign msr_cts = cts_pad_i;
+    assign msr_dcd_d = msr_dcd_d_r;
+    assign msr_ri_d = msr_ri_d_r;
+    assign msr_ds_d = msr_ds_d_r;
+    assign msr_cts_d = msr_cts_d_r;
+
+endmodule
+
+module uart_core #(
+    parameter BAUD_DIVISOR = 16'd1
+) (
+    input  wire clk,
+    input  wire rst,
+    input  wire [15:0] baud_divisor,
+    input  wire tx_start,
+    input  wire [7:0] tx_data,
+    output wire tx_done,
+    output wire tx_empty,
+    output wire rx_valid,
+    output wire [7:0] rx_data,
+    output wire rx_error,
+    output wire rx_break,
+    output wire rx_empty,
+    output wire stx_pad_o,
+    input  wire srx_pad_i,
+    input  wire loopback
+);
+
+    // Baud rate generator
+    reg [15:0] baud_counter;
+    wire baud_tick;
+    
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            baud_counter <= 16'd0;
+        end else if (baud_counter == baud_divisor - 1) begin
+            baud_counter <= 16'd0;
+        end else begin
+            baud_counter <= baud_counter + 1'b1;
+        end
+    end
+    
+    assign baud_tick = (baud_counter == baud_divisor - 1);
+
+    // TX state machine
+    localparam TX_IDLE = 3'd0;
+    localparam TX_START = 3'd1;
+    localparam TX_DATA = 3'd2;
+    localparam TX_PARITY = 3'd3;
+    localparam TX_STOP1 = 3'd4;
+    localparam TX_STOP2 = 3'd5;
+
+    reg [2:0] tx_state;
+    reg [3:0] tx_bit_count;
+    reg [7:0] tx_shift_reg;
+    reg tx_parity_bit;
+    reg tx_stop_bit;
+    reg tx_done_r;
+    reg tx_empty_r;
+
+    wire [7:0] tx_data_eff = loopback ? tx_data : tx_data;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            tx_state <= TX_IDLE;
+            tx_bit_count <= 4'd0;
+            tx_shift_reg <= 8'd0;
+            tx_parity_bit <= 1'b0;
+            tx_stop_bit <= 1'b0;
+            tx_done_r <= 1'b0;
+            tx_empty_r <= 1'b1;
+        end else begin
+            tx_done_r <= 1'b0;
+            
+            case (tx_state)
+                TX_IDLE: begin
+                    tx_empty_r <= 1'b1;
+                    if (tx_start) begin
+                        tx_state <= TX_START;
+                        tx_shift_reg <= tx_data_eff;
+                        tx_empty_r <= 1'b0;
+                    end
+                end
+                TX_START: begin
+                    if (baud_tick) begin
+                        tx_state <= TX_DATA;
+                        tx_bit_count <= 4'd0;
+                    end
+                end
+                TX_DATA: begin
+                    if (baud_tick) begin
+                        if (tx_bit_count == 4'd7) begin
+                            tx_state <= TX_PARITY;
+                            tx_parity_bit <= 1'b0; // Simplified parity
+                        end else begin
+                            tx_bit_count <= tx_bit_count + 1'b1;
+                            tx_shift_reg <= {tx_shift_reg[6:0], 1'b0};
+                        end
+                    end
+                end
+                TX_PARITY: begin
+                    if (baud_tick) begin
+                        tx_state <= TX_STOP1;
+                        tx_stop_bit <= 1'b1;
+                    end
+                end
+                TX_STOP1: begin
+                    if (baud_tick) begin
+                        tx_state <= TX_STOP2;
+                    end
+                end
+                TX_STOP2: begin
+                    if (baud_tick) begin
+                        tx_state <= TX_IDLE;
+                        tx_done_r <= 1'b1;
+                    end
+                end
+                default: tx_state <= TX_IDLE;
+            endcase
+        end
+    end
+
+    assign tx_done = tx_done_r;
+    assign tx_empty = tx_empty_r;
+    assign stx_pad_o = (tx_state == TX_IDLE) ? 1'b1 : 
+                       (tx_state == TX_START) ? 1'b0 :
+                       (tx_state == TX_DATA) ? tx_shift_reg[0] :
+                       (tx_state == TX_PARITY) ? tx_parity_bit :
+                       (tx_state == TX_STOP1) ? 1'b1 :
+                       (tx_state == TX_STOP2) ? 1'b1 : 1'b1;
+
+    // RX state machine
+    localparam RX_IDLE = 3'd0;
+    localparam RX_START = 3'd1;
+    localparam RX_DATA = 3'd2;
+    localparam RX_PARITY = 3'd3;
+    localparam RX_STOP1 = 3'd4;
+    localparam RX_STOP2 = 3'd5;
+
+    reg [2:0] rx_state;
+    reg [3:0] rx_bit_count;
+    reg [7:0] rx_shift_reg;
+    reg rx_valid_r;
+    reg rx_error_r;
+    reg rx_break_r;
+    reg rx_empty_r;
+
+    wire srx_eff = loopback ? stx_pad_o : srx_pad_i;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rx_state <= RX_IDLE;
+            rx_bit_count <= 4'd0;
+            rx_shift_reg <= 8'd0;
+            rx_valid_r <= 1'b0;
+            rx_error_r <= 1'b0;
+            rx_break_r <= 1'b0;
+            rx_empty_r <= 1'b1;
+        end else begin
+            rx_valid_r <= 1'b0;
+            rx_error_r <= 1'b0;
+            rx_break_r <= 1'b0;
+            
+            case (rx_state)
+                RX_IDLE: begin
+                    rx_empty_r <= 1'b1;
+                    if (!srx_eff) begin
+                        rx_state <= RX_START;
+                        rx_empty_r <= 1'b0;
+                    end
+                end
+                RX_START: begin
+                    if (baud_tick) begin
+                        if (!srx_eff) begin
+                            rx_state <= RX_DATA;
+                            rx_bit_count <= 4'd0;
+                        end else begin
+                            rx_state <= RX_IDLE;
+                            rx_break_r <= 1'b1;
+                        end
+                    end
+                end
+                RX_DATA: begin
+                    if (baud_tick) begin
+                        if (rx_bit_count == 4'd7) begin
+                            rx_state <= RX_PARITY;
+                        end else begin
+                            rx_bit_count <= rx_bit_count + 1'b1;
+                            rx_shift_reg <= {srx_eff, rx_shift_reg[7:1]};
+                        end
+                    end
+                end
+                RX_PARITY: begin
+                    if (baud_tick) begin
+                        rx_state <= RX_STOP1;
+                    end
+                end
+                RX_STOP1: begin
+                    if (baud_tick) begin
+                        rx_state <= RX_STOP2;
+                    end
+                end
+                RX_STOP2: begin
+                    if (baud_tick) begin
+                        rx_state <= RX_IDLE;
+                        rx_valid_r <= 1'b1;
+                        rx_empty_r <= 1'b1;
+                    end
+                end
+                default: rx_state <= RX_IDLE;
+            endcase
+        end
+    end
+
+    assign rx_valid = rx_valid_r;
+    assign rx_data = rx_shift_reg;
+    assign rx_error = rx_error_r;
+    assign rx_break = rx_break_r;
+    assign rx_empty = rx_empty_r;
+
+endmodule
+
+module rx_fifo (
+    input  wire clk,
+    input  wire rst,
+    input  wire reset,
+    input  wire push,
+    input  wire [7:0] data_in,
+    input  wire error_in,
+    input  wire break_in,
+    input  wire pop,
+    output wire [7:0] data_out,
+    output wire error_out,
+    output wire break_out,
+    output wire [3:0] count,
+    output wire overflow,
+    output wire empty
+);
+
+    reg [7:0] mem [0:15];
+    reg [3:0] wr_ptr, rd_ptr;
+    reg [3:0] count_r;
+    reg overflow_r;
+    reg empty_r;
+
+    wire full = (count_r == 4'd16);
+    wire empty = (count_r == 4'd0);
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            wr_ptr <= 4'd0;
+            rd_ptr <= 4'd0;
+            count_r <= 4'd0;
+            overflow_r <= 1'b0;
+            empty_r <= 1'b1;
+        end else if (reset) begin
+            wr_ptr <= 4'd0;
+            rd_ptr <= 4'd0;
+            count_r <= 4'd0;
+            overflow_r <= 1'b0;
+            empty_r <= 1'b1;
+        end else begin
+            overflow_r <= 1'b0;
+            
+            if (push && !full) begin
+                mem[wr_ptr] <= data_in;
+                wr_ptr <= wr_ptr + 1'b1;
+                count_r <= count_r + 1'b1;
+                empty_r <= 1'b0;
+            end else if (push && full) begin
+                overflow_r <= 1'b1;
+            end
+            
+            if (pop && !empty) begin
+                rd_ptr <= rd_ptr + 1'b1;
+                count_r <= count_r - 1'b1;
+                empty_r <= (count_r == 4'd1);
+            end
+        end
+    end
+
+    assign data_out = mem[rd_ptr];
+    assign error_out = 1'b0;
+    assign break_out = 1'b0;
+    assign count = count_r;
+    assign overflow = overflow_r;
+    assign empty = empty_r;
+
+endmodule
+
+module tx_fifo (
+    input  wire clk,
+    input  wire rst,
+    input  wire reset,
+    input  wire push,
+    input  wire [7:0] data_in,
+    input  wire pop,
+    output wire [7:0] data_out,
+    output wire [3:0] count,
+    output wire empty
+);
+
+    reg [7:0] mem [0:15];
+    reg [3:0] wr_ptr, rd_ptr;
+    reg [3:0] count_r;
+    reg empty_r;
+
+    wire full = (count_r == 4'd16);
+    wire empty = (count_r == 4'd0);
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            wr_ptr <= 4'd0;
+            rd_ptr <= 4'd0;
+            count_r <= 4'd0;
+            empty_r <= 1'b1;
+        end else if (reset) begin
+            wr_ptr <= 4'd0;
+            rd_ptr <= 4'd0;
+            count_r <= 4'd0;
+            empty_r <= 1'b1;
+        end else begin
+            if (push && !full) begin
+                mem[wr_ptr] <= data_in;
+                wr_ptr <= wr_ptr + 1'b1;
+                count_r <= count_r + 1'b1;
+                empty_r <= 1'b0;
+            end
+            
+            if (pop && !empty) begin
+                rd_ptr <= rd_ptr + 1'b1;
+                count_r <= count_r - 1'b1;
+                empty_r <= (count_r == 4'd1);
+            end
+        end
+    end
+
+    assign data_out = mem[rd_ptr];
+    assign count = count_r;
+    assign empty = empty_r;
+
+endmodule
+
+module reg_file (
+    input  wire clk,
+    input  wire rst,
+    input  wire wb_valid,
+    input  wire wb_write,
+    input  wire wb_read,
+    input  wire [7:0] wb_adr,
+    input  wire [7:0] wb_dat_i,
+    output wire [7:0] wb_dat_o,
+    output wire wb_ack_o,
+    input  wire dlab,
+    output wire [7:0] reg_rbr,
+    output wire [7:0] reg_thr,
+    output wire [7:0] reg_ier,
+    output wire [7:0] reg_fcr,
+    output wire [7:0] reg_lcr,
+    output wire [7:0] reg_mcr,
+    output wire [7:0] reg_lsr,
+    output wire [7:0] reg_msr,
+    output wire [7:0] reg_scr,
+    output wire [7:0] reg_dll,
+    output wire [7:0] reg_dlm,
+    input  wire [3:0] fifo_rx_count,
+    input  wire [3:0] fifo_tx_count,
+    input  wire fifo_rx_overflow,
+    input  wire fifo_tx_empty,
+    input  wire rx_valid,
+    input  wire [7:0] rx_data,
+    input  wire rx_error,
+    input  wire rx_break,
+    input  wire tx_done,
+    input  wire tx_empty,
+    input  wire msr_dcd,
+    input  wire msr_ri,
+    input  wire msr_ds,
+    input  wire msr_cts,
+    input  wire msr_dcd_d,
+    input  wire msr_ri_d,
+    input  wire msr_ds_d,
+    input  wire msr_cts_d,
+    input  wire dtr,
+    input  wire rts,
+    input  wire out2,
+    input  wire out1,
+    input  wire loopback,
+    input  wire parity_enable,
+    input  wire stop_bits,
+    input  wire [1:0] word_length,
+    input  wire break_int,
+    input  wire send_break,
+    input  wire fifo_enabled,
+    input  wire fifo_reset_rx,
+    input  wire fifo_reset_tx,
+    input  wire [1:0] fifo_rx_trig,
+    input  wire [1:0] fifo_tx_trig,
+    input  wire ier_rlsi,
+    input  wire ier_thre,
+    input  wire ier_rx,
+    input  wire ier_tx,
+    input  wire lsr_dr,
+    input  wire lsr_ovr,
+    input  wire lsr_pe,
+    input  wire lsr_fe,
+    input  wire lsr_bi,
+    input  wire lsr_thre,
+    input  wire lsr_temt
+);
+
+    reg [7:0] reg_ier_r;
+    reg [7:0] reg_fcr_r;
+    reg [7:0] reg_lcr_r;
+    reg [7:0] reg_mcr_r;
+    reg [7:0] reg_scr_r;
+    reg [7:0] reg_dll_r;
+    reg [7:0] reg_dlm_r;
+    reg [7:0] reg_thr_r;
+    reg [7:0] reg_rbr_r;
+    reg [7:0] reg_lsr_r;
+    reg [7:0] reg_msr_r;
+
+    wire [7:0] lsr_val = {lsr_bi, lsr_fe, lsr_pe, lsr_ovr, 1'b0, lsr_thre, lsr_temt, lsr_dr};
+    wire [7:0] msr_val = {msr_cts_d, msr_ds_d, msr_ri_d, msr_dcd_d, msr_cts, msr_ds, msr_ri, msr_dcd};
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            reg_ier_r <= 8'd0;
+            reg_fcr_r <= 8'd0;
+            reg_lcr_r <= 8'd0;
+            reg_mcr_r <= 8'd0;
+            reg_scr_r <= 8'd0;
+            reg_dll_r <= 8'd0;
+            reg_dlm_r <= 8'd0;
+            reg_thr_r <= 8'd0;
+            reg_rbr_r <= 8'd0;
+            reg_lsr_r <= 8'd0;
+            reg_msr_r <= 8'd0;
+        end else begin
+            if (wb_valid && wb_write) begin
+                case (wb_adr)
+                    8'h00: begin
+                        if (dlab) reg_dll_r <= wb_dat_i;
+                        else reg_thr_r <= wb_dat_i;
+                    end
+                    8'h01: begin
+                        if (dlab) reg_dlm_r <= wb_dat_i;
+                        else reg_ier_r <= wb_dat_i;
+                    end
+                    8'h02: reg_fcr_r <= wb_dat_i;
+                    8'h03: reg_lcr_r <= wb_dat_i;
+                    8'h04: reg_mcr_r <= wb_dat_i;
+                    8'h07: reg_scr_r <= wb_dat_i;
+                endcase
+            end
+            
+            if (wb_valid && wb_read) begin
+                case (wb_adr)
+                    8'h00: begin
+                        if (dlab) reg_rbr_r <= reg_dll_r;
+                        else reg_rbr_r <= reg_rbr_r;
+                    end
+                    8'h01: begin
+                        if (dlab) reg_rbr_r <= reg_dlm_r;
+                        else reg_rbr_r <= reg_ier_r;
+                    end
+                    8'h02: reg_rbr_r <= reg_fcr_r;
+                    8'h03: reg_rbr_r <= reg_lcr_r;
+                    8'h04: reg_rbr_r <= reg_mcr_r;
+                    8'h05: reg_rbr_r <= lsr_val;
+                    8'h06: reg_rbr_r <= msr_val;
+                    8'h07: reg_rbr_r <= reg_scr_r;
+                endcase
+            end
+        end
+    end
+
+    assign reg_rbr = reg_rbr_r;
+    assign reg_thr = reg_thr_r;
+    assign reg_ier = reg_ier_r;
+    assign reg_fcr = reg_fcr_r;
+    assign reg_lcr = reg_lcr_r;
+    assign reg_mcr = reg_mcr_r;
+    assign reg_lsr = lsr_val;
+    assign reg_msr = msr_val;
+    assign reg_scr = reg_scr_r;
+    assign reg_dll = reg_dll_r;
+    assign reg_dlm = reg_dlm_r;
+
+    assign wb_ack_o = wb_valid;
+    
+    reg [7:0] wb_dat_o_r;
+    always @(*) begin
+        if (wb_read) begin
+            case (wb_adr)
+                8'h00: wb_dat_o_r = dlab ? reg_dll_r : reg_rbr_r;
+                8'h01: wb_dat_o_r = dlab ? reg_dlm_r : reg_ier_r;
+                8'h02: wb_dat_o_r = reg_fcr_r;
+                8'h03: wb_dat_o_r = reg_lcr_r;
+                8'h04: wb_dat_o_r = reg_mcr_r;
+                8'h05: wb_dat_o_r = lsr_val;
+                8'h06: wb_dat_o_r = msr_val;
+                8'h07: wb_dat_o_r = reg_scr_r;
+                default: wb_dat_o_r = 8'd0;
+            endcase
+        end else begin
+            wb_dat_o_r = 8'd0;
+        end
+    end
+    
+    assign wb_dat_o = wb_dat_o_r;
+
+endmodule

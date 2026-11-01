@@ -1,0 +1,200 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // SPI clock divider
+    localparam SPI_CLK_DIV = SPI_2X_CLK_DIV;
+    reg [3:0] spi_clk_cnt;
+    wire spi_clk_en;
+    wire spi_clk_pulse;
+
+    // Generate SPI clock enable and pulse
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_clk_cnt <= 0;
+        end else begin
+            spi_clk_cnt <= spi_clk_cnt + 1;
+        end
+    end
+
+    assign spi_clk_en = (spi_clk_cnt == SPI_CLK_DIV - 1);
+    assign spi_clk_pulse = (spi_clk_cnt == SPI_CLK_DIV - 1);
+
+    // SPI state machine
+    localparam S_IDLE = 2'd0;
+    localparam S_TX   = 2'd1;
+    localparam S_RX   = 2'd2;
+
+    reg [1:0] spi_state;
+    reg [N-1:0] tx_shift;
+    reg [N-1:0] rx_shift;
+    reg [3:0] bit_cnt;
+    reg spi_sck_reg;
+    reg spi_ssel_reg;
+    reg spi_mosi_reg;
+
+    // Parallel side registers
+    reg [N-1:0] di_reg;
+    reg wren_reg;
+    reg di_req_reg;
+    reg wr_ack_reg;
+    reg do_valid_reg;
+    reg [N-1:0] do_reg;
+
+    // Clock domain crossing: sclk to pclk
+    reg [1:0] spi_state_sync;
+    reg [1:0] spi_state_sync2;
+    wire [1:0] spi_state_pclk;
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_state_sync  <= 0;
+            spi_state_sync2 <= 0;
+        end else begin
+            spi_state_sync  <= spi_state;
+            spi_state_sync2 <= spi_state_sync;
+        end
+    end
+    assign spi_state_pclk = spi_state_sync2;
+
+    // Clock domain crossing: pclk to sclk
+    reg wren_sync;
+    reg wren_sync2;
+    wire wren_sclk;
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            wren_sync  <= 0;
+            wren_sync2 <= 0;
+        end else begin
+            wren_sync  <= wren_i;
+            wren_sync2 <= wren_sync;
+        end
+    end
+    assign wren_sclk = wren_sync2;
+
+    // SPI master logic in sclk domain
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_state    <= S_IDLE;
+            spi_sck_reg  <= 0;
+            spi_ssel_reg <= 1;
+            spi_mosi_reg <= 0;
+            tx_shift     <= 0;
+            rx_shift     <= 0;
+            bit_cnt      <= 0;
+        end else begin
+            case (spi_state)
+                S_IDLE: begin
+                    spi_sck_reg  <= 0;
+                    spi_ssel_reg <= 1;
+                    spi_mosi_reg <= 0;
+                    if (wren_sclk) begin
+                        spi_state    <= S_TX;
+                        spi_ssel_reg <= 0;
+                        tx_shift     <= di_i;
+                        bit_cnt      <= 0;
+                        spi_mosi_reg <= di_i[N-1];
+                    end
+                end
+                S_TX: begin
+                    if (spi_clk_pulse) begin
+                        if (bit_cnt == N-1) begin
+                            spi_state    <= S_RX;
+                            spi_sck_reg  <= 0;
+                            bit_cnt      <= 0;
+                            rx_shift     <= 0;
+                        end else begin
+                            bit_cnt      <= bit_cnt + 1;
+                            spi_sck_reg  <= ~spi_sck_reg;
+                            tx_shift     <= {tx_shift[N-2:0], 1'b0};
+                            spi_mosi_reg <= tx_shift[N-2];
+                        end
+                    end
+                end
+                S_RX: begin
+                    if (spi_clk_pulse) begin
+                        if (bit_cnt == N-1) begin
+                            spi_state    <= S_IDLE;
+                            spi_ssel_reg <= 1;
+                            spi_sck_reg  <= 0;
+                            bit_cnt      <= 0;
+                        end else begin
+                            bit_cnt      <= bit_cnt + 1;
+                            spi_sck_reg  <= ~spi_sck_reg;
+                            rx_shift     <= {rx_shift[N-2:0], spi_miso_i};
+                        end
+                    end
+                end
+                default: begin
+                    spi_state    <= S_IDLE;
+                    spi_sck_reg  <= 0;
+                    spi_ssel_reg <= 1;
+                    spi_mosi_reg <= 0;
+                end
+            endcase
+        end
+    end
+
+    assign spi_ssel_o = spi_ssel_reg;
+    assign spi_sck_o  = spi_sck_reg;
+    assign spi_mosi_o = spi_mosi_reg;
+
+    // Parallel side logic in pclk domain
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_reg   <= 0;
+            wr_ack_reg   <= 0;
+            do_valid_reg <= 0;
+            do_reg       <= 0;
+        end else begin
+            // Default: deassert one-cycle pulses
+            di_req_reg   <= 0;
+            wr_ack_reg   <= 0;
+            do_valid_reg <= 0;
+
+            case (spi_state_pclk)
+                S_IDLE: begin
+                    if (wren_i) begin
+                        di_req_reg <= 1;
+                    end
+                end
+                S_TX: begin
+                    // Handshake: acknowledge write request
+                    if (wren_i) begin
+                        wr_ack_reg <= 1;
+                    end
+                end
+                S_RX: begin
+                    // When RX completes, output received data
+                    if (spi_state_pclk == S_RX && spi_state_sync == S_IDLE) begin
+                        do_valid_reg <= 1;
+                        do_reg       <= rx_shift;
+                    end
+                end
+                default: ;
+            endcase
+        end
+    end
+
+    assign di_req_o   = di_req_reg;
+    assign wr_ack_o   = wr_ack_reg;
+    assign do_valid_o = do_valid_reg;
+    assign do_o       = do_reg;
+
+endmodule

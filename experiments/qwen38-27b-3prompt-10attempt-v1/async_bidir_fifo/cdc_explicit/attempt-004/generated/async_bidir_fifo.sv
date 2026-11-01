@@ -1,0 +1,190 @@
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam PTR_W = ASIZE + 1;
+  localparam AFULL_THRESH = DEPTH - 2;
+  localparam AEMPTY_THRESH = 1;
+
+  // Internal FIFO storage
+  reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+  // Side A: write pointer (for A->B direction)
+  reg [PTR_W-1:0] a_wr_ptr;
+  // Side A: read pointer (for B->A direction)
+  reg [PTR_W-1:0] a_rd_ptr;
+
+  // Side B: write pointer (for B->A direction)
+  reg [PTR_W-1:0] b_wr_ptr;
+  // Side B: read pointer (for A->B direction)
+  reg [PTR_W-1:0] b_rd_ptr;
+
+  // Gray code pointers for CDC
+  wire [PTR_W-1:0] a_wr_ptr_gray = a_wr_ptr ^ (a_wr_ptr >> 1);
+  wire [PTR_W-1:0] a_rd_ptr_gray = a_rd_ptr ^ (a_rd_ptr >> 1);
+  wire [PTR_W-1:0] b_wr_ptr_gray = b_wr_ptr ^ (b_wr_ptr >> 1);
+  wire [PTR_W-1:0] b_rd_ptr_gray = b_rd_ptr ^ (b_rd_ptr >> 1);
+
+  // Synchronized gray pointers
+  reg [PTR_W-1:0] a_wr_ptr_gray_sync1, a_wr_ptr_gray_sync2;
+  reg [PTR_W-1:0] a_rd_ptr_gray_sync1, a_rd_ptr_gray_sync2;
+  reg [PTR_W-1:0] b_wr_ptr_gray_sync1, b_wr_ptr_gray_sync2;
+  reg [PTR_W-1:0] b_rd_ptr_gray_sync1, b_rd_ptr_gray_sync2;
+
+  // Convert gray to binary
+  function [PTR_W-1:0] gray2bin;
+    input [PTR_W-1:0] gray;
+    reg [PTR_W-1:0] bin;
+    integer i;
+    begin
+      bin[PTR_W-1] = gray[PTR_W-1];
+      for (i = PTR_W-2; i >= 0; i = i - 1)
+        bin[i] = bin[i+1] ^ gray[i];
+      gray2bin = bin;
+    end
+  endfunction
+
+  // Synchronized binary pointers
+  wire [PTR_W-1:0] a_wr_ptr_bin_sync = gray2bin(a_wr_ptr_gray_sync2);
+  wire [PTR_W-1:0] a_rd_ptr_bin_sync = gray2bin(a_rd_ptr_gray_sync2);
+  wire [PTR_W-1:0] b_wr_ptr_bin_sync = gray2bin(b_wr_ptr_gray_sync2);
+  wire [PTR_W-1:0] b_rd_ptr_bin_sync = gray2bin(b_rd_ptr_gray_sync2);
+
+  // Synchronize gray pointers
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_wr_ptr_gray_sync1 <= {PTR_W{1'b0}};
+      a_wr_ptr_gray_sync2 <= {PTR_W{1'b0}};
+      a_rd_ptr_gray_sync1 <= {PTR_W{1'b0}};
+      a_rd_ptr_gray_sync2 <= {PTR_W{1'b0}};
+    end else begin
+      a_wr_ptr_gray_sync1 <= b_wr_ptr_gray;
+      a_wr_ptr_gray_sync2 <= a_wr_ptr_gray_sync1;
+      a_rd_ptr_gray_sync1 <= b_rd_ptr_gray;
+      a_rd_ptr_gray_sync2 <= a_rd_ptr_gray_sync1;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_wr_ptr_gray_sync1 <= {PTR_W{1'b0}};
+      b_wr_ptr_gray_sync2 <= {PTR_W{1'b0}};
+      b_rd_ptr_gray_sync1 <= {PTR_W{1'b0}};
+      b_rd_ptr_gray_sync2 <= {PTR_W{1'b0}};
+    end else begin
+      b_wr_ptr_gray_sync1 <= a_wr_ptr_gray;
+      b_wr_ptr_gray_sync2 <= b_wr_ptr_gray_sync1;
+      b_rd_ptr_gray_sync1 <= a_rd_ptr_gray;
+      b_rd_ptr_gray_sync2 <= b_rd_ptr_gray_sync1;
+    end
+  end
+
+  // Direction-dependent write/read enables
+  wire a_write_en = a_dir & a_winc;
+  wire a_read_en  = !a_dir & a_rinc;
+  wire b_write_en = b_dir & b_winc;
+  wire b_read_en  = !b_dir & b_rinc;
+
+  // Full/Empty calculations
+  // A->B FIFO: written by A, read by B
+  // Full when a_wr_ptr - b_rd_ptr_sync == DEPTH
+  // Empty when a_wr_ptr_sync == b_rd_ptr
+  wire a_to_b_full  = (a_wr_ptr - b_rd_ptr_bin_sync) == DEPTH;
+  wire a_to_b_empty = (a_wr_ptr_bin_sync == b_rd_ptr);
+
+  // B->A FIFO: written by B, read by A
+  // Full when b_wr_ptr - a_rd_ptr_sync == DEPTH
+  // Empty when b_wr_ptr_sync == a_rd_ptr
+  wire b_to_a_full  = (b_wr_ptr - a_rd_ptr_bin_sync) == DEPTH;
+  wire b_to_a_empty = (b_wr_ptr_bin_sync == a_rd_ptr);
+
+  // Almost full/empty
+  wire a_to_b_afull  = (a_wr_ptr - b_rd_ptr_bin_sync) >= AFULL_THRESH;
+  wire a_to_b_aempty = (a_wr_ptr_bin_sync - b_rd_ptr) <= AEMPTY_THRESH;
+
+  wire b_to_a_afull  = (b_wr_ptr - a_rd_ptr_bin_sync) >= AFULL_THRESH;
+  wire b_to_a_aempty = (b_wr_ptr_bin_sync - a_rd_ptr) <= AEMPTY_THRESH;
+
+  // Output flags
+  assign a_full   = a_to_b_full;
+  assign a_afull  = a_to_b_afull;
+  assign a_empty  = b_to_a_empty;
+  assign a_aempty = b_to_a_aempty;
+
+  assign b_full   = b_to_a_full;
+  assign b_afull  = b_to_a_afull;
+  assign b_empty  = a_to_b_empty;
+  assign b_aempty = a_to_b_aempty;
+
+  // Memory write
+  always @(posedge a_clk) begin
+    if (a_write_en && !a_to_b_full)
+      mem[a_wr_ptr[ASIZE-1:0]] <= a_wdata;
+  end
+
+  always @(posedge b_clk) begin
+    if (b_write_en && !b_to_a_full)
+      mem[b_wr_ptr[ASIZE-1:0]] <= b_wdata;
+  end
+
+  // Memory read
+  wire [DSIZE-1:0] a_to_b_rdata = mem[b_rd_ptr[ASIZE-1:0]];
+  wire [DSIZE-1:0] b_to_a_rdata = mem[a_rd_ptr[ASIZE-1:0]];
+
+  // Output data
+  assign a_rdata = b_to_a_rdata;
+  assign b_rdata = a_to_b_rdata;
+
+  // Pointer updates
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_wr_ptr <= {PTR_W{1'b0}};
+      a_rd_ptr <= {PTR_W{1'b0}};
+    end else begin
+      if (a_write_en && !a_to_b_full)
+        a_wr_ptr <= a_wr_ptr + 1'b1;
+      if (a_read_en && !b_to_a_empty)
+        a_rd_ptr <= a_rd_ptr + 1'b1;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_wr_ptr <= {PTR_W{1'b0}};
+      b_rd_ptr <= {PTR_W{1'b0}};
+    end else begin
+      if (b_write_en && !b_to_a_full)
+        b_wr_ptr <= b_wr_ptr + 1'b1;
+      if (b_read_en && !a_to_b_empty)
+        b_rd_ptr <= b_rd_ptr + 1'b1;
+    end
+  end
+
+endmodule

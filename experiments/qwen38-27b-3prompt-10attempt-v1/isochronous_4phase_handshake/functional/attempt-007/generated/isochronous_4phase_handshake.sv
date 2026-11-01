@@ -1,0 +1,107 @@
+module isochronous_4phase_handshake (
+    input  src_clk_i,
+    input  src_rst_ni,
+    input  src_valid_i,
+    output src_ready_o,
+    input  dst_clk_i,
+    input  dst_rst_ni,
+    output dst_valid_o,
+    input  dst_ready_i
+);
+
+    // Source domain state
+    reg src_valid_reg;
+    reg src_ready_reg;
+
+    // Destination domain state
+    reg dst_valid_reg;
+    reg dst_ready_reg;
+
+    // Synchronizers for crossing domains
+    // src_valid to dst domain
+    reg [1:0] src_valid_sync;
+    // src_ready to dst domain
+    reg [1:0] src_ready_sync;
+    // dst_valid to src domain
+    reg [1:0] dst_valid_sync;
+    // dst_ready to src domain
+    reg [1:0] dst_ready_sync;
+
+    // Synchronizer for src_valid_i (external input) to dst domain
+    // Actually, src_valid_i is in src domain, we need to sync it to dst domain
+    // But wait, the handshake is between src and dst domains.
+    // Let me reconsider the architecture.
+
+    // The four-phase handshake:
+    // Phase 1: src_valid goes high, src_ready is low
+    // Phase 2: dst sees valid, dst_ready goes high
+    // Phase 3: src sees ready, src_valid goes low
+    // Phase 4: dst sees valid low, dst_ready goes low
+
+    // Source domain logic:
+    // src_ready_o is driven by src domain
+    // src_valid_i is an input to the source domain
+
+    // Destination domain logic:
+    // dst_valid_o is driven by dst domain
+    // dst_ready_i is an input to the dst domain
+
+    // We need to synchronize signals across domains.
+
+    // Synchronize src_valid_i from src domain to dst domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_valid_sync <= 2'b00;
+        else
+            src_valid_sync <= {src_valid_sync[0], src_valid_i};
+    end
+
+    // Synchronize src_ready_o from src domain to dst domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_ready_sync <= 2'b00;
+        else
+            src_ready_sync <= {src_ready_sync[0], src_ready_reg};
+    end
+
+    // Synchronize dst_valid_o from dst domain to src domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_valid_sync <= 2'b00;
+        else
+            dst_valid_sync <= {dst_valid_sync[0], dst_valid_reg};
+    end
+
+    // Synchronize dst_ready_i from dst domain to src domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ready_sync <= 2'b00;
+        else
+            dst_ready_sync <= {dst_ready_sync[0], dst_ready_i};
+    end
+
+    // Source domain: generate src_ready_o
+    // src_ready is high when dst is ready to accept (dst_ready_i is high)
+    // In four-phase: src_ready goes high when dst_ready is high
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_ready_reg <= 1'b0;
+        else
+            src_ready_reg <= dst_ready_sync[1];
+    end
+
+    assign src_ready_o = src_ready_reg;
+
+    // Destination domain: generate dst_valid_o
+    // dst_valid is high when src_valid is high
+    // In four-phase: dst_valid goes high when src_valid is high
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_valid_reg <= 1'b0;
+        else
+            dst_valid_reg <= src_valid_sync[1];
+    end
+
+    assign dst_valid_o = dst_valid_reg;
+
+endmodule

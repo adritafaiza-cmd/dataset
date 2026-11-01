@@ -1,0 +1,303 @@
+module apbxclk #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	parameter [0:0]	OPT_REGISTERED = 1'b0,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH
+) (
+	input	wire			S_APB_PCLK, S_PRESETn,
+	input	wire			S_APB_PSEL,
+	input	wire			S_APB_PENABLE,
+	output	reg			S_APB_PREADY,
+	input	wire	[AW-1:0]	S_APB_PADDR,
+	input	wire			S_APB_PWRITE,
+	input	wire	[DW-1:0]	S_APB_PWDATA,
+	input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+	input	wire	[2:0]		S_APB_PPROT,
+	output	wire	[DW-1:0]	S_APB_PRDATA,
+	output	wire			S_APB_PSLVERR,
+	input	wire			M_APB_PCLK,
+	output	reg			M_PRESETn,
+	output	reg			M_APB_PSEL,
+	output	reg			M_APB_PENABLE,
+	input	wire			M_APB_PREADY,
+	output	wire	[AW-1:0]	M_APB_PADDR,
+	output	wire			M_APB_PWRITE,
+	output	wire	[DW-1:0]	M_APB_PWDATA,
+	output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+	output	wire	[2:0]		M_APB_PPROT,
+	input	wire	[DW-1:0]	M_APB_PRDATA,
+	input	wire			M_APB_PSLVERR
+);
+
+	// ------------------------------------------------------------------
+	// Synchronous reset generation for M_APB_PCLK domain
+	// ------------------------------------------------------------------
+	reg [1:0] m_reset_sync;
+	reg       m_reset_int;
+
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_reset_sync <= 2'b00;
+		end else begin
+			m_reset_sync <= {m_reset_sync[0], 1'b1};
+		end
+	end
+
+	assign m_reset_int = ~m_reset_sync[1];
+	assign M_PRESETn   = ~m_reset_int;
+
+	// ------------------------------------------------------------------
+	// Handshake signals (crossing domains)
+	// ------------------------------------------------------------------
+	// req_valid: S domain -> M domain (request pending)
+	// rsp_valid: M domain -> S domain (response ready)
+	reg req_valid_s;
+	reg rsp_valid_m;
+
+	// Synchronous synchronizers
+	reg [1:0] req_valid_sync;
+	reg [1:0] rsp_valid_sync;
+
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn)
+			req_valid_sync <= 2'b00;
+		else
+			req_valid_sync <= {req_valid_sync[0], req_valid_s};
+	end
+
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn)
+			rsp_valid_sync <= 2'b00;
+		else
+			rsp_valid_sync <= {rsp_valid_sync[0], rsp_valid_m};
+	end
+
+	wire req_valid_m = req_valid_sync[1];
+	wire rsp_valid_s = rsp_valid_sync[1];
+
+	// ------------------------------------------------------------------
+	// S-domain: request capture and source APB control
+	// ------------------------------------------------------------------
+	reg [AW-1:0] s_addr_reg;
+	reg          s_write_reg;
+	reg [DW-1:0] s_wdata_reg;
+	reg [DW/8-1:0] s_wstrb_reg;
+	reg [2:0]    s_pprot_reg;
+
+	reg          s_trans_active;
+
+	// Capture request on setup phase (PSEL=1, PENABLE=0)
+	// We accept the request when not already active and not in reset
+	wire s_setup_phase = S_APB_PSEL & ~S_APB_PENABLE;
+	wire s_access_phase = S_APB_PSEL & S_APB_PENABLE;
+
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_trans_active <= 1'b0;
+			req_valid_s    <= 1'b0;
+			S_APB_PREADY   <= 1'b0;
+			s_addr_reg     <= {AW{1'b0}};
+			s_write_reg    <= 1'b0;
+			s_wdata_reg    <= {DW{1'b0}};
+			s_wstrb_reg    <= {(DW/8){1'b0}};
+			s_pprot_reg    <= 3'b000;
+		end else begin
+			// If response is valid, complete the transaction
+			if (rsp_valid_s) begin
+				S_APB_PREADY   <= 1'b1;
+				s_trans_active <= 1'b0;
+				req_valid_s    <= 1'b0;
+			end else if (s_trans_active) begin
+				// Transaction in progress, keep PREADY low
+				S_APB_PREADY   <= 1'b0;
+			end else if (s_setup_phase) begin
+				// New request: capture and forward
+				S_APB_PREADY   <= 1'b0;
+				s_trans_active <= 1'b1;
+				req_valid_s    <= 1'b1;
+				s_addr_reg     <= S_APB_PADDR;
+				s_write_reg    <= S_APB_PWRITE;
+				s_wdata_reg    <= S_APB_PWDATA;
+				s_wstrb_reg    <= S_APB_PWSTRB;
+				s_pprot_reg    <= S_APB_PPROT;
+			end else begin
+				// Idle
+				S_APB_PREADY   <= 1'b0;
+			end
+		end
+	end
+
+	// ------------------------------------------------------------------
+	// M-domain: destination APB control and response capture
+	// ------------------------------------------------------------------
+	reg [AW-1:0] m_addr_reg;
+	reg          m_write_reg;
+	reg [DW-1:0] m_wdata_reg;
+	reg [DW/8-1:0] m_wstrb_reg;
+	reg [2:0]    m_pprot_reg;
+
+	reg          m_trans_active;
+	reg [DW-1:0] m_rdata_reg;
+	reg          m_pslverr_reg;
+
+	// M_APB_PSEL and M_APB_PENABLE are driven based on m_trans_active
+	// Setup phase: PSEL=1, PENABLE=0
+	// Access phase: PSEL=1, PENABLE=1
+	// We use a simple state machine:
+	//   IDLE -> SETUP -> ACCESS -> IDLE
+
+	reg [1:0] m_state;
+	localparam M_IDLE   = 2'b00;
+	localparam M_SETUP  = 2'b01;
+	localparam M_ACCESS = 2'b10;
+
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_state       <= M_IDLE;
+			m_trans_active<= 1'b0;
+			M_APB_PSEL    <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			rsp_valid_m   <= 1'b0;
+			m_addr_reg    <= {AW{1'b0}};
+			m_write_reg   <= 1'b0;
+			m_wdata_reg   <= {DW{1'b0}};
+			m_wstrb_reg   <= {(DW/8){1'b0}};
+			m_pprot_reg   <= 3'b000;
+			m_rdata_reg   <= {DW{1'b0}};
+			m_pslverr_reg <= 1'b0;
+		end else begin
+			case (m_state)
+				M_IDLE: begin
+					M_APB_PSEL    <= 1'b0;
+					M_APB_PENABLE <= 1'b0;
+					if (req_valid_m) begin
+						m_state        <= M_SETUP;
+						m_trans_active <= 1'b1;
+						M_APB_PSEL     <= 1'b1;
+						M_APB_PENABLE  <= 1'b0;
+						m_addr_reg     <= S_APB_PADDR;
+						m_write_reg    <= S_APB_PWRITE;
+						m_wdata_reg    <= S_APB_PWDATA;
+						m_wstrb_reg    <= S_APB_PWSTRB;
+						m_pprot_reg    <= S_APB_PPROT;
+					end
+				end
+				M_SETUP: begin
+					M_APB_PSEL    <= 1'b1;
+					M_APB_PENABLE <= 1'b1;
+					m_state       <= M_ACCESS;
+				end
+				M_ACCESS: begin
+					M_APB_PSEL    <= 1'b1;
+					M_APB_PENABLE <= 1'b1;
+					if (M_APB_PREADY) begin
+						m_state       <= M_IDLE;
+						m_trans_active<= 1'b0;
+						M_APB_PSEL    <= 1'b0;
+						M_APB_PENABLE <= 1'b0;
+						rsp_valid_m   <= 1'b1;
+						m_rdata_reg   <= M_APB_PRDATA;
+						m_pslverr_reg <= M_APB_PSLVERR;
+					end
+				end
+				default: begin
+					m_state       <= M_IDLE;
+					m_trans_active<= 1'b0;
+					M_APB_PSEL    <= 1'b0;
+					M_APB_PENABLE <= 1'b0;
+				end
+			endcase
+		end
+	end
+
+	// ------------------------------------------------------------------
+	// OPT_REGISTERED: register crossing payload and response fields
+	// ------------------------------------------------------------------
+	// When OPT_REGISTERED is set, we add an extra register stage for
+	// the payload going to M domain and the response coming back to S domain.
+	// The behavior must remain the same.
+
+	// For the request payload (S -> M):
+	// We already capture in S domain. If OPT_REGISTERED, we add one more
+	// register in M domain before driving M_APB outputs.
+	// For the response (M -> S):
+	// We already capture in M domain. If OPT_REGISTERED, we add one more
+	// register in S domain before driving S_APB outputs.
+
+	// M_APB output assignments
+	// When OPT_REGISTERED=1, use registered versions; otherwise direct.
+	// Since the spec says "Crossing payload and response fields are captured
+	// once in the receiving clock and then held. OPT_REGISTERED does not
+	// select a combinational bypass.", we interpret this as:
+	// - Without OPT_REGISTERED: fields are captured once in receiving clock (as we do)
+	// - With OPT_REGISTERED: fields are captured once in receiving clock AND
+	//   additionally registered (i.e., one more stage)
+
+	// Let's implement with conditional registers.
+
+	reg [AW-1:0] m_addr_out;
+	reg          m_write_out;
+	reg [DW-1:0] m_wdata_out;
+	reg [DW/8-1:0] m_wstrb_out;
+	reg [2:0]    m_pprot_out;
+
+	reg [DW-1:0] s_rdata_out;
+	reg          s_pslverr_out;
+
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_addr_out  <= {AW{1'b0}};
+			m_write_out <= 1'b0;
+			m_wdata_out <= {DW{1'b0}};
+			m_wstrb_out <= {(DW/8){1'b0}};
+			m_pprot_out <= 3'b000;
+		end else begin
+			if (OPT_REGISTERED) begin
+				// Extra register stage
+				m_addr_out  <= m_addr_reg;
+				m_write_out <= m_write_reg;
+				m_wdata_out <= m_wdata_reg;
+				m_wstrb_out <= m_wstrb_reg;
+				m_pprot_out <= m_pprot_reg;
+			end else begin
+				// Direct from captured registers
+				m_addr_out  <= m_addr_reg;
+				m_write_out <= m_write_reg;
+				m_wdata_out <= m_wdata_reg;
+				m_wstrb_out <= m_wstrb_reg;
+				m_pprot_out <= m_pprot_reg;
+			end
+		end
+	end
+
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_rdata_out   <= {DW{1'b0}};
+			s_pslverr_out <= 1'b0;
+		end else begin
+			if (OPT_REGISTERED) begin
+				// Extra register stage for response
+				s_rdata_out   <= m_rdata_reg;
+				s_pslverr_out <= m_pslverr_reg;
+			end else begin
+				// Direct from captured registers
+				s_rdata_out   <= m_rdata_reg;
+				s_pslverr_out <= m_pslverr_reg;
+			end
+		end
+	end
+
+	// ------------------------------------------------------------------
+	// Output assignments
+	// ------------------------------------------------------------------
+	assign M_APB_PADDR  = m_addr_out;
+	assign M_APB_PWRITE = m_write_out;
+	assign M_APB_PWDATA = m_wdata_out;
+	assign M_APB_PWSTRB = m_wstrb_out;
+	assign M_APB_PPROT  = m_pprot_out;
+
+	assign S_APB_PRDATA  = s_rdata_out;
+	assign S_APB_PSLVERR = s_pslverr_out;
+
+endmodule

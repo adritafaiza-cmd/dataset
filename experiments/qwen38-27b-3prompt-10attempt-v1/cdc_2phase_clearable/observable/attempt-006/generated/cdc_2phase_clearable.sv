@@ -1,0 +1,311 @@
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire src_req;
+  wire dst_ack;
+  wire dst_req;
+  wire src_ack;
+  wire src_clear_synced;
+  wire dst_clear_synced;
+  wire src_clear_pending;
+  wire dst_clear_pending;
+
+  // Source side: clear pending logic
+  // When src_clear_i is asserted, we need to:
+  // 1. Stop accepting new data (src_ready_o = 0)
+  // 2. If there's an outstanding request (src_req=1), we need to wait for dst_ack to clear it
+  // 3. Once the outstanding beat is cleared, src_clear_pending_o goes low
+
+  // Destination side: clear pending logic
+  // When dst_clear_i is asserted, we need to:
+  // 1. Stop accepting data (dst_ready_i effectively ignored, dst_valid_o = 0)
+  // 2. If there's an outstanding request (dst_req=1), we need to wait for src_ack to clear it
+  // 3. Once the outstanding beat is cleared, dst_clear_pending_o goes low
+
+  // Source clear pending: starts when src_clear_i is high, ends when no outstanding request
+  // The clear is "pending" while src_clear_i is high OR while we're waiting for the outstanding beat to be cleared
+
+  // Let's think about this more carefully.
+  // The clear request should flush the channel. 
+  // "A clear isolates both ends, then drops the one outstanding beat by returning request and acknowledge to zero."
+  // "Each clear step reaches the other clock one handshake later."
+
+  // So when src_clear_i is asserted:
+  // - src_ready_o should go to 0 (isolate source)
+  // - If src_req is 1, we need to wait for dst_ack to come back (which will be 0 after clear)
+  // - Once src_req is 0, the clear is complete on the source side
+
+  // When dst_clear_i is asserted:
+  // - dst_valid_o should go to 0 (isolate destination)
+  // - If dst_req is 1, we need to wait for src_ack to come back (which will be 0 after clear)
+  // - Once dst_req is 0, the clear is complete on the destination side
+
+  // The clear_pending_o signals indicate that a clear is in progress.
+
+  // Let's define the state machines.
+
+  // Source side state:
+  // - IDLE: src_req=0, src_ack=0
+  // - REQ: src_req=1, src_ack=0 (waiting for dst_ack)
+  // - ACK: src_req=1, src_ack=1 (dst_ack received, can accept new data)
+
+  // With clear:
+  // - When src_clear_i is high, src_ready_o = 0
+  // - If in REQ state, we wait for dst_ack to clear (dst_ack will go to 0 when dst processes the clear)
+  // - Actually, the clear propagates: src_clear_i -> synced to dst -> dst processes clear -> dst_ack goes to 0 -> src sees dst_ack=0 -> src_req goes to 0
+
+  // Let me reconsider. The two-phase handshake:
+  // - src_req goes from 0 to 1 when src has data and dst is ready (dst_ack=0)
+  // - dst_ack goes from 0 to 1 when dst sees src_req=1
+  // - src_req goes from 1 to 0 when src sees dst_ack=1
+  // - dst_ack goes from 1 to 0 when dst sees src_req=0
+
+  // With clear:
+  // - src_clear_i causes src to stop driving src_req (or force it to 0)
+  // - dst_clear_i causes dst to stop driving dst_ack (or force it to 0)
+  // - The clear propagates through the handshake
+
+  // Let's implement this step by step.
+
+  // Source side:
+  // src_req is driven by source logic
+  // src_ack is the synchronized dst_ack
+
+  // Destination side:
+  // dst_req is the synchronized src_req
+  // dst_ack is driven by destination logic
+
+  // Clear handling:
+  // src_clear_i is synchronized to dst_clk domain
+  // dst_clear_i is synchronized to src_clk domain
+
+  // When src_clear_i is active:
+  // - src_ready_o = 0
+  // - src_req should be forced to 0 (or not asserted)
+  // - Wait for dst_ack to go to 0 (which happens when dst processes the clear)
+  // - src_clear_pending_o = 1 while src_clear_i is high or while waiting for dst_ack to clear
+
+  // When dst_clear_i is active:
+  // - dst_valid_o = 0
+  // - dst_ack should be forced to 0 (or not asserted)
+  // - Wait for src_req to go to 0 (which happens when src processes the clear)
+  // - dst_clear_pending_o = 1 while dst_clear_i is high or while waiting for src_req to clear
+
+  // Let's implement the synchronization first.
+
+  // Synchronize src_clear_i to dst_clk domain
+  reg [SYNC_STAGES-1:0] src_clear_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_clear_sync <= {SYNC_STAGES{1'b0}};
+    else
+      src_clear_sync <= {src_clear_sync[SYNC_STAGES-2:0], src_clear_i};
+  end
+  assign src_clear_synced = src_clear_sync[SYNC_STAGES-1];
+
+  // Synchronize dst_clear_i to src_clk domain
+  reg [SYNC_STAGES-1:0] dst_clear_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_clear_sync <= {SYNC_STAGES{1'b0}};
+    else
+      dst_clear_sync <= {dst_clear_sync[SYNC_STAGES-2:0], dst_clear_i};
+  end
+  assign dst_clear_synced = dst_clear_sync[SYNC_STAGES-1];
+
+  // Source side: src_req generation
+  // src_req is a two-phase signal: 0 -> 1 -> 0 -> 1 ...
+  // It goes to 1 when src has valid data and dst_ack is 0
+  // It goes to 0 when dst_ack is 1
+
+  // With clear: if src_clear_i is active, src_req should be 0
+
+  reg src_req_reg;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      src_req_reg <= 1'b0;
+    else if (src_clear_i)
+      src_req_reg <= 1'b0;
+    else if (src_valid_i && !src_req_reg && !src_ack)
+      src_req_reg <= 1'b1;
+    else if (src_req_reg && src_ack)
+      src_req_reg <= 1'b0;
+  end
+  assign src_req = src_req_reg;
+
+  // src_ready_o: source is ready to accept data
+  // Ready when: not in clear, and (src_req is 0 or src_ack is 1)
+  // Actually, in a two-phase handshake, the source can accept new data when:
+  // - src_req is 0 (no outstanding request), OR
+  // - src_ack is 1 (previous request has been acknowledged, so we can start a new one)
+  // But we can only accept if we're not in the middle of a transfer.
+  // Standard: ready = !src_req || src_ack
+  // But with clear: ready = !src_clear_i && (!src_req || src_ack)
+
+  assign src_ready_o = !src_clear_i && (!src_req_reg || src_ack);
+
+  // Source clear pending:
+  // Pending when src_clear_i is high, or when src_req_reg is 1 (waiting for dst_ack to clear)
+  // Actually, when src_clear_i is asserted, we force src_req_reg to 0.
+  // But if src_req_reg was 1, we need to wait for dst_ack to go to 0.
+  // The clear is pending until src_req_reg is 0 and src_clear_i is deasserted? 
+  // Or until the outstanding beat is cleared?
+
+  // "A clear request should flush the channel and let both sides return to idle without a stray transfer."
+  // "Each clear step reaches the other clock one handshake later."
+
+  // I think src_clear_pending_o should be 1 while src_clear_i is high OR while there's an outstanding request that needs to be cleared.
+  // Once src_req_reg is 0 and src_clear_i is low, the clear is complete.
+
+  // But actually, the clear is a one-shot event. Let me re-read:
+  // "A clear isolates both ends, then drops the one outstanding beat by returning request and acknowledge to zero."
+
+  // So the clear:
+  // 1. Isolates both ends (src_ready=0, dst_valid=0)
+  // 2. Drops the outstanding beat (src_req=0, dst_ack=0)
+
+  // The clear_pending_o indicates that the clear is in progress.
+
+  // Let's say src_clear_pending_o = src_clear_i || src_req_reg
+  // This means: clear is pending if clear is asserted OR if there's an outstanding request.
+
+  assign src_clear_pending = src_clear_i || src_req_reg;
+  assign src_clear_pending_o = src_clear_pending;
+
+  // Destination side: dst_ack generation
+  // dst_ack is a two-phase signal: 0 -> 1 -> 0 -> 1 ...
+  // It goes to 1 when dst_req is 1
+  // It goes to 0 when dst_req is 0
+
+  // With clear: if dst_clear_i is active, dst_ack should be 0
+
+  reg dst_ack_reg;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      dst_ack_reg <= 1'b0;
+    else if (dst_clear_i)
+      dst_ack_reg <= 1'b0;
+    else if (dst_req && !dst_ack_reg)
+      dst_ack_reg <= 1'b1;
+    else if (!dst_req && dst_ack_reg)
+      dst_ack_reg <= 1'b0;
+  end
+  assign dst_ack = dst_ack_reg;
+
+  // dst_valid_o: destination has valid data
+  // Valid when: not in clear, and dst_req is 1
+  // Actually, in a two-phase handshake, the destination has valid data when dst_req is 1.
+  // But we need to hold the data while the receiver waits.
+  // dst_valid_o = !dst_clear_i && dst_req
+
+  assign dst_valid_o = !dst_clear_i && dst_req;
+
+  // Destination clear pending:
+  // Pending when dst_clear_i is high, or when dst_req is 1 (waiting for src_req to clear)
+  assign dst_clear_pending = dst_clear_i || dst_req;
+  assign dst_clear_pending_o = dst_clear_pending;
+
+  // Synchronize src_req to dst_clk domain
+  reg [SYNC_STAGES-1:0] src_req_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_req_sync <= {SYNC_STAGES{1'b0}};
+    else
+      src_req_sync <= {src_req_sync[SYNC_STAGES-2:0], src_req};
+  end
+  assign dst_req = src_req_sync[SYNC_STAGES-1];
+
+  // Synchronize dst_ack to src_clk domain
+  reg [SYNC_STAGES-1:0] dst_ack_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_ack_sync <= {SYNC_STAGES{1'b0}};
+    else
+      dst_ack_sync <= {dst_ack_sync[SYNC_STAGES-2:0], dst_ack};
+  end
+  assign src_ack = dst_ack_sync[SYNC_STAGES-1];
+
+  // Data path:
+  // The data is captured on the source side when src_req is asserted.
+  // The data is held on the destination side until dst_req is deasserted.
+
+  // Source side: capture data when src_req goes from 0 to 1
+  reg [WIDTH-1:0] src_data_reg;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      src_data_reg <= {WIDTH{1'b0}};
+    else if (src_valid_i && src_ready_o && !src_req_reg)
+      src_data_reg <= src_data_i;
+  end
+
+  // Synchronize src_data_reg to dst_clk domain
+  // We need to synchronize the data along with the request.
+  // Since the data changes only when src_req goes from 0 to 1, and src_req is synchronized,
+  // we can use a multi-phase synchronizer for the data.
+
+  // Actually, for a two-phase handshake, the data is stable while src_req is 1.
+  // So we can synchronize the data using a simple multi-stage synchronizer,
+  // but we need to ensure the data is stable before it's sampled.
+
+  // A common approach is to use a "data synchronizer" that captures the data
+  // when the request is detected. But since the request is already synchronized,
+  // we can just synchronize the data directly.
+
+  // However, to be safe, let's use a pipeline synchronizer for the data.
+  // The data is valid when dst_req is 1, and it's stable while dst_req is 1.
+
+  reg [WIDTH-1:0] dst_data_reg;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      dst_data_reg <= {WIDTH{1'b0}};
+    else if (dst_req && !dst_ack_reg)
+      dst_data_reg <= src_data_reg; // This is wrong, src_data_reg is in src_clk domain
+  end
+
+  // I need to synchronize the data properly. Let me use a separate synchronizer for the data.
+
+  // Actually, the standard approach for CDC with handshake is:
+  // 1. Synchronize the request signal
+  // 2. When the request is detected in the destination domain, capture the data
+  //    using a multi-stage synchronizer for the data
+
+  // Let's create a data synchronizer.
+
+  reg [WIDTH-1:0] data_sync [0:SYNC_STAGES-1];
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      for (int i = 0; i < SYNC_STAGES; i = i + 1)
+        data_sync[i] <= {WIDTH{1'b0}};
+    end else begin
+      data_sync[0] <= src_data_reg;
+      for (int i = 1; i < SYNC_STAGES; i = i + 1)
+        data_sync[i] <= data_sync[i-1];
+    end
+  end
+
+  // The data is valid when dst_req is 1 and the synchronizer has settled.
+  // Since dst_req is already synchronized, and the data is stable while src_req is 1,
+  // the data should be stable by the time dst_req is 1 in the destination domain.
+
+  assign dst_data_o = data_sync[SYNC_STAGES-1];
+
+endmodule

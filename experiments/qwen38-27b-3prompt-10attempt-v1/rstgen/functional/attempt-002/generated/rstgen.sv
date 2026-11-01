@@ -1,0 +1,37 @@
+module rstgen (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic test_mode_i,
+    output logic rst_no,
+    output logic init_no
+);
+
+    logic [2:0] rst_sync;
+    logic init_cnt_en;
+    logic [2:0] init_cnt;
+
+    // Synchronize reset release
+    always_ff @(posedge clk_i) begin
+        if (!rst_ni) begin
+            rst_sync <= 3'b000;
+        end else begin
+            rst_sync <= {rst_sync[1:0], 1'b1};
+        end
+    end
+
+    // Synchronized reset output
+    assign rst_no = test_mode_i ? rst_ni : rst_sync[2];
+
+    // Initialization counter: counts for a few cycles after reset release
+    always_ff @(posedge clk_i) begin
+        if (!rst_no) begin
+            init_cnt <= 3'b000;
+        end else if (init_cnt != 3'b111) begin
+            init_cnt <= init_cnt + 1'b1;
+        end
+    end
+
+    // init_no is high after initialization period
+    assign init_no = (init_cnt == 3'b111);
+
+endmodule

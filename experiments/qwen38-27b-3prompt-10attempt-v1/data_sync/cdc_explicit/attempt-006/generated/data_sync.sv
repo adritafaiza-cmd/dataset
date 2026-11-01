@@ -1,0 +1,67 @@
+module data_sync #(
+    parameter STAGES = 2,
+    parameter DWIDTH = 8
+)(
+    input                  clk,
+    input                  rstn,
+    input  [DWIDTH-1:0]    din,
+    input                  dready_i,
+    output reg [DWIDTH-1:0] dout,
+    output reg             dready_o
+);
+
+    // Ensure minimum 2 stages for safe CDC
+    localparam STAGES_SAFE = (STAGES < 2) ? 2 : STAGES;
+
+    // Synchronizer chain for the handshake signal
+    reg [STAGES_SAFE-1:0] sync_chain;
+
+    // Latch the data when the handshake is detected
+    reg [DWIDTH-1:0] data_latch;
+    reg              data_valid;
+
+    // Detect rising edge of the synchronized handshake
+    wire sync_rise = sync_chain[1] & ~sync_chain[0];
+
+    // Synchronize the handshake signal
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            sync_chain <= {STAGES_SAFE{1'b0}};
+        end else begin
+            sync_chain[0] <= dready_i;
+            for (integer i = 1; i < STAGES_SAFE; i = i + 1) begin
+                sync_chain[i] <= sync_chain[i-1];
+            end
+        end
+    end
+
+    // Latch data on rising edge of synchronized handshake
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            data_latch <= {DWIDTH{1'b0}};
+            data_valid <= 1'b0;
+        end else begin
+            if (sync_rise) begin
+                data_latch <= din;
+                data_valid <= 1'b1;
+            end
+        end
+    end
+
+    // Output the latched data and pulse dready_o
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            dout     <= {DWIDTH{1'b0}};
+            dready_o <= 1'b0;
+        end else begin
+            if (data_valid) begin
+                dout     <= data_latch;
+                dready_o <= 1'b1;
+                data_valid <= 1'b0;
+            end else begin
+                dready_o <= 1'b0;
+            end
+        end
+    end
+
+endmodule

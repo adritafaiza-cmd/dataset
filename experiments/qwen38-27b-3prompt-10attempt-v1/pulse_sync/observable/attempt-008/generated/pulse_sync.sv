@@ -1,0 +1,83 @@
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // Synchronizer registers for the request signal (A -> B)
+    reg [STAGES-1:0] req_sync;
+
+    // Synchronizer registers for the acknowledge signal (B -> A)
+    reg [STAGES-1:0] ack_sync;
+
+    // Internal signals
+    wire req_synced;
+    wire ack_synced;
+    wire req_pending;
+    wire ack_pending;
+
+    // Last stage of synchronizers
+    assign req_synced = req_sync[STAGES-1];
+    assign ack_synced = ack_sync[STAGES-1];
+
+    // Request pending: set when pulseA_i arrives and not busy, cleared when ack_synced
+    reg req_pending_r;
+    assign req_pending = req_pending_r;
+
+    // Acknowledge pending: set when req_synced is high, cleared when pulseB_o is generated
+    reg ack_pending_r;
+    assign ack_pending = ack_pending_r;
+
+    // Busy output: high when a pulse is in flight
+    assign busy_o = req_pending;
+
+    // Pulse B output: one pulse when req_synced transitions from 0 to 1
+    reg req_synced_d;
+    assign pulseB_o = req_synced & ~req_synced_d;
+
+    // Clock A domain logic
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            req_pending_r <= 1'b0;
+            ack_sync <= {(STAGES){1'b0}};
+        end else begin
+            // Set req_pending when pulseA_i is high and not already pending
+            if (pulseA_i && !req_pending_r)
+                req_pending_r <= 1'b1;
+            // Clear req_pending when ack_synced is high
+            else if (ack_synced)
+                req_pending_r <= 1'b0;
+
+            // Synchronize ack_synced into clk_a domain
+            ack_sync <= {ack_sync[STAGES-2:0], ack_pending};
+        end
+    end
+
+    // Clock B domain logic
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            req_sync <= {(STAGES){1'b0}};
+            ack_pending_r <= 1'b0;
+            req_synced_d <= 1'b0;
+        end else begin
+            // Synchronize req_synced into clk_b domain
+            req_sync <= {req_sync[STAGES-2:0], req_pending};
+
+            // Generate acknowledge when req_synced is high
+            if (req_synced)
+                ack_pending_r <= 1'b1;
+            else
+                ack_pending_r <= 1'b0;
+
+            // Track previous value of req_synced for edge detection
+            req_synced_d <= req_synced;
+        end
+    end
+
+endmodule

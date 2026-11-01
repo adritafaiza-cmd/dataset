@@ -1,0 +1,63 @@
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  // TX domain: detect edge and generate a pulse to toggle the level
+  logic edge_d1, edge_d2;
+  logic tx_pulse;
+  logic tx_level;
+
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      edge_d1 <= 1'b0;
+      edge_d2 <= 1'b0;
+      tx_pulse <= 1'b0;
+      tx_level <= 1'b0;
+    end else begin
+      edge_d1 <= edge_i;
+      edge_d2 <= edge_d1;
+      tx_pulse <= (edge_i & ~edge_d1) | (~edge_i & edge_d1);
+      if (tx_pulse)
+        tx_level <= ~tx_level;
+    end
+  end
+
+  // Synchronize tx_level into RX domain
+  logic rx_level_d1, rx_level_d2, rx_level_d3;
+
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      rx_level_d1 <= 1'b0;
+      rx_level_d2 <= 1'b0;
+      rx_level_d3 <= 1'b0;
+    end else begin
+      rx_level_d1 <= tx_level;
+      rx_level_d2 <= rx_level_d1;
+      rx_level_d3 <= rx_level_d2;
+    end
+  end
+
+  // RX domain: detect edge on synchronized level to generate output pulse
+  logic rx_level_d4, rx_level_d5;
+  logic rx_pulse;
+
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      rx_level_d4 <= 1'b0;
+      rx_level_d5 <= 1'b0;
+      rx_pulse <= 1'b0;
+    end else begin
+      rx_level_d4 <= rx_level_d3;
+      rx_level_d5 <= rx_level_d4;
+      rx_pulse <= (rx_level_d3 & ~rx_level_d4) | (~rx_level_d3 & rx_level_d4);
+    end
+  end
+
+  assign edge_o = rx_pulse;
+
+endmodule

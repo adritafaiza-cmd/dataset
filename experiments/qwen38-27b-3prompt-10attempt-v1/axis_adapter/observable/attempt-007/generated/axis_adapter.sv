@@ -1,0 +1,344 @@
+module axis_adapter #
+(
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    /*
+     * AXI input
+     */
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    // Determine if we need to split or merge
+    localparam S_BYTES = (S_DATA_WIDTH + 7) / 8;
+    localparam M_BYTES = (M_DATA_WIDTH + 7) / 8;
+    localparam NEED_SPLIT = (S_BYTES > M_BYTES);
+    localparam NEED_MERGE = (S_BYTES < M_BYTES);
+    localparam SAME_WIDTH = (S_BYTES == M_BYTES);
+
+    // For split case: number of output beats per input beat
+    localparam SPLIT_FACTOR = (S_BYTES / M_BYTES);
+    localparam SPLIT_REMAINDER = (S_BYTES % M_BYTES);
+
+    // For merge case: number of input beats per output beat
+    localparam MERGE_FACTOR = (M_BYTES / S_BYTES);
+    localparam MERGE_REMAINDER = (M_BYTES % S_BYTES);
+
+    // State for split mode
+    reg [3:0] split_count;
+    reg [S_DATA_WIDTH-1:0] split_data_reg;
+    reg [S_KEEP_WIDTH-1:0] split_keep_reg;
+    reg split_last_reg;
+    reg [ID_WIDTH-1:0] split_tid_reg;
+    reg [DEST_WIDTH-1:0] split_tdest_reg;
+    reg [USER_WIDTH-1:0] split_tuser_reg;
+    reg split_valid;
+
+    // State for merge mode
+    reg [M_DATA_WIDTH-1:0] merge_data_reg;
+    reg [M_KEEP_WIDTH-1:0] merge_keep_reg;
+    reg merge_last_reg;
+    reg [ID_WIDTH-1:0] merge_tid_reg;
+    reg [DEST_WIDTH-1:0] merge_tdest_reg;
+    reg [USER_WIDTH-1:0] merge_tuser_reg;
+    reg [3:0] merge_count;
+    reg merge_valid;
+
+    // Output signals
+    reg [M_DATA_WIDTH-1:0] m_tdata_r;
+    reg [M_KEEP_WIDTH-1:0] m_tkeep_r;
+    reg m_tvalid_r;
+    reg m_tlast_r;
+    reg [ID_WIDTH-1:0] m_tid_r;
+    reg [DEST_WIDTH-1:0] m_tdest_r;
+    reg [USER_WIDTH-1:0] m_tuser_r;
+
+    assign m_axis_tdata = m_tdata_r;
+    assign m_axis_tkeep = m_tkeep_r;
+    assign m_axis_tvalid = m_tvalid_r;
+    assign m_axis_tlast = m_tlast_r;
+    assign m_axis_tid = m_tid_r;
+    assign m_axis_tdest = m_tdest_r;
+    assign m_axis_tuser = m_tuser_r;
+
+    wire m_ready = m_axis_tready;
+    wire s_ready = s_axis_tready;
+
+    // Helper: extract byte from keep
+    function [7:0] get_byte;
+        input [S_DATA_WIDTH-1:0] data;
+        input [S_KEEP_WIDTH-1:0] keep;
+        input [3:0] byte_idx;
+        begin
+            get_byte = data[byte_idx*8 +: 8];
+        end
+    endfunction
+
+    // Helper: check if byte is valid
+    function byte_valid;
+        input [S_KEEP_WIDTH-1:0] keep;
+        input [3:0] byte_idx;
+        begin
+            byte_valid = keep[byte_idx];
+        end
+    endfunction
+
+    // Split mode logic
+    wire split_active = NEED_SPLIT;
+    wire merge_active = NEED_MERGE;
+    wire same_active = SAME_WIDTH;
+
+    // For split: determine which output beat we're on
+    wire [3:0] split_beat_idx = split_count;
+    
+    // Calculate which bytes of the input beat map to current output beat
+    // Output beat i contains bytes [i*M_BYTES : (i+1)*M_BYTES - 1] of input
+    wire [3:0] split_byte_start = split_count * M_BYTES[3:0];
+    wire [3:0] split_byte_end = split_byte_start + M_BYTES[3:0] - 4'd1;
+
+    // Build output data for split mode
+    reg [M_DATA_WIDTH-1:0] split_out_data;
+    reg [M_KEEP_WIDTH-1:0] split_out_keep;
+    reg split_out_last;
+
+    integer i;
+    always @* begin
+        split_out_data = {M_DATA_WIDTH{1'b0}};
+        split_out_keep = {M_KEEP_WIDTH{1'b0}};
+        split_out_last = 1'b0;
+        for (i = 0; i < M_BYTES; i = i + 1) begin
+            if (split_byte_start + i[3:0] < S_BYTES[3:0]) begin
+                split_out_data[i*8 +: 8] = split_data_reg[(split_byte_start + i[3:0])*8 +: 8];
+                split_out_keep[i] = split_keep_reg[split_byte_start + i[3:0]];
+            end
+        end
+        // Last beat of this input beat
+        if (SPLIT_REMAINDER == 0) begin
+            split_out_last = (split_count == SPLIT_FACTOR[3:0] - 4'd1) ? split_last_reg : 1'b0;
+        end else begin
+            // Last beat has fewer bytes
+            split_out_last = (split_count == SPLIT_FACTOR[3:0]) ? split_last_reg : 1'b0;
+        end
+    end
+
+    // Merge mode logic
+    // Accumulate input beats into output beat
+    wire [3:0] merge_byte_offset = merge_count * S_BYTES[3:0];
+
+    reg [M_DATA_WIDTH-1:0] merge_out_data;
+    reg [M_KEEP_WIDTH-1:0] merge_out_keep;
+    reg merge_out_last;
+
+    always @* begin
+        merge_out_data = merge_data_reg;
+        merge_out_keep = merge_keep_reg;
+        merge_out_last = merge_last_reg;
+    end
+
+    // Same width: direct pass-through
+    wire same_out_valid = s_axis_tvalid;
+    wire [M_DATA_WIDTH-1:0] same_out_data = s_axis_tdata;
+    wire [M_KEEP_WIDTH-1:0] same_out_keep = s_axis_tkeep;
+    wire same_out_last = s_axis_tlast;
+    wire [ID_WIDTH-1:0] same_out_tid = s_axis_tid;
+    wire [DEST_WIDTH-1:0] same_out_tdest = s_axis_tdest;
+    wire [USER_WIDTH-1:0] same_out_tuser = s_axis_tuser;
+
+    // Determine output valid and data based on mode
+    reg out_valid;
+    reg [M_DATA_WIDTH-1:0] out_data;
+    reg [M_KEEP_WIDTH-1:0] out_keep;
+    reg out_last;
+    reg [ID_WIDTH-1:0] out_tid;
+    reg [DEST_WIDTH-1:0] out_tdest;
+    reg [USER_WIDTH-1:0] out_tuser;
+
+    always @* begin
+        if (same_active) begin
+            out_valid = s_axis_tvalid;
+            out_data = same_out_data;
+            out_keep = same_out_keep;
+            out_last = same_out_last;
+            out_tid = same_out_tid;
+            out_tdest = same_out_tdest;
+            out_tuser = same_out_tuser;
+        end else if (split_active) begin
+            out_valid = split_valid;
+            out_data = split_out_data;
+            out_keep = split_out_keep;
+            out_last = split_out_last;
+            out_tid = split_tid_reg;
+            out_tdest = split_tdest_reg;
+            out_tuser = split_tuser_reg;
+        end else begin // merge_active
+            out_valid = merge_valid;
+            out_data = merge_out_data;
+            out_keep = merge_out_keep;
+            out_last = merge_out_last;
+            out_tid = merge_tid_reg;
+            out_tdest = merge_tdest_reg;
+            out_tuser = merge_tuser_reg;
+        end
+    end
+
+    assign m_tdata_r = out_data;
+    assign m_tkeep_r = out_keep;
+    assign m_tvalid_r = out_valid;
+    assign m_tlast_r = out_last;
+    assign m_tid_r = out_tid;
+    assign m_tdest_r = out_tdest;
+    assign m_tuser_r = out_tuser;
+
+    // Input ready logic
+    reg s_ready_r;
+    assign s_axis_tready = s_ready_r;
+
+    always @* begin
+        if (same_active) begin
+            s_ready_r = m_ready;
+        end else if (split_active) begin
+            // Can accept new input if not currently splitting or if current split beat is being consumed
+            if (!split_valid) begin
+                s_ready_r = 1'b1;
+            end else begin
+                s_ready_r = m_ready;
+            end
+        end else begin // merge_active
+            // Can accept new input if merge buffer is empty or if current merge beat is being consumed
+            if (!merge_valid) begin
+                s_ready_r = 1'b1;
+            end else begin
+                s_ready_r = m_ready;
+            end
+        end
+    end
+
+    // Split mode state machine
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            split_count <= 4'd0;
+            split_data_reg <= {S_DATA_WIDTH{1'b0}};
+            split_keep_reg <= {S_KEEP_WIDTH{1'b0}};
+            split_last_reg <= 1'b0;
+            split_tid_reg <= {ID_WIDTH{1'b0}};
+            split_tdest_reg <= {DEST_WIDTH{1'b0}};
+            split_tuser_reg <= {USER_WIDTH{1'b0}};
+            split_valid <= 1'b0;
+        end else if (split_active) begin
+            if (split_valid && m_ready) begin
+                // Current split beat is consumed
+                if (split_out_last) begin
+                    // Done with this input beat
+                    split_valid <= 1'b0;
+                    split_count <= 4'd0;
+                end else begin
+                    // Move to next split beat
+                    split_count <= split_count + 4'd1;
+                end
+            end
+            if (!split_valid && s_axis_tvalid) begin
+                // Start new split sequence
+                split_valid <= 1'b1;
+                split_count <= 4'd0;
+                split_data_reg <= s_axis_tdata;
+                split_keep_reg <= s_axis_tkeep;
+                split_last_reg <= s_axis_tlast;
+                split_tid_reg <= s_axis_tid;
+                split_tdest_reg <= s_axis_tdest;
+                split_tuser_reg <= s_axis_tuser;
+            end
+        end
+    end
+
+    // Merge mode state machine
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            merge_data_reg <= {M_DATA_WIDTH{1'b0}};
+            merge_keep_reg <= {M_KEEP_WIDTH{1'b0}};
+            merge_last_reg <= 1'b0;
+            merge_tid_reg <= {ID_WIDTH{1'b0}};
+            merge_tdest_reg <= {DEST_WIDTH{1'b0}};
+            merge_tuser_reg <= {USER_WIDTH{1'b0}};
+            merge_count <= 4'd0;
+            merge_valid <= 1'b0;
+        end else if (merge_active) begin
+            if (merge_valid && m_ready) begin
+                // Current merge beat is consumed
+                merge_valid <= 1'b0;
+                merge_count <= 4'd0;
+            end
+            if (!merge_valid && s_axis_tvalid) begin
+                // Start new merge sequence
+                merge_valid <= 1'b1;
+                merge_count <= 4'd0;
+                merge_tid_reg <= s_axis_tid;
+                merge_tdest_reg <= s_axis_tdest;
+                merge_tuser_reg <= s_axis_tuser;
+                // Initialize merge buffer with first input beat
+                merge_data_reg <= {M_DATA_WIDTH{1'b0}};
+                merge_keep_reg <= {M_KEEP_WIDTH{1'b0}};
+                merge_last_reg <= 1'b0;
+                // Place first beat's bytes
+                for (i = 0; i < S_BYTES; i = i + 1) begin
+                    merge_data_reg[i*8 +: 8] <= s_axis_tdata[i*8 +: 8];
+                    merge_keep_reg[i] <= s_axis_tkeep[i];
+                end
+                if (s_axis_tlast) begin
+                    merge_last_reg <= 1'b1;
+                end
+                if (MERGE_REMAINDER == 0) begin
+                    if (MERGE_FACTOR == 1) begin
+                        // Single beat merge, done
+                        merge_count <= 4'd0;
+                    end else begin
+                        merge_count <= 4'd1;
+                    end
+                end else begin
+                    merge_count <= 4'd1;
+                end
+            end else if (merge_valid && !m_ready && s_axis_tvalid) begin
+                // Accumulate more input beats
+                for (i = 0; i < S_BYTES; i = i + 1) begin
+                    merge_data_reg[(merge_byte_offset + i[3:0])*8 +: 8] <= s_axis_tdata[i*8 +: 8];
+                    merge_keep_reg[merge_byte_offset + i[3:0]] <= s_axis_tkeep[i];
+                end
+                if (s_axis_tlast) begin
+                    merge_last_reg <= 1'b1;
+                end
+                merge_count <= merge_count + 4'd1;
+            end
+        end
+    end
+
+endmodule

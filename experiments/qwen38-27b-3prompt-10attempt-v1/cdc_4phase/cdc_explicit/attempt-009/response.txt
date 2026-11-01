@@ -1,0 +1,164 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire [WIDTH-1:0] src_data_reg;
+  wire src_valid_reg;
+  wire src_ready_int;
+  wire dst_valid_int;
+  wire [WIDTH-1:0] dst_data_int;
+  wire dst_ready_int;
+
+  // Source domain: register data and valid when handshake occurs
+  // Destination domain: register data and valid when handshake occurs
+
+  // We use a 4-phase handshake:
+  // Phase 1: src_valid high, src_ready low -> data stable
+  // Phase 2: src_valid high, src_ready high -> transfer accepted
+  // Phase 3: src_valid low, src_ready high -> source deasserts valid
+  // Phase 4: src_valid low, src_ready low -> ready deasserts, back to idle
+
+  // For CDC, we need to synchronize the handshake signals.
+  // The key insight: we can use a simple approach where:
+  // - Source holds data and valid until destination acknowledges
+  // - Destination samples data when it sees valid, then acknowledges
+  // - Source deasserts valid when it sees acknowledgment
+  // - Destination deasserts valid when it sees source deasserted valid
+
+  // Let's use a different approach: a simple FIFO-like structure with
+  // a single entry buffer and 4-phase handshake.
+
+  // Source side:
+  // - When src_valid_i && src_ready_o, capture data
+  // - Hold data and valid until dst_ack comes back
+  // - When dst_ack, deassert valid, then deassert ready
+
+  // Destination side:
+  // - When src_valid_synced, capture data, assert dst_valid
+  // - When dst_valid && dst_ready_i, deassert dst_valid, assert dst_ack
+  // - When src_valid_synced deasserts, deassert dst_ack
+
+  // Synchronization:
+  // - src_valid -> dst domain: 2-FF synchronizer
+  // - dst_ack -> src domain: 2-FF synchronizer
+  // - Data: must be stable while src_valid is high, so we can use a
+  //   multi-bit synchronizer or ensure data is stable. Since data is
+  //   stable while src_valid is high, we can sample it in the dst domain
+  //   when src_valid_synced is high.
+
+  // Let's implement this:
+
+  // Source domain registers
+  reg [WIDTH-1:0] src_data_hold;
+  reg src_valid_hold;
+  reg src_ready_hold;
+  reg dst_ack_synced;
+
+  // Destination domain registers
+  reg [WIDTH-1:0] dst_data_hold;
+  reg dst_valid_hold;
+  reg dst_ack_hold;
+  reg src_valid_synced;
+
+  // Synchronizers
+  // src_valid to dst domain
+  reg [1:0] src_valid_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_valid_sync <= 2'b00;
+    else
+      src_valid_sync <= {src_valid_sync[0], src_valid_hold};
+  end
+  assign src_valid_synced = src_valid_sync[1];
+
+  // dst_ack to src domain
+  reg [1:0] dst_ack_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_ack_sync <= 2'b00;
+    else
+      dst_ack_sync <= {dst_ack_sync[0], dst_ack_hold};
+  end
+  assign dst_ack_synced = dst_ack_sync[1];
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_hold <= {WIDTH{1'b0}};
+      src_valid_hold <= 1'b0;
+      src_ready_hold <= 1'b0;
+    end else begin
+      if (src_valid_hold) begin
+        // Valid is high
+        if (dst_ack_synced) begin
+          // Ack received, deassert valid
+          src_valid_hold <= 1'b0;
+          src_ready_hold <= 1'b0;
+        end
+      end else begin
+        // Valid is low
+        if (src_valid_i) begin
+          // New valid from source
+          src_data_hold <= src_data_i;
+          src_valid_hold <= 1'b1;
+          src_ready_hold <= 1'b1;
+        end else if (src_ready_hold) begin
+          // Ready was high, deassert it
+          src_ready_hold <= 1'b0;
+        end
+      end
+    end
+  end
+
+  assign src_ready_o = src_ready_hold;
+
+  // Destination domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_hold <= {WIDTH{1'b0}};
+      dst_valid_hold <= 1'b0;
+      dst_ack_hold <= 1'b0;
+    end else begin
+      if (dst_valid_hold) begin
+        // Valid is high
+        if (dst_ready_i) begin
+          // Handshake complete, deassert valid, assert ack
+          dst_valid_hold <= 1'b0;
+          dst_ack_hold <= 1'b1;
+        end
+      end else begin
+        // Valid is low
+        if (src_valid_synced) begin
+          // New valid from source, capture data
+          dst_data_hold <= src_data_hold;
+          dst_valid_hold <= 1'b1;
+          dst_ack_hold <= 1'b0;
+        end else if (dst_ack_hold) begin
+          // Ack was high, deassert it
+          dst_ack_hold <= 1'b0;
+        end
+      end
+    end
+  end
+
+  assign dst_data_o = dst_data_hold;
+  assign dst_valid_o = dst_valid_hold;
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,420 @@
+module uart_top (
+    wb_clk_i,
+    wb_rst_i, wb_adr_i, wb_dat_i, wb_dat_o, wb_we_i, wb_stb_i, wb_cyc_i, wb_ack_o, wb_sel_i,
+    int_o,
+    stx_pad_o, srx_pad_i,
+    rts_pad_o, cts_pad_i, dtr_pad_o, dsr_pad_i, ri_pad_i, dcd_pad_i
+);
+
+    // Wishbone signals
+    input  wire        wb_clk_i;
+    input  wire        wb_rst_i;
+    input  wire [7:0]  wb_adr_i;
+    input  wire [7:0]  wb_dat_i;
+    output wire [7:0]  wb_dat_o;
+    input  wire        wb_we_i;
+    input  wire        wb_stb_i;
+    input  wire        wb_cyc_i;
+    output wire        wb_ack_o;
+    input  wire [3:0]  wb_sel_i;
+
+    // Interrupt
+    output wire        int_o;
+
+    // UART pins
+    output wire        stx_pad_o;
+    input  wire        srx_pad_i;
+
+    // Modem control pins
+    output wire        rts_pad_o;
+    input  wire        cts_pad_i;
+    output wire        dtr_pad_o;
+    input  wire        dsr_pad_i;
+    input  wire        ri_pad_i;
+    input  wire        dcd_pad_i;
+
+    // Internal signals
+    wire [7:0]  rx_data;
+    wire        rx_valid;
+    wire        rx_empty;
+    wire        rx_full;
+    wire [7:0]  tx_data;
+    wire        tx_valid;
+    wire        tx_empty;
+    wire        tx_full;
+    wire        tx_busy;
+    wire        rx_ovr;
+    wire        rx_perr;
+    wire        rx_berr;
+    wire        rx_ferr;
+    wire        tx_done;
+    wire        rx_done;
+
+    // Register file signals
+    wire [7:0]  reg_rbr_thr;
+    wire [7:0]  reg_iir;
+    wire [7:0]  reg_lcr;
+    wire [7:0]  reg_mcr;
+    wire [7:0]  reg_lsr;
+    wire [7:0]  reg_msr;
+    wire [7:0]  reg_scr;
+    wire [7:0]  reg_dll;
+    wire [7:0]  reg_dlh;
+    wire [7:0]  reg_fcr;
+    wire [7:0]  reg_ier;
+    wire [7:0]  reg_lcr_reg;
+    wire [7:0]  reg_mcr_reg;
+    wire [7:0]  reg_scr_reg;
+    wire [7:0]  reg_dll_reg;
+    wire [7:0]  reg_dlh_reg;
+    wire [7:0]  reg_fcr_reg;
+    wire [7:0]  reg_ier_reg;
+
+    // DLAB mode
+    wire dlab = reg_lcr[7];
+
+    // Register address decode
+    wire [2:0] reg_addr = wb_adr_i[2:0];
+    wire is_dlab_reg = dlab && (reg_addr == 3'd0 || reg_addr == 3'd1);
+
+    // Read data mux
+    reg [7:0] read_data;
+    always @(*) begin
+        if (is_dlab_reg) begin
+            if (reg_addr == 3'd0)
+                read_data = reg_dll;
+            else
+                read_data = reg_dlh;
+        end else begin
+            case (reg_addr)
+                3'd0: read_data = reg_rbr_thr;
+                3'd1: read_data = reg_iir;
+                3'd2: read_data = reg_lcr;
+                3'd3: read_data = reg_mcr;
+                3'd4: read_data = reg_lsr;
+                3'd5: read_data = reg_msr;
+                3'd6: read_data = reg_scr;
+                default: read_data = 8'h00;
+            endcase
+        end
+    end
+
+    // Write data mux
+    reg [7:0] write_data;
+    always @(*) begin
+        if (is_dlab_reg) begin
+            if (reg_addr == 3'd0)
+                write_data = reg_dll;
+            else
+                write_data = reg_dlh;
+        end else begin
+            case (reg_addr)
+                3'd0: write_data = reg_rbr_thr;
+                3'd1: write_data = reg_iir;
+                3'd2: write_data = reg_lcr;
+                3'd3: write_data = reg_mcr;
+                3'd4: write_data = reg_lsr;
+                3'd5: write_data = reg_msr;
+                3'd6: write_data = reg_scr;
+                default: write_data = 8'h00;
+            endcase
+        end
+    end
+
+    // Register writes
+    wire wb_write = wb_cyc_i && wb_stb_i && wb_we_i;
+    wire wb_read  = wb_cyc_i && wb_stb_i && !wb_we_i;
+
+    // LCR register
+    reg [7:0] lcr_reg;
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i)
+            lcr_reg <= 8'h00;
+        else if (wb_write && reg_addr == 3'd2)
+            lcr_reg <= wb_dat_i;
+    end
+    assign reg_lcr = lcr_reg;
+
+    // MCR register
+    reg [7:0] mcr_reg;
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i)
+            mcr_reg <= 8'h00;
+        else if (wb_write && reg_addr == 3'd3)
+            mcr_reg <= wb_dat_i;
+    end
+    assign reg_mcr = mcr_reg;
+
+    // SCR register
+    reg [7:0] scr_reg;
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i)
+            scr_reg <= 8'h00;
+        else if (wb_write && reg_addr == 3'd6)
+            scr_reg <= wb_dat_i;
+    end
+    assign reg_scr = scr_reg;
+
+    // DLL register
+    reg [7:0] dll_reg;
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i)
+            dll_reg <= 8'h01;
+        else if (wb_write && reg_addr == 3'd0 && dlab)
+            dll_reg <= wb_dat_i;
+    end
+    assign reg_dll = dll_reg;
+
+    // DLH register
+    reg [7:0] dlh_reg;
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i)
+            dlh_reg <= 8'h00;
+        else if (wb_write && reg_addr == 3'd1 && dlab)
+            dlh_reg <= wb_dat_i;
+    end
+    assign reg_dlh = dlh_reg;
+
+    // IER register
+    reg [7:0] ier_reg;
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i)
+            ier_reg <= 8'h00;
+        else if (wb_write && reg_addr == 3'd1 && !dlab)
+            ier_reg <= wb_dat_i & 8'h0F;
+    end
+    assign reg_ier = ier_reg;
+
+    // FCR register
+    reg [7:0] fcr_reg;
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i)
+            fcr_reg <= 8'h00;
+        else if (wb_write && reg_addr == 3'd2 && !dlab)
+            fcr_reg <= wb_dat_i;
+    end
+    assign reg_fcr = fcr_reg;
+
+    // RBR/THR register
+    reg [7:0] rbr_thr_reg;
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i)
+            rbr_thr_reg <= 8'h00;
+        else if (wb_write && reg_addr == 3'd0 && !dlab)
+            rbr_thr_reg <= wb_dat_i;
+    end
+    assign reg_rbr_thr = rbr_thr_reg;
+
+    // IIR register (read-only, computed)
+    assign reg_iir = 8'h00; // Placeholder, will be computed below
+
+    // LSR register (read-only, computed)
+    assign reg_lsr = {1'b0, rx_ovr, rx_perr, rx_berr, rx_ferr, tx_empty, tx_done, rx_valid};
+
+    // MSR register (read-only, computed)
+    assign reg_msr = {1'b0, 1'b0, 1'b0, 1'b0, dcd_pad_i, ri_pad_i, dsr_pad_i, cts_pad_i};
+
+    // Modem control outputs
+    assign rts_pad_o = mcr_reg[1];
+    assign dtr_pad_o = mcr_reg[0];
+
+    // Interrupt generation
+    wire int_rx_data = ier_reg[0] && rx_valid;
+    wire int_tx_empty = ier_reg[1] && tx_empty;
+    wire int_rx_err = ier_reg[2] && (rx_ovr | rx_perr | rx_berr | rx_ferr);
+    wire int_modem = ier_reg[3] && (dcd_pad_i ^ dcd_pad_i_prev | ri_pad_i ^ ri_pad_i_prev);
+    
+    // Need to track previous modem states for edge detection
+    reg dcd_pad_i_prev, ri_pad_i_prev;
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            dcd_pad_i_prev <= 1'b0;
+            ri_pad_i_prev <= 1'b0;
+        end else begin
+            dcd_pad_i_prev <= dcd_pad_i;
+            ri_pad_i_prev <= ri_pad_i;
+        end
+    end
+
+    wire int_active = int_rx_data | int_tx_empty | int_rx_err | int_modem;
+    assign int_o = int_active;
+
+    // IIR value
+    reg [7:0] iir_val;
+    always @(*) begin
+        if (int_rx_data)
+            iir_val = 8'h04; // Receiver data available
+        else if (int_tx_empty)
+            iir_val = 8'h02; // Transmitter holding register empty
+        else if (int_rx_err)
+            iir_val = 8'h06; // Receiver line status
+        else if (int_modem)
+            iir_val = 8'h00; // Modem status
+        else
+            iir_val = 8'h01; // No interrupt pending
+    end
+    assign reg_iir = iir_val;
+
+    // UART core instantiation
+    // Since we need a single clock domain, we'll implement the UART logic directly
+    // Baud rate calculation
+    wire [15:0] baud_divisor = {dlh_reg, dll_reg};
+    wire [15:0] baud_div = (baud_divisor == 16'd0) ? 16'd1 : baud_divisor;
+
+    // TX logic
+    reg [7:0] tx_shift_reg;
+    reg [3:0] tx_bit_count;
+    reg tx_active;
+    reg [15:0] tx_baud_counter;
+    reg tx_start_bit;
+
+    wire tx_start = wb_write && reg_addr == 3'd0 && !dlab && !tx_active;
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            tx_active <= 1'b0;
+            tx_shift_reg <= 8'h00;
+            tx_bit_count <= 4'd0;
+            tx_baud_counter <= 16'd0;
+            tx_start_bit <= 1'b0;
+        end else begin
+            if (tx_start) begin
+                tx_active <= 1'b1;
+                tx_shift_reg <= {wb_dat_i, 1'b0}; // LSB first, with start bit
+                tx_bit_count <= 4'd0;
+                tx_baud_counter <= 16'd0;
+                tx_start_bit <= 1'b1;
+            end else if (tx_active) begin
+                if (tx_baud_counter >= baud_div - 1) begin
+                    tx_baud_counter <= 16'd0;
+                    if (tx_bit_count < 4'd10) begin
+                        tx_bit_count <= tx_bit_count + 4'd1;
+                        if (tx_bit_count == 4'd9) begin
+                            // Stop bit
+                            tx_start_bit <= 1'b1;
+                        end else begin
+                            tx_start_bit <= tx_shift_reg[0];
+                            tx_shift_reg <= {1'b0, tx_shift_reg[7:1]};
+                        end
+                    end else begin
+                        tx_active <= 1'b0;
+                        tx_start_bit <= 1'b1;
+                    end
+                end else begin
+                    tx_baud_counter <= tx_baud_counter + 16'd1;
+                end
+            end
+        end
+    end
+
+    assign stx_pad_o = tx_start_bit;
+    assign tx_empty = !tx_active;
+    assign tx_done = !tx_active;
+
+    // RX logic
+    reg [7:0] rx_shift_reg;
+    reg [3:0] rx_bit_count;
+    reg rx_active;
+    reg [15:0] rx_baud_counter;
+    reg rx_start_bit;
+    reg rx_data_reg;
+    reg rx_valid_reg;
+    reg rx_ovr_reg;
+    reg rx_perr_reg;
+    reg rx_berr_reg;
+    reg rx_ferr_reg;
+
+    wire rx_start = !rx_active && srx_pad_i == 1'b0;
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            rx_active <= 1'b0;
+            rx_shift_reg <= 8'h00;
+            rx_bit_count <= 4'd0;
+            rx_baud_counter <= 16'd0;
+            rx_start_bit <= 1'b1;
+            rx_data_reg <= 8'h00;
+            rx_valid_reg <= 1'b0;
+            rx_ovr_reg <= 1'b0;
+            rx_perr_reg <= 1'b0;
+            rx_berr_reg <= 1'b0;
+            rx_ferr_reg <= 1'b0;
+        end else begin
+            if (rx_start) begin
+                rx_active <= 1'b1;
+                rx_shift_reg <= 8'h00;
+                rx_bit_count <= 4'd0;
+                rx_baud_counter <= 16'd0;
+                rx_start_bit <= 1'b0;
+            end else if (rx_active) begin
+                if (rx_baud_counter >= baud_div - 1) begin
+                    rx_baud_counter <= 16'd0;
+                    if (rx_bit_count < 4'd10) begin
+                        rx_bit_count <= rx_bit_count + 4'd1;
+                        if (rx_bit_count == 4'd9) begin
+                            // Stop bit
+                            if (srx_pad_i == 1'b0) begin
+                                rx_ferr_reg <= 1'b1;
+                            end
+                            rx_active <= 1'b0;
+                            rx_start_bit <= 1'b1;
+                        end else begin
+                            rx_start_bit <= srx_pad_i;
+                            rx_shift_reg <= {srx_pad_i, rx_shift_reg[7:1]};
+                        end
+                    end else begin
+                        rx_active <= 1'b0;
+                        rx_start_bit <= 1'b1;
+                    end
+                end else begin
+                    rx_baud_counter <= rx_baud_counter + 16'd1;
+                end
+            end
+        end
+    end
+
+    // RX data valid and error detection
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            rx_valid_reg <= 1'b0;
+            rx_ovr_reg <= 1'b0;
+            rx_perr_reg <= 1'b0;
+            rx_berr_reg <= 1'b0;
+            rx_ferr_reg <= 1'b0;
+        end else begin
+            // Check for valid data reception
+            if (rx_active && rx_bit_count == 4'd9 && srx_pad_i == 1'b1) begin
+                // Data received
+                if (rx_valid_reg) begin
+                    rx_ovr_reg <= 1'b1;
+                end else begin
+                    rx_data_reg <= rx_shift_reg;
+                    rx_valid_reg <= 1'b1;
+                end
+            end
+            // Clear valid on read
+            if (wb_read && reg_addr == 3'd0 && !dlab) begin
+                rx_valid_reg <= 1'b0;
+                rx_ovr_reg <= 1'b0;
+                rx_perr_reg <= 1'b0;
+                rx_berr_reg <= 1'b0;
+                rx_ferr_reg <= 1'b0;
+            end
+        end
+    end
+
+    assign rx_data = rx_data_reg;
+    assign rx_valid = rx_valid_reg;
+    assign rx_empty = !rx_valid_reg;
+    assign rx_full = rx_valid_reg;
+    assign rx_ovr = rx_ovr_reg;
+    assign rx_perr = rx_perr_reg;
+    assign rx_berr = rx_berr_reg;
+    assign rx_ferr = rx_ferr_reg;
+    assign rx_done = rx_valid_reg;
+
+    // Wishbone output
+    assign wb_dat_o = read_data;
+    assign wb_ack_o = wb_cyc_i && wb_stb_i;
+
+endmodule

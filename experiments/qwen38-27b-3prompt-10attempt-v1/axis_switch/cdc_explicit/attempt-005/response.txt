@@ -1,0 +1,339 @@
+```verilog
+module axis_switch #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter S_ID_WIDTH = 8,
+    parameter M_ID_WIDTH = S_ID_WIDTH+$clog2(S_COUNT),
+    parameter M_DEST_WIDTH = 1,
+    parameter S_DEST_WIDTH = M_DEST_WIDTH+$clog2(M_COUNT),
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter M_BASE = 0,
+    parameter M_TOP = 0,
+    parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
+    parameter UPDATE_TID = 0,
+    parameter S_REG_TYPE = 0,
+    parameter M_REG_TYPE = 2,
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 1
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    /*
+     * AXI Stream inputs
+     */
+    input  wire [S_COUNT*DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [S_COUNT*KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire [S_COUNT-1:0]               s_axis_tvalid,
+    output wire [S_COUNT-1:0]               s_axis_tready,
+    input  wire [S_COUNT-1:0]               s_axis_tlast,
+    input  wire [S_COUNT*S_ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [S_COUNT*USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI Stream outputs
+     */
+    output wire [M_COUNT*DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [M_COUNT*KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire [M_COUNT-1:0]               m_axis_tvalid,
+    input  wire [M_COUNT-1:0]               m_axis_tready,
+    output wire [M_COUNT-1:0]               m_axis_tlast,
+    output wire [M_COUNT*M_ID_WIDTH-1:0]    m_axis_tid,
+    output wire [M_COUNT*M_DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [M_COUNT*USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    // Internal signals
+    wire [S_COUNT-1:0] s_valid;
+    wire [S_COUNT-1:0] s_ready;
+    wire [S_COUNT-1:0] s_last;
+    wire [S_COUNT-1:0] s_fire;
+    
+    wire [M_COUNT-1:0] m_valid;
+    wire [M_COUNT-1:0] m_ready;
+    wire [M_COUNT-1:0] m_last;
+    wire [M_COUNT-1:0] m_fire;
+    
+    wire [S_COUNT*DATA_WIDTH-1:0] s_data;
+    wire [S_COUNT*KEEP_WIDTH-1:0] s_keep;
+    wire [S_COUNT*S_ID_WIDTH-1:0] s_id;
+    wire [S_COUNT*S_DEST_WIDTH-1:0] s_dest;
+    wire [S_COUNT*USER_WIDTH-1:0] s_user;
+    
+    wire [M_COUNT*DATA_WIDTH-1:0] m_data;
+    wire [M_COUNT*KEEP_WIDTH-1:0] m_keep;
+    wire [M_COUNT*M_ID_WIDTH-1:0] m_id;
+    wire [M_COUNT*M_DEST_WIDTH-1:0] m_dest;
+    wire [M_COUNT*USER_WIDTH-1:0] m_user;
+
+    // Source side registration
+    generate
+        if (S_REG_TYPE == 1) begin
+            genvar i;
+            for (i = 0; i < S_COUNT; i = i + 1) begin : gen_s_reg
+                reg [DATA_WIDTH-1:0] s_data_reg;
+                reg [KEEP_WIDTH-1:0] s_keep_reg;
+                reg s_valid_reg;
+                reg s_last_reg;
+                reg [S_ID_WIDTH-1:0] s_id_reg;
+                reg [S_DEST_WIDTH-1:0] s_dest_reg;
+                reg [USER_WIDTH-1:0] s_user_reg;
+                reg s_ready_reg;
+
+                wire s_fire_i = s_valid_reg & s_ready_reg;
+
+                always @(posedge clk or posedge rst) begin
+                    if (rst) begin
+                        s_data_reg <= {DATA_WIDTH{1'b0}};
+                        s_keep_reg <= {KEEP_WIDTH{1'b0}};
+                        s_valid_reg <= 1'b0;
+                        s_last_reg <= 1'b0;
+                        s_id_reg <= {S_ID_WIDTH{1'b0}};
+                        s_dest_reg <= {S_DEST_WIDTH{1'b0}};
+                        s_user_reg <= {USER_WIDTH{1'b0}};
+                        s_ready_reg <= 1'b0;
+                    end else begin
+                        if (s_fire_i) begin
+                            s_valid_reg <= s_axis_tvalid[i];
+                            s_last_reg <= s_axis_tlast[i];
+                            s_data_reg <= s_axis_tdata[i*DATA_WIDTH +: DATA_WIDTH];
+                            s_keep_reg <= s_axis_tkeep[i*KEEP_WIDTH +: KEEP_WIDTH];
+                            s_id_reg <= s_axis_tid[i*S_ID_WIDTH +: S_ID_WIDTH];
+                            s_dest_reg <= s_axis_tdest[i*S_DEST_WIDTH +: S_DEST_WIDTH];
+                            s_user_reg <= s_axis_tuser[i*USER_WIDTH +: USER_WIDTH];
+                        end else if (!s_valid_reg) begin
+                            s_valid_reg <= s_axis_tvalid[i];
+                            s_last_reg <= s_axis_tlast[i];
+                            s_data_reg <= s_axis_tdata[i*DATA_WIDTH +: DATA_WIDTH];
+                            s_keep_reg <= s_axis_tkeep[i*KEEP_WIDTH +: KEEP_WIDTH];
+                            s_id_reg <= s_axis_tid[i*S_ID_WIDTH +: S_ID_WIDTH];
+                            s_dest_reg <= s_axis_tdest[i*S_DEST_WIDTH +: S_DEST_WIDTH];
+                            s_user_reg <= s_axis_tuser[i*USER_WIDTH +: USER_WIDTH];
+                        end
+
+                        s_ready_reg <= s_valid_reg ? 1'b0 : s_axis_tready[i];
+                    end
+                end
+
+                assign s_data[i*DATA_WIDTH +: DATA_WIDTH] = s_data_reg;
+                assign s_keep[i*KEEP_WIDTH +: KEEP_WIDTH] = s_keep_reg;
+                assign s_valid[i] = s_valid_reg;
+                assign s_last[i] = s_last_reg;
+                assign s_id[i*S_ID_WIDTH +: S_ID_WIDTH] = s_id_reg;
+                assign s_dest[i*S_DEST_WIDTH +: S_DEST_WIDTH] = s_dest_reg;
+                assign s_user[i*USER_WIDTH +: USER_WIDTH] = s_user_reg;
+                assign s_ready[i] = s_ready_reg;
+            end
+        end else begin
+            assign s_data = s_axis_tdata;
+            assign s_keep = s_axis_tkeep;
+            assign s_valid = s_axis_tvalid;
+            assign s_last = s_axis_tlast;
+            assign s_id = s_axis_tid;
+            assign s_dest = s_axis_tdest;
+            assign s_user = s_axis_tuser;
+            assign s_ready = s_axis_tready;
+        end
+    endgenerate
+
+    // Destination side registration
+    generate
+        if (M_REG_TYPE == 1 || M_REG_TYPE == 2) begin
+            genvar j;
+            for (j = 0; j < M_COUNT; j = j + 1) begin : gen_m_reg
+                reg [DATA_WIDTH-1:0] m_data_reg;
+                reg [KEEP_WIDTH-1:0] m_keep_reg;
+                reg m_valid_reg;
+                reg m_last_reg;
+                reg [M_ID_WIDTH-1:0] m_id_reg;
+                reg [M_DEST_WIDTH-1:0] m_dest_reg;
+                reg [USER_WIDTH-1:0] m_user_reg;
+                reg m_ready_reg;
+
+                wire m_fire_j = m_valid_reg & m_ready_reg;
+
+                always @(posedge clk or posedge rst) begin
+                    if (rst) begin
+                        m_data_reg <= {DATA_WIDTH{1'b0}};
+                        m_keep_reg <= {KEEP_WIDTH{1'b0}};
+                        m_valid_reg <= 1'b0;
+                        m_last_reg <= 1'b0;
+                        m_id_reg <= {M_ID_WIDTH{1'b0}};
+                        m_dest_reg <= {M_DEST_WIDTH{1'b0}};
+                        m_user_reg <= {USER_WIDTH{1'b0}};
+                        m_ready_reg <= 1'b0;
+                    end else begin
+                        if (m_fire_j) begin
+                            m_valid_reg <= m_axis_tvalid[j];
+                            m_last_reg <= m_axis_tlast[j];
+                            m_data_reg <= m_axis_tdata[j*DATA_WIDTH +: DATA_WIDTH];
+                            m_keep_reg <= m_axis_tkeep[j*KEEP_WIDTH +: KEEP_WIDTH];
+                            m_id_reg <= m_axis_tid[j*M_ID_WIDTH +: M_ID_WIDTH];
+                            m_dest_reg <= m_axis_tdest[j*M_DEST_WIDTH +: M_DEST_WIDTH];
+                            m_user_reg <= m_axis_tuser[j*USER_WIDTH +: USER_WIDTH];
+                        end else if (!m_valid_reg) begin
+                            m_valid_reg <= m_axis_tvalid[j];
+                            m_last_reg <= m_axis_tlast[j];
+                            m_data_reg <= m_axis_tdata[j*DATA_WIDTH +: DATA_WIDTH];
+                            m_keep_reg <= m_axis_tkeep[j*KEEP_WIDTH +: KEEP_WIDTH];
+                            m_id_reg <= m_axis_tid[j*M_ID_WIDTH +: M_ID_WIDTH];
+                            m_dest_reg <= m_axis_tdest[j*M_DEST_WIDTH +: M_DEST_WIDTH];
+                            m_user_reg <= m_axis_tuser[j*USER_WIDTH +: USER_WIDTH];
+                        end
+
+                        m_ready_reg <= m_valid_reg ? 1'b0 : m_axis_tready[j];
+                    end
+                end
+
+                assign m_data[j*DATA_WIDTH +: DATA_WIDTH] = m_data_reg;
+                assign m_keep[j*KEEP_WIDTH +: KEEP_WIDTH] = m_keep_reg;
+                assign m_valid[j] = m_valid_reg;
+                assign m_last[j] = m_last_reg;
+                assign m_id[j*M_ID_WIDTH +: M_ID_WIDTH] = m_id_reg;
+                assign m_dest[j*M_DEST_WIDTH +: M_DEST_WIDTH] = m_dest_reg;
+                assign m_user[j*USER_WIDTH +: USER_WIDTH] = m_user_reg;
+                assign m_ready[j] = m_ready_reg;
+            end
+        end else begin
+            assign m_data = m_axis_tdata;
+            assign m_keep = m_axis_tkeep;
+            assign m_valid = m_axis_tvalid;
+            assign m_last = m_axis_tlast;
+            assign m_id = m_axis_tid;
+            assign m_dest = m_axis_tdest;
+            assign m_user = m_axis_tuser;
+            assign m_ready = m_axis_tready;
+        end
+    endgenerate
+
+    // Arbitration and routing logic
+    // For each destination, select one source based on arbitration
+    wire [S_COUNT-1:0] dest_req [0:M_COUNT-1];
+    wire [S_COUNT-1:0] dest_grant [0:M_COUNT-1];
+    wire [S_COUNT-1:0] dest_fire [0:M_COUNT-1];
+
+    // Determine which sources are requesting each destination
+    genvar i, j;
+    for (j = 0; j < M_COUNT; j = j + 1) begin : gen_dest_req
+        for (i = 0; i < S_COUNT; i = i + 1) begin : gen_src_req
+            wire src_to_dest = s_valid[i] & (s_dest[i*S_DEST_WIDTH +: S_DEST_WIDTH] == j) & M_CONNECT[j*S_COUNT + i];
+            assign dest_req[j][i] = src_to_dest;
+        end
+    end
+
+    // Arbitration for each destination
+    generate
+        for (j = 0; j < M_COUNT; j = j + 1) begin : gen_arb
+            wire [S_COUNT-1:0] req = dest_req[j];
+            wire [S_COUNT-1:0] grant;
+            wire [S_COUNT-1:0] fire;
+
+            // Round-robin or fixed priority arbitration
+            if (ARB_TYPE_ROUND_ROBIN) begin
+                // Simple round-robin: use a rotating priority
+                // For simplicity, we'll use a basic round-robin with a pointer
+                reg [$clog2(S_COUNT)-1:0] rr_ptr;
+                
+                always @(posedge clk or posedge rst) begin
+                    if (rst) begin
+                        rr_ptr <= 0;
+                    end else begin
+                        // Update pointer when a grant is made
+                        if (|grant) begin
+                            // Find the granted index and set pointer to next
+                            case (grant)
+                                1'b1: rr_ptr <= 0;
+                                default: begin
+                                    // Find highest set bit and increment
+                                    reg [$clog2(S_COUNT)-1:0] next_ptr;
+                                    next_ptr = rr_ptr + 1;
+                                    if (next_ptr >= S_COUNT) next_ptr = 0;
+                                    rr_ptr <= next_ptr;
+                                end
+                            endcase
+                        end
+                    end
+                end
+
+                // Generate priority based on round-robin pointer
+                wire [S_COUNT-1:0] priority;
+                genvar k;
+                for (k = 0; k < S_COUNT; k = k + 1) begin : gen_prio
+                    assign priority[k] = (k >= rr_ptr) ? 1'b1 : 1'b0;
+                end
+
+                // Select highest priority request
+                assign grant = req & priority;
+                // If no priority match, fall back to LSB priority
+                wire [S_COUNT-1:0] lsb_grant;
+                assign lsb_grant = req;
+                assign grant = (|grant) ? grant : lsb_grant;
+            end else begin
+                // Fixed priority: LSB high priority
+                assign grant = req;
+            end
+
+            // Fire signal: grant and destination ready
+            assign fire = grant & m_ready[j];
+            
+            assign dest_grant[j] = grant;
+            assign dest_fire[j] = fire;
+        end
+    endgenerate
+
+    // Generate source ready signals
+    // A source is ready if it is granted by its destination
+    genvar src_i;
+    for (src_i = 0; src_i < S_COUNT; src_i = src_i + 1) begin : gen_s_ready
+        wire [M_COUNT-1:0] src_granted;
+        for (j = 0; j < M_COUNT; j = j + 1) begin : gen_src_grant
+            assign src_granted[j] = dest_grant[j][src_i];
+        end
+        assign s_axis_tready[src_i] = |src_granted;
+    end
+
+    // Generate destination valid and data
+    // For each destination, if there's a grant, forward the data from the granted source
+    genvar dst_j;
+    for (dst_j = 0; dst_j < M_COUNT; dst_j = dst_j + 1) begin : gen_m_out
+        wire [S_COUNT-1:0] grant = dest_grant[dst_j];
+        wire [S_COUNT-1:0] fire = dest_fire[dst_j];
+        
+        // Find the granted source
+        reg [$clog2(S_COUNT)-1:0] granted_src;
+        always @(*) begin
+            granted_src = 0;
+            for (i = 0; i < S_COUNT; i = i + 1) begin
+                if (grant[i]) begin
+                    granted_src = i;
+                end
+            end
+        end
+
+        assign m_axis_tvalid[dst_j] = |grant;
+        assign m_axis_tlast[dst_j] = s_last[granted_src];
+        assign m_axis_tdata[dst_j*DATA_WIDTH +: DATA_WIDTH] = s_data[granted_src*DATA_WIDTH +: DATA_WIDTH];
+        assign m_axis_tkeep[dst_j*KEEP_WIDTH +: KEEP_WIDTH] = s_keep[granted_src*KEEP_WIDTH +: KEEP_WIDTH];
+        assign m_axis_tuser[dst_j*USER_WIDTH +: USER_WIDTH] = s_user[granted_src*USER_WIDTH +: USER_WIDTH];
+        
+        // ID and dest handling
+        if (UPDATE_TID) begin
+            // Update TID to include source index
+            wire [M_ID_WIDTH-1:0] new_tid;
+            assign new_tid = {s_id[granted_src*S_ID_WIDTH +: S_ID_WIDTH], granted_src[$clog2(S_COUNT)-1:0]};
+            assign m_axis_tid[dst_j*M_ID_WIDTH +: M_ID_WIDTH] = new_tid;
+        end else begin
+            assign m_axis_tid[dst_j*M_ID_WIDTH +: M_ID_WIDTH] = s_id[granted_src*S_ID_WIDTH +: S_ID_WIDTH];
+        end
+        
+        assign m_axis_tdest[dst_j*M_DEST_WIDTH +: M_DEST_WIDTH] = dst_j;
+    end
+
+endmodule
+```<|im_end|>

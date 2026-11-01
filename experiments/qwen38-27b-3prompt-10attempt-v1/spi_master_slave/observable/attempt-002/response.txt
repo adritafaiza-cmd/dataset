@@ -1,0 +1,242 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // SCLK domain state
+    reg [N-1:0] tx_shift;
+    reg [N-1:0] rx_shift;
+    reg [N-1:0] bit_cnt;
+    reg         sclk_active;
+    reg         sclk_phase;
+    reg [SPI_2X_CLK_DIV-1:0] sclk_div_cnt;
+    reg         sclk_edge;
+
+    // PCLK domain state
+    reg [N-1:0] p_tx_word;
+    reg         p_tx_valid;
+    reg         p_rx_valid;
+    reg [N-1:0] p_rx_word;
+    reg         p_busy;
+
+    // Synchronizers
+    reg [1:0] sync_tx_valid;
+    reg [1:0] sync_rx_valid;
+    reg [1:0] sync_busy;
+
+    // SCLK domain: synchronizer for pclk signals
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sync_tx_valid <= 2'b00;
+            sync_rx_valid <= 2'b00;
+            sync_busy     <= 2'b00;
+        end else begin
+            sync_tx_valid <= {sync_tx_valid[0], p_tx_valid};
+            sync_rx_valid <= {sync_rx_valid[0], p_rx_valid};
+            sync_busy     <= {sync_busy[0], p_busy};
+        end
+    end
+
+    // PCLK domain: synchronizer for sclk signals
+    reg [1:0] sync_sclk_active;
+    reg [1:0] sync_sclk_done;
+    reg [N-1:0] sync_rx_word;
+    reg [N-1:0] sync_rx_word_d1;
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sync_sclk_active <= 2'b00;
+            sync_sclk_done   <= 2'b00;
+            sync_rx_word     <= {N{1'b0}};
+            sync_rx_word_d1  <= {N{1'b0}};
+        end else begin
+            sync_sclk_active <= {sync_sclk_active[0], sclk_active};
+            sync_sclk_done   <= {sync_sclk_done[0], sclk_active & (bit_cnt == N[MSB:0])};
+            sync_rx_word     <= rx_shift;
+            sync_rx_word_d1  <= sync_rx_word;
+        end
+    end
+
+    // SCLK domain: SPI state machine
+    // SPI mode 0: CPOL=0, CPHA=0
+    // sck idle low, data changes on falling edge, sampled on rising edge
+    // We generate sck from sclk_i using a divider
+
+    wire [N-1:0] full_cnt = N[MSB:0];
+
+    // Generate SPI clock from sclk_i
+    // SPI_2X_CLK_DIV is the number of sclk_i cycles per SPI bit
+    // We need to generate a clock that is SPI_2X_CLK_DIV times slower
+    // Actually, let's think about this differently.
+    
+    // The parameter SPI_2X_CLK_DIV suggests that the SPI clock frequency is 
+    // sclk_i / SPI_2X_CLK_DIV. So for each SPI bit, we need SPI_2X_CLK_DIV 
+    // cycles of sclk_i.
+    
+    // Let's use a counter to generate the SPI clock edges.
+    // We'll count up to SPI_2X_CLK_DIV/2 for each half-cycle.
+    
+    // Actually, let's simplify: we'll use a state machine that advances 
+    // on sclk_i edges and generates the SPI signals.
+    
+    // Let me reconsider the approach. We'll have a state machine in the 
+    // sclk_i domain that:
+    // 1. Waits for a valid word from the pclk domain
+    // 2. Shifts out the word over N SPI bits
+    // 3. Shifts in the received word
+    // 4. Signals completion to the pclk domain
+    
+    // SPI clock generation:
+    // We'll generate spi_sck_o by toggling it every SPI_2X_CLK_DIV/2 sclk_i cycles
+    // during active transfer.
+    
+    // Let's define the states:
+    // IDLE: waiting for a word
+    // ACTIVE: shifting data
+    
+    reg [1:0] state;
+    localparam S_IDLE   = 2'd0;
+    localparam S_ACTIVE = 2'd1;
+
+    // SPI clock divider counter
+    reg [SPI_2X_CLK_DIV-1:0] clk_div;
+
+    // MOSI output
+    assign spi_mosi_o = tx_shift[N-1];
+
+    // SCLK domain main logic
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state        <= S_IDLE;
+            tx_shift     <= {N{1'b0}};
+            rx_shift     <= {N{1'b0}};
+            bit_cnt      <= {N{1'b0}};
+            sclk_active  <= 1'b0;
+            sclk_phase   <= 1'b0;
+            clk_div      <= {SPI_2X_CLK_DIV{1'b0}};
+            spi_ssel_o   <= 1'b1;
+            spi_sck_o    <= 1'b0;
+        end else begin
+            case (state)
+                S_IDLE: begin
+                    spi_ssel_o <= 1'b1;
+                    spi_sck_o  <= 1'b0;
+                    sclk_active <= 1'b0;
+                    clk_div <= {SPI_2X_CLK_DIV{1'b0}};
+                    
+                    if (sync_tx_valid[1]) begin
+                        // Load the word and start transfer
+                        tx_shift    <= p_tx_word;
+                        rx_shift    <= {N{1'b0}};
+                        bit_cnt     <= {N{1'b0}};
+                        sclk_active <= 1'b1;
+                        sclk_phase  <= 1'b0;
+                        clk_div     <= {SPI_2X_CLK_DIV{1'b0}};
+                        spi_ssel_o  <= 1'b0;
+                        state       <= S_ACTIVE;
+                    end
+                end
+                
+                S_ACTIVE: begin
+                    // Generate SPI clock
+                    clk_div <= clk_div + 1'b1;
+                    
+                    if (clk_div == SPI_2X_CLK_DIV[MSB:0] - 1) begin
+                        clk_div <= {SPI_2X_CLK_DIV{1'b0}};
+                        
+                        // Toggle SCK
+                        if (sclk_phase == 1'b0) begin
+                            // Rising edge of SPI SCK
+                            spi_sck_o  <= 1'b1;
+                            sclk_phase <= 1'b1;
+                            
+                            // Sample MISO on rising edge (SPI mode 0)
+                            rx_shift <= {spi_miso_i, rx_shift[N-1:1]};
+                        end else begin
+                            // Falling edge of SPI SCK
+                            spi_sck_o  <= 1'b0;
+                            sclk_phase <= 1'b0;
+                            
+                            // Shift out next bit on falling edge (SPI mode 0)
+                            tx_shift <= {tx_shift[N-2:0], 1'b0};
+                            
+                            // Check if we're done
+                            if (bit_cnt == N[MSB:0] - 1) begin
+                                // Transfer complete
+                                sclk_active <= 1'b0;
+                                spi_ssel_o  <= 1'b1;
+                                spi_sck_o   <= 1'b0;
+                                state       <= S_IDLE;
+                            end else begin
+                                bit_cnt <= bit_cnt + 1'b1;
+                            end
+                        end
+                    end
+                end
+                
+                default: begin
+                    state <= S_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // PCLK domain: parallel interface logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            p_tx_word  <= {N{1'b0}};
+            p_tx_valid <= 1'b0;
+            p_rx_valid <= 1'b0;
+            p_rx_word  <= {N{1'b0}};
+            p_busy     <= 1'b0;
+            di_req_o   <= 1'b0;
+            wr_ack_o   <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o       <= {N{1'b0}};
+        end else begin
+            // Default: deassert single-cycle signals
+            di_req_o   <= 1'b0;
+            wr_ack_o   <= 1'b0;
+            do_valid_o <= 1'b0;
+            
+            // Handle incoming word
+            if (wren_i && !p_busy) begin
+                p_tx_word  <= di_i;
+                p_tx_valid <= 1'b1;
+                p_busy     <= 1'b1;
+                di_req_o   <= 1'b1;
+            end else begin
+                p_tx_valid <= 1'b0;
+            end
+            
+            // Handle completion from SCLK domain
+            if (sync_sclk_done[1] && !sync_sclk_done[0]) begin
+                // Rising edge of done signal
+                p_rx_word  <= sync_rx_word_d1;
+                p_rx_valid <= 1'b1;
+                p_busy     <= 1'b0;
+                do_valid_o <= 1'b1;
+                do_o       <= sync_rx_word_d1;
+            end else begin
+                p_rx_valid <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,177 @@
+module apbxclk #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		parameter [0:0]	OPT_REGISTERED = 1'b0,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH
+	) (
+		input	wire			S_APB_PCLK, S_PRESETn,
+		input	wire			S_APB_PSEL,
+		input	wire			S_APB_PENABLE,
+		output	reg			S_APB_PREADY,
+		input	wire	[AW-1:0]	S_APB_PADDR,
+		input	wire			S_APB_PWRITE,
+		input	wire	[DW-1:0]	S_APB_PWDATA,
+		input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+		input	wire	[2:0]		S_APB_PPROT,
+		output	wire	[DW-1:0]	S_APB_PRDATA,
+		output	wire			S_APB_PSLVERR,
+		input	wire			M_APB_PCLK,
+		output	reg			M_PRESETn,
+		output	reg			M_APB_PSEL,
+		output	reg			M_APB_PENABLE,
+		input	wire			M_APB_PREADY,
+		output	wire	[AW-1:0]	M_APB_PADDR,
+		output	wire			M_APB_PWRITE,
+		output	wire	[DW-1:0]	M_APB_PWDATA,
+		output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+		output	wire	[2:0]		M_APB_PPROT,
+		input	wire	[DW-1:0]	M_APB_PRDATA,
+		input	wire			M_APB_PSLVERR
+	);
+
+	// Synchronous reset for M domain
+	reg [2:0] m_reset_sync;
+	reg m_reset_n;
+
+	always @(posedge M_APB_PCLK) begin
+		m_reset_sync <= {m_reset_sync[1:0], S_PRESETn};
+	end
+
+	assign M_PRESETn = m_reset_sync[2];
+
+	// Handshake signals
+	reg s_req;
+	reg [1:0] m_ack;
+	reg m_req;
+	reg [1:0] s_ack;
+
+	// S domain: detect setup phase start
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_req <= 1'b0;
+			s_ack <= 2'b00;
+		end else begin
+			if (S_APB_PSEL && !S_APB_PENABLE) begin
+				s_req <= 1'b1;
+			end else if (s_req && s_ack[1]) begin
+				s_req <= 1'b0;
+			end
+			if (s_ack[0] && !s_ack[1]) begin
+				s_ack <= 2'b10;
+			end else if (s_ack[1] && !s_req) begin
+				s_ack <= 2'b00;
+			end
+		end
+	end
+
+	// M domain: capture request and drive APB
+	reg m_sel;
+	reg m_enable;
+	reg [AW-1:0] m_addr;
+	reg m_write;
+	reg [DW-1:0] m_wdata;
+	reg [DW/8-1:0] m_wstrb;
+	reg [2:0] m_pprot;
+
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_ack <= 2'b00;
+			m_req <= 1'b0;
+			m_sel <= 1'b0;
+			m_enable <= 1'b0;
+			m_addr <= {AW{1'b0}};
+			m_write <= 1'b0;
+			m_wdata <= {DW{1'b0}};
+			m_wstrb <= {(DW/8){1'b0}};
+			m_pprot <= 3'b000;
+		end else begin
+			// Handshake
+			if (m_req && m_ack[1]) begin
+				m_req <= 1'b0;
+			end
+			if (m_ack[0] && !m_ack[1]) begin
+				m_ack <= 2'b10;
+			end else if (m_ack[1] && !m_req) begin
+				m_ack <= 2'b00;
+			end
+
+			// APB state machine
+			if (m_sel && !m_enable) begin
+				// Setup phase: capture request
+				if (s_req) begin
+					m_addr <= S_APB_PADDR;
+					m_write <= S_APB_PWRITE;
+					m_wdata <= S_APB_PWDATA;
+					m_wstrb <= S_APB_PWSTRB;
+					m_pprot <= S_APB_PPROT;
+					m_sel <= 1'b1;
+					m_enable <= 1'b1;
+					m_req <= 1'b1;
+				end
+			end else if (m_sel && m_enable) begin
+				// Access phase: wait for PREADY
+				if (M_APB_PREADY) begin
+					m_sel <= 1'b0;
+					m_enable <= 1'b0;
+				end
+			end else begin
+				m_sel <= 1'b0;
+				m_enable <= 1'b0;
+			end
+		end
+	end
+
+	assign M_APB_PSEL = m_sel;
+	assign M_APB_PENABLE = m_enable;
+	assign M_APB_PADDR = m_addr;
+	assign M_APB_PWRITE = m_write;
+	assign M_APB_PWDATA = m_wdata;
+	assign M_APB_PWSTRB = m_wstrb;
+	assign M_APB_PPROT = m_pprot;
+
+	// Response capture in M domain
+	reg [DW-1:0] m_rdata;
+	reg m_rslverr;
+	reg m_resp_valid;
+
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_rdata <= {DW{1'b0}};
+			m_rslverr <= 1'b0;
+			m_resp_valid <= 1'b0;
+		end else begin
+			if (m_sel && m_enable && M_APB_PREADY) begin
+				m_rdata <= M_APB_PRDATA;
+				m_rslverr <= M_APB_PSLVERR;
+				m_resp_valid <= 1'b1;
+			end else if (m_resp_valid && s_ack[1]) begin
+				m_resp_valid <= 1'b0;
+			end
+		end
+	end
+
+	// S domain: capture response
+	reg [DW-1:0] s_rdata;
+	reg s_rslverr;
+
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			S_APB_PREADY <= 1'b0;
+			s_rdata <= {DW{1'b0}};
+			s_rslverr <= 1'b0;
+		end else begin
+			if (m_resp_valid) begin
+				s_rdata <= m_rdata;
+				s_rslverr <= m_rslverr;
+				S_APB_PREADY <= 1'b1;
+			end else begin
+				S_APB_PREADY <= 1'b0;
+			end
+		end
+	end
+
+	assign S_APB_PRDATA = s_rdata;
+	assign S_APB_PSLVERR = s_rslverr;
+
+endmodule

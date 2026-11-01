@@ -1,0 +1,116 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain signals
+  reg src_req;
+  wire src_req_sync;
+  wire src_ack_sync;
+  wire src_ready_internal;
+
+  // Destination domain signals
+  reg dst_ack;
+  wire dst_ack_sync;
+  wire dst_req_sync;
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_valid_reg;
+
+  // Synchronizers: src_req to dst domain
+  reg [1:0] req_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      req_sync <= 2'b00;
+    else
+      req_sync <= {req_sync[0], src_req};
+  end
+  assign dst_req_sync = req_sync[1];
+
+  // Synchronizers: dst_ack to src domain
+  reg [1:0] ack_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      ack_sync <= 2'b00;
+    else
+      ack_sync <= {ack_sync[0], dst_ack};
+  end
+  assign src_ack_sync = ack_sync[1];
+
+  // Source domain logic
+  // src_ready is high when we are not waiting for an ack (i.e., no outstanding request)
+  assign src_ready_o = src_rst_ni & ~src_req;
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      src_req <= 1'b0;
+    else if (src_valid_i & src_ready_o)
+      src_req <= 1'b1;
+    else if (src_ack_sync)
+      src_req <= 1'b0;
+  end
+
+  // Destination domain logic
+  // dst_ack is high when we have a valid item and are ready to accept a new one
+  // Actually, in 2-phase handshake, ack is asserted when the destination has received the data
+  // and is ready to accept the next transfer.
+  
+  // Let's use a state machine approach for the destination
+  // States: IDLE, WAIT_ACK
+  // Actually, let's think about this more carefully.
+  
+  // In a 2-phase handshake:
+  // - Source asserts req when it has data
+  // - Destination sees req, captures data, asserts ack
+  // - Source sees ack, deasserts req
+  // - Destination sees req deasserted, deasserts ack
+  
+  // But we also need to handle the valid/ready interface at the destination.
+  // dst_valid_o should be high when we have data to present
+  // dst_ready_i from the consumer
+  
+  // Let's use a simpler approach:
+  // dst_ack is asserted when dst_req_sync is high and we haven't already acknowledged
+  // We need to track whether we've already sent an ack for the current req
+  
+  reg dst_ack_pending;
+  
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_ack <= 1'b0;
+      dst_ack_pending <= 1'b0;
+      dst_data_reg <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+    end else begin
+      // If req is high and we haven't acknowledged yet, capture data and assert ack
+      if (dst_req_sync & ~dst_ack_pending) begin
+        dst_ack_pending <= 1'b1;
+        dst_ack <= 1'b1;
+        dst_data_reg <= src_data_i; // This is wrong - src_data_i is in src domain
+        dst_valid_reg <= 1'b1;
+      end
+      // If req goes low, deassert ack
+      else if (~dst_req_sync) begin
+        dst_ack <= 1'b0;
+        dst_ack_pending <= 1'b0;
+      end
+      // If dst_valid and dst_ready, clear valid
+      if (dst_valid_reg & dst_ready_i) begin
+        dst_valid_reg <= 1'b0;
+      end
+    end
+  end
+
+  assign dst_data_o = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+endmodule

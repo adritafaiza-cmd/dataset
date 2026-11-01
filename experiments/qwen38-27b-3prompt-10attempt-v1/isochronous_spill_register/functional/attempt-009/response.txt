@@ -1,0 +1,185 @@
+```verilog
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    // Stage 0 (first register)
+    reg [WIDTH-1:0] stage0_data;
+    reg             stage0_valid;
+
+    // Stage 1 (second register)
+    reg [WIDTH-1:0] stage1_data;
+    reg             stage1_valid;
+
+    // Source domain: stage0
+    // src_ready_o is high when stage0 is empty, or when stage0 is full but stage1 is empty
+    // Actually, for a 2-deep buffer:
+    // - If stage0 is empty, we can accept.
+    // - If stage0 is full, we can accept only if stage1 is empty (so we can shift).
+    // But wait, in a standard 2-stage pipeline with valid/ready:
+    // Stage 0 accepts when it's empty OR when it can push to stage 1.
+    // Stage 0 can push to stage 1 when stage1 is empty OR when stage1 can push to dst.
+    
+    // Let's define the handshake properly.
+    // src_ready_o: source can send
+    // dst_valid_o: destination has data
+    // dst_data_o: destination data
+    
+    // The buffer has 2 slots.
+    // Slot 0: stage0
+    // Slot 1: stage1
+    
+    // src_ready_o = !stage0_valid || (stage0_valid && !stage1_valid)
+    // Actually, if stage0 is valid and stage1 is valid, we can't accept.
+    // If stage0 is valid and stage1 is empty, we can accept (and shift).
+    // If stage0 is empty, we can accept.
+    
+    // So: src_ready_o = !stage0_valid || !stage1_valid
+    
+    // dst_valid_o = stage1_valid
+    // dst_data_o = stage1_data
+    
+    // In dst_clk domain:
+    // If stage1_valid && dst_ready_i, then stage1 becomes empty.
+    // If stage0_valid && !stage1_valid, then stage1 gets stage0's data, stage0 becomes empty.
+    // If stage0_valid && stage1_valid && dst_ready_i, then stage1 becomes empty (consumed), 
+    //   and stage0 moves to stage1? No, that's not right for a simple shift register.
+    
+    // Let me reconsider. A 2-deep FIFO with valid/ready:
+    // 
+    // In dst_clk:
+    //   - If dst_ready_i && stage1_valid: stage1_valid <= 0
+    //   - If stage0_valid && !stage1_valid: stage1_data <= stage0_data, stage1_valid <= 1, stage0_valid <= 0
+    //   - If stage0_valid && stage1_valid && dst_ready_i: 
+    //       stage1_valid <= 0 (consumed)
+    //       stage1_data <= stage0_data
+    //       stage0_valid <= 0
+    //   - If stage0_valid && stage1_valid && !dst_ready_i: nothing changes
+    //   - If !stage0_valid && stage1_valid && dst_ready_i: stage1_valid <= 0
+    //   - If !stage0_valid && !stage1_valid: nothing
+    //   - If !stage0_valid && stage1_valid && !dst_ready_i: nothing
+    //   - If stage0_valid && !stage1_valid && dst_ready_i: 
+    //       stage1_data <= stage0_data, stage1_valid <= 1, stage0_valid <= 0
+    //       (same as above, dst_ready doesn't matter since stage1 was empty)
+    
+    // Wait, but stage0 is in src_clk domain and stage1 is in dst_clk domain.
+    // This is a CDC problem. The clocks are related (integer ratio), so we can use
+    // a simple synchronizer approach, but for valid/ready with related clocks,
+    // we need to be careful.
+    
+    // Actually, for related clocks (integer ratio), we can use a simple approach:
+    // - stage0 is clocked by src_clk
+    // - stage1 is clocked by dst_clk
+    // - We need to synchronize the valid signal from src to dst domain
+    
+    // But the problem says "related clocks" which means they have a fixed integer ratio.
+    // For a 2-deep spill buffer between related clocks, a common approach is:
+    // - Use a 2-stage pipeline where each stage is in its own clock domain
+    // - Synchronize the valid bit using a 2-flop synchronizer
+    
+    // However, for related clocks, we can also use a simpler approach if the ratio is known.
+    // But since the ratio isn't specified, let's use a standard CDC approach.
+    
+    // Let me reconsider the architecture:
+    // 
+    // src_clk domain:
+    //   - stage0_data, stage0_valid
+    //   - src_ready_o = !stage0_valid || (stage0_valid && stage1_empty_synced)
+    //   - When src_valid_i && src_ready_o: stage0_data <= src_data_i, stage0_valid <= 1
+    //   - When stage0_valid && stage1_empty_synced: stage0_valid <= 0
+    //
+    // dst_clk domain:
+    //   - stage1_data, stage1_valid
+    //   - dst_valid_o = stage1_valid
+    //   - dst_data_o = stage1_data
+    //   - When stage1_valid && dst_ready_i: stage1_valid <= 0
+    //   - When stage0_valid_synced && !stage1_valid: stage1_data <= stage0_data_synced, stage1_valid <= 1
+    //
+    // Synchronization:
+    //   - stage0_valid needs to be synchronized to dst_clk
+    //   - stage0_data needs to be synchronized to dst_clk (or use a mux)
+    //   - stage1_empty needs to be synchronized to src_clk
+    
+    // For related clocks, a 2-flop synchronizer should work.
+    
+    // Let's implement this:
+    
+    // Synchronize stage0_valid to dst domain
+    reg stage0_valid_sync1;
+    reg stage0_valid_sync2;
+    
+    // Synchronize stage0_data to dst domain (use a register in dst domain)
+    reg [WIDTH-1:0] stage0_data_sync;
+    
+    // Synchronize stage1_empty to src domain
+    reg stage1_empty_sync1;
+    reg stage1_empty_sync2;
+    
+    // In dst_clk:
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            stage0_valid_sync1 <= 1'b0;
+            stage0_valid_sync2 <= 1'b0;
+            stage0_data_sync <= {WIDTH{1'b0}};
+            stage1_data <= {WIDTH{1'b0}};
+            stage1_valid <= 1'b0;
+        end else begin
+            stage0_valid_sync1 <= stage0_valid;
+            stage0_valid_sync2 <= stage0_valid_sync1;
+            
+            // Capture stage0_data when stage0_valid is high (synchronized)
+            if (stage0_valid_sync2) begin
+                stage0_data_sync <= stage0_data;
+            end
+            
+            // Stage1 logic
+            if (stage1_valid && dst_ready_i) begin
+                stage1_valid <= 1'b0;
+            end else if (stage0_valid_sync2 && !stage1_valid) begin
+                stage1_data <= stage0_data_sync;
+                stage1_valid <= 1'b0; // Will be set to 1
+                stage1_valid <= 1'b1;
+            end
+        end
+    end
+    
+    // In src_clk:
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            stage0_data <= {WIDTH{1'b0}};
+            stage0_valid <= 1'b0;
+            stage1_empty_sync1 <= 1'b1;
+            stage1_empty_sync2 <= 1'b1;
+        end else begin
+            // Synchronize stage1_empty to src domain
+            stage1_empty_sync1 <= !stage1_valid;
+            stage1_empty_sync2 <= stage1_empty_sync1;
+            
+            // Stage0 logic
+            if (src_valid_i && src_ready_o) begin
+                stage0_data <= src_data_i;
+                stage0_valid <= 1'b1;
+            end else if (stage0_valid && stage1_empty_sync2) begin
+                stage0_valid <= 1'b0;
+            end
+        end
+    end
+    
+    // Outputs
+    assign src_ready_o = !stage0_valid || stage1_empty_sync2;
+    assign dst_valid_o = stage1_valid;
+    assign dst_data_o = stage1_data;
+
+endmodule
+```<|im_end|>

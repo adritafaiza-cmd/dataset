@@ -1,0 +1,473 @@
+```verilog
+module async_bidir_ramif_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "FALSE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir,
+       output wire             o_ram_a_clk,
+       output wire [DSIZE-1:0] o_ram_a_wdata,
+       input wire [DSIZE-1:0]  i_ram_a_rdata,
+       output wire [ASIZE-1:0] o_ram_a_addr,
+       output wire             o_ram_a_rinc,
+       output wire             o_ram_a_winc,
+       output wire             o_ram_b_clk,
+       output wire [DSIZE-1:0] o_ram_b_wdata,
+       input wire [DSIZE-1:0]  i_ram_b_rdata,
+       output wire [ASIZE-1:0] o_ram_b_addr,
+       output wire             o_ram_b_rinc,
+       output wire             o_ram_b_winc
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam AWIDTH = ASIZE + 1;
+  localparam AWIDTH_P1 = ASIZE + 2;
+  localparam AFULL_THRESH = DEPTH - 2;
+  localparam AEMPTY_THRESH = 1;
+
+  // Side A state
+  reg [AWIDTH-1:0] a_wr_ptr;
+  reg [AWIDTH-1:0] a_rd_ptr;
+  reg [AWIDTH-1:0] a_wr_ptr_gray;
+  reg [AWIDTH-1:0] a_rd_ptr_gray;
+  reg [AWIDTH-1:0] a_wr_ptr_gray_sync1;
+  reg [AWIDTH-1:0] a_wr_ptr_gray_sync2;
+  reg [AWIDTH-1:0] a_rd_ptr_gray_sync1;
+  reg [AWIDTH-1:0] a_rd_ptr_gray_sync2;
+
+  // Side B state
+  reg [AWIDTH-1:0] b_wr_ptr;
+  reg [AWIDTH-1:0] b_rd_ptr;
+  reg [AWIDTH-1:0] b_wr_ptr_gray;
+  reg [AWIDTH-1:0] b_rd_ptr_gray;
+  reg [AWIDTH-1:0] b_wr_ptr_gray_sync1;
+  reg [AWIDTH-1:0] b_wr_ptr_gray_sync2;
+  reg [AWIDTH-1:0] b_rd_ptr_gray_sync1;
+  reg [AWIDTH-1:0] b_rd_ptr_gray_sync2;
+
+  // Derived signals
+  wire a_wr_en;
+  wire a_rd_en;
+  wire b_wr_en;
+  wire b_rd_en;
+
+  wire a_full;
+  wire a_empty;
+  wire b_full;
+  wire b_empty;
+
+  wire a_afull;
+  wire a_aempty;
+  wire b_afull;
+  wire b_aempty;
+
+  // RAM interface signals
+  wire o_ram_a_winc;
+  wire o_ram_a_rinc;
+  wire o_ram_b_winc;
+  wire o_ram_b_rinc;
+
+  // Side A: write enable is when a_dir is high (A writes to RAM)
+  // Side A: read enable is when a_dir is low (A reads from RAM)
+  // But we need to consider the FIFO logic:
+  // When a_dir=1, A is the writer side. a_winc triggers a write.
+  // When a_dir=0, A is the reader side. a_rinc triggers a read.
+  // The FIFO pointers track the number of entries.
+  // For a bidirectional FIFO, the direction determines which side is writing and which is reading.
+  // Actually, let me reconsider. In a bidirectional FIFO, both sides can write and read independently.
+  // The a_dir and b_dir signals likely indicate the direction of data flow.
+  // Let me assume:
+  // - When a_dir=1, data flows from A to B. A writes, B reads.
+  // - When a_dir=0, data flows from B to A. B writes, A reads.
+  // But that would make it unidirectional at any given time.
+  // 
+  // Actually, for a true bidirectional FIFO, both directions can be active simultaneously.
+  // Let me reconsider the semantics:
+  // - a_winc: A wants to write data into the FIFO
+  // - a_rinc: A wants to read data from the FIFO
+  // - a_dir: Direction of A's operation? Or direction of the FIFO?
+  //
+  // Given the port names, I think:
+  // - a_dir indicates whether A is in write mode (1) or read mode (0)
+  // - b_dir indicates whether B is in write mode (1) or read mode (0)
+  //
+  // But that doesn't make sense for a FIFO where both sides can write and read.
+  //
+  // Let me think about this differently. In a bidirectional FIFO:
+  // - Side A can write to the FIFO and read from the FIFO
+  // - Side B can write to the FIFO and read from the FIFO
+  // - The FIFO has two ends: one for A, one for B
+  // - Data written by A can be read by B, and data written by B can be read by A
+  //
+  // So the FIFO is essentially two unidirectional FIFOs sharing the same memory:
+  // 1. A-to-B FIFO: A writes, B reads
+  // 2. B-to-A FIFO: B writes, A reads
+  //
+  // The a_dir and b_dir signals might indicate which direction is active.
+  // Or they might be used to select which port of the dual-port RAM to use.
+  //
+  // Given the complexity, let me implement a simpler interpretation:
+  // - The FIFO has two independent directions
+  // - a_dir=1 means A is writing to the A-to-B direction
+  // - a_dir=0 means A is reading from the B-to-A direction
+  // - b_dir=1 means B is writing to the B-to-A direction
+  // - b_dir=0 means B is reading from the A-to-B direction
+  //
+  // This way, both directions can be active simultaneously.
+
+  // A-to-B direction: A writes, B reads
+  wire a2b_wr_en = a_winc & a_dir;
+  wire b2a_wr_en = b_winc & b_dir;
+  wire a2b_rd_en = b_rinc & ~b_dir;
+  wire b2a_rd_en = a_rinc & ~a_dir;
+
+  // For the A-to-B FIFO:
+  // Write pointer is on A side, read pointer is on B side
+  // For the B-to-A FIFO:
+  // Write pointer is on B side, read pointer is on A side
+
+  // Let me use separate pointer sets for each direction
+  // A-to-B: a_wr_ptr_a2b, b_rd_ptr_a2b
+  // B-to-A: b_wr_ptr_b2a, a_rd_ptr_b2a
+
+  // Actually, this is getting complex. Let me simplify by assuming
+  // that the FIFO operates in one direction at a time, selected by a_dir and b_dir.
+  // When a_dir=1 and b_dir=0, data flows A to B.
+  // When a_dir=0 and b_dir=1, data flows B to A.
+  // Both cannot be 1 or both cannot be 0 simultaneously for valid operation.
+
+  // For simplicity, let me implement a single-direction FIFO where the direction
+  // is determined by a_dir (and b_dir should be ~a_dir for valid operation).
+
+  // Write enable: A writes when a_dir=1 and a_winc=1
+  // Read enable: B reads when b_dir=0 and b_rinc=1
+  // Or: B writes when b_dir=1 and b_winc=1
+  // Read enable: A reads when a_dir=0 and a_rinc=1
+
+  // Let me define:
+  // wr_en_a = a_winc & a_dir  (A writes to FIFO)
+  // rd_en_b = b_rinc & ~b_dir (B reads from FIFO)
+  // wr_en_b = b_winc & b_dir  (B writes to FIFO)
+  // rd_en_a = a_rinc & ~a_dir (A reads from FIFO)
+
+  // The FIFO has two independent data paths:
+  // Path 1: A writes, B reads (A-to-B)
+  // Path 2: B writes, A reads (B-to-A)
+
+  // For Path 1 (A-to-B):
+  // Write pointer: a_wr_ptr_a2b (on A clock)
+  // Read pointer: b_rd_ptr_a2b (on B clock)
+  // RAM write: A side, when wr_en_a
+  // RAM read: B side, when rd_en_b
+
+  // For Path 2 (B-to-A):
+  // Write pointer: b_wr_ptr_b2a (on B clock)
+  // Read pointer: a_rd_ptr_b2a (on A clock)
+  // RAM write: B side, when wr_en_b
+  // RAM read: A side, when rd_en_a
+
+  // This requires 4 pointers total. Let me implement this.
+
+  // A-to-B pointers
+  reg [AWIDTH-1:0] a2b_wr_ptr;
+  reg [AWIDTH-1:0] a2b_rd_ptr;
+  reg [AWIDTH-1:0] a2b_wr_ptr_gray;
+  reg [AWIDTH-1:0] a2b_rd_ptr_gray;
+  reg [AWIDTH-1:0] a2b_wr_ptr_gray_sync1;
+  reg [AWIDTH-1:0] a2b_wr_ptr_gray_sync2;
+  reg [AWIDTH-1:0] a2b_rd_ptr_gray_sync1;
+  reg [AWIDTH-1:0] a2b_rd_ptr_gray_sync2;
+
+  // B-to-A pointers
+  reg [AWIDTH-1:0] b2a_wr_ptr;
+  reg [AWIDTH-1:0] b2a_rd_ptr;
+  reg [AWIDTH-1:0] b2a_wr_ptr_gray;
+  reg [AWIDTH-1:0] b2a_rd_ptr_gray;
+  reg [AWIDTH-1:0] b2a_wr_ptr_gray_sync1;
+  reg [AWIDTH-1:0] b2a_wr_ptr_gray_sync2;
+  reg [AWIDTH-1:0] b2a_rd_ptr_gray_sync1;
+  reg [AWIDTH-1:0] b2a_rd_ptr_gray_sync2;
+
+  // A-to-B: A writes, B reads
+  wire a2b_wr_en = a_winc & a_dir;
+  wire a2b_rd_en = b_rinc & ~b_dir;
+
+  // B-to-A: B writes, A reads
+  wire b2a_wr_en = b_winc & b_dir;
+  wire b2a_rd_en = a_rinc & ~a_dir;
+
+  // A-to-B full/empty
+  wire [AWIDTH-1:0] a2b_wr_ptr_gray_sync2_diff;
+  wire [AWIDTH-1:0] a2b_rd_ptr_gray_sync2_diff;
+  
+  // Convert gray to binary for comparison
+  function [AWIDTH-1:0] gray2bin;
+    input [AWIDTH-1:0] gray;
+    integer i;
+    begin
+      gray2bin[AWIDTH-1] = gray[AWIDTH-1];
+      for (i = AWIDTH-2; i >= 0; i = i - 1)
+        gray2bin[i] = gray2bin[i+1] ^ gray[i];
+    end
+  endfunction
+
+  function [AWIDTH-1:0] bin2gray;
+    input [AWIDTH-1:0] bin;
+    begin
+      bin2gray = bin ^ (bin >> 1);
+    end
+  endfunction
+
+  // A-to-B: full when write pointer catches up to read pointer (with wrap)
+  wire [AWIDTH-1:0] a2b_wr_ptr_bin_sync = gray2bin(a2b_wr_ptr_gray_sync2);
+  wire [AWIDTH-1:0] a2b_rd_ptr_bin_sync = gray2bin(a2b_rd_ptr_gray_sync2);
+  
+  // Full: write pointer is one ahead of read pointer in the extended space
+  // For a FIFO of depth DEPTH, full when (wr_ptr - rd_ptr) == DEPTH
+  // Using binary pointers with an extra bit:
+  wire a2b_full = (a2b_wr_ptr_bin_sync[AWIDTH-1:1] == a2b_rd_ptr_bin_sync[AWIDTH-1:1]) &
+                  (a2b_wr_ptr_bin_sync[0] != a2b_rd_ptr_bin_sync[0]);
+
+  // Empty: write pointer equals read pointer
+  wire a2b_empty = (a2b_wr_ptr_bin_sync == a2b_rd_ptr_bin_sync);
+
+  // B-to-A: full/empty
+  wire [AWIDTH-1:0] b2a_wr_ptr_bin_sync = gray2bin(b2a_wr_ptr_gray_sync2);
+  wire [AWIDTH-1:0] b2a_rd_ptr_bin_sync = gray2bin(b2a_rd_ptr_gray_sync2);
+  
+  wire b2a_full = (b2a_wr_ptr_bin_sync[AWIDTH-1:1] == b2a_rd_ptr_bin_sync[AWIDTH-1:1]) &
+                  (b2a_wr_ptr_bin_sync[0] != b2a_rd_ptr_bin_sync[0]);
+
+  wire b2a_empty = (b2a_wr_ptr_bin_sync == b2a_rd_ptr_bin_sync);
+
+  // A side: full when A-to-B is full (A can't write)
+  // A side: empty when B-to-A is empty (A can't read)
+  assign a_full = a2b_full;
+  assign a_empty = b2a_empty;
+
+  // B side: full when B-to-A is full (B can't write)
+  // B side: empty when A-to-B is empty (B can't read)
+  assign b_full = b2a_full;
+  assign b_empty = a2b_empty;
+
+  // Almost full/empty
+  wire [AWIDTH:0] a2b_count = a2b_wr_ptr_bin_sync - a2b_rd_ptr_bin_sync;
+  wire [AWIDTH:0] b2a_count = b2a_wr_ptr_bin_sync - b2a_rd_ptr_bin_sync;
+
+  assign a_afull = (a2b_count >= AFULL_THRESH[AWIDTH:0]);
+  assign a_aempty = (b2a_count <= AEMPTY_THRESH[AWIDTH:0]);
+  assign b_afull = (b2a_count >= AFULL_THRESH[AWIDTH:0]);
+  assign b_aempty = (a2b_count <= AEMPTY_THRESH[AWIDTH:0]);
+
+  // RAM interface
+  // A side RAM: used for A-to-B writes and B-to-A reads
+  // B side RAM: used for B-to-A writes and A-to-B reads
+
+  // A side RAM write: A-to-B write
+  assign o_ram_a_winc = a2b_wr_en;
+  assign o_ram_a_wdata = a_wdata;
+  assign o_ram_a_addr = a2b_wr_ptr[ASIZE-1:0];
+
+  // A side RAM read: B-to-A read
+  assign o_ram_a_rinc = b2a_rd_en;
+  assign o_ram_a_addr = b2a_rd_ptr[ASIZE-1:0]; // This is wrong, need separate address
+
+  // I need to handle the fact that the same RAM port can't do both read and write simultaneously
+  // in a simple dual-port RAM. Let me assume the RAM supports simultaneous read and write
+  // on the same port, or that we need to multiplex.
+
+  // For simplicity, let me assume the RAM can handle simultaneous read and write on the same port.
+  // The address for read and write are separate.
+
+  // Actually, looking at the port list, there's only one address per RAM port.
+  // This means we can't do simultaneous read and write on the same port with different addresses.
+  // We need to multiplex or use a different architecture.
+
+  // Let me reconsider. Perhaps the FIFO is unidirectional at any given time.
+  // When a_dir=1, only A-to-B is active.
+  // When a_dir=0, only B-to-A is active.
+  // This simplifies the RAM interface.
+
+  // For A-to-B (a_dir=1, b_dir=0):
+  // A writes to RAM A port
+  // B reads from RAM B port
+
+  // For B-to-A (a_dir=0, b_dir=1):
+  // B writes to RAM B port
+  // A reads from RAM A port
+
+  // This way, each RAM port is only used for one operation at a time.
+
+  // Let me redefine:
+  // When a_dir=1: A-to-B mode
+  //   o_ram_a_winc = a_winc
+  //   o_ram_a_addr = a_wr_ptr[ASIZE-1:0]
+  //   o_ram_b_rinc = b_rinc
+  //   o_ram_b_addr = b_rd_ptr[ASIZE-1:0]
+
+  // When a_dir=0: B-to-A mode
+  //   o_ram_b_winc = b_winc
+  //   o_ram_b_addr = b_wr_ptr[ASIZE-1:0]
+  //   o_ram_a_rinc = a_rinc
+  //   o_ram_a_addr = a_rd_ptr[ASIZE-1:0]
+
+  // This is much simpler. Let me implement this.
+
+  // Single direction FIFO with direction select
+  reg [AWIDTH-1:0] wr_ptr;
+  reg [AWIDTH-1:0] rd_ptr;
+  reg [AWIDTH-1:0] wr_ptr_gray;
+  reg [AWIDTH-1:0] rd_ptr_gray;
+  reg [AWIDTH-1:0] wr_ptr_gray_sync1;
+  reg [AWIDTH-1:0] wr_ptr_gray_sync2;
+  reg [AWIDTH-1:0] rd_ptr_gray_sync1;
+  reg [AWIDTH-1:0] rd_ptr_gray_sync2;
+
+  // Write side: A when a_dir=1, B when a_dir=0
+  wire wr_en_a = a_winc & a_dir;
+  wire wr_en_b = b_winc & ~a_dir;
+  wire rd_en_a = a_rinc & ~a_dir;
+  wire rd_en_b = b_rinc & a_dir;
+
+  // Write pointer update
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      wr_ptr <= {AWIDTH{1'b0}};
+      wr_ptr_gray <= {AWIDTH{1'b0}};
+    end else if (wr_en_a) begin
+      wr_ptr <= wr_ptr + 1'b1;
+      wr_ptr_gray <= bin2gray(wr_ptr + 1'b1);
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      wr_ptr <= {AWIDTH{1'b0}};
+      wr_ptr_gray <= {AWIDTH{1'b0}};
+    end else if (wr_en_b) begin
+      wr_ptr <= wr_ptr + 1'b1;
+      wr_ptr_gray <= bin2gray(wr_ptr + 1'b1);
+    end
+  end
+
+  // Read pointer update
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      rd_ptr <= {AWIDTH{1'b0}};
+      rd_ptr_gray <= {AWIDTH{1'b0}};
+    end else if (rd_en_a) begin
+      rd_ptr <= rd_ptr + 1'b1;
+      rd_ptr_gray <= bin2gray(rd_ptr + 1'b1);
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      rd_ptr <= {AWIDTH{1'b0}};
+      rd_ptr_gray <= {AWIDTH{1'b0}};
+    end else if (rd_en_b) begin
+      rd_ptr <= rd_ptr + 1'b1;
+      rd_ptr_gray <= bin2gray(rd_ptr + 1'b1);
+    end
+  end
+
+  // Gray code synchronization
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      wr_ptr_gray_sync1 <= {AWIDTH{1'b0}};
+      wr_ptr_gray_sync2 <= {AWIDTH{1'b0}};
+      rd_ptr_gray_sync1 <= {AWIDTH{1'b0}};
+      rd_ptr_gray_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      wr_ptr_gray_sync1 <= wr_ptr_gray;
+      wr_ptr_gray_sync2 <= wr_ptr_gray_sync1;
+      rd_ptr_gray_sync1 <= rd_ptr_gray;
+      rd_ptr_gray_sync2 <= rd_ptr_gray_sync1;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      wr_ptr_gray_sync1 <= {AWIDTH{1'b0}};
+      wr_ptr_gray_sync2 <= {AWIDTH{1'b0}};
+      rd_ptr_gray_sync1 <= {AWIDTH{1'b0}};
+      rd_ptr_gray_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      wr_ptr_gray_sync1 <= wr_ptr_gray;
+      wr_ptr_gray_sync2 <= wr_ptr_gray_sync1;
+      rd_ptr_gray_sync1 <= rd_ptr_gray;
+      rd_ptr_gray_sync2 <= rd_ptr_gray_sync1;
+    end
+  end
+
+  // Full/empty
+  wire [AWIDTH-1:0] wr_ptr_bin_sync_a = gray2bin(wr_ptr_gray_sync2);
+  wire [AWIDTH-1:0] rd_ptr_bin_sync_a = gray2bin(rd_ptr_gray_sync2);
+  wire [AWIDTH-1:0] wr_ptr_bin_sync_b = gray2bin(wr_ptr_gray_sync2);
+  wire [AWIDTH-1:0] rd_ptr_bin_sync_b = gray2bin(rd_ptr_gray_sync2);
+
+  wire full_a = (wr_ptr_bin_sync_a[AWIDTH-1:1] == rd_ptr_bin_sync_a[AWIDTH-1:1]) &
+                (wr_ptr_bin_sync_a[0] != rd_ptr_bin_sync_a[0]);
+  wire empty_a = (wr_ptr_bin_sync_a == rd_ptr_bin_sync_a);
+
+  wire full_b = (wr_ptr_bin_sync_b[AWIDTH-1:1] == rd_ptr_bin_sync_b[AWIDTH-1:1]) &
+                (wr_ptr_bin_sync_b[0] != rd_ptr_bin_sync_b[0]);
+  wire empty_b = (wr_ptr_bin_sync_b == rd_ptr_bin_sync_b);
+
+  assign a_full = a_dir ? full_a : full_b;
+  assign a_empty = a_dir ? empty_b : empty_a;
+  assign b_full = a_dir ? full_b : full_a;
+  assign b_empty = a_dir ? empty_a : empty_b;
+
+  wire [AWIDTH:0] count_a = wr_ptr_bin_sync_a - rd_ptr_bin_sync_a;
+  wire [AWIDTH:0] count_b = wr_ptr_bin_sync_b - rd_ptr_bin_sync_b;
+
+  assign a_afull = a_dir ? (count_a >= AFULL_THRESH[AWIDTH:0]) : (count_b >= AFULL_THRESH[AWIDTH:0]);
+  assign a_aempty = a_dir ? (count_b <= AEMPTY_THRESH[AWIDTH:0]) : (count_a <= AEMPTY_THRESH[AWIDTH:0]);
+  assign b_afull = a_dir ? (count_b >= AFULL_THRESH[AWIDTH:0]) : (count_a >= AFULL_THRESH[AWIDTH:0]);
+  assign b_aempty = a_dir ? (count_a <= AEMPTY_THRESH[AWIDTH:0]) : (count_b <= AEMPTY_THRESH[AWIDTH:0]);
+
+  // RAM interface
+  // When a_dir=1: A writes, B reads
+  assign o_ram_a_winc = a_dir & a_winc;
+  assign o_ram_a_wdata = a_wdata;
+  assign o_ram_a_addr = wr_ptr[ASIZE-1:0];
+  assign o_ram_a_rinc = ~a_dir & a_rinc;
+  
+  assign o_ram_b_winc = ~a_dir & b_winc;
+  assign o_ram_b_wdata = b_wdata;
+  assign o_ram_b_addr = wr_ptr[ASIZE-1:0];
+  assign o_ram_b_rinc = a_dir & b_rinc;
+
+  // Read data
+  assign a_rdata = i_ram_a_rdata;
+  assign b_rdata = i_ram_b_rdata;
+
+  // Clocks
+  assign o_ram_a_clk = a_clk;
+  assign o_ram_b_clk = b_clk;
+
+endmodule
+```<|im_end|>

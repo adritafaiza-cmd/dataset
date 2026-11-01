@@ -1,0 +1,132 @@
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  a_clk_i,
+    input  a_rst_ni,
+    input  a_clear_i,
+    output a_clear_o,
+    input  a_clear_ack_i,
+    output a_isolate_o,
+    input  a_isolate_ack_i,
+    input  b_clk_i,
+    input  b_rst_ni,
+    input  b_clear_i,
+    output b_clear_o,
+    input  b_clear_ack_i,
+    output b_isolate_o,
+    input  b_isolate_ack_i
+);
+
+    // Internal state machines
+    reg [1:0] a_state_r;
+    reg [1:0] b_state_r;
+
+    localparam A_IDLE      = 2'd0;
+    localparam A_ISOLATE   = 2'd1;
+    localparam A_CLEAR     = 2'd2;
+    localparam A_RELEASE   = 2'd3;
+
+    localparam B_IDLE      = 2'd0;
+    localparam B_ISOLATE   = 2'd1;
+    localparam B_CLEAR     = 2'd2;
+    localparam B_RELEASE   = 2'd3;
+
+    // Synchronizer for a_isolate_ack_i into b domain
+    reg [SYNC_STAGES-1:0] a_isolate_ack_sync_r;
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            a_isolate_ack_sync_r <= {SYNC_STAGES{1'b0}};
+        else
+            a_isolate_ack_sync_r <= {a_isolate_ack_sync_r[SYNC_STAGES-2:0], a_isolate_ack_i};
+    end
+    wire a_isolate_ack_b = a_isolate_ack_sync_r[SYNC_STAGES-1];
+
+    // Synchronizer for a_clear_ack_i into b domain
+    reg [SYNC_STAGES-1:0] a_clear_ack_sync_r;
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            a_clear_ack_sync_r <= {SYNC_STAGES{1'b0}};
+        else
+            a_clear_ack_sync_r <= {a_clear_ack_sync_r[SYNC_STAGES-2:0], a_clear_ack_i};
+    end
+    wire a_clear_ack_b = a_clear_ack_sync_r[SYNC_STAGES-1];
+
+    // Synchronizer for b_isolate_ack_i into a domain
+    reg [SYNC_STAGES-1:0] b_isolate_ack_sync_r;
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            b_isolate_ack_sync_r <= {SYNC_STAGES{1'b0}};
+        else
+            b_isolate_ack_sync_r <= {b_isolate_ack_sync_r[SYNC_STAGES-2:0], b_isolate_ack_i};
+    end
+    wire b_isolate_ack_a = b_isolate_ack_sync_r[SYNC_STAGES-1];
+
+    // Synchronizer for b_clear_ack_i into a domain
+    reg [SYNC_STAGES-1:0] b_clear_ack_sync_r;
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            b_clear_ack_sync_r <= {SYNC_STAGES{1'b0}};
+        else
+            b_clear_ack_sync_r <= {b_clear_ack_sync_r[SYNC_STAGES-2:0], b_clear_ack_i};
+    end
+    wire b_clear_ack_a = b_clear_ack_sync_r[SYNC_STAGES-1];
+
+    // A domain state machine
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            a_state_r <= A_IDLE;
+        end else begin
+            case (a_state_r)
+                A_IDLE: begin
+                    if (a_clear_i)
+                        a_state_r <= A_ISOLATE;
+                end
+                A_ISOLATE: begin
+                    if (b_isolate_ack_a)
+                        a_state_r <= A_CLEAR;
+                end
+                A_CLEAR: begin
+                    if (b_clear_ack_a)
+                        a_state_r <= A_RELEASE;
+                end
+                A_RELEASE: begin
+                    a_state_r <= A_IDLE;
+                end
+                default: a_state_r <= A_IDLE;
+            endcase
+        end
+    end
+
+    // B domain state machine
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            b_state_r <= B_IDLE;
+        end else begin
+            case (b_state_r)
+                B_IDLE: begin
+                    if (b_clear_i)
+                        b_state_r <= B_ISOLATE;
+                end
+                B_ISOLATE: begin
+                    if (a_isolate_ack_b)
+                        b_state_r <= B_CLEAR;
+                end
+                B_CLEAR: begin
+                    if (a_clear_ack_b)
+                        b_state_r <= B_RELEASE;
+                end
+                B_RELEASE: begin
+                    b_state_r <= B_IDLE;
+                end
+                default: b_state_r <= B_IDLE;
+            endcase
+        end
+    end
+
+    // Outputs
+    assign a_isolate_o = (a_state_r == A_ISOLATE) || (a_state_r == A_CLEAR);
+    assign a_clear_o   = (a_state_r == A_CLEAR);
+    assign b_isolate_o = (b_state_r == B_ISOLATE) || (b_state_r == B_CLEAR);
+    assign b_clear_o   = (b_state_r == B_CLEAR);
+
+endmodule

@@ -1,0 +1,381 @@
+```verilog
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH;
+
+    // Source domain state
+    reg  [ADDR_WIDTH-1:0]  src_addr_r;
+    reg  [DATA_WIDTH-1:0]  src_wdata_r;
+    reg  [DATA_WIDTH/8-1:0] src_strb_r;
+    reg  [2:0]             src_prot_r;
+    reg                    src_write_r;
+    reg                    src_valid_r;
+
+    // Destination domain state
+    reg  [ADDR_WIDTH-1:0]  dst_addr_r;
+    reg  [DATA_WIDTH-1:0]  dst_wdata_r;
+    reg  [DATA_WIDTH/8-1:0] dst_strb_r;
+    reg  [2:0]             dst_prot_r;
+    reg                    dst_write_r;
+    reg                    dst_valid_r;
+    reg                    dst_penable_r;
+
+    // Response path (dst -> src)
+    reg  [DATA_WIDTH-1:0]  resp_data_r;
+    reg                    resp_err_r;
+    reg                    resp_valid_r;
+
+    // Handshake signals
+    wire src_req;
+    wire dst_ack;
+    wire dst_req;
+    wire src_ack;
+
+    // Source side: detect APB access phase start
+    // APB: setup phase (psel=1, penable=0), access phase (psel=1, penable=1)
+    // We capture the request at the start of the access phase (when penable goes high)
+    // and assert pready when the response is ready.
+
+    // We use a simple handshake:
+    // Source asserts a "request" when it wants to send a transaction.
+    // Destination acknowledges when it has accepted the transaction.
+    // Destination asserts a "response ready" when it has completed the transfer.
+    // Source acknowledges the response.
+
+    // Let's use a 2-phase handshake for each direction.
+
+    // Source -> Destination: request handshake
+    // src_valid_r is the request valid
+    // dst_ack is the destination's acknowledgment
+
+    // Destination -> Source: response handshake
+    // dst_resp_valid is the response valid
+    // src_ack is the source's acknowledgment
+
+    // For simplicity, let's use a single outstanding transaction model.
+
+    // Source state machine:
+    // IDLE: Wait for APB access phase (psel & penable)
+    // SEND: Send request to destination, wait for ack
+    // WAIT_RESP: Wait for response from destination
+    // DONE: Return pready, then go back to IDLE
+
+    // Destination state machine:
+    // IDLE: Wait for request from source
+    // SETUP: Drive setup phase (psel=1, penable=0)
+    // ACCESS: Drive access phase (psel=1, penable=1), wait for pready
+    // RESP: Send response back to source, wait for ack
+
+    // Let's implement this.
+
+    // Source domain
+    reg [1:0] src_state;
+    localparam SRC_IDLE = 2'd0;
+    localparam SRC_SEND = 2'd1;
+    localparam SRC_WAIT_RESP = 2'd2;
+
+    // Destination domain
+    reg [1:0] dst_state;
+    localparam DST_IDLE = 2'd0;
+    localparam DST_SETUP = 2'd1;
+    localparam DST_ACCESS = 2'd2;
+    localparam DST_RESP = 2'd3;
+
+    // Handshake wires
+    wire src_to_dst_valid;
+    wire dst_to_src_ack;
+    wire dst_to_src_valid;
+    wire src_to_dst_ack;
+
+    // Source to destination: request
+    assign src_to_dst_valid = src_valid_r;
+    
+    // Destination to source: ack for request
+    // dst_to_src_ack is asserted when destination has accepted the request
+    // This is a single-bit signal, so we can use a 2-flop synchronizer.
+    
+    // Destination to source: response
+    assign dst_to_src_valid = resp_valid_r;
+    
+    // Source to destination: ack for response
+    // src_to_dst_ack is asserted when source has accepted the response
+
+    // Let's use a simpler approach with explicit handshake signals.
+
+    // Request handshake (src -> dst):
+    // src_req_valid: source has a request to send
+    // dst_req_ack: destination has accepted the request
+
+    // Response handshake (dst -> src):
+    // dst_resp_valid: destination has a response to send
+    // src_resp_ack: source has accepted the response
+
+    reg src_req_valid;
+    reg dst_req_ack;
+    reg dst_resp_valid;
+    reg src_resp_ack;
+
+    // Synchronizers for single-bit signals
+    // dst_req_ack: dst domain -> src domain
+    reg [2:0] dst_req_ack_sync;
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            dst_req_ack_sync <= 3'b0;
+        else
+            dst_req_ack_sync <= {dst_req_ack_sync[1:0], dst_req_ack};
+    end
+    wire dst_req_ack_synced = dst_req_ack_sync[2];
+
+    // src_resp_ack: src domain -> dst domain
+    reg [2:0] src_resp_ack_sync;
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni)
+            src_resp_ack_sync <= 3'b0;
+        else
+            src_resp_ack_sync <= {src_resp_ack_sync[1:0], src_resp_ack};
+    end
+    wire src_resp_ack_synced = src_resp_ack_sync[2];
+
+    // Multi-bit data transfer: use FIFO or handshake with data stable
+    // Since we have one outstanding transaction, we can use a simple approach:
+    // Data is stable while valid is high. Use a 2-flop synchronizer for valid,
+    // and sample data when valid transitions.
+
+    // For the request data (src -> dst):
+    // We need to transfer: addr, wdata, strb, prot, write
+    // These are multi-bit, so we need to ensure they are stable.
+    // We'll use a handshake: src asserts valid, dst samples data, then acks.
+
+    // Let's use a different approach: use a small FIFO for data.
+    // But since LOG_DEPTH is given, let's use it.
+
+    // Actually, for a single outstanding transaction, we can use a simpler method:
+    // 1. Source latches the APB request data.
+    // 2. Source asserts a "req_valid" signal.
+    // 3. Destination synchronizes req_valid.
+    // 4. When destination sees req_valid, it samples the data (which is stable).
+    // 5. Destination asserts "req_ack".
+    // 6. Source synchronizes req_ack and deasserts req_valid.
+
+    // The data must be stable while req_valid is high. Since the source holds the data
+    // until it receives the ack, this is safe.
+
+    // Let's implement this.
+
+    // Source domain
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_state <= SRC_IDLE;
+            src_addr_r <= {ADDR_WIDTH{1'b0}};
+            src_wdata_r <= {DATA_WIDTH{1'b0}};
+            src_strb_r <= {(DATA_WIDTH/8){1'b0}};
+            src_prot_r <= 3'b0;
+            src_write_r <= 1'b0;
+            src_valid_r <= 1'b0;
+            src_req_valid <= 1'b0;
+            src_resp_ack <= 1'b0;
+            src_pready_o <= 1'b0;
+            src_prdata_o <= {DATA_WIDTH{1'b0}};
+            src_pslverr_o <= 1'b0;
+        end else begin
+            case (src_state)
+                SRC_IDLE: begin
+                    src_pready_o <= 1'b0;
+                    src_resp_ack <= 1'b0;
+                    if (src_psel_i && src_penable_i) begin
+                        // Capture the request
+                        src_addr_r <= src_paddr_i;
+                        src_wdata_r <= src_pwdata_i;
+                        src_strb_r <= src_pstrb_i;
+                        src_prot_r <= src_pprot_i;
+                        src_write_r <= src_pwrite_i;
+                        src_valid_r <= 1'b1;
+                        src_req_valid <= 1'b1;
+                        src_state <= SRC_SEND;
+                    end
+                end
+                SRC_SEND: begin
+                    src_pready_o <= 1'b0;
+                    if (dst_req_ack_synced) begin
+                        src_req_valid <= 1'b0;
+                        src_valid_r <= 1'b0;
+                        src_state <= SRC_WAIT_RESP;
+                    end
+                end
+                SRC_WAIT_RESP: begin
+                    src_pready_o <= 1'b0;
+                    if (dst_to_src_valid) begin
+                        // Response is available
+                        src_prdata_o <= resp_data_r;
+                        src_pslverr_o <= resp_err_r;
+                        src_pready_o <= 1'b1;
+                        src_resp_ack <= 1'b1;
+                        src_state <= SRC_IDLE;
+                    end
+                end
+                default: begin
+                    src_state <= SRC_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Destination domain
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_state <= DST_IDLE;
+            dst_addr_r <= {ADDR_WIDTH{1'b0}};
+            dst_wdata_r <= {DATA_WIDTH{1'b0}};
+            dst_strb_r <= {(DATA_WIDTH/8){1'b0}};
+            dst_prot_r <= 3'b0;
+            dst_write_r <= 1'b0;
+            dst_valid_r <= 1'b0;
+            dst_penable_r <= 1'b0;
+            dst_psel_o <= 1'b0;
+            dst_penable_o <= 1'b0;
+            dst_pwrite_o <= 1'b0;
+            dst_paddr_o <= {ADDR_WIDTH{1'b0}};
+            dst_pwdata_o <= {DATA_WIDTH{1'b0}};
+            dst_pstrb_o <= {(DATA_WIDTH/8){1'b0}};
+            dst_pprot_o <= 3'b0;
+            dst_req_ack <= 1'b0;
+            dst_resp_valid <= 1'b0;
+            resp_data_r <= {DATA_WIDTH{1'b0}};
+            resp_err_r <= 1'b0;
+        end else begin
+            case (dst_state)
+                DST_IDLE: begin
+                    dst_psel_o <= 1'b0;
+                    dst_penable_o <= 1'b0;
+                    dst_req_ack <= 1'b0;
+                    dst_resp_valid <= 1'b0;
+                    if (src_to_dst_valid) begin
+                        // Sample the request data
+                        dst_addr_r <= src_paddr_i;
+                        dst_wdata_r <= src_pwdata_i;
+                        dst_strb_r <= src_pstrb_i;
+                        dst_prot_r <= src_pprot_i;
+                        dst_write_r <= src_pwrite_i;
+                        dst_valid_r <= 1'b1;
+                        dst_req_ack <= 1'b1;
+                        dst_state <= DST_SETUP;
+                    end
+                end
+                DST_SETUP: begin
+                    dst_psel_o <= 1'b1;
+                    dst_penable_o <= 1'b0;
+                    dst_pwrite_o <= dst_write_r;
+                    dst_paddr_o <= dst_addr_r;
+                    dst_pwdata_o <= dst_wdata_r;
+                    dst_pstrb_o <= dst_strb_r;
+                    dst_pprot_o <= dst_prot_r;
+                    dst_req_ack <= 1'b0;
+                    dst_state <= DST_ACCESS;
+                end
+                DST_ACCESS: begin
+                    dst_psel_o <= 1'b1;
+                    dst_penable_o <= 1'b1;
+                    dst_pwrite_o <= dst_write_r;
+                    dst_paddr_o <= dst_addr_r;
+                    dst_pwdata_o <= dst_wdata_r;
+                    dst_pstrb_o <= dst_strb_r;
+                    dst_pprot_o <= dst_prot_r;
+                    if (dst_pready_i) begin
+                        // Transfer complete, capture response
+                        resp_data_r <= dst_prdata_i;
+                        resp_err_r <= dst_pslverr_i;
+                        dst_resp_valid <= 1'b1;
+                        dst_state <= DST_RESP;
+                    end
+                end
+                DST_RESP: begin
+                    dst_psel_o <= 1'b0;
+                    dst_penable_o <= 1'b0;
+                    if (src_resp_ack_synced) begin
+                        dst_resp_valid <= 1'b0;
+                        dst_state <= DST_IDLE;
+                    end
+                end
+                default: begin
+                    dst_state <= DST_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Synchronizer for src_to_dst_valid (src -> dst)
+    reg [2:0] src_to_dst_valid_sync;
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni)
+            src_to_dst_valid_sync <= 3'b0;
+        else
+            src_to_dst_valid_sync <= {src_to_dst_valid_sync[1:0], src_req_valid};
+    end
+    wire src_to_dst_valid = src_to_dst_valid_sync[2];
+
+    // Synchronizer for dst_to_src_valid (dst -> src)
+    reg [2:0] dst_to_src_valid_sync;
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            dst_to_src_valid_sync <= 3'b0;
+        else
+            dst_to_src_valid_sync <= {dst_to_src_valid_sync[1:0], dst_resp_valid};
+    end
+    wire dst_to_src_valid = dst_to_src_valid_sync[2];
+
+    // Synchronizer for response data (dst -> src)
+    // Data is stable while dst_resp_valid is high.
+    // We sample the data when dst_to_src_valid transitions from 0 to 1.
+    reg [DATA_WIDTH-1:0] resp_data_sync;
+    reg resp_err_sync;
+    reg dst_to_src_valid_prev;
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            resp_data_sync <= {DATA_WIDTH{1'b0}};
+            resp_err_sync <= 1'b0;
+            dst_to_src_valid_prev <= 1'b0;
+        end else begin
+            dst_to_src_valid_prev <= dst_to_src_valid;
+            if (dst_to_src_valid && !dst_to_src_valid_prev) begin
+                resp_data_sync <= dst_prdata_i;
+                resp_err_sync <= dst_pslverr_i;
+            end
+        end
+    end
+
+    // Assign the synchronized response data
+    assign resp_data_r = resp_data_sync;
+    assign resp_err_r = resp_err_sync;
+
+endmodule
+```<|im_end|>

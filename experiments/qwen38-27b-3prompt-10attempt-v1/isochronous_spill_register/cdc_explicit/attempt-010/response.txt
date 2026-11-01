@@ -1,0 +1,176 @@
+```verilog
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    // Source-domain registers
+    reg  [WIDTH-1:0] src_data_reg;
+    reg              src_valid_reg;
+    reg              src_ready_reg;
+
+    // Destination-domain registers
+    reg  [WIDTH-1:0] dst_data_reg;
+    reg              dst_valid_reg;
+    reg              dst_ready_reg;
+
+    // Synchronizers for valid signal (src -> dst)
+    reg              valid_sync_1;
+    reg              valid_sync_2;
+
+    // Synchronizers for ready signal (dst -> src)
+    reg              ready_sync_1;
+    reg              ready_sync_2;
+
+    // Synchronizers for reset (src -> dst)
+    reg              src_rst_sync_1;
+    reg              src_rst_sync_2;
+
+    // Synchronizers for reset (dst -> src)
+    reg              dst_rst_sync_1;
+    reg              dst_rst_sync_2;
+
+    // Synchronizers for data (src -> dst) - use 2-stage synchronizer per bit
+    // Since clocks are related (integer ratio), we can use a simpler approach:
+    // The data is stable when valid is asserted, and we synchronize the valid
+    // signal. When the synchronized valid transitions from 0 to 1, we capture
+    // the data. However, for multi-bit data with related clocks, we need to
+    // ensure data coherence.
+
+    // For related clocks with integer ratio, the data will be stable for at
+    // least one destination clock cycle when the valid is asserted. We can
+    // use a 2-stage synchronizer for the valid signal and capture the data
+    // when the synchronized valid rises.
+
+    // Actually, for a 2-deep spill buffer with related clocks, the standard
+    // approach is to use a handshake protocol. Let's implement a proper
+    // valid/ready handshake with synchronizers.
+
+    // Source domain:
+    // - src_ready_o is high when the buffer is not full (i.e., dst is ready to accept)
+    // - When src_valid_i and src_ready_o are both high, data is accepted
+    // - The data is stored in src_data_reg and src_valid_reg is set
+
+    // Destination domain:
+    // - dst_valid_o is high when there is data to send
+    // - When dst_valid_o and dst_ready_i are both high, data is sent
+    // - dst_ready_o is fed back to source domain to indicate buffer is not full
+
+    // For related clocks, we can use a simpler synchronization scheme.
+    // The key insight is that with related clocks, the data will be stable
+    // for a sufficient number of destination clock cycles.
+
+    // Let's implement a 2-stage synchronizer for the valid signal and
+    // capture the data when the synchronized valid rises.
+
+    // Source domain logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_data_reg  <= {WIDTH{1'b0}};
+            src_valid_reg <= 1'b0;
+            src_ready_reg <= 1'b0;
+        end else begin
+            // Accept data when valid and ready
+            if (src_valid_i && src_ready_o) begin
+                src_data_reg  <= src_data_i;
+                src_valid_reg <= 1'b1;
+            end else if (src_valid_reg && ready_sync_2) begin
+                // Data has been consumed by destination
+                src_valid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // Source ready: high when destination is ready to accept new data
+    // This is the synchronized version of dst_ready
+    assign src_ready_o = ready_sync_2;
+
+    // Synchronize dst_ready to source domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            ready_sync_1 <= 1'b0;
+            ready_sync_2 <= 1'b0;
+        end else begin
+            ready_sync_1 <= dst_ready_reg;
+            ready_sync_2 <= ready_sync_1;
+        end
+    end
+
+    // Synchronize src_valid to destination domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            valid_sync_1 <= 1'b0;
+            valid_sync_2 <= 1'b0;
+        end else begin
+            valid_sync_1 <= src_valid_reg;
+            valid_sync_2 <= valid_sync_1;
+        end
+    end
+
+    // Synchronize src_rst_ni to destination domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_rst_sync_1 <= 1'b0;
+            src_rst_sync_2 <= 1'b0;
+        end else begin
+            src_rst_sync_1 <= src_rst_ni;
+            src_rst_sync_2 <= src_rst_sync_1;
+        end
+    end
+
+    // Synchronize dst_rst_ni to source domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_rst_sync_1 <= 1'b0;
+            dst_rst_sync_2 <= 1'b0;
+        end else begin
+            dst_rst_sync_1 <= dst_rst_ni;
+            dst_rst_sync_2 <= dst_rst_sync_1;
+        end
+    end
+
+    // Destination domain logic
+    // dst_valid_o is high when there is valid data to send
+    // We use the synchronized valid signal and track when data has been sent
+
+    reg dst_data_sent;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_data_reg  <= {WIDTH{1'b0}};
+            dst_valid_reg <= 1'b0;
+            dst_ready_reg <= 1'b0;
+            dst_data_sent <= 1'b0;
+        end else begin
+            // When synchronized valid rises, capture data
+            if (valid_sync_2 && !valid_sync_1) begin
+                dst_data_reg  <= src_data_reg;
+                dst_valid_reg <= 1'b1;
+                dst_data_sent <= 1'b0;
+            end else if (dst_valid_reg && dst_ready_i) begin
+                // Data has been consumed
+                dst_valid_reg <= 1'b0;
+                dst_data_sent <= 1'b1;
+            end
+        end
+    end
+
+    assign dst_valid_o = dst_valid_reg;
+    assign dst_data_o  = dst_data_reg;
+
+    // dst_ready_reg indicates that the destination is ready to accept new data
+    // This is high when there is no valid data pending
+    assign dst_ready_reg = !dst_valid_reg;
+
+endmodule
+```<|im_end|>

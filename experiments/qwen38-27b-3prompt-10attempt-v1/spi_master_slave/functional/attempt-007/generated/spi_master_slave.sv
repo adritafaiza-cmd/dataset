@@ -1,0 +1,221 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // State machine states
+    localparam S_IDLE    = 2'd0;
+    localparam S_WAIT_WR = 2'd1;
+    localparam S_SHIFT   = 2'd2;
+    localparam S_DONE    = 2'd3;
+
+    reg [1:0] state;
+    reg [1:0] state_next;
+
+    // Data registers
+    reg [N-1:0] tx_data;
+    reg [N-1:0] rx_data;
+    reg [N-1:0] shift_reg;
+
+    // Bit counter
+    reg [$clog2(N)-1:0] bit_cnt;
+
+    // SPI clock divider counter
+    reg [$clog2(SPI_2X_CLK_DIV)-1:0] clk_div_cnt;
+    reg clk_div_done;
+
+    // SCK phase control
+    reg sck_phase;
+
+    // MOSI output
+    assign spi_mosi_o = shift_reg[N-1];
+
+    // Synchronous reset for pclk domain
+    reg rst_pclk;
+    reg rst_pclk_d;
+    always @(posedge pclk_i) begin
+        rst_pclk <= rst_i;
+        rst_pclk_d <= rst_pclk;
+    end
+
+    // Synchronous reset for sclk domain
+    reg rst_sclk;
+    reg rst_sclk_d;
+    always @(posedge sclk_i) begin
+        rst_sclk <= rst_i;
+        rst_sclk_d <= rst_sclk;
+    end
+
+    // Use the sclk domain for SPI timing
+    wire rst_active = rst_sclk;
+
+    // State machine - sclk domain
+    always @(posedge sclk_i) begin
+        if (rst_active) begin
+            state <= S_IDLE;
+        end else begin
+            state <= state_next;
+        end
+    end
+
+    always @(*) begin
+        state_next = state;
+        case (state)
+            S_IDLE: begin
+                if (wren_i) begin
+                    state_next = S_WAIT_WR;
+                end
+            end
+            S_WAIT_WR: begin
+                if (wren_i) begin
+                    state_next = S_SHIFT;
+                end
+            end
+            S_SHIFT: begin
+                if (bit_cnt == N-1 && clk_div_done) begin
+                    state_next = S_DONE;
+                end
+            end
+            S_DONE: begin
+                state_next = S_IDLE;
+            end
+            default: state_next = S_IDLE;
+        endcase
+    end
+
+    // Clock divider - sclk domain
+    always @(posedge sclk_i) begin
+        if (rst_active) begin
+            clk_div_cnt <= 0;
+            clk_div_done <= 1'b0;
+        end else if (state == S_SHIFT) begin
+            if (clk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                clk_div_cnt <= 0;
+                clk_div_done <= 1'b1;
+            end else begin
+                clk_div_cnt <= clk_div_cnt + 1'b1;
+                clk_div_done <= 1'b0;
+            end
+        end else begin
+            clk_div_cnt <= 0;
+            clk_div_done <= 1'b0;
+        end
+    end
+
+    // SCK generation - sclk domain
+    always @(posedge sclk_i) begin
+        if (rst_active) begin
+            spi_sck_o <= 1'b0;
+            sck_phase <= 1'b0;
+        end else if (state == S_SHIFT) begin
+            if (clk_div_done) begin
+                spi_sck_o <= ~sck_phase;
+                sck_phase <= ~sck_phase;
+            end
+        end else begin
+            spi_sck_o <= 1'b0;
+            sck_phase <= 1'b0;
+        end
+    end
+
+    // SSel control - sclk domain
+    always @(posedge sclk_i) begin
+        if (rst_active) begin
+            spi_ssel_o <= 1'b1; // Inactive high
+        end else if (state == S_SHIFT) begin
+            spi_ssel_o <= 1'b0; // Active low
+        end else begin
+            spi_ssel_o <= 1'b1;
+        end
+    end
+
+    // Bit counter and shift register - sclk domain
+    always @(posedge sclk_i) begin
+        if (rst_active) begin
+            bit_cnt <= 0;
+            shift_reg <= 0;
+            tx_data <= 0;
+            rx_data <= 0;
+        end else begin
+            case (state)
+                S_WAIT_WR: begin
+                    if (wren_i) begin
+                        tx_data <= di_i;
+                        shift_reg <= di_i;
+                        bit_cnt <= 0;
+                    end
+                end
+                S_SHIFT: begin
+                    if (clk_div_done) begin
+                        // On rising edge of SCK (sck_phase transitions 0->1), capture MISO
+                        // On falling edge of SCK (sck_phase transitions 1->0), shift out
+                        if (sck_phase == 1'b0) begin
+                            // Rising edge of SCK: capture MISO
+                            rx_data[N-1] <= spi_miso_i;
+                            rx_data[N-2:0] <= rx_data[N-1:1];
+                            // Shift out next bit
+                            shift_reg <= {shift_reg[N-2:0], 1'b0};
+                            if (bit_cnt == N-1) begin
+                                bit_cnt <= 0;
+                            end else begin
+                                bit_cnt <= bit_cnt + 1'b1;
+                            end
+                        end
+                    end
+                end
+                default: begin
+                    bit_cnt <= 0;
+                    shift_reg <= 0;
+                end
+            endcase
+        end
+    end
+
+    // pclk domain outputs
+    // wr_ack_o: acknowledge write when wren_i is high and we're in WAIT_WR or IDLE
+    always @(posedge pclk_i) begin
+        if (rst_pclk) begin
+            wr_ack_o <= 1'b0;
+            di_req_o <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o <= 0;
+        end else begin
+            // wr_ack_o: pulse when accepting a write
+            if (wren_i && (state == S_IDLE || state == S_WAIT_WR)) begin
+                wr_ack_o <= 1'b1;
+            end else begin
+                wr_ack_o <= 1'b0;
+            end
+
+            // di_req_o: request next word when idle
+            if (state == S_IDLE) begin
+                di_req_o <= 1'b1;
+            end else begin
+                di_req_o <= 1'b0;
+            end
+
+            // do_valid_o and do_o: valid when shift is complete
+            if (state == S_DONE) begin
+                do_valid_o <= 1'b1;
+                do_o <= rx_data;
+            end else begin
+                do_valid_o <= 1'b0;
+            end
+        end
+    end
+
+endmodule

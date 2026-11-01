@@ -1,0 +1,90 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source side: hold data and valid until destination acknowledges
+  reg [WIDTH-1:0] src_hold_data;
+  reg             src_hold_valid;
+
+  // Destination side: hold data and valid until source acknowledges
+  reg [WIDTH-1:0] dst_hold_data;
+  reg             dst_hold_valid;
+
+  // Cross-domain signals
+  // src_to_dst_valid: source has data waiting
+  // dst_to_src_ready: destination is ready to accept (i.e., not holding)
+
+  // Synchronizers for src_to_dst_valid
+  reg [1:0] src_to_dst_valid_sync;
+  wire      src_to_dst_valid = src_to_dst_valid_sync[1];
+
+  // Synchronizers for dst_to_src_ready
+  reg [1:0] dst_to_src_ready_sync;
+  wire      dst_to_src_ready = dst_to_src_ready_sync[1];
+
+  // Source clock domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_hold_data  <= {WIDTH{1'b0}};
+      src_hold_valid <= 1'b0;
+    end else begin
+      if (src_valid_i && src_ready_o) begin
+        src_hold_data  <= src_data_i;
+        src_hold_valid <= 1'b1;
+      end else if (dst_to_src_ready && src_hold_valid) begin
+        src_hold_valid <= 1'b0;
+      end
+    end
+  end
+
+  assign src_ready_o = dst_to_src_ready || !src_hold_valid;
+
+  // Destination clock domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_hold_data  <= {WIDTH{1'b0}};
+      dst_hold_valid <= 1'b0;
+    end else begin
+      if (src_to_dst_valid && !dst_hold_valid) begin
+        dst_hold_data  <= src_hold_data;
+        dst_hold_valid <= 1'b1;
+      end else if (dst_ready_i && dst_hold_valid) begin
+        dst_hold_valid <= 1'b0;
+      end
+    end
+  end
+
+  assign dst_data_o  = dst_hold_data;
+  assign dst_valid_o = dst_hold_valid;
+
+  // Synchronizer for src_to_dst_valid (source -> destination)
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_to_dst_valid_sync <= 2'b00;
+    end else begin
+      src_to_dst_valid_sync <= {src_to_dst_valid_sync[0], src_hold_valid};
+    end
+  end
+
+  // Synchronizer for dst_to_src_ready (destination -> source)
+  // dst_to_src_ready is high when destination is NOT holding (i.e., ready to accept)
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      dst_to_src_ready_sync <= 2'b00;
+    end else begin
+      dst_to_src_ready_sync <= {dst_to_src_ready_sync[0], !dst_hold_valid};
+    end
+  end
+
+endmodule

@@ -1,0 +1,174 @@
+```verilog
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam AWIDTH = LGFIFO;
+	localparam CWIDTH = LGFIFO + 1;
+
+	// Write side
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+	reg [AWIDTH-1:0] wr_ptr;
+	reg [AWIDTH-1:0] rd_ptr_gray_w;
+	reg [CWIDTH-1:0] wr_ptr_gray;
+	reg [CWIDTH-1:0] rd_ptr_gray_w_sync;
+	reg [CWIDTH-1:0] rd_ptr_gray_w_sync2;
+	reg [CWIDTH-1:0] rd_ptr_gray_w_sync3;
+	reg [CWIDTH-1:0] rd_ptr_gray_w_sync4;
+
+	// Read side
+	reg [AWIDTH-1:0] rd_ptr;
+	reg [AWIDTH-1:0] wr_ptr_gray_r;
+	reg [CWIDTH-1:0] rd_ptr_gray;
+	reg [CWIDTH-1:0] wr_ptr_gray_r_sync;
+	reg [CWIDTH-1:0] wr_ptr_gray_r_sync2;
+	reg [CWIDTH-1:0] wr_ptr_gray_r_sync3;
+	reg [CWIDTH-1:0] wr_ptr_gray_r_sync4;
+
+	// Read data pipeline
+	reg [WIDTH-1:0] rd_data_reg;
+	reg [WIDTH-1:0] rd_data_reg2;
+	reg rd_valid;
+	reg rd_valid2;
+
+	// Gray code conversion
+	function [CWIDTH-1:0] bin2gray;
+		input [CWIDTH-1:0] bin;
+		begin
+			bin2gray = bin ^ (bin >> 1);
+		end
+	endfunction
+
+	function [CWIDTH-1:0] gray2bin;
+		input [CWIDTH-1:0] gray;
+		reg [CWIDTH-1:0] bin;
+		begin
+			bin[CWIDTH-1] = gray[CWIDTH-1];
+			for (i = CWIDTH-2; i >= 0; i = i - 1)
+				bin[i] = gray[i] ^ bin[i+1];
+			gray2bin = bin;
+		end
+	endfunction
+
+	// Write clock domain
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_ptr <= {AWIDTH{1'b0}};
+			wr_ptr_gray <= {CWIDTH{1'b0}};
+		end else begin
+			if (i_wr && !o_wr_full) begin
+				mem[wr_ptr] <= i_wr_data;
+				wr_ptr <= wr_ptr + 1'b1;
+				wr_ptr_gray <= bin2gray(wr_ptr + 1'b1);
+			end
+		end
+	end
+
+	// Synchronize read pointer gray code to write domain
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			rd_ptr_gray_w_sync <= {CWIDTH{1'b0}};
+			rd_ptr_gray_w_sync2 <= {CWIDTH{1'b0}};
+			rd_ptr_gray_w_sync3 <= {CWIDTH{1'b0}};
+			rd_ptr_gray_w_sync4 <= {CWIDTH{1'b0}};
+		end else begin
+			rd_ptr_gray_w_sync <= rd_ptr_gray;
+			rd_ptr_gray_w_sync2 <= rd_ptr_gray_w_sync;
+			rd_ptr_gray_w_sync3 <= rd_ptr_gray_w_sync2;
+			rd_ptr_gray_w_sync4 <= rd_ptr_gray_w_sync3;
+		end
+	end
+
+	// Full flag in write domain
+	always @(*) begin
+		if (!i_wr_reset_n)
+			o_wr_full = 1'b0;
+		else begin
+			// Full when write pointer has lapped read pointer by DEPTH
+			// wr_ptr_gray and rd_ptr_gray_w_sync4 are both gray codes
+			// Full condition: MSB differs, and remaining bits are complement
+			o_wr_full = (wr_ptr_gray[CWIDTH-1] != rd_ptr_gray_w_sync4[CWIDTH-1]) &&
+						(wr_ptr_gray[CWIDTH-2:0] == ~rd_ptr_gray_w_sync4[CWIDTH-2:0]);
+		end
+	end
+
+	// Read clock domain
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_ptr <= {AWIDTH{1'b0}};
+			rd_ptr_gray <= {CWIDTH{1'b0}};
+		end else begin
+			if (i_rd && !o_rd_empty) begin
+				rd_ptr <= rd_ptr + 1'b1;
+				rd_ptr_gray <= bin2gray(rd_ptr + 1'b1);
+			end
+		end
+	end
+
+	// Synchronize write pointer gray code to read domain
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			wr_ptr_gray_r_sync <= {CWIDTH{1'b0}};
+			wr_ptr_gray_r_sync2 <= {CWIDTH{1'b0}};
+			wr_ptr_gray_r_sync3 <= {CWIDTH{1'b0}};
+			wr_ptr_gray_r_sync4 <= {CWIDTH{1'b0}};
+		end else begin
+			wr_ptr_gray_r_sync <= wr_ptr_gray;
+			wr_ptr_gray_r_sync2 <= wr_ptr_gray_r_sync;
+			wr_ptr_gray_r_sync3 <= wr_ptr_gray_r_sync2;
+			wr_ptr_gray_r_sync4 <= wr_ptr_gray_r_sync3;
+		end
+	end
+
+	// Empty flag in read domain
+	always @(*) begin
+		if (!i_rd_reset_n)
+			o_rd_empty = 1'b1;
+		else
+			o_rd_empty = (rd_ptr_gray == wr_ptr_gray_r_sync4);
+	end
+
+	// Read data path
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_data_reg <= {WIDTH{1'b0}};
+			rd_data_reg2 <= {WIDTH{1'b0}};
+			rd_valid <= 1'b0;
+			rd_valid2 <= 1'b0;
+		end else begin
+			if (i_rd && !o_rd_empty) begin
+				rd_data_reg <= mem[rd_ptr];
+				rd_valid <= 1'b1;
+			end else begin
+				rd_valid <= 1'b0;
+			end
+
+			if (OPT_REGISTER_READS) begin
+				rd_data_reg2 <= rd_data_reg;
+				rd_valid2 <= rd_valid;
+			end
+		end
+	end
+
+	// Output data
+	always @(*) begin
+		if (OPT_REGISTER_READS)
+			o_rd_data = rd_data_reg2;
+		else
+			o_rd_data = rd_data_reg;
+	end
+
+endmodule
+```<|im_end|>

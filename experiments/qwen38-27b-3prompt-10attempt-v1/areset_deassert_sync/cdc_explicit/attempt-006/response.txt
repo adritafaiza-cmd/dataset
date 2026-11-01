@@ -1,0 +1,68 @@
+```verilog
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    localparam integer DEPTH = (CHAINS < 2) ? 2 : CHAINS;
+
+    reg [DEPTH-1:0] sync_reg;
+    reg             rst_active;
+
+    // Synchronize the reset signal
+    always @(posedge clk or posedge async_rst_i) begin
+        if (async_rst_i)
+            sync_reg <= {DEPTH{1'b1}};
+        else
+            sync_reg <= {sync_reg[DEPTH-2:0], 1'b1};
+    end
+
+    // Track whether reset is active (asserted)
+    // For active-high reset: reset is active when async_rst_i is high
+    // For active-low reset: reset is active when async_rst_i is low
+    wire rst_asserted = (RST_POL) ? async_rst_i : ~async_rst_i;
+
+    // The synchronized release signal: all bits are 1 means reset has been deasserted for DEPTH cycles
+    wire sync_released = &sync_reg;
+
+    // sync_rst_o is active (reset asserted) if:
+    // 1. The async reset is currently asserted (immediate assertion)
+    // 2. OR the synchronized release has not yet completed (still in release pipeline)
+    //
+    // For active-high reset (RST_POL=1):
+    //   sync_rst_o = 1 when reset is active
+    //   sync_rst_o = rst_asserted | ~sync_released
+    //
+    // For active-low reset (RST_POL=0):
+    //   sync_rst_o = 0 when reset is active (active-low means 0 is active)
+    //   sync_rst_o = ~rst_asserted & sync_released  ... wait, let me think again.
+    //
+    // Actually, let's define it more carefully:
+    // sync_rst_o should be in the "reset active" state when:
+    //   - async_rst_i is asserting reset (immediate)
+    //   - OR the deassertion has not yet been synchronized
+    //
+    // For RST_POL=1 (active-high): reset active = 1
+    //   sync_rst_o = rst_asserted | ~sync_released
+    //
+    // For RST_POL=0 (active-low): reset active = 0
+    //   sync_rst_o = ~rst_asserted & sync_released  ... no
+    //   When reset is active (async_rst_i=0 for active-low), sync_rst_o should be 0 (active)
+    //   When reset is released (async_rst_i=1 for active-low), sync_rst_o should go to 1 (inactive) after sync
+    //   So: sync_rst_o = rst_asserted ? 1'b0 : sync_released
+    //   Which is: sync_rst_o = ~rst_asserted & sync_released | rst_asserted & 1'b0
+    //   = ~rst_asserted & sync_released
+    //
+    // Let me unify:
+    // For RST_POL=1: sync_rst_o = rst_asserted | ~sync_released
+    // For RST_POL=0: sync_rst_o = ~rst_asserted & sync_released
+
+    assign sync_rst_o = (RST_POL) ? (rst_asserted | ~sync_released)
+                                  : (~rst_asserted & sync_released);
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,74 @@
+```verilog
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    localparam DEPTH = (CHAINS > 0) ? CHAINS : 1;
+
+    reg [DEPTH-1:0] sync_reg;
+
+    // Active reset value: 1 if active-high, 0 if active-low
+    localparam ACTIVE_VAL  = RST_POL;
+    localparam INACTIVE_VAL = ~RST_POL;
+
+    // Synchronize the release of the async reset into the clk domain.
+    // On assertion, the output should follow async_rst_i immediately (async assert).
+    // On deassertion, the output should be released synchronously to clk.
+
+    // We use a shift register to synchronize the deassertion.
+    // The idea: 
+    //   - If async_rst_i is active, sync_rst_o should be active (asserted).
+    //   - If async_rst_i is inactive, we need to wait for the synchronized signal to become inactive before deasserting.
+    //
+    // A common approach:
+    //   - Use a chain of flip-flops to synchronize async_rst_i.
+    //   - The output is active if either the async input is active OR the synchronized chain hasn't yet cleared.
+    //
+    // More precisely:
+    //   - sync_reg[0] <= async_rst_i (first stage)
+    //   - sync_reg[i] <= sync_reg[i-1] for i > 0
+    //   - The synchronized reset is active if async_rst_i is active OR any bit in the chain is still active.
+    //   - Actually, we want: assert immediately when async_rst_i asserts, and deassert only when the entire chain has cleared.
+    //
+    // Let's think about it differently:
+    //   - We want sync_rst_o to be active (asserted) when:
+    //     1. async_rst_i is currently active, OR
+    //     2. async_rst_i was recently active and the synchronization chain hasn't fully cleared yet.
+    //
+    // The chain should track the "active" state. When async_rst_i goes inactive, the chain will shift in inactive values,
+    // and after DEPTH cycles, all bits will be inactive.
+    //
+    // So: sync_rst_o = async_rst_i | sync_reg[DEPTH-1] (if we use the last stage as the "fully synchronized" indicator)
+    // But wait, we need to be careful with polarity.
+    //
+    // Let's define:
+    //   - rst_active = (async_rst_i == ACTIVE_VAL)
+    //   - We synchronize rst_active into the chain.
+    //   - sync_rst_o should be ACTIVE_VAL if (rst_active | sync_reg[DEPTH-1]) else INACTIVE_VAL.
+    //
+    // Actually, let's simplify by working with the active sense:
+    //   - Let active_in = (async_rst_i == ACTIVE_VAL)
+    //   - Synchronize active_in through the chain.
+    //   - The output is active if active_in OR the last stage of the chain is active.
+    //   - Then convert back to the correct polarity.
+
+    wire active_in = (async_rst_i == ACTIVE_VAL);
+
+    integer i;
+    always @(posedge clk) begin
+        sync_reg[0] <= active_in;
+        for (i = 1; i < DEPTH; i = i + 1)
+            sync_reg[i] <= sync_reg[i-1];
+    end
+
+    wire active_out = active_in | sync_reg[DEPTH-1];
+
+    assign sync_rst_o = active_out ? ACTIVE_VAL : INACTIVE_VAL;
+
+endmodule
+```<|im_end|>

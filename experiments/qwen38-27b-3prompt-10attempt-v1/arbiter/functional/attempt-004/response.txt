@@ -1,0 +1,299 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam NUM_BITS = $clog2(PORTS);
+
+    reg [PORTS-1:0] grant_reg;
+    reg [NUM_BITS-1:0] grant_encoded_reg;
+    reg grant_valid_reg;
+
+    // For round-robin, we need to track the last granted port
+    reg [NUM_BITS-1:0] last_grant;
+
+    // Function to find the first set bit (LSB priority)
+    function [PORTS-1:0] find_first_set;
+        input [PORTS-1:0] mask;
+        integer i;
+        begin
+            find_first_set = {PORTS{1'b0}};
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (mask[i] && find_first_set == {PORTS{1'b0}}) begin
+                    find_first_set[i] = 1'b1;
+                end
+            end
+        end
+    endfunction
+
+    // Function to find the last set bit (MSB priority)
+    function [PORTS-1:0] find_last_set;
+        input [PORTS-1:0] mask;
+        integer i;
+        begin
+            find_last_set = {PORTS{1'b0}};
+            for (i = PORTS-1; i >= 0; i = i - 1) begin
+                if (mask[i] && find_last_set == {PORTS{1'b0}}) begin
+                    find_last_set[i] = 1'b1;
+                end
+            end
+        endfunction
+    endfunction
+
+    // Function to rotate a vector left by n positions
+    function [PORTS-1:0] rotate_left;
+        input [PORTS-1:0] vec;
+        input [NUM_BITS-1:0] shift;
+        integer i;
+        begin
+            rotate_left = {PORTS{1'b0}};
+            for (i = 0; i < PORTS; i = i + 1) begin
+                rotate_left[i] = vec[(i - shift) % PORTS];
+            end
+        end
+    endfunction
+
+    // Function to rotate a vector right by n positions
+    function [PORTS-1:0] rotate_right;
+        input [PORTS-1:0] vec;
+        input [NUM_BITS-1:0] shift;
+        integer i;
+        begin
+            rotate_right = {PORTS{1'b0}};
+            for (i = 0; i < PORTS; i = i + 1) begin
+                rotate_right[i] = vec[(i + shift) % PORTS];
+            end
+        end
+    endfunction
+
+    // Function to convert one-hot to binary
+    function [NUM_BITS-1:0] onehot_to_binary;
+        input [PORTS-1:0] onehot;
+        integer i;
+        begin
+            onehot_to_binary = {NUM_BITS{1'b0}};
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (onehot[i]) begin
+                    onehot_to_binary = i[NUM_BITS-1:0];
+                end
+            end
+        end
+    endfunction
+
+    // Function to convert binary to one-hot
+    function [PORTS-1:0] binary_to_onehot;
+        input [NUM_BITS-1:0] bin;
+        integer i;
+        begin
+            binary_to_onehot = {PORTS{1'b0}};
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (i[NUM_BITS-1:0] == bin) begin
+                    binary_to_onehot[i] = 1'b1;
+                end
+            end
+        end
+    endfunction
+
+    wire [PORTS-1:0] arbiter_grant;
+    wire arbiter_valid;
+    wire [NUM_BITS-1:0] arbiter_encoded;
+
+    // Compute the grant based on arbitration type
+    // For fixed priority:
+    //   If ARB_LSB_HIGH_PRIORITY, LSB wins (find_first_set)
+    //   Otherwise, MSB wins (find_last_set)
+    // For round-robin:
+    //   Rotate request so that the port after last_grant has highest priority
+    //   Then apply fixed priority logic
+
+    wire [PORTS-1:0] rotated_request;
+    wire [PORTS-1:0] rotated_grant;
+    wire [PORTS-1:0] fixed_grant;
+
+    // For round-robin, we rotate the request vector so that the port
+    // immediately after last_grant is at position 0 (highest priority for LSB)
+    // or at the highest position (for MSB priority)
+    
+    // Let's think about this more carefully.
+    // In round-robin, we want to give priority to the next port after the last granted one.
+    // If we use LSB priority, we want the port after last_grant to be the LSB.
+    // If we use MSB priority, we want the port after last_grant to be the MSB.
+
+    // For LSB priority round-robin:
+    // Rotate request left by (last_grant + 1) so that port (last_grant+1) is at position 0
+    // Then find first set bit, then rotate back
+
+    // For MSB priority round-robin:
+    // Rotate request right by (PORTS - 1 - last_grant - 1) = (PORTS - last_grant - 2)
+    // Hmm, let me think again.
+
+    // Actually, let's use a simpler approach.
+    // For round-robin with LSB priority:
+    //   We want to prioritize ports in order: (last_grant+1), (last_grant+2), ..., (last_grant-1)
+    //   So we rotate the request left by (last_grant + 1) mod PORTS
+    //   Then the LSB of the rotated request corresponds to port (last_grant+1)
+    //   Find first set bit in rotated request
+    //   Rotate the result right by (last_grant + 1) mod PORTS to get back to original indexing
+
+    // For round-robin with MSB priority:
+    //   We want to prioritize ports in order: (last_grant+1), (last_grant+2), ..., (last_grant-1)
+    //   But with MSB priority, the highest bit wins.
+    //   So we need to arrange it so that (last_grant+1) is at the MSB position.
+    //   Rotate request right by (PORTS - 1 - (last_grant + 1)) = (PORTS - last_grant - 2)
+    //   Hmm, this is getting complicated. Let me use a different approach.
+
+    // Alternative: For round-robin, create a priority order and use a priority encoder.
+    // But since we're using one-hot grants, let's stick with the rotation approach.
+
+    // Let's define:
+    // For LSB priority:
+    //   rotated_request = rotate_left(request, last_grant + 1)
+    //   rotated_grant = find_first_set(rotated_request)
+    //   grant = rotate_right(rotated_grant, last_grant + 1)
+
+    // For MSB priority:
+    //   We want (last_grant+1) to be at the highest position.
+    //   If we rotate request right by (PORTS - 1 - (last_grant + 1)) = (PORTS - last_grant - 2)
+    //   Then port (last_grant+1) will be at position PORTS-1 (MSB)
+    //   rotated_request = rotate_right(request, PORTS - last_grant - 2)
+    //   rotated_grant = find_last_set(rotated_request)
+    //   grant = rotate_left(rotated_grant, PORTS - last_grant - 2)
+
+    // But we need to handle the case where last_grant + 1 >= PORTS (wrap around)
+    // The rotation functions handle this with modulo.
+
+    // Let's compute the shift amounts
+    wire [NUM_BITS-1:0] lsb_shift = (last_grant + 1) % PORTS;
+    wire [NUM_BITS-1:0] msb_shift = (PORTS - 1 - (last_grant + 1) + PORTS) % PORTS;
+
+    // For LSB priority round-robin
+    wire [PORTS-1:0] rr_lsb_rotated_req = rotate_left(request, lsb_shift);
+    wire [PORTS-1:0] rr_lsb_rotated_grant = find_first_set(rr_lsb_rotated_req);
+    wire [PORTS-1:0] rr_lsb_grant = rotate_right(rr_lsb_rotated_grant, lsb_shift);
+
+    // For MSB priority round-robin
+    wire [PORTS-1:0] rr_msb_rotated_req = rotate_right(request, msb_shift);
+    wire [PORTS-1:0] rr_msb_rotated_grant = find_last_set(rr_msb_rotated_req);
+    wire [PORTS-1:0] rr_msb_grant = rotate_left(rr_msb_rotated_grant, msb_shift);
+
+    // For fixed priority
+    wire [PORTS-1:0] fixed_lsb_grant = find_first_set(request);
+    wire [PORTS-1:0] fixed_msb_grant = find_last_set(request);
+
+    // Select the appropriate grant
+    wire [PORTS-1:0] computed_grant;
+    assign computed_grant = ARB_TYPE_ROUND_ROBIN ?
+        (ARB_LSB_HIGH_PRIORITY ? rr_lsb_grant : rr_msb_grant) :
+        (ARB_LSB_HIGH_PRIORITY ? fixed_lsb_grant : fixed_msb_grant);
+
+    assign arbiter_grant = computed_grant;
+    assign arbiter_valid = (computed_grant != {PORTS{1'b0}});
+    assign arbiter_encoded = onehot_to_binary(computed_grant);
+
+    // Blocking logic
+    // When ARB_BLOCK is set:
+    //   If ARB_BLOCK_ACK is nonzero, hold grant until acknowledge
+    //   If ARB_BLOCK_ACK is zero, hold grant until request drops
+
+    reg [PORTS-1:0] blocked_grant;
+    reg blocked_valid;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            grant_reg <= {PORTS{1'b0}};
+            grant_encoded_reg <= {NUM_BITS{1'b0}};
+            grant_valid_reg <= 1'b0;
+            last_grant <= {NUM_BITS{1'b0}};
+            blocked_grant <= {PORTS{1'b0}};
+            blocked_valid <= 1'b0;
+        end else begin
+            if (ARB_BLOCK) begin
+                if (blocked_valid) begin
+                    // Currently blocking
+                    if (ARB_BLOCK_ACK) begin
+                        // Hold until acknowledge
+                        if (blocked_grant & acknowledge) begin
+                            // Acknowledge received, release block
+                            blocked_valid <= 1'b0;
+                            // Update last_grant for round-robin
+                            if (ARB_TYPE_ROUND_ROBIN) begin
+                                last_grant <= onehot_to_binary(blocked_grant);
+                            end
+                            // Grant the new arbiter result
+                            grant_reg <= arbiter_grant;
+                            grant_encoded_reg <= arbiter_encoded;
+                            grant_valid_reg <= arbiter_valid;
+                        end else begin
+                            // Continue blocking
+                            grant_reg <= blocked_grant;
+                            grant_encoded_reg <= onehot_to_binary(blocked_grant);
+                            grant_valid_reg <= 1'b1;
+                        end
+                    end else begin
+                        // Hold until request drops
+                        if (blocked_grant & request) begin
+                            // Request still active, continue blocking
+                            grant_reg <= blocked_grant;
+                            grant_encoded_reg <= onehot_to_binary(blocked_grant);
+                            grant_valid_reg <= 1'b1;
+                        end else begin
+                            // Request dropped, release block
+                            blocked_valid <= 1'b0;
+                            // Update last_grant for round-robin
+                            if (ARB_TYPE_ROUND_ROBIN) begin
+                                last_grant <= onehot_to_binary(blocked_grant);
+                            end
+                            // Grant the new arbiter result
+                            grant_reg <= arbiter_grant;
+                            grant_encoded_reg <= arbiter_encoded;
+                            grant_valid_reg <= arbiter_valid;
+                        end
+                    end
+                end else begin
+                    // Not currently blocking
+                    if (arbiter_valid) begin
+                        // Start blocking
+                        blocked_grant <= arbiter_grant;
+                        blocked_valid <= 1'b1;
+                        grant_reg <= arbiter_grant;
+                        grant_encoded_reg <= arbiter_encoded;
+                        grant_valid_reg <= 1'b1;
+                    end else begin
+                        grant_reg <= {PORTS{1'b0}};
+                        grant_encoded_reg <= {NUM_BITS{1'b0}};
+                        grant_valid_reg <= 1'b0;
+                    end
+                end
+            end else begin
+                // No blocking
+                grant_reg <= arbiter_grant;
+                grant_encoded_reg <= arbiter_encoded;
+                grant_valid_reg <= arbiter_valid;
+                // Update last_grant for round-robin
+                if (ARB_TYPE_ROUND_ROBIN && arbiter_valid) begin
+                    last_grant <= arbiter_encoded;
+                end
+            end
+        end
+    end
+
+    assign grant = grant_reg;
+    assign grant_valid = grant_valid_reg;
+    assign grant_encoded = grant_encoded_reg;
+
+endmodule
+```<|im_end|>

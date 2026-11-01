@@ -1,0 +1,202 @@
+```verilog
+module apbslave #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH,
+	localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+) (
+	input	wire			PCLK, PRESETn,
+	input	wire			PSEL,
+	input	wire			PENABLE,
+	output	reg			PREADY,
+	input	wire	[AW-1:0]	PADDR,
+	input	wire			PWRITE,
+	input	wire	[DW-1:0]	PWDATA,
+	input	wire	[DW/8-1:0]	PWSTRB,
+	input	wire	[2:0]		PPROT,
+	output	reg	[DW-1:0]	PRDATA,
+	output	wire			PSLVERR
+);
+
+	// Internal state
+	reg [DW-1:0] mem [0:(1<<(AW-APBLSB))-1];
+
+	// PSLVERR is always 0 for this simple slave
+	assign PSLVERR = 1'b0;
+
+	// State machine
+	// IDLE: PSEL=0 or (PSEL=1 and PENABLE=0)
+	// SETUP: PSEL=1 and PENABLE=0
+	// ACCESS: PSEL=1 and PENABLE=1
+
+	// We can implement this with a simple state register or just use the signals directly.
+	// Since PREADY is always 1 (no wait states), the slave completes in one access phase.
+	// We need to capture the address and data during the setup phase and perform the
+	// read/write during the access phase.
+
+	reg [AW-1:0] addr_reg;
+	reg [DW-1:0] data_reg;
+	reg write_reg;
+	reg [DW/8-1:0] strb_reg;
+
+	// Detect setup phase: PSEL=1, PENABLE=0
+	wire setup_phase = PSEL & ~PENABLE;
+	// Detect access phase: PSEL=1, PENABLE=1
+	wire access_phase = PSEL & PENABLE;
+
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			PREADY <= 1'b1;
+			PRDATA <= {DW{1'b0}};
+			addr_reg <= {AW{1'b0}};
+			data_reg <= {DW{1'b0}};
+			write_reg <= 1'b0;
+			strb_reg <= {(DW/8){1'b0}};
+		end else begin
+			// PREADY is always 1
+			PREADY <= 1'b1;
+
+			// Capture signals during setup phase
+			if (setup_phase) begin
+				addr_reg <= PADDR;
+				data_reg <= PWDATA;
+				write_reg <= PWRITE;
+				strb_reg <= PWSTRB;
+			end
+
+			// Perform read/write during access phase
+			if (access_phase) begin
+				if (write_reg) begin
+					// Byte-strobed write
+					// Calculate the memory address (word address)
+					// PADDR[AW-1:APBLSB] is the word address
+					// PADDR[APBLSB-1:0] is the byte offset within the word
+					// For a simple slave, we assume aligned accesses or handle byte enables
+					// The memory is organized as words of DW bits
+					// Address for memory: PADDR[AW-1:APBLSB]
+					
+					// We need to write to the appropriate bytes based on PWSTRB
+					// Let's create a temporary variable for the write
+					// Since we can't easily do partial writes to a memory array in a single always block
+					// without multiple assignments, we'll use a case or generate
+					
+					// For simplicity, let's assume the memory is word-addressable and we write
+					// the entire word, but only the bytes enabled by PWSTRB.
+					// However, in Verilog, we can't do partial writes to a memory array directly.
+					// We need to read-modify-write or use a different approach.
+					
+					// Let's use a read-modify-write approach:
+					// 1. Read the current value from memory
+					// 2. Modify the bytes based on PWSTRB
+					// 3. Write back the modified value
+					
+					// But this requires two memory accesses in one cycle, which is not possible
+					// in a simple synchronous design without additional logic.
+					
+					// Alternative: Use a separate always block for the memory write
+					// or use a different memory organization.
+					
+					// For this implementation, let's assume that the memory is organized
+					// such that we can write individual bytes. We'll use a byte-addressable memory.
+					
+					// Actually, let's simplify: we'll use a word-addressable memory and
+					// handle byte enables by reading the current word, modifying the bytes,
+					// and writing back. This requires a read in the same cycle as the write,
+					// which is not possible in a single always block.
+					
+					// Let's use a different approach: we'll have a separate always block
+					// for the memory write that uses the captured signals.
+					
+					// For now, let's just store the write data and address, and handle
+					// the actual memory write in a separate always block.
+				end else begin
+					// Read
+					// PRDATA should be driven during the access phase
+					// We'll read from memory in a separate always block
+				end
+			end
+		end
+	end
+
+	// Memory write logic
+	// We need to handle byte-strobed writes
+	// Let's use a byte-addressable memory for simplicity
+	// Memory size: 2^AW bytes
+	// But the interface is word-based, so let's use word-addressable memory
+	// and handle byte enables by reading-modify-write
+
+	// Actually, let's use a simpler approach:
+	// We'll have a word-addressable memory, and for byte-strobed writes,
+	// we'll read the current word, modify the bytes, and write back.
+	// This requires a read in the same cycle, which we can do by using
+	// a separate always block for the read and write.
+
+	// Let's restructure:
+	// 1. In the main always block, capture the address and data during setup
+	// 2. In a separate always block, perform the memory read/write during access
+
+	// Memory read
+	reg [DW-1:0] mem_read_data;
+	always @(*) begin
+		// Read from memory based on the captured address
+		// The address is word-addressable: PADDR[AW-1:APBLSB]
+		mem_read_data = mem[addr_reg[AW-1:APBLSB]];
+	end
+
+	// Memory write
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			// No reset for memory
+		end else if (access_phase && write_reg) begin
+			// Perform byte-strobed write
+			// Read the current value, modify the bytes, and write back
+			// We need to do this in a way that handles byte enables
+			// Let's create a temporary variable for the new value
+			reg [DW-1:0] new_val;
+			new_val = mem[addr_reg[AW-1:APBLSB]];
+			
+			// Apply byte enables
+			// PWSTRB[0] corresponds to the least significant byte
+			// PWSTRB[1] corresponds to the next byte, etc.
+			// We need to mask the bytes based on PWSTRB
+			// For each byte, if the corresponding PWSTRB bit is 1, use PWDATA
+			// otherwise, keep the old value
+			
+			// Let's do this byte by byte
+			// Byte 0: bits [7:0]
+			if (strb_reg[0]) begin
+				new_val[7:0] = data_reg[7:0];
+			end
+			// Byte 1: bits [15:8]
+			if (strb_reg[1]) begin
+				new_val[15:8] = data_reg[15:8];
+			end
+			// Byte 2: bits [23:16]
+			if (strb_reg[2]) begin
+				new_val[23:16] = data_reg[23:16];
+			end
+			// Byte 3: bits [31:24]
+			if (strb_reg[3]) begin
+				new_val[31:24] = data_reg[31:24];
+			end
+			// For larger data widths, we would need more bytes
+			// But for DW=32, this is sufficient
+			
+			// Write the new value to memory
+			mem[addr_reg[AW-1:APBLSB]] <= new_val;
+		end
+	end
+
+	// Drive PRDATA during access phase for reads
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			PRDATA <= {DW{1'b0}};
+		end else if (access_phase && !write_reg) begin
+			// Read: drive the data from memory
+			PRDATA <= mem_read_data;
+		end
+	end
+
+endmodule
+```<|im_end|>

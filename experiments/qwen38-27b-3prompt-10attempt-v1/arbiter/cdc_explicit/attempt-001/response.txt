@@ -1,0 +1,465 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam ENC_WIDTH = $clog2(PORTS);
+
+    // Internal signals
+    wire [PORTS-1:0] active_request;
+    wire [PORTS-1:0] arbiter_grant;
+    wire             arbiter_valid;
+    wire [ENC_WIDTH-1:0] arbiter_encoded;
+
+    // For round-robin, we need to track the last granted port
+    reg [ENC_WIDTH-1:0] last_grant;
+    reg                 last_grant_valid;
+
+    // For blocking, we need to hold the grant
+    reg [PORTS-1:0] held_grant;
+    reg              held_valid;
+
+    // Determine the effective request based on blocking mode
+    // If blocking is enabled and we have a held grant, use the held grant
+    // Otherwise, use the current request
+    wire use_held = (ARB_BLOCK == 1) && held_valid;
+
+    assign active_request = use_held ? held_grant : request;
+
+    // Arbiter logic
+    // We need to implement priority encoding
+    // If ARB_LSB_HIGH_PRIORITY is set, LSB has highest priority
+    // Otherwise, MSB has highest priority (standard priority encoder)
+
+    // For round-robin, we rotate the priority based on last_grant
+    // For fixed priority, we use a simple priority encoder
+
+    // Let's create a priority encoder that can handle both LSB and MSB priority
+    // and optionally rotate for round-robin
+
+    // First, let's create a function to find the highest priority request
+    // We'll use a combinational approach
+
+    // For fixed priority with LSB high:
+    //   grant[i] = request[i] & ~(request[i-1] | request[i-2] | ... | request[0])
+    // For fixed priority with MSB high:
+    //   grant[i] = request[i] & ~(request[i+1] | request[i+2] | ... | request[PORTS-1])
+
+    // For round-robin, we rotate the request vector so that the port after last_grant
+    // has the highest priority
+
+    // Let's implement a generic priority encoder
+    // We'll create a rotated request for round-robin
+
+    wire [PORTS-1:0] rotated_request;
+    wire [ENC_WIDTH-1:0] rotation_amount;
+
+    // For round-robin, rotate so that the port after last_grant is at position 0
+    // This means we shift left by (last_grant + 1) mod PORTS
+    // But we need to be careful with the rotation
+
+    // Actually, let's think about this differently.
+    // In round-robin, the priority order is:
+    //   (last_grant + 1) % PORTS, (last_grant + 2) % PORTS, ..., last_grant
+    // So we want to give highest priority to the port after last_grant.
+
+    // We can create a rotated version of the request where the bit at position
+    // (last_grant + 1) % PORTS is moved to position 0.
+
+    // Let's compute the rotation
+    generate
+        if (ARB_TYPE_ROUND_ROBIN == 1) begin : gen_round_robin
+            // Compute rotation amount
+            assign rotation_amount = last_grant_valid ? (last_grant + 1) % PORTS : 0;
+
+            // Create rotated request
+            // rotated_request[i] = request[(i + rotation_amount) % PORTS]
+            genvar i;
+            for (i = 0; i < PORTS; i = i + 1) begin : gen_rotate
+                assign rotated_request[i] = request[(i + rotation_amount) % PORTS];
+            end
+        end
+        else begin : gen_fixed
+            assign rotated_request = request;
+        end
+    endgenerate
+
+    // Now we need a priority encoder on rotated_request
+    // The priority encoder should select the highest priority bit
+    // If ARB_LSB_HIGH_PRIORITY is set, LSB (bit 0) has highest priority
+    // Otherwise, MSB (bit PORTS-1) has highest priority
+
+    // Let's create a priority encoder that outputs the index of the selected bit
+    // and a one-hot grant
+
+    // For LSB high priority:
+    //   We scan from bit 0 to bit PORTS-1, first set bit wins
+    // For MSB high priority:
+    //   We scan from bit PORTS-1 to bit 0, first set bit wins
+
+    // Let's implement both cases
+
+    wire [PORTS-1:0] priority_grant_rotated;
+    wire             priority_valid_rotated;
+
+    generate
+        if (ARB_LSB_HIGH_PRIORITY == 1) begin : gen_lsb_high
+            // LSB has highest priority
+            // priority_grant_rotated[i] = rotated_request[i] & ~(rotated_request[i-1] | ... | rotated_request[0])
+            genvar i;
+            for (i = 0; i < PORTS; i = i + 1) begin : gen_lsb
+                if (i == 0) begin : gen_lsb_0
+                    assign priority_grant_rotated[0] = rotated_request[0];
+                end
+                else begin : gen_lsb_n
+                    wire [i-1:0] lower_bits;
+                    assign lower_bits = rotated_request[i-1:0];
+                    assign priority_grant_rotated[i] = rotated_request[i] & ~(|lower_bits);
+                end
+            end
+        end
+        else begin : gen_msb_high
+            // MSB has highest priority
+            // priority_grant_rotated[i] = rotated_request[i] & ~(rotated_request[i+1] | ... | rotated_request[PORTS-1])
+            genvar i;
+            for (i = 0; i < PORTS; i = i + 1) begin : gen_msb
+                if (i == PORTS-1) begin : gen_msb_top
+                    assign priority_grant_rotated[PORTS-1] = rotated_request[PORTS-1];
+                end
+                else begin : gen_msb_n
+                    wire [PORTS-1:i+1] higher_bits;
+                    assign higher_bits = rotated_request[PORTS-1:i+1];
+                    assign priority_grant_rotated[i] = rotated_request[i] & ~(|higher_bits);
+                end
+            end
+        end
+    endgenerate
+
+    assign priority_valid_rotated = |priority_grant_rotated;
+
+    // Now we need to convert the rotated one-hot grant back to the original domain
+    // and also to an encoded value
+
+    // For the one-hot grant in the original domain:
+    // If we selected bit i in the rotated domain, the original port is (i + rotation_amount) % PORTS
+    // But wait, we rotated by shifting left, so:
+    // rotated_request[i] = request[(i + rotation_amount) % PORTS]
+    // So if priority_grant_rotated[i] is set, the original port is (i + rotation_amount) % PORTS
+
+    // Let's create the original one-hot grant
+    wire [PORTS-1:0] original_grant;
+    genvar j;
+    for (j = 0; j < PORTS; j = j + 1) begin : gen_original
+        assign original_grant[j] = priority_grant_rotated[(j - rotation_amount + PORTS) % PORTS];
+    end
+
+    // Wait, this is getting complicated. Let me reconsider.
+
+    // Actually, let's simplify. Instead of rotating and then de-rotating,
+    // let's just implement the priority encoder directly with the correct priority order.
+
+    // For fixed priority:
+    //   If LSB high: priority order is 0, 1, 2, ..., PORTS-1
+    //   If MSB high: priority order is PORTS-1, PORTS-2, ..., 0
+
+    // For round-robin:
+    //   Priority order starts from (last_grant + 1) % PORTS and wraps around
+
+    // Let's create a priority order array and use it to determine the grant
+
+    // Actually, let's just implement it more directly.
+
+    // Let me restart with a cleaner approach.
+
+    // We'll create a priority encoder that takes the request and the priority order
+    // and outputs the grant.
+
+    // For simplicity, let's handle the cases separately.
+
+    // Case 1: Fixed priority, LSB high
+    // Case 2: Fixed priority, MSB high
+    // Case 3: Round-robin, LSB high (relative to rotation)
+    // Case 4: Round-robin, MSB high (relative to rotation)
+
+    // Let's just implement a generic priority encoder that works on the rotated request
+    // and then map back.
+
+    // Actually, let's just compute the grant directly.
+
+    // For each port i, determine if it should be granted:
+    //   - It must have a request
+    //   - No higher priority port has a request
+
+    // The priority order depends on the mode.
+
+    // Let's define a function to get the priority of each port.
+    // Lower priority value = higher priority.
+
+    // For fixed LSB high: priority(i) = i
+    // For fixed MSB high: priority(i) = PORTS-1-i
+    // For round-robin: priority(i) = (i - (last_grant+1) + PORTS) % PORTS
+    //   Then apply LSB/MSB high to this rotated priority
+
+    // This is getting complex. Let's just implement it with generate blocks.
+
+    // Let's define the effective priority for each port
+    wire [ENC_WIDTH:0] port_priority [0:PORTS-1];
+
+    generate
+        genvar p;
+        for (p = 0; p < PORTS; p = p + 1) begin : gen_priority
+            if (ARB_TYPE_ROUND_ROBIN == 1) begin : gen_rr
+                if (ARB_LSB_HIGH_PRIORITY == 1) begin : gen_rr_lsb
+                    // Priority is (p - (last_grant+1) + PORTS) % PORTS
+                    // But we need to handle the case when last_grant_valid is 0
+                    assign port_priority[p] = last_grant_valid ? 
+                        ((p - (last_grant + 1) + PORTS) % PORTS) : p;
+                end
+                else begin : gen_rr_msb
+                    // Priority is PORTS-1 - ((p - (last_grant+1) + PORTS) % PORTS)
+                    assign port_priority[p] = last_grant_valid ? 
+                        (PORTS-1 - ((p - (last_grant + 1) + PORTS) % PORTS)) : (PORTS-1-p);
+                end
+            end
+            else begin : gen_fixed
+                if (ARB_LSB_HIGH_PRIORITY == 1) begin : gen_fixed_lsb
+                    assign port_priority[p] = p;
+                end
+                else begin : gen_fixed_msb
+                    assign port_priority[p] = PORTS-1-p;
+                end
+            end
+        end
+    endgenerate
+
+    // Now for each port, check if it has a request and no higher priority port has a request
+    wire [PORTS-1:0] grant_internal;
+    genvar g;
+    for (g = 0; g < PORTS; g = g + 1) begin : gen_grant
+        wire higher_priority_request;
+        assign higher_priority_request = |({PORTS{1'b0}} & 
+            (request & ~grant_internal[g] & 
+             (port_priority[g] == 0 ? {PORTS{1'b0}} : 
+              (port_priority[g] == 1 ? {PORTS-1{1'b0}, 1'b0} : 
+               (port_priority[g] == 2 ? {PORTS-2{1'b0}, 2'b00} : 
+                (port_priority[g] == 3 ? {PORTS-3{1'b0}, 3'b000} : 
+                 (port_priority[g] == 4 ? {PORTS-4{1'b0}, 4'b0000} : 
+                  (port_priority[g] == 5 ? {PORTS-5{1'b0}, 5'b00000} : 
+                   (port_priority[g] == 6 ? {PORTS-6{1'b0}, 6'b000000} : 
+                    (port_priority[g] == 7 ? {PORTS-7{1'b0}, 7'b0000000} : 
+                     (port_priority[g] == 8 ? {PORTS-8{1'b0}, 8'b00000000} : 
+                      (port_priority[g] == 9 ? {PORTS-9{1'b0}, 9'b000000000} : 
+                       (port_priority[g] == 10 ? {PORTS-10{1'b0}, 10'b0000000000} : 
+                        (port_priority[g] == 11 ? {PORTS-11{1'b0}, 11'b00000000000} : 
+                         (port_priority[g] == 12 ? {PORTS-12{1'b0}, 12'b000000000000} : 
+                          (port_priority[g] == 13 ? {PORTS-13{1'b0}, 13'b0000000000000} : 
+                           (port_priority[g] == 14 ? {PORTS-14{1'b0}, 14'b00000000000000} : 
+                            (port_priority[g] == 15 ? {PORTS-15{1'b0}, 15'b000000000000000} : 
+                             {PORTS{1'b0}})))))))))))))))))));
+        // This is getting too complex. Let me use a different approach.
+    end
+
+    // Let me use a simpler approach: create a priority encoder using a tree structure
+    // or just use a simple loop-based approach.
+
+    // Actually, let's just implement a standard priority encoder and handle the rotation
+    // by permuting the input.
+
+    // Let's create a permuted request where the priority order is 0, 1, 2, ..., PORTS-1
+    // Then use a standard LSB-high priority encoder on the permuted request.
+
+    // The permutation depends on the mode.
+
+    wire [PORTS-1:0] permuted_request;
+    genvar perm;
+    for (perm = 0; perm < PORTS; perm = perm + 1) begin : gen_permute
+        // We need to find which original port has priority 'perm'
+        // This is the inverse of the priority mapping
+        // For fixed LSB high: priority(p) = p, so permuted_request[perm] = request[perm]
+        // For fixed MSB high: priority(p) = PORTS-1-p, so permuted_request[perm] = request[PORTS-1-perm]
+        // For round-robin LSB high: priority(p) = (p - (last_grant+1) + PORTS) % PORTS
+        //   So permuted_request[perm] = request[(perm + (last_grant+1)) % PORTS]
+        // For round-robin MSB high: priority(p) = PORTS-1 - ((p - (last_grant+1) + PORTS) % PORTS)
+        //   So permuted_request[perm] = request[(PORTS-1-perm + (last_grant+1)) % PORTS]
+
+        if (ARB_TYPE_ROUND_ROBIN == 1) begin : gen_rr_perm
+            if (ARB_LSB_HIGH_PRIORITY == 1) begin : gen_rr_lsb_perm
+                assign permuted_request[perm] = last_grant_valid ? 
+                    request[(perm + (last_grant + 1)) % PORTS] : request[perm];
+            end
+            else begin : gen_rr_msb_perm
+                assign permuted_request[perm] = last_grant_valid ? 
+                    request[(PORTS-1-perm + (last_grant + 1)) % PORTS] : request[PORTS-1-perm];
+            end
+        end
+        else begin : gen_fixed_perm
+            if (ARB_LSB_HIGH_PRIORITY == 1) begin : gen_fixed_lsb_perm
+                assign permuted_request[perm] = request[perm];
+            end
+            else begin : gen_fixed_msb_perm
+                assign permuted_request[perm] = request[PORTS-1-perm];
+            end
+        end
+    end
+
+    // Now use a standard LSB-high priority encoder on permuted_request
+    wire [PORTS-1:0] permuted_grant;
+    genvar pg;
+    for (pg = 0; pg < PORTS; pg = pg + 1) begin : gen_perm_grant
+        if (pg == 0) begin : gen_pg0
+            assign permuted_grant[0] = permuted_request[0];
+        end
+        else begin : gen_pgn
+            wire [pg-1:0] lower_perm;
+            assign lower_perm = permuted_request[pg-1:0];
+            assign permuted_grant[pg] = permuted_request[pg] & ~(|lower_perm);
+        end
+    end
+
+    assign arbiter_valid = |permuted_grant;
+
+    // Now map back from permuted grant to original grant
+    wire [PORTS-1:0] mapped_grant;
+    genvar mg;
+    for (mg = 0; mg < PORTS; mg = mg + 1) begin : gen_map_back
+        // If permuted_grant[perm] is set, the original port is:
+        // For fixed LSB high: mg
+        // For fixed MSB high: PORTS-1-mg
+        // For round-robin LSB high: (mg + (last_grant+1)) % PORTS
+        // For round-robin MSB high: (PORTS-1-mg + (last_grant+1)) % PORTS
+
+        if (ARB_TYPE_ROUND_ROBIN == 1) begin : gen_rr_map
+            if (ARB_LSB_HIGH_PRIORITY == 1) begin : gen_rr_lsb_map
+                assign mapped_grant[(mg + (last_grant + 1)) % PORTS] = 
+                    last_grant_valid ? permuted_grant[mg] : permuted_grant[mg];
+            end
+            else begin : gen_rr_msb_map
+                assign mapped_grant[(PORTS-1-mg + (last_grant + 1)) % PORTS] = 
+                    last_grant_valid ? permuted_grant[mg] : permuted_grant[mg];
+            end
+        end
+        else begin : gen_fixed_map
+            if (ARB_LSB_HIGH_PRIORITY == 1) begin : gen_fixed_lsb_map
+                assign mapped_grant[mg] = permuted_grant[mg];
+            end
+            else begin : gen_fixed_msb_map
+                assign mapped_grant[PORTS-1-mg] = permuted_grant[mg];
+            end
+        end
+    end
+
+    assign arbiter_grant = mapped_grant;
+
+    // Encode the grant
+    // We need to convert the one-hot grant to a binary encoded value
+    wire [ENC_WIDTH-1:0] encoded_internal;
+    genvar enc;
+    for (enc = 0; enc < ENC_WIDTH; enc = enc + 1) begin : gen_encode
+        wire [PORTS-1:0] mask;
+        // Create a mask for bit 'enc'
+        // mask[i] = (i >> enc) & 1
+        genvar em;
+        for (em = 0; em < PORTS; em = em + 1) begin : gen_mask
+            assign mask[em] = (em >> enc) & 1;
+        end
+        assign encoded_internal[enc] = |(arbiter_grant & mask);
+    end
+
+    assign arbiter_encoded = encoded_internal;
+
+    // Now handle the blocking logic
+    // If ARB_BLOCK is set:
+    //   - If ARB_BLOCK_ACK is nonzero, hold the grant until acknowledge
+    //   - If ARB_BLOCK_ACK is zero, hold the grant until request drops
+
+    // Let's implement the blocking logic
+    wire block_active = (ARB_BLOCK == 1);
+
+    // Determine if we should hold the grant
+    wire should_hold;
+    if (ARB_BLOCK_ACK != 0) begin : gen_block_ack
+        // Hold until acknowledge
+        assign should_hold = block_active && held_valid && !(held_grant & acknowledge);
+    end
+    else begin : gen_block_noack
+        // Hold until request drops
+        assign should_hold = block_active && held_valid && (held_grant & request);
+    end
+
+    // Update the held grant
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            held_valid <= 1'b0;
+            held_grant <= {PORTS{1'b0}};
+        end
+        else begin
+            if (should_hold) begin
+                // Keep holding
+                held_valid <= 1'b1;
+                held_grant <= held_grant;
+            end
+            else if (arbiter_valid && !held_valid) begin
+                // Start holding a new grant
+                held_valid <= 1'b1;
+                held_grant <= arbiter_grant;
+            end
+            else begin
+                // Release the held grant
+                held_valid <= 1'b0;
+                held_grant <= {PORTS{1'b0}};
+            end
+        end
+    end
+
+    // Update the last grant for round-robin
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            last_grant <= {ENC_WIDTH{1'b0}};
+            last_grant_valid <= 1'b0;
+        end
+        else begin
+            if (arbiter_valid) begin
+                last_grant <= arbiter_encoded;
+                last_grant_valid <= 1'b1;
+            end
+        end
+    end
+
+    // Final outputs
+    // If blocking is active and we have a held grant, use the held grant
+    // Otherwise, use the arbiter grant
+    assign grant = use_held ? held_grant : arbiter_grant;
+    assign grant_valid = use_held ? held_valid : arbiter_valid;
+    assign grant_encoded = use_held ? arbiter_encoded : arbiter_encoded;
+
+    // Wait, the encoded value for the held grant should be the encoded value of the held grant
+    // Let's compute the encoded value of the held grant
+    wire [ENC_WIDTH-1:0] held_encoded;
+    genvar he;
+    for (he = 0; he < ENC_WIDTH; he = he + 1) begin : gen_held_encode
+        wire [PORTS-1:0] hmask;
+        genvar hm;
+        for (hm = 0; hm < PORTS; hm = hm + 1) begin : gen_hmask
+            assign hmask[hm] = (hm >> he) & 1;
+        end
+        assign held_encoded[he] = |(held_grant & hmask);
+    end
+
+    assign grant_encoded = use_held ? held_encoded : arbiter_encoded;
+
+endmodule
+```<|im_end|>

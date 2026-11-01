@@ -1,0 +1,92 @@
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Extract APB signals from req_t
+  // Assuming req_t has fields: psel, penable, pwrite, paddr, pwdata
+  // We need to define the structure or use direct field access
+  // Since req_t is a parameter type, we assume it's a struct with these fields
+
+  // For simplicity, let's assume req_t is a struct with:
+  // typedef struct packed {
+  //   logic       psel;
+  //   logic       penable;
+  //   logic       pwrite;
+  //   apb_addr_t  paddr;
+  //   logic [ApbDataWidth-1:0] pwdata;
+  // } req_t;
+
+  // And resp_t is a struct with:
+  // typedef struct packed {
+  //   logic       pready;
+  //   logic       pslverr;
+  //   logic [ApbDataWidth-1:0] prdata;
+  // } resp_t;
+
+  // Since we can't define types inside the module with parameter types easily,
+  // we'll use direct field access assuming the struct layout.
+
+  // APB signals
+  wire psel    = req_i.psel;
+  wire penable = req_i.penable;
+  wire pwrite  = req_i.pwrite;
+  wire [ApbAddrWidth-1:0] paddr = req_i.paddr;
+  wire [ApbDataWidth-1:0] pwdata = req_i.pwdata;
+
+  // Register file
+  reg_data_t [NoApbRegs-1:0] reg_q;
+
+  // Address decoding
+  wire [ApbAddrWidth-1:0] offset_addr = paddr - base_addr_i;
+  wire [ApbAddrWidth-1:0] reg_index = offset_addr / AddrOffset;
+
+  // Valid address check
+  wire addr_valid = (reg_index < NoApbRegs);
+
+  // Write enable
+  wire write_en = psel & penable & pwrite & addr_valid;
+
+  // Read data
+  wire [RegDataWidth-1:0] read_data = reg_q[reg_index];
+
+  // APB response
+  assign resp_o.pready = 1'b1;
+  assign resp_o.pslverr = 1'b0;
+  assign resp_o.prdata = read_data[ApbDataWidth-1:0];
+
+  // Register update logic
+  always @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        reg_q[i] <= reg_init_i[i];
+      end
+    end else begin
+      if (write_en) begin
+        if (!ReadOnly[reg_index]) begin
+          reg_q[reg_index] <= pwdata[RegDataWidth-1:0];
+        end
+      end
+    end
+  end
+
+  // Output registers
+  assign reg_q_o = reg_q;
+
+endmodule

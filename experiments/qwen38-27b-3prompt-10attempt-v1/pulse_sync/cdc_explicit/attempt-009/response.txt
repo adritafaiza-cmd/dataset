@@ -1,0 +1,121 @@
+```verilog
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // Domain A: Toggle a bit on each accepted pulse
+    reg a_toggle;
+    wire a_toggle_next;
+
+    // Domain B: Synchronize the toggle bit
+    reg [STAGES-1:0] b_sync;
+    reg b_toggle_prev;
+
+    // Generate pulse in domain B from toggle change
+    wire b_toggle_change;
+    assign b_toggle_change = b_sync[STAGES-1] ^ b_toggle_prev;
+
+    assign pulseB_o = b_toggle_change;
+    assign busy_o   = b_sync[STAGES-1];
+
+    // Domain A logic
+    // Accept pulse only when not busy (i.e., when the toggle has been acknowledged)
+    // We use the synchronized toggle value fed back? No, that would be a data path.
+    // Instead, we use a handshake: Domain A sets a "pending" flag, Domain B clears it.
+    // But the requirement says "one-pulse-in, one-pulse-out" with busy_o.
+    // A simpler approach: Use a toggle bit. Domain A toggles on pulse.
+    // Domain B detects the toggle change and outputs a pulse.
+    // busy_o is high while the toggle is "in flight" - but how does Domain A know?
+    // Actually, for a simple pulse synchronizer with toggle, busy_o can be derived
+    // from the synchronized toggle in Domain B, but that's in Domain B.
+    // The busy_o output is in Domain B (since it's an output port, and pulseB_o is in Domain B).
+    // Wait, busy_o is an output. It should be in Domain B since it relates to the pulse being in flight.
+    // But the requirement says "ignore additional pulseA_i while busy". This means Domain A needs to know busy state.
+    // So we need a feedback path from Domain B to Domain A for the busy signal.
+    // This is a 2-phase handshake.
+
+    // Let's use a proper 2-phase handshake:
+    // Domain A: req (request)
+    // Domain B: ack (acknowledge)
+    // Pulse in A: set req
+    // Pulse in B: detect req change, output pulse, set ack
+    // Domain A: detect ack change, clear req
+    // busy_o: req is high (pulse in flight)
+
+    // Actually, let's reconsider. The simplest safe approach for "one pulse in, one pulse out"
+    // with busy is a toggle-based synchronizer where busy is derived from the toggle state.
+    // But busy needs to be visible to Domain A to gate input pulses.
+
+    // Let's use a 2-phase handshake with proper CDC:
+    // - req: Domain A -> Domain B (synchronized)
+    // - ack: Domain B -> Domain A (synchronized)
+
+    reg req;
+    reg ack;
+
+    // Synchronize req to Domain B
+    reg [STAGES-1:0] req_sync;
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b)
+            req_sync <= {STAGES{1'b0}};
+        else
+            req_sync <= {req_sync[STAGES-2:0], req};
+    end
+
+    // Synchronize ack to Domain A
+    reg [STAGES-1:0] ack_sync;
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a)
+            ack_sync <= {STAGES{1'b0}};
+        else
+            ack_sync <= {ack_sync[STAGES-2:0], ack};
+    end
+
+    // Domain B: Detect req change, generate pulse, toggle ack
+    reg req_prev;
+    wire req_change;
+    assign req_change = req_sync[STAGES-1] ^ req_prev;
+
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            req_prev <= 1'b0;
+            ack <= 1'b0;
+        end else begin
+            req_prev <= req_sync[STAGES-1];
+            if (req_change)
+                ack <= ~ack;
+        end
+    end
+
+    assign pulseB_o = req_change;
+
+    // Domain A: Accept pulse, set req, wait for ack change, clear req
+    reg ack_prev;
+    wire ack_change;
+    assign ack_change = ack_sync[STAGES-1] ^ ack_prev;
+
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            req <= 1'b0;
+            ack_prev <= 1'b0;
+        end else begin
+            ack_prev <= ack_sync[STAGES-1];
+            if (ack_change)
+                req <= 1'b0;
+            else if (pulseA_i && !req)
+                req <= 1'b1;
+        end
+    end
+
+    assign busy_o = req;
+
+endmodule
+```<|im_end|>

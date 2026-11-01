@@ -1,0 +1,40 @@
+module rstgen (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic test_mode_i,
+    output logic rst_no,
+    output logic init_no
+);
+
+    // Synchronization chain for reset release
+    logic sync_rst_n [2:0];
+
+    always_ff @(posedge clk_i) begin
+        sync_rst_n[0] <= rst_ni;
+        sync_rst_n[1] <= sync_rst_n[0];
+        sync_rst_n[2] <= sync_rst_n[1];
+    end
+
+    // Synchronized reset output
+    assign rst_no = sync_rst_n[2];
+
+    // Initialization qualifier: high for a few cycles after reset release
+    // Use a small counter to generate init_no
+    logic [1:0] init_cnt;
+    logic init_cnt_done;
+
+    always_ff @(posedge clk_i) begin
+        if (!rst_no) begin
+            init_cnt <= 2'd0;
+        end else if (init_cnt < 2'd3) begin
+            init_cnt <= init_cnt + 2'd1;
+        end
+    end
+
+    assign init_cnt_done = (init_cnt == 2'd3);
+    assign init_no = init_cnt_done;
+
+    // In test mode, bypass synchronization
+    assign rst_no = test_mode_i ? rst_ni : sync_rst_n[2];
+
+endmodule

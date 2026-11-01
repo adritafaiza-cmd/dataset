@@ -1,0 +1,251 @@
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH + 1;
+
+    // Source domain signals
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg [PTR_W-1:0] src_wr_ptr;
+    reg [PTR_W-1:0] src_rd_ptr_gray;
+    reg [PTR_W-1:0] src_rd_ptr_gray_sync [0:SYNC_STAGES-1];
+    reg [PTR_W-1:0] src_rd_ptr_gray_sync_next;
+    reg src_clear_pending;
+    reg src_clear_sync [0:SYNC_STAGES-1];
+    reg src_clear_sync_next;
+    reg dst_clear_sync [0:SYNC_STAGES-1];
+    reg dst_clear_sync_next;
+
+    // Destination domain signals
+    reg [PTR_W-1:0] dst_rd_ptr;
+    reg [PTR_W-1:0] dst_wr_ptr_gray;
+    reg [PTR_W-1:0] dst_wr_ptr_gray_sync [0:SYNC_STAGES-1];
+    reg [PTR_W-1:0] dst_wr_ptr_gray_sync_next;
+    reg dst_clear_pending;
+    reg dst_clear_sync [0:SYNC_STAGES-1];
+    reg dst_clear_sync_next;
+    reg src_clear_sync [0:SYNC_STAGES-1];
+    reg src_clear_sync_next;
+    reg [WIDTH-1:0] dst_data_reg;
+    reg dst_valid_reg;
+
+    wire [PTR_W-1:0] src_rd_ptr_gray_synced = src_rd_ptr_gray_sync[SYNC_STAGES-1];
+    wire [PTR_W-1:0] dst_wr_ptr_gray_synced = dst_wr_ptr_gray_sync[SYNC_STAGES-1];
+    wire src_clear_synced = src_clear_sync[SYNC_STAGES-1];
+    wire dst_clear_synced = dst_clear_sync[SYNC_STAGES-1];
+
+    // Gray code conversion
+    function [PTR_W-1:0] bin2gray;
+        input [PTR_W-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    // Source domain: write pointer and memory
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_wr_ptr <= {PTR_W{1'b0}};
+            src_clear_pending <= 1'b0;
+        end else begin
+            if (src_clear_i) begin
+                src_clear_pending <= 1'b1;
+            end else if (src_clear_pending) begin
+                if (dst_clear_synced) begin
+                    src_clear_pending <= 1'b0;
+                    src_wr_ptr <= {PTR_W{1'b0}};
+                end
+            end else begin
+                if (src_valid_i && src_ready_o) begin
+                    mem[src_wr_ptr[LOG_DEPTH-1:0]] <= src_data_i;
+                    src_wr_ptr <= src_wr_ptr + 1'b1;
+                end
+            end
+        end
+    end
+
+    // Source domain: read pointer gray code (from destination)
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_rd_ptr_gray <= {PTR_W{1'b0}};
+        end else begin
+            src_rd_ptr_gray <= src_rd_ptr_gray_sync_next;
+        end
+    end
+
+    // Source domain: synchronizer for destination read pointer
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_rd_ptr_gray_sync[0] <= {PTR_W{1'b0}};
+            src_rd_ptr_gray_sync[1] <= {PTR_W{1'b0}};
+            if (SYNC_STAGES > 2) begin
+                src_rd_ptr_gray_sync[2] <= {PTR_W{1'b0}};
+            end
+        end else begin
+            src_rd_ptr_gray_sync[0] <= src_rd_ptr_gray;
+            src_rd_ptr_gray_sync[1] <= src_rd_ptr_gray_sync[0];
+            if (SYNC_STAGES > 2) begin
+                src_rd_ptr_gray_sync[2] <= src_rd_ptr_gray_sync[1];
+            end
+        end
+    end
+
+    // Source domain: synchronizer for destination clear
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_clear_sync[0] <= 1'b0;
+            dst_clear_sync[1] <= 1'b0;
+            if (SYNC_STAGES > 2) begin
+                dst_clear_sync[2] <= 1'b0;
+            end
+        end else begin
+            dst_clear_sync[0] <= dst_clear_sync_next;
+            dst_clear_sync[1] <= dst_clear_sync[0];
+            if (SYNC_STAGES > 2) begin
+                dst_clear_sync[2] <= dst_clear_sync[1];
+            end
+        end
+    end
+
+    // Source domain: synchronizer for source clear (to destination)
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_clear_sync[0] <= 1'b0;
+            src_clear_sync[1] <= 1'b0;
+            if (SYNC_STAGES > 2) begin
+                src_clear_sync[2] <= 1'b0;
+            end
+        end else begin
+            src_clear_sync[0] <= src_clear_sync_next;
+            src_clear_sync[1] <= src_clear_sync[0];
+            if (SYNC_STAGES > 2) begin
+                src_clear_sync[2] <= src_clear_sync[1];
+            end
+        end
+    end
+
+    // Source ready: FIFO not full and not in clear pending
+    assign src_ready_o = !src_clear_pending && (src_wr_ptr != src_rd_ptr_gray_synced);
+
+    // Source clear pending output
+    assign src_clear_pending_o = src_clear_pending;
+
+    // Destination domain: read pointer and output
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_rd_ptr <= {PTR_W{1'b0}};
+            dst_clear_pending <= 1'b0;
+            dst_data_reg <= {WIDTH{1'b0}};
+            dst_valid_reg <= 1'b0;
+        end else begin
+            if (dst_clear_i) begin
+                dst_clear_pending <= 1'b1;
+                dst_valid_reg <= 1'b0;
+            end else if (dst_clear_pending) begin
+                if (src_clear_synced) begin
+                    dst_clear_pending <= 1'b0;
+                    dst_rd_ptr <= {PTR_W{1'b0}};
+                    dst_valid_reg <= 1'b0;
+                end
+            end else begin
+                if (dst_valid_reg && dst_ready_i) begin
+                    dst_rd_ptr <= dst_rd_ptr + 1'b1;
+                    dst_valid_reg <= 1'b0;
+                end else if (!dst_valid_reg && dst_wr_ptr_gray_synced != dst_rd_ptr) begin
+                    dst_data_reg <= mem[dst_rd_ptr[LOG_DEPTH-1:0]];
+                    dst_valid_reg <= 1'b1;
+                end
+            end
+        end
+    end
+
+    // Destination domain: write pointer gray code (from source)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_wr_ptr_gray <= {PTR_W{1'b0}};
+        end else begin
+            dst_wr_ptr_gray <= dst_wr_ptr_gray_sync_next;
+        end
+    end
+
+    // Destination domain: synchronizer for source write pointer
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_wr_ptr_gray_sync[0] <= {PTR_W{1'b0}};
+            dst_wr_ptr_gray_sync[1] <= {PTR_W{1'b0}};
+            if (SYNC_STAGES > 2) begin
+                dst_wr_ptr_gray_sync[2] <= {PTR_W{1'b0}};
+            end
+        end else begin
+            dst_wr_ptr_gray_sync[0] <= dst_wr_ptr_gray;
+            dst_wr_ptr_gray_sync[1] <= dst_wr_ptr_gray_sync[0];
+            if (SYNC_STAGES > 2) begin
+                dst_wr_ptr_gray_sync[2] <= dst_wr_ptr_gray_sync[1];
+            end
+        end
+    end
+
+    // Destination domain: synchronizer for source clear
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_clear_sync[0] <= 1'b0;
+            src_clear_sync[1] <= 1'b0;
+            if (SYNC_STAGES > 2) begin
+                src_clear_sync[2] <= 1'b0;
+            end
+        end else begin
+            src_clear_sync[0] <= src_clear_sync_next;
+            src_clear_sync[1] <= src_clear_sync[0];
+            if (SYNC_STAGES > 2) begin
+                src_clear_sync[2] <= src_clear_sync[1];
+            end
+        end
+    end
+
+    // Destination domain: synchronizer for destination clear (to source)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_clear_sync[0] <= 1'b0;
+            dst_clear_sync[1] <= 1'b0;
+            if (SYNC_STAGES > 2) begin
+                dst_clear_sync[2] <= 1'b0;
+            end
+        end else begin
+            dst_clear_sync[0] <= dst_clear_sync_next;
+            dst_clear_sync[1] <= dst_clear_sync[0];
+            if (SYNC_STAGES > 2) begin
+                dst_clear_sync[2] <= dst_clear_sync[1];
+            end
+        end
+    end
+
+    // Destination valid output
+    assign dst_valid_o = dst_valid_reg;
+    assign dst_data_o = dst_data_reg;
+    assign dst_clear_pending_o = dst_clear_pending;
+
+    // Next state for synchronizers
+    assign src_rd_ptr_gray_sync_next = src_rd_ptr_gray_sync[SYNC_STAGES-1];
+    assign dst_wr_ptr_gray_sync_next = dst_wr_ptr_gray_sync[SYNC_STAGES-1];
+    assign src_clear_sync_next = src_clear_sync[SYNC_STAGES-1];
+    assign dst_clear_sync_next = dst_clear_sync[SYNC_STAGES-1];
+
+endmodule

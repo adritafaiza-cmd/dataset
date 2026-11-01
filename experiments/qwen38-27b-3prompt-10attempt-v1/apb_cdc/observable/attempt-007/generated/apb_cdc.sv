@@ -1,0 +1,191 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH;
+
+    // Request FIFO (src -> dst)
+    reg [ADDR_WIDTH-1:0] req_addr [0:DEPTH-1];
+    reg [DATA_WIDTH-1:0] req_wdata [0:DEPTH-1];
+    reg [DATA_WIDTH/8-1:0] req_strb [0:DEPTH-1];
+    reg [2:0] req_prot [0:DEPTH-1];
+    reg req_write [0:DEPTH-1];
+
+    reg [PTR_W-1:0] req_wr_ptr;
+    reg [PTR_W-1:0] req_rd_ptr;
+    reg [PTR_W-1:0] req_rd_ptr_sync0;
+    reg [PTR_W-1:0] req_rd_ptr_sync1;
+
+    // Response FIFO (dst -> src)
+    reg [DATA_WIDTH-1:0] rsp_data [0:DEPTH-1];
+    reg rsp_err [0:DEPTH-1];
+
+    reg [PTR_W-1:0] rsp_wr_ptr;
+    reg [PTR_W-1:0] rsp_rd_ptr;
+    reg [PTR_W-1:0] rsp_rd_ptr_sync0;
+    reg [PTR_W-1:0] rsp_rd_ptr_sync1;
+
+    // Handshake signals
+    reg req_valid;
+    reg rsp_valid;
+
+    // Destination side state
+    reg dst_psel_r;
+    reg dst_penable_r;
+    reg dst_pwrite_r;
+    reg [ADDR_WIDTH-1:0] dst_paddr_r;
+    reg [DATA_WIDTH-1:0] dst_pwdata_r;
+    reg [DATA_WIDTH/8-1:0] dst_pstrb_r;
+    reg [2:0] dst_pprot_r;
+
+    // Source side state
+    reg src_pready_r;
+    reg [DATA_WIDTH-1:0] src_prdata_r;
+    reg src_pslverr_r;
+
+    // FIFO full/empty
+    wire req_full = (req_wr_ptr == req_rd_ptr_sync1) && (req_wr_ptr[PTR_W-1] != req_rd_ptr_sync1[PTR_W-1]);
+    wire req_empty = (req_wr_ptr == req_rd_ptr_sync1);
+    wire rsp_full = (rsp_wr_ptr == rsp_rd_ptr_sync1) && (rsp_wr_ptr[PTR_W-1] != rsp_rd_ptr_sync1[PTR_W-1]);
+    wire rsp_empty = (rsp_wr_ptr == rsp_rd_ptr_sync1);
+
+    // Source clock domain
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            req_wr_ptr <= {PTR_W{1'b0}};
+            req_rd_ptr_sync0 <= {PTR_W{1'b0}};
+            req_rd_ptr_sync1 <= {PTR_W{1'b0}};
+            rsp_rd_ptr <= {PTR_W{1'b0}};
+            rsp_rd_ptr_sync0 <= {PTR_W{1'b0}};
+            rsp_rd_ptr_sync1 <= {PTR_W{1'b0}};
+            src_pready_r <= 1'b0;
+            src_prdata_r <= {DATA_WIDTH{1'b0}};
+            src_pslverr_r <= 1'b0;
+        end else begin
+            // Sync destination read pointer
+            req_rd_ptr_sync0 <= req_rd_ptr;
+            req_rd_ptr_sync1 <= req_rd_ptr_sync0;
+
+            // Sync source read pointer to destination
+            rsp_rd_ptr_sync0 <= rsp_rd_ptr;
+            rsp_rd_ptr_sync1 <= rsp_rd_ptr_sync0;
+
+            // Write request to FIFO
+            if (src_psel_i && !src_penable_i && !req_full) begin
+                req_addr[req_wr_ptr] <= src_paddr_i;
+                req_wdata[req_wr_ptr] <= src_pwdata_i;
+                req_strb[req_wr_ptr] <= src_pstrb_i;
+                req_prot[req_wr_ptr] <= src_pprot_i;
+                req_write[req_wr_ptr] <= src_pwrite_i;
+                req_wr_ptr <= req_wr_ptr + 1'b1;
+            end
+
+            // Read response from FIFO
+            if (!rsp_empty) begin
+                src_prdata_r <= rsp_data[rsp_rd_ptr];
+                src_pslverr_r <= rsp_err[rsp_rd_ptr];
+                rsp_rd_ptr <= rsp_rd_ptr + 1'b1;
+            end
+
+            // APB source ready
+            if (src_psel_i && src_penable_i) begin
+                src_pready_r <= !rsp_empty;
+            end else begin
+                src_pready_r <= 1'b0;
+            end
+        end
+    end
+
+    // Destination clock domain
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            req_rd_ptr <= {PTR_W{1'b0}};
+            req_rd_ptr_sync0 <= {PTR_W{1'b0}};
+            req_rd_ptr_sync1 <= {PTR_W{1'b0}};
+            rsp_wr_ptr <= {PTR_W{1'b0}};
+            rsp_wr_ptr_sync0 <= {PTR_W{1'b0}};
+            rsp_wr_ptr_sync1 <= {PTR_W{1'b0}};
+            dst_psel_r <= 1'b0;
+            dst_penable_r <= 1'b0;
+            dst_pwrite_r <= 1'b0;
+            dst_paddr_r <= {ADDR_WIDTH{1'b0}};
+            dst_pwdata_r <= {DATA_WIDTH{1'b0}};
+            dst_pstrb_r <= {DATA_WIDTH/8{1'b0}};
+            dst_pprot_r <= 3'b0;
+        end else begin
+            // Sync source write pointer
+            req_rd_ptr_sync0 <= req_wr_ptr;
+            req_rd_ptr_sync1 <= req_rd_ptr_sync0;
+
+            // Sync destination write pointer to source
+            rsp_wr_ptr_sync0 <= rsp_wr_ptr;
+            rsp_wr_ptr_sync1 <= rsp_wr_ptr_sync0;
+
+            // Read request from FIFO and drive APB destination
+            if (!req_empty && !dst_psel_r) begin
+                dst_paddr_r <= req_addr[req_rd_ptr];
+                dst_pwdata_r <= req_wdata[req_rd_ptr];
+                dst_pstrb_r <= req_strb[req_rd_ptr];
+                dst_pprot_r <= req_prot[req_rd_ptr];
+                dst_pwrite_r <= req_write[req_rd_ptr];
+                dst_psel_r <= 1'b1;
+                dst_penable_r <= 1'b0;
+                req_rd_ptr <= req_rd_ptr + 1'b1;
+            end else if (dst_psel_r && !dst_penable_r) begin
+                dst_penable_r <= 1'b1;
+            end else if (dst_psel_r && dst_penable_r && dst_pready_i) begin
+                dst_psel_r <= 1'b0;
+                dst_penable_r <= 1'b0;
+            end
+
+            // Write response to FIFO
+            if (dst_psel_r && dst_penable_r && dst_pready_i && !rsp_full) begin
+                rsp_data[rsp_wr_ptr] <= dst_prdata_i;
+                rsp_err[rsp_wr_ptr] <= dst_pslverr_i;
+                rsp_wr_ptr <= rsp_wr_ptr + 1'b1;
+            end
+        end
+    end
+
+    // Outputs
+    assign src_pready_o = src_pready_r;
+    assign src_prdata_o = src_prdata_r;
+    assign src_pslverr_o = src_pslverr_r;
+
+    assign dst_psel_o = dst_psel_r;
+    assign dst_penable_o = dst_penable_r;
+    assign dst_pwrite_o = dst_pwrite_r;
+    assign dst_paddr_o = dst_paddr_r;
+    assign dst_pwdata_o = dst_pwdata_r;
+    assign dst_pstrb_o = dst_pstrb_r;
+    assign dst_pprot_o = dst_pprot_r;
+
+endmodule

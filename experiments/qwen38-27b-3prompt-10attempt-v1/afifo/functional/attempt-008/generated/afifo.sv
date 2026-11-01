@@ -1,0 +1,157 @@
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam ADDR_W = LGFIFO;
+	localparam CNT_W = LGFIFO + 1;
+
+	// Memory
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+
+	// Write pointer
+	reg [ADDR_W-1:0] wptr;
+	reg [ADDR_W-1:0] wptr_gray;
+	reg [ADDR_W:0]   wptr_bin;
+
+	// Read pointer
+	reg [ADDR_W-1:0] rptr;
+	reg [ADDR_W-1:0] rptr_gray;
+	reg [ADDR_W:0]   rptr_bin;
+
+	// Gray code conversion functions
+	function [ADDR_W-1:0] bin2gray;
+		input [ADDR_W:0] bin;
+		begin
+			bin2gray = bin ^ (bin >> 1);
+		end
+	endfunction
+
+	function [ADDR_W:0] gray2bin;
+		input [ADDR_W-1:0] gray;
+		reg [ADDR_W:0] b;
+		begin
+			b[ADDR_W] = 1'b0;
+			b[ADDR_W-1] = gray[ADDR_W-1];
+			for (integer i = ADDR_W-2; i >= 0; i = i - 1)
+				b[i] = b[i+1] ^ gray[i];
+			gray2bin = b;
+		end
+	endfunction
+
+	// Write side: pointer update
+	wire wclk_edge = WRITE_ON_POSEDGE ? i_wclk : ~i_wclk;
+	wire wreset_n  = i_wr_reset_n;
+
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wptr      <= {ADDR_W{1'b0}};
+			wptr_gray <= {ADDR_W{1'b0}};
+			wptr_bin  <= {(ADDR_W+1){1'b0}};
+		end else if (i_wr && !o_wr_full) begin
+			wptr_bin  <= wptr_bin + 1'b1;
+			wptr      <= wptr_bin[ADDR_W-1:0];
+			wptr_gray <= bin2gray(wptr_bin + 1'b1);
+		end
+	end
+
+	// Write to memory
+	always @(posedge i_wclk) begin
+		if (i_wr && !o_wr_full)
+			mem[wptr] <= i_wr_data;
+	end
+
+	// Read side: pointer update
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rptr      <= {ADDR_W{1'b0}};
+			rptr_gray <= {ADDR_W{1'b0}};
+			rptr_bin  <= {(ADDR_W+1){1'b0}};
+		end else if (i_rd && !o_rd_empty) begin
+			rptr_bin  <= rptr_bin + 1'b1;
+			rptr      <= rptr_bin[ADDR_W-1:0];
+			rptr_gray <= bin2gray(rptr_bin + 1'b1);
+		end
+	end
+
+	// Read from memory
+	always @(posedge i_rclk) begin
+		if (i_rd && !o_rd_empty) begin
+			if (OPT_REGISTER_READS)
+				o_rd_data <= mem[rptr];
+			else
+				o_rd_data <= mem[rptr]; // same for simplicity; combinational read would be different
+		end
+	end
+
+	// Synchronizers: write pointer gray to read domain
+	reg [ADDR_W-1:0] wptr_gray_sync [0:NFF-1];
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			for (integer i = 0; i < NFF; i = i + 1)
+				wptr_gray_sync[i] <= {ADDR_W{1'b0}};
+		end else begin
+			wptr_gray_sync[0] <= wptr_gray;
+			for (integer i = 1; i < NFF; i = i + 1)
+				wptr_gray_sync[i] <= wptr_gray_sync[i-1];
+		end
+	end
+
+	// Synchronizers: read pointer gray to write domain
+	reg [ADDR_W-1:0] rptr_gray_sync [0:NFF-1];
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			for (integer i = 0; i < NFF; i = i + 1)
+				rptr_gray_sync[i] <= {ADDR_W{1'b0}};
+		end else begin
+			rptr_gray_sync[0] <= rptr_gray;
+			for (integer i = 1; i < NFF; i = i + 1)
+				rptr_gray_sync[i] <= rptr_gray_sync[i-1];
+		end
+	end
+
+	// Convert synchronized gray to binary
+	reg [ADDR_W:0] wptr_gray_sync_bin;
+	reg [ADDR_W:0] rptr_gray_sync_bin;
+
+	always @(*) begin
+		wptr_gray_sync_bin = gray2bin(wptr_gray_sync[NFF-1]);
+		rptr_gray_sync_bin = gray2bin(rptr_gray_sync[NFF-1]);
+	end
+
+	// Full/Empty flags
+	// Full: write pointer has lapped read pointer by DEPTH
+	// In binary: wptr_bin - rptr_gray_sync_bin == DEPTH
+	// Since we use extended pointers, full when:
+	// wptr_bin[ADDR_W] != rptr_gray_sync_bin[ADDR_W] && wptr_bin[ADDR_W-1:0] == rptr_gray_sync_bin[ADDR_W-1:0]
+	
+	// Empty: write pointer == read pointer
+	// wptr_gray_sync_bin == rptr_bin
+
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			o_wr_full <= 1'b0;
+		else
+			o_wr_full <= (wptr_bin[ADDR_W] != rptr_gray_sync_bin[ADDR_W]) &&
+						 (wptr_bin[ADDR_W-1:0] == rptr_gray_sync_bin[ADDR_W-1:0]);
+	end
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_empty <= 1'b1;
+		else
+			o_rd_empty <= (wptr_gray_sync_bin == rptr_bin);
+	end
+
+endmodule

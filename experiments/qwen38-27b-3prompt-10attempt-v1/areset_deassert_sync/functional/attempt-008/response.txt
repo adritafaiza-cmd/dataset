@@ -1,0 +1,126 @@
+```verilog
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    localparam ACTIVE = RST_POL;
+    localparam INACTIVE = ~RST_POL;
+
+    reg [CHAINS-1:0] sync_reg;
+    reg sync_rst_reg;
+
+    // Initialize sync_reg to inactive state
+    initial begin
+        sync_reg = {CHAINS{INACTIVE}};
+    end
+
+    // Synchronize the deassertion of async_rst_i
+    always @(posedge clk or posedge async_rst_i) begin
+        if (async_rst_i) begin
+            // On reset assertion, clear the sync chain to inactive
+            sync_reg <= {CHAINS{INACTIVE}};
+        end else begin
+            // Shift register for deassertion synchronization
+            sync_reg <= {sync_reg[CHAINS-2:0], INACTIVE};
+        end
+    end
+
+    // sync_rst_o is active if async_rst_i is active OR if the sync chain hasn't fully deasserted
+    // The sync chain is "fully deasserted" when all bits are INACTIVE
+    // We need to detect when the last bit has been shifted in as INACTIVE
+    // Actually, let's think about this more carefully.
+    
+    // When async_rst_i is active, sync_rst_o should be active immediately.
+    // When async_rst_i deasserts, we need to wait CHAINS cycles before releasing.
+    
+    // The sync_reg chain: on each posedge clk (when not in reset), we shift in INACTIVE.
+    // After CHAINS cycles of async_rst_i being inactive, all bits of sync_reg will be INACTIVE.
+    
+    // sync_rst_o = async_rst_i OR (any bit in sync_reg is ACTIVE)
+    // Wait, that's not quite right either. Let me reconsider.
+    
+    // Actually, the standard approach:
+    // - sync_rst_o is active when async_rst_i is active
+    // - sync_rst_o remains active until the sync chain has fully propagated the deassertion
+    // - The sync chain tracks the deassertion: each stage shifts in the previous stage's value
+    // - After CHAINS cycles of async_rst_i being inactive, the last stage will be inactive
+    
+    // Let's use a different approach:
+    // sync_reg[0] is the first stage, sync_reg[CHAINS-1] is the last stage
+    // On each clock (when not in reset), sync_reg shifts: sync_reg[i] <= sync_reg[i-1], sync_reg[0] <= async_rst_i
+    // But we want to synchronize the deassertion, so we shift in the current async_rst_i value
+    
+    // Actually, the typical reset synchronizer for deassertion:
+    // - When async_rst_i goes inactive, we want to wait CHAINS clock cycles before releasing sync_rst_o
+    // - We can use a shift register that shifts in async_rst_i on each clock
+    // - sync_rst_o is active if async_rst_i is active OR if any bit in the shift register is active
+    
+    // Let me redo this properly.
+
+    // Clear and re-declare
+    // We'll use a shift register where each stage captures the previous stage
+    // sync_reg[0] captures async_rst_i on each posedge clk
+    // sync_reg[i] captures sync_reg[i-1] on each posedge clk
+    // sync_rst_o is active if async_rst_i is active OR if any sync_reg bit is active
+
+    // But we need to handle the async reset assertion properly.
+    // When async_rst_i is asserted, sync_rst_o should be active immediately.
+    // When async_rst_i is deasserted, we wait CHAINS cycles.
+
+    // The shift register approach:
+    // On posedge clk:
+    //   sync_reg[0] <= async_rst_i;
+    //   sync_reg[i] <= sync_reg[i-1];
+    // sync_rst_o = async_rst_i | sync_reg[0] | sync_reg[1] | ... | sync_reg[CHAINS-1]
+
+    // This way, when async_rst_i deasserts, it takes CHAINS cycles for the last bit to become inactive.
+
+    // But we also need to handle the case where async_rst_i is asynchronously asserted.
+    // In that case, sync_rst_o should be active immediately, which is handled by the OR with async_rst_i.
+
+    // Let's implement this.
+
+    // First, let's clear the previous declarations and start fresh.
+    // I'll rewrite the module properly.
+
+endmodule
+```
+
+Wait, I made a mess with the initial attempt. Let me provide a clean, correct implementation.
+
+```verilog
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    localparam ACTIVE = RST_POL;
+    localparam INACTIVE = ~RST_POL;
+
+    reg [CHAINS-1:0] sync_reg;
+
+    // Synchronize the deassertion of async_rst_i
+    always @(posedge clk) begin
+        sync_reg[0] <= async_rst_i;
+        for (integer i = 1; i < CHAINS; i = i + 1) begin
+            sync_reg[i] <= sync_reg[i-1];
+        end
+    end
+
+    // sync_rst_o is active if async_rst_i is active OR if any bit in the sync chain is active
+    wire [CHAINS-1:0] sync_active = sync_reg;
+    wire any_sync_active = |sync_active;
+
+    assign sync_rst_o = (async_rst_i == ACTIVE) ? ACTIVE : (any_sync_active ? ACTIVE : INACTIVE);
+
+endmodule
+```<|im_end|>

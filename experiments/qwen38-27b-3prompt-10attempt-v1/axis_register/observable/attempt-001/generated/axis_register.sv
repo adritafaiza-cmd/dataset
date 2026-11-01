@@ -1,0 +1,193 @@
+module axis_register #
+(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI Stream input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI Stream output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser
+);
+
+    // Internal signals
+    wire [DATA_WIDTH-1:0]  reg_tdata;
+    wire [KEEP_WIDTH-1:0]  reg_tkeep;
+    wire                   reg_tvalid;
+    wire                   reg_tlast;
+    wire [ID_WIDTH-1:0]    reg_tid;
+    wire [DEST_WIDTH-1:0]  reg_tdest;
+    wire [USER_WIDTH-1:0]  reg_tuser;
+
+    // Skid buffer registers
+    reg [DATA_WIDTH-1:0]  skid_tdata;
+    reg [KEEP_WIDTH-1:0]  skid_tkeep;
+    reg                   skid_tvalid;
+    reg                   skid_tlast;
+    reg [ID_WIDTH-1:0]    skid_tid;
+    reg [DEST_WIDTH-1:0]  skid_tdest;
+    reg [USER_WIDTH-1:0]  skid_tuser;
+
+    // Control signals
+    wire s_axis_tready_wire;
+    wire m_axis_tvalid_wire;
+
+    // For REG_TYPE = 0: Wire (no buffering)
+    // For REG_TYPE = 1: Buffer (single register)
+    // For REG_TYPE = 2: Skid buffer
+
+    generate
+        if (REG_TYPE == 0) begin : gen_wire
+            // Wire: direct connection
+            assign m_axis_tdata  = s_axis_tdata;
+            assign m_axis_tkeep  = s_axis_tkeep;
+            assign m_axis_tvalid = s_axis_tvalid;
+            assign m_axis_tlast  = s_axis_tlast;
+            assign m_axis_tid    = s_axis_tid;
+            assign m_axis_tdest  = s_axis_tdest;
+            assign m_axis_tuser  = s_axis_tuser;
+            assign s_axis_tready = m_axis_tready;
+        end
+        else if (REG_TYPE == 1) begin : gen_buffer
+            // Single register buffer
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    reg_tvalid <= 1'b0;
+                end else begin
+                    if (s_axis_tvalid && s_axis_tready) begin
+                        reg_tvalid <= 1'b1;
+                        reg_tdata  <= s_axis_tdata;
+                        reg_tkeep  <= s_axis_tkeep;
+                        reg_tlast  <= s_axis_tlast;
+                        reg_tid    <= s_axis_tid;
+                        reg_tdest  <= s_axis_tdest;
+                        reg_tuser  <= s_axis_tuser;
+                    end else if (m_axis_tvalid && m_axis_tready) begin
+                        reg_tvalid <= 1'b0;
+                    end
+                end
+            end
+
+            assign m_axis_tdata  = reg_tdata;
+            assign m_axis_tkeep  = reg_tkeep;
+            assign m_axis_tvalid = reg_tvalid;
+            assign m_axis_tlast  = reg_tlast;
+            assign m_axis_tid    = reg_tid;
+            assign m_axis_tdest  = reg_tdest;
+            assign m_axis_tuser  = reg_tuser;
+            assign s_axis_tready = ~reg_tvalid;
+        end
+        else begin : gen_skid
+            // Skid buffer
+            // State: 
+            //   main register holds data, skid register holds backup
+            //   When main is full and new data arrives, move main to skid, load new into main
+            //   When main is empty and skid has data, move skid to main
+
+            wire main_valid;
+            wire skid_valid;
+
+            assign main_valid = reg_tvalid;
+            assign skid_valid = skid_tvalid;
+
+            // s_axis_tready: can accept new data if main is empty, or if main is full but skid is empty
+            // Actually for skid buffer:
+            // - If main is empty: accept
+            // - If main is full and skid is empty: accept (will move main to skid)
+            // - If main is full and skid is full: cannot accept
+            assign s_axis_tready = ~(main_valid && skid_valid);
+
+            // m_axis_tvalid: main register has valid data
+            assign m_axis_tvalid = main_valid;
+
+            // Output from main register
+            assign m_axis_tdata  = reg_tdata;
+            assign m_axis_tkeep  = reg_tkeep;
+            assign m_axis_tlast  = reg_tlast;
+            assign m_axis_tid    = reg_tid;
+            assign m_axis_tdest  = reg_tdest;
+            assign m_axis_tuser  = reg_tuser;
+
+            // Main register update logic
+            wire main_accept = s_axis_tvalid && s_axis_tready;
+            wire main_pop    = m_axis_tvalid && m_axis_tready;
+            wire skid_to_main = skid_valid && ~main_valid;
+
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    reg_tvalid  <= 1'b0;
+                    skid_tvalid <= 1'b0;
+                end else begin
+                    // Update main register
+                    if (main_accept) begin
+                        reg_tvalid  <= 1'b1;
+                        reg_tdata   <= s_axis_tdata;
+                        reg_tkeep   <= s_axis_tkeep;
+                        reg_tlast   <= s_axis_tlast;
+                        reg_tid     <= s_axis_tid;
+                        reg_tdest   <= s_axis_tdest;
+                        reg_tuser   <= s_axis_tuser;
+                    end else if (main_pop) begin
+                        if (skid_valid) begin
+                            // Move skid to main
+                            reg_tvalid  <= 1'b1;
+                            reg_tdata   <= skid_tdata;
+                            reg_tkeep   <= skid_tkeep;
+                            reg_tlast   <= skid_tlast;
+                            reg_tid     <= skid_tid;
+                            reg_tdest   <= skid_tdest;
+                            reg_tuser   <= skid_tuser;
+                        end else begin
+                            reg_tvalid  <= 1'b0;
+                        end
+                    end
+
+                    // Update skid register
+                    if (main_accept && main_valid) begin
+                        // Move current main to skid
+                        skid_tvalid <= 1'b1;
+                        skid_tdata  <= reg_tdata;
+                        skid_tkeep  <= reg_tkeep;
+                        skid_tlast  <= reg_tlast;
+                        skid_tid    <= reg_tid;
+                        skid_tdest  <= reg_tdest;
+                        skid_tuser  <= reg_tuser;
+                    end else if (main_pop && skid_valid) begin
+                        // Skid moved to main, clear skid
+                        skid_tvalid <= 1'b0;
+                    end
+                end
+            end
+        end
+    endgenerate
+
+endmodule

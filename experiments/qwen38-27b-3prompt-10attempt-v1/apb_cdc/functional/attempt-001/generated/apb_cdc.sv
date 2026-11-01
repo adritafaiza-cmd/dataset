@@ -1,0 +1,210 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_WIDTH = LOG_DEPTH;
+
+    // Source side state
+    reg src_state;
+    localparam SRC_IDLE = 1'b0;
+    localparam SRC_WAIT = 1'b1;
+
+    // Destination side state
+    reg dst_state;
+    localparam DST_IDLE = 1'b0;
+    localparam DST_SETUP = 1'b1;
+    localparam DST_ACCESS = 1'b10;
+
+    // FIFO pointers
+    reg [PTR_WIDTH-1:0] src_wr_ptr;
+    reg [PTR_WIDTH-1:0] dst_rd_ptr;
+
+    // FIFO storage
+    reg [DATA_WIDTH-1:0] fifo_data [0:DEPTH-1];
+    reg [ADDR_WIDTH-1:0] fifo_addr [0:DEPTH-1];
+    reg [DATA_WIDTH/8-1:0] fifo_strb [0:DEPTH-1];
+    reg [2:0] fifo_prot [0:DEPTH-1];
+    reg fifo_write [0:DEPTH-1];
+
+    // FIFO valid bits
+    reg [DEPTH-1:0] fifo_valid;
+
+    // Handshake signals
+    reg src_req;
+    reg dst_ack;
+    reg dst_req;
+    reg src_ack;
+
+    // Destination output registers
+    reg dst_psel_r;
+    reg dst_penable_r;
+    reg dst_pwrite_r;
+    reg [ADDR_WIDTH-1:0] dst_paddr_r;
+    reg [DATA_WIDTH-1:0] dst_pwdata_r;
+    reg [DATA_WIDTH/8-1:0] dst_pstrb_r;
+    reg [2:0] dst_pprot_r;
+
+    // Source output registers
+    reg src_pready_r;
+    reg [DATA_WIDTH-1:0] src_prdata_r;
+    reg src_pslverr_r;
+
+    // CDC synchronizers
+    reg [1:0] src_req_sync;
+    reg [1:0] dst_ack_sync;
+    reg [1:0] dst_req_sync;
+    reg [1:0] src_ack_sync;
+
+    // Source clock domain logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_state <= SRC_IDLE;
+            src_wr_ptr <= {PTR_WIDTH{1'b0}};
+            fifo_valid <= {DEPTH{1'b0}};
+            src_pready_r <= 1'b0;
+            src_prdata_r <= {DATA_WIDTH{1'b0}};
+            src_pslverr_r <= 1'b0;
+            src_req <= 1'b0;
+            src_ack_sync <= 2'b00;
+            dst_ack_sync <= 2'b00;
+        end else begin
+            // Synchronizers
+            src_ack_sync <= {src_ack_sync[0], src_ack};
+            dst_ack_sync <= {dst_ack_sync[0], dst_ack};
+
+            case (src_state)
+                SRC_IDLE: begin
+                    src_pready_r <= 1'b0;
+                    if (src_psel_i && !src_penable_i) begin
+                        // Setup phase detected, latch data
+                        fifo_data[src_wr_ptr] <= src_pwdata_i;
+                        fifo_addr[src_wr_ptr] <= src_paddr_i;
+                        fifo_strb[src_wr_ptr] <= src_pstrb_i;
+                        fifo_prot[src_wr_ptr] <= src_pprot_i;
+                        fifo_write[src_wr_ptr] <= src_pwrite_i;
+                        fifo_valid[src_wr_ptr] <= 1'b1;
+                        src_wr_ptr <= src_wr_ptr + 1'b1;
+                        src_req <= 1'b1;
+                        src_state <= SRC_WAIT;
+                    end
+                end
+                SRC_WAIT: begin
+                    if (dst_ack_sync[1]) begin
+                        // Destination completed, return data
+                        src_pready_r <= 1'b1;
+                        src_prdata_r <= dst_prdata_i;
+                        src_pslverr_r <= dst_pslverr_i;
+                        src_req <= 1'b0;
+                        src_state <= SRC_IDLE;
+                    end
+                end
+                default: begin
+                    src_state <= SRC_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Destination clock domain logic
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_state <= DST_IDLE;
+            dst_rd_ptr <= {PTR_WIDTH{1'b0}};
+            dst_psel_r <= 1'b0;
+            dst_penable_r <= 1'b0;
+            dst_pwrite_r <= 1'b0;
+            dst_paddr_r <= {ADDR_WIDTH{1'b0}};
+            dst_pwdata_r <= {DATA_WIDTH{1'b0}};
+            dst_pstrb_r <= {DATA_WIDTH/8{1'b0}};
+            dst_pprot_r <= 3'b000;
+            dst_req <= 1'b0;
+            dst_ack <= 1'b0;
+            src_req_sync <= 2'b00;
+            src_ack_sync <= 2'b00;
+        end else begin
+            // Synchronizers
+            src_req_sync <= {src_req_sync[0], src_req};
+            src_ack_sync <= {src_ack_sync[0], src_ack};
+
+            case (dst_state)
+                DST_IDLE: begin
+                    dst_psel_r <= 1'b0;
+                    dst_penable_r <= 1'b0;
+                    dst_ack <= 1'b0;
+                    if (src_req_sync[1] && fifo_valid[dst_rd_ptr]) begin
+                        // Load data from FIFO
+                        dst_pwrite_r <= fifo_write[dst_rd_ptr];
+                        dst_paddr_r <= fifo_addr[dst_rd_ptr];
+                        dst_pwdata_r <= fifo_data[dst_rd_ptr];
+                        dst_pstrb_r <= fifo_strb[dst_rd_ptr];
+                        dst_pprot_r <= fifo_prot[dst_rd_ptr];
+                        dst_psel_r <= 1'b1;
+                        dst_penable_r <= 1'b0;
+                        dst_state <= DST_SETUP;
+                    end
+                end
+                DST_SETUP: begin
+                    dst_psel_r <= 1'b1;
+                    dst_penable_r <= 1'b1;
+                    dst_state <= DST_ACCESS;
+                end
+                DST_ACCESS: begin
+                    dst_psel_r <= 1'b1;
+                    dst_penable_r <= 1'b1;
+                    if (dst_pready_i) begin
+                        // Transfer complete
+                        dst_psel_r <= 1'b0;
+                        dst_penable_r <= 1'b0;
+                        dst_ack <= 1'b1;
+                        dst_rd_ptr <= dst_rd_ptr + 1'b1;
+                        dst_state <= DST_IDLE;
+                    end
+                end
+                default: begin
+                    dst_state <= DST_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Assign outputs
+    assign src_pready_o = src_pready_r;
+    assign src_prdata_o = src_prdata_r;
+    assign src_pslverr_o = src_pslverr_r;
+    assign dst_psel_o = dst_psel_r;
+    assign dst_penable_o = dst_penable_r;
+    assign dst_pwrite_o = dst_pwrite_r;
+    assign dst_paddr_o = dst_paddr_r;
+    assign dst_pwdata_o = dst_pwdata_r;
+    assign dst_pstrb_o = dst_pstrb_r;
+    assign dst_pprot_o = dst_pprot_r;
+
+endmodule

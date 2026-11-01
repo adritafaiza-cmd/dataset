@@ -1,0 +1,135 @@
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Extract APB fields from req_t
+  // Assuming req_t has fields: psel, penable, pwrite, paddr, pwdata
+  // We need to access these fields. Since req_t is a type parameter,
+  // we assume it's a struct with these fields.
+  
+  // For APB, the typical fields are:
+  // psel, penable, pwrite, paddr, pwdata
+  // We'll access them via the struct fields.
+  
+  // Since we don't know the exact structure, we'll assume common APB field names.
+  // In many APB implementations, the request struct has:
+  //   bit psel
+  //   bit penable
+  //   bit pwrite
+  //   apb_addr_t paddr
+  //   reg_data_t pwdata (or similar data width)
+  
+  // Let's define local signals for the APB signals
+  wire psel    = req_i.psel;
+  wire penable = req_i.penable;
+  wire pwrite  = req_i.pwrite;
+  wire [ApbAddrWidth-1:0] paddr = req_i.paddr;
+  
+  // Data width for APB data
+  // The APB data width is ApbDataWidth, but reg_data_t is RegDataWidth
+  // We need to handle the data appropriately
+  
+  // APB data input
+  // Assuming req_t has a field for write data
+  // Let's assume it's called pwdata and has width ApbDataWidth
+  // But we need to map it to RegDataWidth
+  
+  // For simplicity, assume ApbDataWidth == RegDataWidth or handle truncation/extension
+  wire [ApbDataWidth-1:0] pwdata = req_i.pwdata;
+  
+  // Convert APB data to register data width
+  wire [RegDataWidth-1:0] write_data;
+  assign write_data = (RegDataWidth >= ApbDataWidth) ? 
+                      {{(RegDataWidth-ApbDataWidth){1'b0}} & pwdata} : 
+                      pwdata[RegDataWidth-1:0];
+  
+  // Calculate register index from address
+  // Address offset from base
+  wire [ApbAddrWidth-1:0] addr_offset = paddr - base_addr_i;
+  
+  // Register index = addr_offset / AddrOffset
+  // AddrOffset is in bytes, so we need to shift
+  // Assuming AddrOffset is a power of 2 for simplicity, or do division
+  // For general case, do integer division
+  
+  wire [ApbAddrWidth-1:0] reg_index_raw = addr_offset / AddrOffset;
+  
+  // Check if address is valid
+  wire addr_valid = (reg_index_raw < NoApbRegs) && 
+                    (addr_offset % AddrOffset == 0);
+  
+  // Register index
+  wire [ApbAddrWidth-1:0] reg_index = reg_index_raw;
+  
+  // APB response
+  // APB response typically has: pready, pslverr, prdata
+  // Assuming resp_t has these fields
+  
+  // Default response
+  resp_t resp_default;
+  resp_default.pready  = 1'b0;
+  resp_default.pslverr = 1'b0;
+  resp_default.prdata  = '0;
+  
+  // APB protocol:
+  // Setup phase: psel=1, penable=0
+  // Access phase: psel=1, penable=1
+  // We respond in the access phase
+  
+  wire in_access_phase = psel & penable;
+  
+  // Read data
+  wire [RegDataWidth-1:0] read_data;
+  assign read_data = addr_valid ? reg_q_o[reg_index] : '0;
+  
+  // Convert read data to APB data width
+  wire [ApbDataWidth-1:0] prdata;
+  assign prdata = (ApbDataWidth >= RegDataWidth) ? 
+                  {{(ApbDataWidth-RegDataWidth){1'b0}} & read_data} : 
+                  read_data[ApbDataWidth-1:0];
+  
+  // Response logic
+  always_comb begin
+    resp_o = resp_default;
+    if (in_access_phase) begin
+      resp_o.pready  = 1'b1;
+      resp_o.pslverr = ~addr_valid;
+      resp_o.prdata  = prdata;
+    end
+  end
+  
+  // Register file
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        reg_q_o[i] <= reg_init_i[i];
+      end
+    end else begin
+      // Write in access phase
+      if (in_access_phase && pwrite && addr_valid) begin
+        // Check if register is read-only
+        if (!ReadOnly[reg_index]) begin
+          reg_q_o[reg_index] <= write_data;
+        end
+      end
+    end
+  end
+
+endmodule

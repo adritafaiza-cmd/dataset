@@ -1,0 +1,185 @@
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam NUM_PORTS = PORTS;
+    localparam ENC_WIDTH = $clog2(PORTS);
+
+    reg [NUM_PORTS-1:0] grant_reg;
+    reg                 grant_valid_reg;
+    reg [ENC_WIDTH-1:0] grant_encoded_reg;
+
+    // For round-robin: track the last granted port
+    reg [ENC_WIDTH-1:0] last_grant_reg;
+
+    // For blocking: track if a grant is currently held
+    reg                 block_hold_reg;
+
+    // Function to find the lowest set bit (LSB) in a vector
+    // Returns the index of the lowest set bit, or 0 if none
+    function [ENC_WIDTH-1:0] find_lsb;
+        input [NUM_PORTS-1:0] vec;
+        integer i;
+        begin
+            find_lsb = 0;
+            for (i = 0; i < NUM_PORTS; i = i + 1) begin
+                if (vec[i]) begin
+                    find_lsb = i[ENC_WIDTH-1:0];
+                    disable find_lsb;
+                end
+            end
+        end
+    endfunction
+
+    // Function to find the highest set bit (MSB) in a vector
+    // Returns the index of the highest set bit, or 0 if none
+    function [ENC_WIDTH-1:0] find_msb;
+        input [NUM_PORTS-1:0] vec;
+        integer i;
+        begin
+            find_msb = 0;
+            for (i = NUM_PORTS - 1; i >= 0; i = i - 1) begin
+                if (vec[i]) begin
+                    find_msb = i[ENC_WIDTH-1:0];
+                    disable find_msb;
+                end
+            end
+        end
+    endfunction
+
+    // For round-robin: rotate the request vector so that the port after last_grant is at position 0
+    // Then find the LSB of the rotated vector, and map back to original index
+    function [ENC_WIDTH-1:0] round_robin_select;
+        input [NUM_PORTS-1:0] req;
+        input [ENC_WIDTH-1:0] last;
+        reg [NUM_PORTS-1:0] rotated;
+        integer i;
+        integer offset;
+        begin
+            offset = last;
+            for (i = 0; i < NUM_PORTS; i = i + 1) begin
+                rotated[i] = req[(i + offset) % NUM_PORTS];
+            end
+            // Find LSB of rotated
+            round_robin_select = 0;
+            for (i = 0; i < NUM_PORTS; i = i + 1) begin
+                if (rotated[i]) begin
+                    round_robin_select = (i + offset) % NUM_PORTS;
+                    disable round_robin_select;
+                end
+            end
+        end
+    endfunction
+
+    wire [NUM_PORTS-1:0] grant_next;
+    wire                 grant_valid_next;
+    wire [ENC_WIDTH-1:0] grant_encoded_next;
+
+    // Determine the next grant based on arbiter type
+    wire [ENC_WIDTH-1:0] selected_port;
+    wire                 has_request;
+
+    assign has_request = |request;
+
+    generate
+        if (ARB_TYPE_ROUND_ROBIN == 1) begin : gen_round_robin
+            assign selected_port = round_robin_select(request, last_grant_reg);
+        end
+        else begin : gen_fixed
+            if (ARB_LSB_HIGH_PRIORITY == 1) begin : gen_lsb
+                assign selected_port = find_lsb(request);
+            end
+            else begin : gen_msb
+                assign selected_port = find_msb(request);
+            end
+        end
+    endgenerate
+
+    // Blocking logic
+    wire block_release;
+    wire block_active;
+
+    assign block_active = block_hold_reg;
+    
+    // Release event: when acknowledge is asserted for the currently held grant
+    assign block_release = (ARB_BLOCK_ACK == 1) ? (acknowledge & grant_reg) : 1'b0;
+
+    // Determine if we should hold the current grant
+    wire hold_grant;
+    assign hold_grant = (ARB_BLOCK == 1) && block_active && !block_release;
+
+    // Next state logic
+    always @(*) begin
+        if (hold_grant) begin
+            // Hold the current grant
+            grant_next = grant_reg;
+            grant_valid_next = grant_valid_reg;
+            grant_encoded_next = grant_encoded_reg;
+        end
+        else if (has_request) begin
+            // Grant the selected port
+            grant_next = 0;
+            grant_next[selected_port] = 1'b1;
+            grant_valid_next = 1'b1;
+            grant_encoded_next = selected_port;
+        end
+        else begin
+            // No request, no grant
+            grant_next = 0;
+            grant_valid_next = 1'b0;
+            grant_encoded_next = 0;
+        end
+    end
+
+    // Sequential logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            grant_reg <= 0;
+            grant_valid_reg <= 1'b0;
+            grant_encoded_reg <= 0;
+            last_grant_reg <= 0;
+            block_hold_reg <= 1'b0;
+        end
+        else begin
+            grant_reg <= grant_next;
+            grant_valid_reg <= grant_valid_next;
+            grant_encoded_reg <= grant_encoded_next;
+
+            // Update last grant for round-robin
+            if (grant_valid_next) begin
+                last_grant_reg <= grant_encoded_next;
+            end
+
+            // Update block hold
+            if (ARB_BLOCK == 1) begin
+                if (grant_valid_next && !block_hold_reg) begin
+                    // Start holding when a new grant is issued
+                    block_hold_reg <= 1'b1;
+                end
+                else if (block_hold_reg && block_release) begin
+                    // Release the hold
+                    block_hold_reg <= 1'b0;
+                end
+            end
+        end
+    end
+
+    assign grant = grant_reg;
+    assign grant_valid = grant_valid_reg;
+    assign grant_encoded = grant_encoded_reg;
+
+endmodule

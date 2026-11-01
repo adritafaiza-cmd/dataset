@@ -1,0 +1,349 @@
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam W = $clog2(PORTS);
+
+    reg [W-1:0] rr_ptr;
+    reg [PORTS-1:0] held_grant;
+    reg held_valid;
+
+    wire [PORTS-1:0] active_request;
+    wire [PORTS-1:0] grant_next;
+    wire grant_valid_next;
+    wire [W-1:0] grant_encoded_next;
+
+    // Determine if we are in blocked state
+    wire blocked = ARB_BLOCK && held_valid;
+
+    // If blocked, use held grant; otherwise compute new grant
+    assign active_request = blocked ? 1'b0 : request;
+
+    // Priority encoder logic
+    // For fixed priority: LSB high or MSB high
+    // For round-robin: rotate request based on rr_ptr
+
+    wire [PORTS-1:0] rotated_request;
+    wire [PORTS-1:0] rotated_grant;
+    wire [W-1:0] rotated_grant_encoded;
+
+    // Round-robin: rotate request so that rr_ptr becomes LSB
+    // We need to rotate left by rr_ptr positions
+    // Then do fixed priority (LSB high) on rotated, then rotate back
+
+    // Generate rotated request
+    genvar i;
+    generate
+        if (ARB_TYPE_ROUND_ROBIN) begin : gen_rr
+            // Rotate request left by rr_ptr
+            assign rotated_request = request << rr_ptr;
+            // But we need to handle wrap-around for PORTS not power of 2
+            // Actually, for simplicity and correctness with arbitrary PORTS,
+            // let's use a different approach: mask requests below rr_ptr as lower priority
+            
+            // Alternative: create a priority where ports >= rr_ptr have higher priority,
+            // then among those, lower index has higher priority (if LSB high)
+            
+            // Let's use a simpler approach: 
+            // For round-robin, we want to give priority to the next requester after rr_ptr
+            // We can do this by creating a rotated version
+            
+            // For now, let's implement fixed priority first, then add round-robin
+        end
+        else begin : gen_fixed
+            assign rotated_request = request;
+        end
+    endgenerate
+
+    // Let's implement a clean priority encoder
+    // For fixed priority with LSB high: lowest index wins
+    // For fixed priority with MSB high: highest index wins
+    // For round-robin: next after rr_ptr wins
+
+    // Helper: find lowest set bit (LSB high priority)
+    function [W-1:0] find_lsb;
+        input [PORTS-1:0] req;
+        integer j;
+        begin
+            find_lsb = {W{1'b0}};
+            for (j = 0; j < PORTS; j = j + 1) begin
+                if (req[j]) begin
+                    find_lsb = j[W-1:0];
+                    disable find_lsb;
+                end
+            end
+        end
+    endfunction
+
+    // Helper: find highest set bit (MSB high priority)
+    function [W-1:0] find_msb;
+        input [PORTS-1:0] req;
+        integer j;
+        begin
+            find_msb = {W{1'b0}};
+            for (j = PORTS-1; j >= 0; j = j - 1) begin
+                if (req[j]) begin
+                    find_msb = j[W-1:0];
+                    disable find_msb;
+                end
+            end
+        end
+    endfunction
+
+    // For round-robin, we need to find the next requester after rr_ptr
+    // This is equivalent to: rotate request so rr_ptr is at position 0,
+    // find LSB, then rotate back
+    
+    // Let's compute grant for each mode
+    wire [W-1:0] grant_fixed_lsb;
+    wire [W-1:0] grant_fixed_msb;
+    wire [W-1:0] grant_rr;
+    wire grant_valid_fixed_lsb;
+    wire grant_valid_fixed_msb;
+    wire grant_valid_rr;
+
+    assign grant_fixed_lsb = find_lsb(request);
+    assign grant_valid_fixed_lsb = |request;
+
+    assign grant_fixed_msb = find_msb(request);
+    assign grant_valid_fixed_msb = |request;
+
+    // Round-robin: find next requester after rr_ptr
+    // Create a rotated request where rr_ptr is at position 0
+    // We can do this by: for each bit i, rotated[i] = request[(i + rr_ptr) % PORTS]
+    // But since PORTS may not be power of 2, we need to be careful
+    
+    // Simpler approach: 
+    // 1. Mask out requests at indices < rr_ptr (they have lower priority)
+    // 2. If any request exists at indices >= rr_ptr, pick the lowest one
+    // 3. Otherwise, pick the lowest one from all requests
+    
+    wire [PORTS-1:0] req_high;  // requests at indices >= rr_ptr
+    wire [PORTS-1:0] req_low;   // requests at indices < rr_ptr
+    wire any_high;
+    wire any_low;
+    wire [W-1:0] grant_high;
+    wire [W-1:0] grant_low;
+
+    genvar k;
+    generate
+        for (k = 0; k < PORTS; k = k + 1) begin : gen_mask
+            assign req_high[k] = (k >= rr_ptr) ? request[k] : 1'b0;
+            assign req_low[k]  = (k < rr_ptr)  ? request[k] : 1'b0;
+        end
+    endgenerate
+
+    assign any_high = |req_high;
+    assign any_low  = |req_low;
+
+    assign grant_high = find_lsb(req_high);
+    assign grant_low  = find_lsb(req_low);
+
+    assign grant_rr = any_high ? grant_high : grant_low;
+    assign grant_valid_rr = |request;
+
+    // Select based on arbiter type
+    wire [W-1:0] grant_sel;
+    wire grant_valid_sel;
+
+    assign grant_sel = ARB_TYPE_ROUND_ROBIN ? grant_rr : 
+                       (ARB_LSB_HIGH_PRIORITY ? grant_fixed_lsb : grant_fixed_msb);
+    assign grant_valid_sel = ARB_TYPE_ROUND_ROBIN ? grant_valid_rr : 
+                             (ARB_LSB_HIGH_PRIORITY ? grant_valid_fixed_lsb : grant_valid_fixed_msb);
+
+    // One-hot grant
+    wire [PORTS-1:0] grant_onehot_sel;
+    genvar m;
+    generate
+        for (m = 0; m < PORTS; m = m + 1) begin : gen_onehot
+            assign grant_onehot_sel[m] = (grant_sel == m[W-1:0]) && grant_valid_sel;
+        end
+    endgenerate
+
+    // Determine next state
+    // If blocked and not released, hold
+    // If not blocked, use new grant
+    // Release condition: if ARB_BLOCK_ACK, release when acknowledge matches held grant
+    // If not ARB_BLOCK_ACK, release when... let's assume release when no request or some other condition
+    // The spec says "hold it until the specified release event"
+    // For ARB_BLOCK_ACK: release when acknowledge is asserted for the held port
+    // For non-ACK block: let's assume release when request is deasserted or some default
+    
+    // Let's define release:
+    // If ARB_BLOCK and ARB_BLOCK_ACK: release when acknowledge[held_port] is high
+    // If ARB_BLOCK and not ARB_BLOCK_ACK: release when request[held_port] is low (or always release after one cycle?)
+    // Let's assume for non-ACK block, we hold until the request is deasserted
+    
+    wire release;
+    wire [PORTS-1:0] held_onehot;
+    
+    genvar n;
+    generate
+        for (n = 0; n < PORTS; n = n + 1) begin : gen_held_onehot
+            assign held_onehot[n] = held_valid && (held_grant[n]);
+        end
+    endgenerate
+
+    // Release condition
+    // For ACK-based: release when acknowledge matches held grant
+    // For non-ACK: release when request for held port is deasserted
+    wire ack_match;
+    genvar p;
+    generate
+        for (p = 0; p < PORTS; p = p + 1) begin : gen_ack_match
+            assign ack_match = ack_match | (held_grant[p] && acknowledge[p]);
+        end
+    endgenerate
+
+    wire req_deasserted;
+    genvar q;
+    generate
+        for (q = 0; q < PORTS; q = q + 1) begin : gen_req_deassert
+            assign req_deasserted = req_deasserted | (held_grant[q] && !request[q]);
+        end
+    endgenerate
+
+    assign release = ARB_BLOCK_ACK ? ack_match : req_deasserted;
+
+    // Next state logic
+    always @(*) begin
+        if (rst) begin
+            grant_next = {PORTS{1'b0}};
+            grant_valid_next = 1'b0;
+            grant_encoded_next = {W{1'b0}};
+        end else if (ARB_BLOCK && held_valid && !release) begin
+            // Hold the grant
+            grant_next = held_grant;
+            grant_valid_next = 1'b1;
+            grant_encoded_next = {W{1'b0}}; // Will be set from held_grant
+            // Need to encode held_grant
+            // Let's compute it separately
+        end else begin
+            grant_next = grant_onehot_sel;
+            grant_valid_next = grant_valid_sel;
+            grant_encoded_next = grant_sel;
+        end
+    end
+
+    // We need to properly encode the held grant
+    // Let's restructure: compute grant_encoded_next properly
+    
+    // Actually, let's simplify by computing everything in the always block
+    
+    reg [W-1:0] grant_encoded_reg;
+    reg [PORTS-1:0] grant_reg;
+    reg grant_valid_reg;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            grant_reg <= {PORTS{1'b0}};
+            grant_valid_reg <= 1'b0;
+            grant_encoded_reg <= {W{1'b0}};
+            held_grant <= {PORTS{1'b0}};
+            held_valid <= 1'b0;
+            rr_ptr <= {W{1'b0}};
+        end else begin
+            if (ARB_BLOCK && held_valid && !release) begin
+                // Hold
+                grant_reg <= held_grant;
+                grant_valid_reg <= 1'b1;
+                // Encode held_grant
+                grant_encoded_reg <= {W{1'b0}};
+                // Need to find which bit is set in held_grant
+                // Let's use a function or loop
+                // For simplicity, let's compute it
+                // Actually, we can store the encoded value when we set held_grant
+            end else begin
+                grant_reg <= grant_onehot_sel;
+                grant_valid_reg <= grant_valid_sel;
+                grant_encoded_reg <= grant_sel;
+                
+                // Update held state
+                if (ARB_BLOCK && grant_valid_sel) begin
+                    held_grant <= grant_onehot_sel;
+                    held_valid <= 1'b1;
+                end else begin
+                    held_valid <= 1'b0;
+                end
+                
+                // Update round-robin pointer
+                if (ARB_TYPE_ROUND_ROBIN && grant_valid_sel) begin
+                    rr_ptr <= grant_sel + 1'b1;
+                    // Wrap around if needed
+                    if (grant_sel == PORTS[W-1:0]-1) begin
+                        rr_ptr <= {W{1'b0}};
+                    end
+                end
+            end
+        end
+    end
+
+    // We need to properly encode held_grant. Let's add a register for held encoded value
+    reg [W-1:0] held_encoded;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            held_encoded <= {W{1'b0}};
+        end else begin
+            if (ARB_BLOCK && grant_valid_sel && !(ARB_BLOCK && held_valid && !release)) begin
+                held_encoded <= grant_sel;
+            end
+        end
+    end
+
+    // Fix the always block to use held_encoded
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            grant_reg <= {PORTS{1'b0}};
+            grant_valid_reg <= 1'b0;
+            grant_encoded_reg <= {W{1'b0}};
+            held_grant <= {PORTS{1'b0}};
+            held_valid <= 1'b0;
+            rr_ptr <= {W{1'b0}};
+        end else begin
+            if (ARB_BLOCK && held_valid && !release) begin
+                grant_reg <= held_grant;
+                grant_valid_reg <= 1'b1;
+                grant_encoded_reg <= held_encoded;
+            end else begin
+                grant_reg <= grant_onehot_sel;
+                grant_valid_reg <= grant_valid_sel;
+                grant_encoded_reg <= grant_sel;
+                
+                if (ARB_BLOCK && grant_valid_sel) begin
+                    held_grant <= grant_onehot_sel;
+                    held_valid <= 1'b1;
+                end else begin
+                    held_valid <= 1'b0;
+                end
+                
+                if (ARB_TYPE_ROUND_ROBIN && grant_valid_sel) begin
+                    if (grant_sel == PORTS[W-1:0]-1) begin
+                        rr_ptr <= {W{1'b0}};
+                    end else begin
+                        rr_ptr <= grant_sel + 1'b1;
+                    end
+                end
+            end
+        end
+    end
+
+    assign grant = grant_reg;
+    assign grant_valid = grant_valid_reg;
+    assign grant_encoded = grant_encoded_reg;
+
+endmodule

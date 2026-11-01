@@ -1,0 +1,309 @@
+```verilog
+module axis_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   pause_req,
+    output wire                   pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] status_depth,
+    output wire [$clog2(DEPTH):0] status_depth_commit,
+    output wire                   status_overflow,
+    output wire                   status_bad_frame,
+    output wire                   status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam DEPTH_MASK = DEPTH - 1;
+
+    // Internal signals
+    reg [ADDR_WIDTH:0] wr_ptr;
+    reg [ADDR_WIDTH:0] rd_ptr;
+    reg [ADDR_WIDTH:0] depth_reg;
+    reg [ADDR_WIDTH:0] depth_commit_reg;
+
+    // RAM storage
+    reg [DATA_WIDTH-1:0] ram_data [0:DEPTH-1];
+    reg [KEEP_WIDTH-1:0] ram_keep [0:DEPTH-1];
+    reg                  ram_last [0:DEPTH-1];
+    reg [ID_WIDTH-1:0]   ram_id   [0:DEPTH-1];
+    reg [DEST_WIDTH-1:0] ram_dest [0:DEPTH-1];
+    reg [USER_WIDTH-1:0] ram_user [0:DEPTH-1];
+
+    // Write side
+    wire wr_en = s_axis_tvalid & s_axis_tready;
+    wire [ADDR_WIDTH-1:0] wr_addr = wr_ptr[ADDR_WIDTH-1:0];
+
+    // Read side
+    wire [ADDR_WIDTH-1:0] rd_addr = rd_ptr[ADDR_WIDTH-1:0];
+    wire rd_en = m_axis_tvalid & m_axis_tready;
+
+    // Output FIFO (if enabled)
+    reg [DATA_WIDTH-1:0] out_data;
+    reg [KEEP_WIDTH-1:0] out_keep;
+    reg                  out_last;
+    reg [ID_WIDTH-1:0]   out_id;
+    reg [DEST_WIDTH-1:0] out_dest;
+    reg [USER_WIDTH-1:0] out_user;
+    reg                  out_valid;
+
+    // Frame tracking
+    reg                  in_frame;
+    reg                  frame_bad;
+    reg                  frame_oversize;
+    reg [ADDR_WIDTH:0]   frame_count;
+
+    // Pause logic
+    reg                  pause_active;
+
+    // Status pulses
+    reg                  overflow_pulse;
+    reg                  bad_frame_pulse;
+    reg                  good_frame_pulse;
+
+    // RAM read pipeline
+    reg [DATA_WIDTH-1:0] ram_rd_data;
+    reg [KEEP_WIDTH-1:0] ram_rd_keep;
+    reg                  ram_rd_last;
+    reg [ID_WIDTH-1:0]   ram_rd_id;
+    reg [DEST_WIDTH-1:0] ram_rd_dest;
+    reg [USER_WIDTH-1:0] ram_rd_user;
+    reg                  ram_rd_valid;
+
+    // Compute depth
+    wire [ADDR_WIDTH:0] depth = wr_ptr - rd_ptr;
+
+    // Full and empty
+    wire full = (depth == DEPTH);
+    wire empty = (depth == 0);
+
+    // Pause logic
+    wire pause_effective = PAUSE_ENABLE ? pause_req : 1'b0;
+    wire frame_pause_active = FRAME_PAUSE ? (in_frame & pause_effective) : pause_effective;
+
+    // Write ready
+    wire wr_ready_base = !full;
+    wire wr_ready_pause = !frame_pause_active;
+    wire wr_ready_drop = DROP_WHEN_FULL ? 1'b1 : wr_ready_base;
+    wire s_axis_tready_internal = wr_ready_drop & wr_ready_pause;
+    assign s_axis_tready = s_axis_tready_internal;
+
+    // Overflow detection
+    wire overflow = s_axis_tvalid & full & !DROP_WHEN_FULL;
+    assign status_overflow = overflow;
+
+    // Frame tracking
+    wire frame_start = s_axis_tvalid & s_axis_tready & !in_frame;
+    wire frame_end = s_axis_tvalid & s_axis_tready & s_axis_tlast;
+
+    // Bad frame detection
+    wire bad_frame_det = USER_ENABLE & (s_axis_tuser & USER_BAD_FRAME_MASK) == USER_BAD_FRAME_VALUE;
+    wire bad_frame_event = s_axis_tvalid & s_axis_tready & bad_frame_det;
+
+    // Oversize frame detection
+    wire oversize_det = (frame_count == DEPTH) & !s_axis_tlast;
+    wire oversize_event = s_axis_tvalid & s_axis_tready & oversize_det;
+
+    // Drop logic
+    wire drop_frame = (DROP_OVERSIZE_FRAME & frame_oversize) | (DROP_BAD_FRAME & frame_bad);
+    wire drop_word = drop_frame;
+
+    // Mark when full
+    wire mark_full = MARK_WHEN_FULL & full & s_axis_tvalid & s_axis_tready;
+
+    // Write to RAM
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            wr_ptr <= 0;
+            rd_ptr <= 0;
+            depth_reg <= 0;
+            depth_commit_reg <= 0;
+            in_frame <= 0;
+            frame_bad <= 0;
+            frame_oversize <= 0;
+            frame_count <= 0;
+            pause_active <= 0;
+            overflow_pulse <= 0;
+            bad_frame_pulse <= 0;
+            good_frame_pulse <= 0;
+            ram_rd_valid <= 0;
+            out_valid <= 0;
+        end else begin
+            // Update pointers
+            if (wr_en & !drop_word) begin
+                wr_ptr <= wr_ptr + 1;
+            end
+            if (rd_en) begin
+                rd_ptr <= rd_ptr + 1;
+            end
+
+            // Update depth
+            depth_reg <= depth;
+            depth_commit_reg <= depth;
+
+            // Frame tracking
+            if (frame_start) begin
+                in_frame <= 1;
+                frame_bad <= 0;
+                frame_oversize <= 0;
+                frame_count <= 1;
+            end else if (in_frame) begin
+                if (frame_end) begin
+                    in_frame <= 0;
+                    frame_count <= 0;
+                end else if (wr_en & !drop_word) begin
+                    frame_count <= frame_count + 1;
+                    if (frame_count == DEPTH) begin
+                        frame_oversize <= 1;
+                    end
+                end
+            end
+
+            // Bad frame tracking
+            if (bad_frame_event) begin
+                frame_bad <= 1;
+            end
+
+            // Pause
+            pause_active <= pause_effective;
+
+            // Status pulses
+            overflow_pulse <= overflow;
+            bad_frame_pulse <= bad_frame_event;
+            good_frame_pulse <= frame_end & !frame_bad & !frame_oversize;
+        end
+    end
+
+    // RAM write
+    always @(posedge clk) begin
+        if (wr_en & !drop_word) begin
+            ram_data[wr_addr] <= s_axis_tdata;
+            ram_keep[wr_addr] <= s_axis_tkeep;
+            ram_last[wr_addr] <= s_axis_tlast;
+            ram_id[wr_addr]   <= s_axis_tid;
+            ram_dest[wr_addr] <= s_axis_tdest;
+            ram_user[wr_addr] <= s_axis_tuser;
+        end
+    end
+
+    // RAM read
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            ram_rd_valid <= 0;
+        end else begin
+            if (rd_en) begin
+                ram_rd_valid <= 1;
+                ram_rd_data  <= ram_data[rd_addr];
+                ram_rd_keep  <= ram_keep[rd_addr];
+                ram_rd_last  <= ram_last[rd_addr];
+                ram_rd_id    <= ram_id[rd_addr];
+                ram_rd_dest  <= ram_dest[rd_addr];
+                ram_rd_user  <= ram_user[rd_addr];
+            end else begin
+                ram_rd_valid <= 0;
+            end
+        end
+    end
+
+    // Output FIFO
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            out_valid <= 0;
+        end else begin
+            if (OUTPUT_FIFO_ENABLE) begin
+                if (ram_rd_valid & !out_valid) begin
+                    out_valid <= 1;
+                    out_data  <= ram_rd_data;
+                    out_keep  <= ram_rd_keep;
+                    out_last  <= ram_rd_last;
+                    out_id    <= ram_rd_id;
+                    out_dest  <= ram_rd_dest;
+                    out_user  <= ram_rd_user;
+                end else if (out_valid & m_axis_tready) begin
+                    out_valid <= 0;
+                end
+            end else begin
+                out_valid <= ram_rd_valid;
+                if (ram_rd_valid) begin
+                    out_data  <= ram_rd_data;
+                    out_keep  <= ram_rd_keep;
+                    out_last  <= ram_rd_last;
+                    out_id    <= ram_rd_id;
+                    out_dest  <= ram_rd_dest;
+                    out_user  <= ram_rd_user;
+                end
+            end
+        end
+    end
+
+    // Output assignments
+    assign m_axis_tvalid = out_valid;
+    assign m_axis_tdata  = out_data;
+    assign m_axis_tkeep  = out_keep;
+    assign m_axis_tlast  = out_last;
+    assign m_axis_tid    = out_id;
+    assign m_axis_tdest  = out_dest;
+    assign m_axis_tuser  = out_user;
+
+    // Pause ack
+    assign pause_ack = PAUSE_ENABLE ? pause_active : 1'b0;
+
+    // Status outputs
+    assign status_depth = depth_reg;
+    assign status_depth_commit = depth_commit_reg;
+    assign status_bad_frame = bad_frame_pulse;
+    assign status_good_frame = good_frame_pulse;
+
+endmodule
+```<|im_end|>

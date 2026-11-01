@@ -1,0 +1,209 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam AW = LOG_DEPTH;
+
+    // Request FIFO (src -> dst)
+    reg [DATA_WIDTH-1:0] req_fifo [0:DEPTH-1];
+    reg [ADDR_WIDTH-1:0] req_addr_fifo [0:DEPTH-1];
+    reg [DATA_WIDTH/8-1:0] req_strb_fifo [0:DEPTH-1];
+    reg [2:0] req_prot_fifo [0:DEPTH-1];
+    reg req_write_fifo [0:DEPTH-1];
+    reg [AW-1:0] req_wr_ptr, req_rd_ptr;
+    reg req_wr_en, req_rd_en;
+
+    // Response FIFO (dst -> src)
+    reg [DATA_WIDTH-1:0] rsp_fifo [0:DEPTH-1];
+    reg rsp_err_fifo [0:DEPTH-1];
+    reg [AW-1:0] rsp_wr_ptr, rsp_rd_ptr;
+    reg rsp_wr_en, rsp_rd_en;
+
+    // Handshake signals
+    reg req_valid_src, req_valid_dst;
+    reg rsp_valid_src, rsp_valid_dst;
+    reg req_ready_src, req_ready_dst;
+    reg rsp_ready_src, rsp_ready_dst;
+
+    // 2-flop synchronizers
+    reg [1:0] req_valid_sync;
+    reg [1:0] rsp_valid_sync;
+    reg [1:0] req_ready_sync;
+    reg [1:0] rsp_ready_sync;
+
+    // APB state machines
+    reg src_state;
+    reg dst_state;
+    localparam SRC_IDLE = 1'b0;
+    localparam SRC_WAIT = 1'b1;
+    localparam DST_IDLE = 1'b0;
+    localparam DST_WAIT = 1'b1;
+
+    // Source side: APB master to FIFO
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_state <= SRC_IDLE;
+            src_pready_o <= 1'b0;
+            src_prdata_o <= {DATA_WIDTH{1'b0}};
+            src_pslverr_o <= 1'b0;
+            req_wr_ptr <= {AW{1'b0}};
+            rsp_rd_ptr <= {AW{1'b0}};
+            req_valid_src <= 1'b0;
+            rsp_ready_src <= 1'b0;
+        end else begin
+            case (src_state)
+                SRC_IDLE: begin
+                    src_pready_o <= 1'b0;
+                    if (src_psel_i && req_ready_src) begin
+                        src_state <= SRC_WAIT;
+                        src_pready_o <= 1'b1;
+                        req_wr_en <= 1'b1;
+                        req_fifo[req_wr_ptr] <= src_pwdata_i;
+                        req_addr_fifo[req_wr_ptr] <= src_paddr_i;
+                        req_strb_fifo[req_wr_ptr] <= src_pstrb_i;
+                        req_prot_fifo[req_wr_ptr] <= src_pprot_i;
+                        req_write_fifo[req_wr_ptr] <= src_pwrite_i;
+                        req_wr_ptr <= req_wr_ptr + 1'b1;
+                        req_valid_src <= 1'b1;
+                    end else begin
+                        req_wr_en <= 1'b0;
+                        req_valid_src <= 1'b0;
+                    end
+                end
+                SRC_WAIT: begin
+                    src_pready_o <= 1'b1;
+                    if (rsp_valid_src) begin
+                        src_state <= SRC_IDLE;
+                        src_prdata_o <= rsp_fifo[rsp_rd_ptr];
+                        src_pslverr_o <= rsp_err_fifo[rsp_rd_ptr];
+                        rsp_rd_en <= 1'b1;
+                        rsp_rd_ptr <= rsp_rd_ptr + 1'b1;
+                        rsp_ready_src <= 1'b1;
+                    end else begin
+                        rsp_rd_en <= 1'b0;
+                        rsp_ready_src <= 1'b0;
+                    end
+                end
+                default: begin
+                    src_state <= SRC_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Destination side: FIFO to APB slave
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_state <= DST_IDLE;
+            dst_psel_o <= 1'b0;
+            dst_penable_o <= 1'b0;
+            dst_pwrite_o <= 1'b0;
+            dst_paddr_o <= {ADDR_WIDTH{1'b0}};
+            dst_pwdata_o <= {DATA_WIDTH{1'b0}};
+            dst_pstrb_o <= {(DATA_WIDTH/8){1'b0}};
+            dst_pprot_o <= 3'b0;
+            req_rd_ptr <= {AW{1'b0}};
+            rsp_wr_ptr <= {AW{1'b0}};
+            req_ready_dst <= 1'b0;
+            rsp_valid_dst <= 1'b0;
+        end else begin
+            case (dst_state)
+                DST_IDLE: begin
+                    dst_psel_o <= 1'b0;
+                    dst_penable_o <= 1'b0;
+                    if (req_valid_dst && rsp_ready_dst) begin
+                        dst_state <= DST_WAIT;
+                        dst_psel_o <= 1'b1;
+                        dst_penable_o <= 1'b0;
+                        dst_pwrite_o <= req_write_fifo[req_rd_ptr];
+                        dst_paddr_o <= req_addr_fifo[req_rd_ptr];
+                        dst_pwdata_o <= req_fifo[req_rd_ptr];
+                        dst_pstrb_o <= req_strb_fifo[req_rd_ptr];
+                        dst_pprot_o <= req_prot_fifo[req_rd_ptr];
+                        req_rd_en <= 1'b1;
+                        req_rd_ptr <= req_rd_ptr + 1'b1;
+                        req_ready_dst <= 1'b1;
+                    end else begin
+                        req_rd_en <= 1'b0;
+                        req_ready_dst <= 1'b0;
+                    end
+                end
+                DST_WAIT: begin
+                    dst_psel_o <= 1'b1;
+                    dst_penable_o <= 1'b1;
+                    if (dst_pready_i) begin
+                        dst_state <= DST_IDLE;
+                        rsp_wr_en <= 1'b1;
+                        rsp_fifo[rsp_wr_ptr] <= dst_prdata_i;
+                        rsp_err_fifo[rsp_wr_ptr] <= dst_pslverr_i;
+                        rsp_wr_ptr <= rsp_wr_ptr + 1'b1;
+                        rsp_valid_dst <= 1'b1;
+                    end else begin
+                        rsp_wr_en <= 1'b0;
+                        rsp_valid_dst <= 1'b0;
+                    end
+                end
+                default: begin
+                    dst_state <= DST_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Synchronizers: src -> dst
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            req_valid_sync <= 2'b00;
+            rsp_ready_sync <= 2'b00;
+        end else begin
+            req_valid_sync <= {req_valid_sync[0], req_valid_src};
+            rsp_ready_sync <= {rsp_ready_sync[0], rsp_ready_src};
+        end
+    end
+
+    // Synchronizers: dst -> src
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            rsp_valid_sync <= 2'b00;
+            req_ready_sync <= 2'b00;
+        end else begin
+            rsp_valid_sync <= {rsp_valid_sync[0], rsp_valid_dst};
+            req_ready_sync <= {req_ready_sync[0], req_ready_dst};
+        end
+    end
+
+    // Assign synchronized signals
+    assign req_valid_dst = req_valid_sync[1];
+    assign rsp_ready_dst = rsp_ready_sync[1];
+    assign rsp_valid_src = rsp_valid_sync[1];
+    assign req_ready_src = req_ready_sync[1];
+
+endmodule

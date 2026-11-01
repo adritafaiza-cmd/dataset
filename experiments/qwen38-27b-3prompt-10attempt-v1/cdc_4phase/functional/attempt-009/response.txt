@@ -1,0 +1,181 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Four-phase handshake signals
+  // req: source to destination (request)
+  // ack: destination to source (acknowledge)
+  // Each is synchronized across the clock domain boundary.
+
+  // Source domain: req generation
+  // Destination domain: ack generation
+
+  // We use a 4-phase handshake:
+  // Idle: req=0, ack=0
+  // Phase 1: req=1, ack=0 (source asserts req)
+  // Phase 2: req=1, ack=1 (destination asserts ack)
+  // Phase 3: req=0, ack=1 (source deasserts req)
+  // Phase 4: req=0, ack=0 (destination deasserts ack) -> back to idle
+
+  // Source domain registers
+  reg src_req;
+  reg src_ack;
+  reg [WIDTH-1:0] src_data_reg;
+  reg src_valid_reg;
+  reg src_ready_int;
+
+  // Destination domain registers
+  reg dst_req;
+  reg dst_ack;
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_valid_reg;
+
+  // Synchronization of req from source to destination
+  reg [2:0] req_sync;
+  wire req_dst = req_sync[2];
+
+  // Synchronization of ack from destination to source
+  reg [2:0] ack_sync;
+  wire ack_src = ack_sync[2];
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_req <= 1'b0;
+      src_ack <= 1'b0;
+      src_data_reg <= {WIDTH{1'b0}};
+      src_valid_reg <= 1'b0;
+      src_ready_int <= 1'b1;
+    end else begin
+      // Four-phase handshake in source domain
+      // State is determined by src_req and src_ack
+      // Idle: src_req=0, src_ack=0
+      // Phase 1: src_req=1, src_ack=0
+      // Phase 2: src_req=1, src_ack=1
+      // Phase 3: src_req=0, src_ack=1
+
+      if (src_req == 1'b0 && src_ack == 1'b0) begin
+        // Idle state
+        if (src_valid_i) begin
+          // Accept new item
+          src_req <= 1'b1;
+          src_data_reg <= src_data_i;
+          src_valid_reg <= 1'b1;
+          src_ready_int <= 1'b0;
+        end else begin
+          src_ready_int <= 1'b1;
+        end
+      end else if (src_req == 1'b1 && src_ack == 1'b0) begin
+        // Phase 1: waiting for ack
+        src_ready_int <= 1'b0;
+        if (ack_src) begin
+          // Move to phase 2
+          src_ack <= 1'b1;
+        end
+      end else if (src_req == 1'b1 && src_ack == 1'b1) begin
+        // Phase 2: waiting to deassert req
+        src_ready_int <= 1'b0;
+        src_req <= 1'b0;
+      end else if (src_req == 1'b0 && src_ack == 1'b1) begin
+        // Phase 3: waiting for ack to deassert
+        src_ready_int <= 1'b0;
+        if (!ack_src) begin
+          // Back to idle
+          src_ack <= 1'b0;
+          src_ready_int <= 1'b1;
+        end
+      end
+    end
+  end
+
+  // Destination domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req <= 1'b0;
+      dst_ack <= 1'b0;
+      dst_data_reg <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+    end else begin
+      // Four-phase handshake in destination domain
+      // State is determined by dst_req and dst_ack
+      // Idle: dst_req=0, dst_ack=0
+      // Phase 1: dst_req=1, dst_ack=0
+      // Phase 2: dst_req=1, dst_ack=1
+      // Phase 3: dst_req=0, dst_ack=1
+
+      if (dst_req == 1'b0 && dst_ack == 1'b0) begin
+        // Idle state
+        if (req_dst) begin
+          // Move to phase 1
+          dst_req <= 1'b1;
+          dst_valid_reg <= 1'b1;
+        end
+      end else if (dst_req == 1'b1 && dst_ack == 1'b0) begin
+        // Phase 1: waiting to assert ack
+        dst_ack <= 1'b1;
+      end else if (dst_req == 1'b1 && dst_ack == 1'b1) begin
+        // Phase 2: waiting for req to deassert
+        if (!req_dst) begin
+          // Move to phase 3
+          dst_req <= 1'b0;
+        end
+      end else if (dst_req == 1'b0 && dst_ack == 1'b1) begin
+        // Phase 3: waiting to deassert ack
+        dst_ack <= 1'b0;
+        dst_valid_reg <= 1'b0;
+      end
+    end
+  end
+
+  // Synchronize req from source to destination
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      req_sync <= 3'b000;
+    end else begin
+      req_sync <= {req_sync[1:0], src_req};
+    end
+  end
+
+  // Synchronize ack from destination to source
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      ack_sync <= 3'b000;
+    end else begin
+      ack_sync <= {ack_sync[1:0], dst_ack};
+    end
+  end
+
+  // Data path: capture data when req is asserted in destination domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_reg <= {WIDTH{1'b0}};
+    end else begin
+      if (req_dst && !dst_req) begin
+        // Capture data when new request arrives
+        dst_data_reg <= src_data_reg;
+      end
+    end
+  end
+
+  // Outputs
+  assign src_ready_o = src_ready_int;
+  assign dst_data_o = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+endmodule
+```<|im_end|>

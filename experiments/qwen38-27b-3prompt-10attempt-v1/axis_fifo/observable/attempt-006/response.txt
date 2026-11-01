@@ -1,0 +1,382 @@
+```verilog
+module axis_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   pause_req,
+    output wire                   pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] status_depth,
+    output wire [$clog2(DEPTH):0] status_depth_commit,
+    output wire                   status_overflow,
+    output wire                   status_bad_frame,
+    output wire                   status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam DEPTH_MASK = DEPTH - 1;
+
+    // Internal signals
+    wire [DATA_WIDTH-1:0]  ram_data;
+    wire [KEEP_WIDTH-1:0]  ram_keep;
+    wire                    ram_last;
+    wire [ID_WIDTH-1:0]    ram_tid;
+    wire [DEST_WIDTH-1:0]  ram_tdest;
+    wire [USER_WIDTH-1:0]  ram_tuser;
+
+    // Write pointer and read pointer
+    reg [ADDR_WIDTH:0] wptr;
+    reg [ADDR_WIDTH:0] rptr;
+
+    // RAM storage
+    reg [DATA_WIDTH-1:0]  mem_data [0:DEPTH-1];
+    reg [KEEP_WIDTH-1:0]  mem_keep [0:DEPTH-1];
+    reg                    mem_last [0:DEPTH-1];
+    reg [ID_WIDTH-1:0]    mem_tid [0:DEPTH-1];
+    reg [DEST_WIDTH-1:0]  mem_tdest [0:DEPTH-1];
+    reg [USER_WIDTH-1:0]  mem_tuser [0:DEPTH-1];
+
+    // Frame tracking
+    reg frame_active;
+    reg [ADDR_WIDTH:0] frame_start_ptr;
+    reg frame_oversize;
+    reg frame_bad;
+
+    // Status registers
+    reg status_overflow_reg;
+    reg status_bad_frame_reg;
+    reg status_good_frame_reg;
+
+    // Pause logic
+    reg pause_active;
+
+    // Write enable
+    wire write_en;
+    wire read_en;
+
+    // Depth calculation
+    wire [$clog2(DEPTH):0] depth;
+    wire [$clog2(DEPTH):0] depth_commit;
+
+    // Full and empty
+    wire full;
+    wire empty;
+
+    // Frame drop logic
+    wire drop_frame;
+    wire mark_frame;
+
+    // Output valid
+    wire out_valid;
+
+    // Calculate depth
+    assign depth = wptr - rptr;
+    assign depth_commit = wptr - rptr;
+
+    assign full = (depth == DEPTH);
+    assign empty = (depth == 0);
+
+    // Pause logic
+    assign pause_ack = pause_active;
+
+    // Determine if we should accept input
+    wire can_accept;
+    wire should_drop;
+    wire should_mark;
+
+    assign should_drop = (DROP_WHEN_FULL && full) || (DROP_OVERSIZE_FRAME && frame_oversize) || (DROP_BAD_FRAME && frame_bad);
+    assign should_mark = (MARK_WHEN_FULL && full);
+
+    // Frame oversize detection: if frame_active and we've written DEPTH beats without tlast
+    // Actually, oversize means the frame exceeds DEPTH. We track this by counting beats in current frame.
+    // Simpler: if frame is active and depth reaches DEPTH, the frame is oversize.
+    
+    // Let's use a frame beat counter
+    reg [ADDR_WIDTH:0] frame_beat_count;
+
+    // Write logic
+    assign write_en = s_axis_tvalid && s_axis_tready && !rst;
+
+    // Read logic
+    assign read_en = m_axis_tvalid && m_axis_tready && !rst;
+
+    // Output valid: we have data and not paused
+    assign out_valid = !empty && !pause_active;
+    assign m_axis_tvalid = out_valid;
+
+    // Read address
+    wire [ADDR_WIDTH-1:0] raddr;
+    assign raddr = rptr[ADDR_WIDTH-1:0];
+
+    // RAM read
+    assign ram_data  = mem_data[raddr];
+    assign ram_keep  = mem_keep[raddr];
+    assign ram_last  = mem_last[raddr];
+    assign ram_tid   = mem_tid[raddr];
+    assign ram_tdest = mem_tdest[raddr];
+    assign ram_tuser = mem_tuser[raddr];
+
+    // Output data
+    assign m_axis_tdata  = ram_data;
+    assign m_axis_tkeep  = ram_keep;
+    assign m_axis_tlast  = ram_last;
+    assign m_axis_tid    = ram_tid;
+    assign m_axis_tdest  = ram_tdest;
+    assign m_axis_tuser  = ram_tuser;
+
+    // Write address
+    wire [ADDR_WIDTH-1:0] waddr;
+    assign waddr = wptr[ADDR_WIDTH-1:0];
+
+    // Determine if this write completes a frame
+    wire write_is_last;
+    assign write_is_last = s_axis_tlast;
+
+    // Frame state machine
+    // When not in a frame, first beat starts a frame
+    // When in a frame, track beats until tlast
+
+    // Determine if we're starting a new frame
+    wire start_frame;
+    assign start_frame = !frame_active && write_en;
+
+    // Determine if we're ending a frame
+    wire end_frame;
+    assign end_frame = frame_active && write_en && write_is_last;
+
+    // Frame oversize: if frame is active and we're about to write beyond DEPTH
+    // Actually, if frame_active and depth == DEPTH, the next write would make it oversize
+    // But we can only hold DEPTH beats total. So if frame is active and depth reaches DEPTH, 
+    // the frame is oversize (it needs more than DEPTH beats).
+    
+    // Let's track: if frame_active and depth == DEPTH, mark as oversize
+    wire frame_oversize_det;
+    assign frame_oversize_det = frame_active && (depth == DEPTH);
+
+    // Frame bad detection: based on user sideband
+    wire frame_bad_det;
+    assign frame_bad_det = (USER_ENABLE && (s_axis_tuser & USER_BAD_FRAME_MASK) == USER_BAD_FRAME_VALUE);
+
+    // Determine if we should drop this frame
+    // Drop if: (DROP_OVERSIZE_FRAME && frame_oversize) || (DROP_BAD_FRAME && frame_bad)
+    // But we need to decide at the start of the frame or during?
+    // Typically, we decide when we see the frame is bad/oversize.
+    // For simplicity, we'll drop the entire frame if any beat in the frame triggers drop condition.
+    // Actually, let's drop the frame if the frame is marked as bad or oversize.
+    // We'll track frame_bad and frame_oversize as latched values.
+
+    // Latch frame_bad when frame starts or when we see a bad user signal
+    // Latch frame_oversize when depth reaches DEPTH while frame is active
+
+    // For drop/mark when full: this applies to the current beat, not the whole frame
+    // DROP_WHEN_FULL: if FIFO is full, drop the incoming beat
+    // MARK_WHEN_FULL: if FIFO is full, mark the incoming beat (set user bit)
+
+    // Let's simplify: 
+    // - If DROP_WHEN_FULL and full, don't accept the beat (tready=0)
+    // - If MARK_WHEN_FULL and full, accept the beat but mark it
+    // - Frame drop: if DROP_OVERSIZE_FRAME and frame becomes oversize, drop all beats of this frame
+    // - Frame bad: if DROP_BAD_FRAME and frame is bad, drop all beats of this frame
+
+    // For frame drop, we need to know if the current frame should be dropped.
+    // We'll set a flag when the frame is determined to be bad/oversize, and then drop all subsequent beats of that frame.
+
+    // Let's use a "drop_current_frame" flag
+    reg drop_current_frame;
+
+    // Determine if we should accept the current beat
+    wire accept_beat;
+    
+    // If we're dropping the current frame, don't accept
+    // If DROP_WHEN_FULL and full, don't accept
+    // Otherwise, accept if not full (or if we're marking)
+
+    assign accept_beat = write_en && !drop_current_frame && !(DROP_WHEN_FULL && full);
+
+    // tready
+    assign s_axis_tready = !rst && !full && !pause_active && !drop_current_frame && !(DROP_WHEN_FULL && full);
+
+    // Actually, tready should be high when we can accept. Let's refine:
+    // tready = !rst && !pause_active && !drop_current_frame && !(DROP_WHEN_FULL && full)
+    // But if MARK_WHEN_FULL, we still accept even when full? No, if full, we can't write.
+    // MARK_WHEN_FULL probably means: if the FIFO is full, mark the beat as bad but still try to write? 
+    // That doesn't make sense if FIFO is full. Let's assume MARK_WHEN_FULL means:
+    // if the FIFO is full, mark the incoming beat with a bad frame indicator, but still accept it
+    // (implying the FIFO has some backpressure handling). But if FIFO is full, we can't write.
+    // Let's assume MARK_WHEN_FULL is used in conjunction with not dropping, so we accept and mark.
+    // But if FIFO is full, we can't accept. So maybe MARK_WHEN_FULL means:
+    // when the FIFO is about to become full (depth == DEPTH-1), mark the next beat.
+    // Let's interpret: MARK_WHEN_FULL means if depth == DEPTH-1, mark the incoming beat.
+
+    // Let's redefine:
+    // DROP_WHEN_FULL: if depth == DEPTH, don't accept (tready=0)
+    // MARK_WHEN_FULL: if depth == DEPTH-1, accept but mark the beat as bad
+
+    wire mark_beat;
+    assign mark_beat = MARK_WHEN_FULL && (depth == DEPTH - 1) && write_en;
+
+    // Update tready
+    assign s_axis_tready = !rst && !pause_active && !drop_current_frame && !(DROP_WHEN_FULL && full);
+
+    // Write to RAM
+    always @(posedge clk) begin
+        if (rst) begin
+            wptr <= 0;
+            rptr <= 0;
+            frame_active <= 0;
+            frame_start_ptr <= 0;
+            frame_beat_count <= 0;
+            frame_oversize <= 0;
+            frame_bad <= 0;
+            drop_current_frame <= 0;
+            status_overflow_reg <= 0;
+            status_bad_frame_reg <= 0;
+            status_good_frame_reg <= 0;
+            pause_active <= 0;
+        end else begin
+            // Update pointers
+            if (write_en && accept_beat) begin
+                mem_data[waddr]  <= s_axis_tdata;
+                mem_keep[waddr]  <= s_axis_tkeep;
+                mem_last[waddr]  <= s_axis_tlast;
+                mem_tid[waddr]   <= s_axis_tid;
+                mem_tdest[waddr] <= s_axis_tdest;
+                
+                // Mark if needed
+                if (mark_beat) begin
+                    mem_tuser[waddr] <= (s_axis_tuser | USER_BAD_FRAME_MASK);
+                end else begin
+                    mem_tuser[waddr] <= s_axis_tuser;
+                end
+                
+                wptr <= wptr + 1;
+            end
+
+            if (read_en) begin
+                rptr <= rptr + 1;
+            end
+
+            // Frame tracking
+            if (write_en && accept_beat) begin
+                if (!frame_active) begin
+                    // Start new frame
+                    frame_active <= 1;
+                    frame_start_ptr <= wptr;
+                    frame_beat_count <= 1;
+                    frame_oversize <= 0;
+                    frame_bad <= frame_bad_det;
+                    drop_current_frame <= (DROP_BAD_FRAME && frame_bad_det);
+                end else begin
+                    // Continue frame
+                    frame_beat_count <= frame_beat_count + 1;
+                    
+                    // Check for oversize
+                    if (frame_beat_count == DEPTH - 1) begin
+                        frame_oversize <= 1;
+                        if (DROP_OVERSIZE_FRAME) begin
+                            drop_current_frame <= 1;
+                        end
+                    end
+                    
+                    // Check for bad
+                    if (frame_bad_det) begin
+                        frame_bad <= 1;
+                        if (DROP_BAD_FRAME) begin
+                            drop_current_frame <= 1;
+                        end
+                    end
+                end
+            end
+
+            if (end_frame) begin
+                // End of frame
+                frame_active <= 0;
+                frame_beat_count <= 0;
+                frame_oversize <= 0;
+                frame_bad <= 0;
+                drop_current_frame <= 0;
+                
+                // Update status
+                if (frame_bad || frame_oversize) begin
+                    status_bad_frame_reg <= 1;
+                end else begin
+                    status_good_frame_reg <= 1;
+                end
+            end
+
+            // Overflow status
+            if (s_axis_tvalid && !s_axis_tready) begin
+                status_overflow_reg <= 1;
+            end
+
+            // Pause
+            if (PAUSE_ENABLE) begin
+                if (pause_req) begin
+                    pause_active <= 1;
+                end else if (empty) begin
+                    pause_active <= 0;
+                end
+            end
+        end
+    end
+
+    // Status outputs
+    assign status_depth = depth;
+    assign status_depth_commit = depth_commit;
+    assign status_overflow = status_overflow_reg;
+    assign status_bad_frame = status_bad_frame_reg;
+    assign status_good_frame = status_good_frame_reg;
+
+endmodule
+```<|im_end|>

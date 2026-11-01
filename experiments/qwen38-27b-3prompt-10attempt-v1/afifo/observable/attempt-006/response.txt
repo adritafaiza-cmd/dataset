@@ -1,0 +1,137 @@
+```verilog
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	localparam LGFIFO_P1 = LGFIFO + 1;
+	localparam LGFIFO_P2 = LGFIFO + 2;
+	localparam DEPTH = 1 << LGFIFO;
+	localparam MASK  = DEPTH - 1;
+
+	// Write side
+	reg [LGFIFO-1:0] wr_ptr;
+	reg [LGFIFO_P1-1:0] wr_ptr_gray;
+	reg [LGFIFO_P1-1:0] wr_ptr_gray_sync;
+
+	// Read side
+	reg [LGFIFO-1:0] rd_ptr;
+	reg [LGFIFO_P1-1:0] rd_ptr_gray;
+	reg [LGFIFO_P1-1:0] rd_ptr_gray_sync;
+
+	// Memory
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+
+	// Gray code conversion
+	function [LGFIFO_P1-1:0] bin2gray;
+		input [LGFIFO_P1-1:0] bin;
+		begin
+			bin2gray = bin ^ (bin >> 1);
+		end
+	endfunction
+
+	// Write clock domain
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_ptr      <= {LGFIFO{1'b0}};
+			wr_ptr_gray <= {LGFIFO_P1{1'b0}};
+		end else if (i_wr && !o_wr_full) begin
+			wr_ptr      <= wr_ptr + 1'b1;
+			wr_ptr_gray <= bin2gray(wr_ptr + 1'b1);
+		end
+	end
+
+	// Write data storage
+	always @(posedge i_wclk) begin
+		if (i_wr && !o_wr_full) begin
+			mem[wr_ptr] <= i_wr_data;
+		end
+	end
+
+	// Synchronize read pointer gray to write domain
+	reg [LGFIFO_P1-1:0] rd_ptr_gray_sync_r1, rd_ptr_gray_sync_r2;
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			rd_ptr_gray_sync_r1 <= {LGFIFO_P1{1'b0}};
+			rd_ptr_gray_sync_r2 <= {LGFIFO_P1{1'b0}};
+		end else begin
+			rd_ptr_gray_sync_r1 <= rd_ptr_gray;
+			rd_ptr_gray_sync_r2 <= rd_ptr_gray_sync_r1;
+		end
+	end
+
+	// Full flag
+	wire [LGFIFO_P1-1:0] rd_ptr_gray_sync_w = rd_ptr_gray_sync_r2;
+	wire full = (wr_ptr_gray == {~rd_ptr_gray_sync_w[LGFIFO_P1-1:LGFIFO], rd_ptr_gray_sync_w[LGFIFO-1:0]});
+
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			o_wr_full <= 1'b0;
+		else
+			o_wr_full <= full;
+	end
+
+	// Read clock domain
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_ptr      <= {LGFIFO{1'b0}};
+			rd_ptr_gray <= {LGFIFO_P1{1'b0}};
+		end else if (i_rd && !o_rd_empty) begin
+			rd_ptr      <= rd_ptr + 1'b1;
+			rd_ptr_gray <= bin2gray(rd_ptr + 1'b1);
+		end
+	end
+
+	// Synchronize write pointer gray to read domain
+	reg [LGFIFO_P1-1:0] wr_ptr_gray_sync_r1, wr_ptr_gray_sync_r2;
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			wr_ptr_gray_sync_r1 <= {LGFIFO_P1{1'b0}};
+			wr_ptr_gray_sync_r2 <= {LGFIFO_P1{1'b0}};
+		end else begin
+			wr_ptr_gray_sync_r1 <= wr_ptr_gray;
+			wr_ptr_gray_sync_r2 <= wr_ptr_gray_sync_r1;
+		end
+	end
+
+	// Empty flag
+	wire [LGFIFO_P1-1:0] wr_ptr_gray_sync_r = wr_ptr_gray_sync_r2;
+	wire empty = (rd_ptr_gray == wr_ptr_gray_sync_r);
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_empty <= 1'b1;
+		else
+			o_rd_empty <= empty;
+	end
+
+	// Read data output
+	reg [WIDTH-1:0] rd_data_reg;
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			rd_data_reg <= {WIDTH{1'b0}};
+		else if (i_rd && !o_rd_empty)
+			rd_data_reg <= mem[rd_ptr];
+	end
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_data <= {WIDTH{1'b0}};
+		else if (OPT_REGISTER_READS)
+			o_rd_data <= rd_data_reg;
+		else
+			o_rd_data <= mem[rd_ptr];
+	end
+
+endmodule
+```<|im_end|>

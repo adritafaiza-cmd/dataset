@@ -1,0 +1,113 @@
+module apbslave #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH,
+		localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+	) (
+		input	wire			PCLK, PRESETn,
+		input	wire			PSEL,
+		input	wire			PENABLE,
+		output	reg			PREADY,
+		input	wire	[AW-1:0]	PADDR,
+		input	wire			PWRITE,
+		input	wire	[DW-1:0]	PWDATA,
+		input	wire	[DW/8-1:0]	PWSTRB,
+		input	wire	[2:0]		PPROT,
+		output	reg	[DW-1:0]	PRDATA,
+		output	wire			PSLVERR
+	);
+
+	// Internal register file
+	reg [DW-1:0] mem [0:(2**(AW-APBLSB-1))-1];
+
+	// State machine
+	localparam S_IDLE = 1'b0;
+	localparam S_SETUP = 1'b1;
+	localparam S_ACCESS = 1'b1; // Simplified: use PSEL/PENABLE directly
+
+	// We'll use a simple approach:
+	// PREADY is high when not in setup phase (i.e., when PSEL is low or we're in access phase)
+	// Actually, standard APB: PREADY can be asserted in setup or access phase.
+	// For a simple slave, we can assert PREADY in the access phase.
+	// Let's use a state machine to track the phase.
+
+	reg state;
+	localparam ST_IDLE = 1'b0;
+	localparam ST_SETUP = 1'b1;
+	localparam ST_ACCESS = 1'b1; // This won't work, need 2 bits or different encoding
+
+	// Let's use a 2-bit state
+	reg [1:0] state;
+	localparam ST_IDLE = 2'b00;
+	localparam ST_SETUP = 2'b01;
+	localparam ST_ACCESS = 2'b10;
+
+	// Address decode
+	wire [AW-APBLSB-1:0] addr_index = PADDR[AW-1:APBLSB];
+
+	// Write enable
+	wire write_en = PSEL & PENABLE & PWRITE;
+	wire read_en = PSEL & PENABLE & ~PWRITE;
+
+	// Byte enable for each byte
+	// Generate byte enables
+	genvar i;
+	generate
+		for (i = 0; i < DW/8; i = i + 1) begin : gen_byte_en
+			wire byte_en = PWSTRB[i];
+			// Write to memory
+			always @(posedge PCLK or negedge PRESETn) begin
+				if (!PRESETn) begin
+					// Reset memory? Not required, but we can leave it.
+					// The spec says "After reset the slave must be idle."
+					// It doesn't say memory must be reset.
+				end else if (write_en && byte_en) begin
+					mem[addr_index][i*8 +: 8] <= PWDATA[i*8 +: 8];
+				end
+			end
+		end
+	endgenerate
+
+	// Read data
+	always @(*) begin
+		PRDATA = mem[addr_index];
+	end
+
+	// State machine
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			state <= ST_IDLE;
+			PREADY <= 1'b0;
+		end else begin
+			case (state)
+				ST_IDLE: begin
+					PREADY <= 1'b0;
+					if (PSEL) begin
+						state <= ST_SETUP;
+					end
+				end
+				ST_SETUP: begin
+					PREADY <= 1'b0;
+					if (PENABLE) begin
+						state <= ST_ACCESS;
+					end else if (!PSEL) begin
+						state <= ST_IDLE;
+					end
+				end
+				ST_ACCESS: begin
+					PREADY <= 1'b1;
+					state <= ST_IDLE;
+				end
+				default: begin
+					state <= ST_IDLE;
+					PREADY <= 1'b0;
+				end
+			endcase
+		end
+	end
+
+	// PSLVERR is always low for in-range accesses
+	assign PSLVERR = 1'b0;
+
+endmodule

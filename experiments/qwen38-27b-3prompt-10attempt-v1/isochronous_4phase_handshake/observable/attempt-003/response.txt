@@ -1,0 +1,197 @@
+```verilog
+module isochronous_4phase_handshake (
+    input  src_clk_i,
+    input  src_rst_ni,
+    input  src_valid_i,
+    output src_ready_o,
+    input  dst_clk_i,
+    input  dst_rst_ni,
+    output dst_valid_o,
+    input  dst_ready_i
+);
+
+    // Source side state
+    reg src_valid_r;
+    reg src_ready_r;
+
+    // Destination side state
+    reg dst_valid_r;
+    reg dst_ready_r;
+
+    // Synchronizers for signals crossing from source to destination
+    reg [1:0] src_valid_sync;
+    reg [1:0] src_ready_sync;
+
+    // Synchronizers for signals crossing from destination to source
+    reg [1:0] dst_valid_sync;
+    reg [1:0] dst_ready_sync;
+
+    // Synchronize src_valid_i to dst_clk domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_valid_sync <= 2'b00;
+        else
+            src_valid_sync <= {src_valid_sync[0], src_valid_i};
+    end
+
+    // Synchronize src_ready_r to dst_clk domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_ready_sync <= 2'b00;
+        else
+            src_ready_sync <= {src_ready_sync[0], src_ready_r};
+    end
+
+    // Synchronize dst_valid_r to src_clk domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_valid_sync <= 2'b00;
+        else
+            dst_valid_sync <= {dst_valid_sync[0], dst_valid_r};
+    end
+
+    // Synchronize dst_ready_i to src_clk domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ready_sync <= 2'b00;
+        else
+            dst_ready_sync <= {dst_ready_sync[0], dst_ready_i};
+    end
+
+    // Source side logic
+    // src_ready_o is high when source is ready to accept a new transfer
+    // In four-phase handshake, ready goes high when valid goes low (after completion)
+    // Initially after reset, ready should be high (idle state)
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_valid_r <= 1'b0;
+            src_ready_r <= 1'b1;
+        end else begin
+            // If valid is asserted and ready is asserted, transfer occurs
+            // After transfer, valid deasserts and ready deasserts
+            // When valid deasserts, ready asserts again
+            if (src_valid_r && src_ready_r) begin
+                // Transfer in progress, deassert both
+                src_valid_r <= 1'b0;
+                src_ready_r <= 1'b0;
+            end else if (!src_valid_r && !src_ready_r) begin
+                // Both deasserted, ready to accept new transfer
+                src_ready_r <= 1'b1;
+            end
+        end
+    end
+
+    assign src_ready_o = src_ready_r;
+
+    // Destination side logic
+    // dst_valid_o is high when destination has a valid transfer to report
+    // Initially after reset, valid should be low (idle state)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_valid_r <= 1'b0;
+            dst_ready_r <= 1'b0;
+        end else begin
+            // If valid is asserted and ready is asserted, transfer completes
+            // After transfer, valid deasserts and ready deasserts
+            // When valid deasserts, ready asserts again
+            if (dst_valid_r && dst_ready_i) begin
+                // Transfer complete, deassert both
+                dst_valid_r <= 1'b0;
+                dst_ready_r <= 1'b0;
+            end else if (!dst_valid_r && !dst_ready_r) begin
+                // Both deasserted, ready to accept new transfer
+                dst_ready_r <= 1'b1;
+            end
+        end
+    end
+
+    assign dst_valid_o = dst_valid_r;
+
+    // Cross-domain coordination
+    // Source asserts valid when it has data and is ready
+    // Destination asserts valid when it sees source valid and is ready
+    // We need to coordinate so that a transfer only occurs when both sides agree
+
+    // Source: assert valid when ready and not currently in a transfer
+    // The source valid should be driven based on the input src_valid_i
+    // But we need to ensure proper four-phase behavior
+
+    // Let me reconsider the design. In a four-phase handshake:
+    // Phase 1: valid=0, ready=0 (idle)
+    // Phase 2: valid=1, ready=0 (request)
+    // Phase 3: valid=1, ready=1 (acknowledge)
+    // Phase 4: valid=0, ready=1 (deassert)
+    // Then back to Phase 1
+
+    // Actually, let me use a simpler approach with explicit state machines
+
+    // Source state machine
+    localparam SRC_IDLE = 2'b00;
+    localparam SRC_WAIT = 2'b01;
+    localparam SRC_ACK  = 2'b10;
+    localparam SRC_DEAS = 2'b11;
+
+    reg [1:0] src_state;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_state <= SRC_IDLE;
+        else begin
+            case (src_state)
+                SRC_IDLE: begin
+                    if (src_valid_i)
+                        src_state <= SRC_WAIT;
+                end
+                SRC_WAIT: begin
+                    if (dst_ready_sync[1])
+                        src_state <= SRC_ACK;
+                end
+                SRC_ACK: begin
+                    src_state <= SRC_DEAS;
+                end
+                SRC_DEAS: begin
+                    src_state <= SRC_IDLE;
+                end
+                default: src_state <= SRC_IDLE;
+            endcase
+        end
+    end
+
+    assign src_ready_o = (src_state == SRC_IDLE) || (src_state == SRC_DEAS);
+
+    // Destination state machine
+    localparam DST_IDLE = 2'b00;
+    localparam DST_WAIT = 2'b01;
+    localparam DST_ACK  = 2'b10;
+    localparam DST_DEAS = 2'b11;
+
+    reg [1:0] dst_state;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_state <= DST_IDLE;
+        else begin
+            case (dst_state)
+                DST_IDLE: begin
+                    if (src_valid_sync[1])
+                        dst_state <= DST_WAIT;
+                end
+                DST_WAIT: begin
+                    if (dst_ready_i)
+                        dst_state <= DST_ACK;
+                end
+                DST_ACK: begin
+                    dst_state <= DST_DEAS;
+                end
+                DST_DEAS: begin
+                    dst_state <= DST_IDLE;
+                end
+                default: dst_state <= DST_IDLE;
+            endcase
+        end
+    end
+
+    assign dst_valid_o = (dst_state == DST_WAIT) || (dst_state == DST_ACK);
+
+endmodule
+```<|im_end|>

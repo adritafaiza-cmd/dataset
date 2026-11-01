@@ -1,0 +1,303 @@
+```verilog
+module axis_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   pause_req,
+    output wire                   pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] status_depth,
+    output wire [$clog2(DEPTH):0] status_depth_commit,
+    output wire                   status_overflow,
+    output wire                   status_bad_frame,
+    output wire                   status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam DEPTH_POW2 = (1 << ADDR_WIDTH);
+    localparam DEPTH_MASK = DEPTH_POW2 - 1;
+
+    // Sideband width calculation
+    localparam SIDE_KEEP_W = KEEP_ENABLE ? KEEP_WIDTH : 0;
+    localparam SIDE_LAST_W = LAST_ENABLE ? 1 : 0;
+    localparam SIDE_ID_W   = ID_ENABLE ? ID_WIDTH : 0;
+    localparam SIDE_DEST_W = DEST_ENABLE ? DEST_WIDTH : 0;
+    localparam SIDE_USER_W = USER_ENABLE ? USER_WIDTH : 0;
+    localparam SIDE_W = SIDE_KEEP_W + SIDE_LAST_W + SIDE_ID_W + SIDE_DEST_W + SIDE_USER_W;
+
+    // Total word width
+    localparam WORD_W = DATA_WIDTH + SIDE_W;
+
+    // Internal signals
+    wire [WORD_W-1:0] wr_data;
+    wire [WORD_W-1:0] rd_data;
+    wire              wr_en;
+    wire              rd_en;
+    wire [ADDR_WIDTH:0] wr_ptr;
+    wire [ADDR_WIDTH:0] rd_ptr;
+    wire [ADDR_WIDTH:0] depth;
+    wire              full;
+    wire              empty;
+    wire              overflow;
+    wire              underflow;
+
+    // Frame tracking
+    reg               in_frame;
+    reg [ADDR_WIDTH:0] frame_count;
+    wire              frame_overflow;
+    wire              frame_bad;
+    wire              frame_good;
+    wire              drop_frame;
+    wire              mark_frame;
+
+    // Pause logic
+    reg               pause_active;
+    wire              pause_block_wr;
+    wire              pause_block_rd;
+
+    // Status latches
+    reg               status_overflow_reg;
+    reg               status_bad_frame_reg;
+    reg               status_good_frame_reg;
+
+    // Build write data
+    assign wr_data = {
+        SIDE_USER_W'(s_axis_tuser),
+        SIDE_DEST_W'(s_axis_tdest),
+        SIDE_ID_W'(s_axis_tid),
+        SIDE_LAST_W'(s_axis_tlast),
+        SIDE_KEEP_W'(s_axis_tkeep),
+        s_axis_tdata
+    };
+
+    // Extract read data
+    wire [DATA_WIDTH-1:0] rd_tdata = rd_data[DATA_WIDTH-1:0];
+    wire [KEEP_WIDTH-1:0] rd_tkeep = KEEP_ENABLE ? rd_data[DATA_WIDTH + SIDE_KEEP_W - 1 : DATA_WIDTH] : {KEEP_WIDTH{1'b0}};
+    wire                  rd_tlast = LAST_ENABLE ? rd_data[DATA_WIDTH + SIDE_KEEP_W] : 1'b0;
+    wire [ID_WIDTH-1:0]   rd_tid   = ID_ENABLE ? rd_data[DATA_WIDTH + SIDE_KEEP_W + SIDE_LAST_W + SIDE_ID_W - 1 : DATA_WIDTH + SIDE_KEEP_W + SIDE_LAST_W] : {ID_WIDTH{1'b0}};
+    wire [DEST_WIDTH-1:0] rd_tdest = DEST_ENABLE ? rd_data[DATA_WIDTH + SIDE_KEEP_W + SIDE_LAST_W + SIDE_ID_W + SIDE_DEST_W - 1 : DATA_WIDTH + SIDE_KEEP_W + SIDE_LAST_W + SIDE_ID_W] : {DEST_WIDTH{1'b0}};
+    wire [USER_WIDTH-1:0] rd_tuser = USER_ENABLE ? rd_data[WORD_W-1 : DATA_WIDTH + SIDE_KEEP_W + SIDE_LAST_W + SIDE_ID_W + SIDE_DEST_W] : {USER_WIDTH{1'b0}};
+
+    // Frame bad detection
+    wire frame_bad_user = USER_ENABLE && (rd_tuser & USER_BAD_FRAME_MASK) == USER_BAD_FRAME_VALUE;
+    assign frame_bad = FRAME_FIFO && frame_bad_user;
+
+    // Frame overflow detection
+    assign frame_overflow = FRAME_FIFO && (frame_count >= DEPTH);
+
+    // Drop/mark logic
+    assign drop_frame = (DROP_OVERSIZE_FRAME && frame_overflow) || (DROP_BAD_FRAME && frame_bad);
+    assign mark_frame = MARK_WHEN_FULL && full;
+
+    // Pause logic
+    wire pause_req_eff = PAUSE_ENABLE ? pause_req : 1'b0;
+    wire frame_pause_eff = FRAME_PAUSE ? in_frame : 1'b0;
+    assign pause_block_wr = pause_req_eff || (FRAME_PAUSE && in_frame);
+    assign pause_block_rd = pause_req_eff;
+
+    // Handshake
+    wire wr_allowed = s_axis_tvalid && !full && !pause_block_wr && !drop_frame;
+    wire rd_allowed = m_axis_tready && !empty && !pause_block_rd;
+
+    assign s_axis_tready = !full && !pause_block_wr && !drop_frame;
+    assign m_axis_tvalid = !empty && !pause_block_rd;
+
+    // Write enable
+    assign wr_en = wr_allowed;
+
+    // Read enable
+    assign rd_en = rd_allowed;
+
+    // FIFO core
+    fifo_core #(
+        .DEPTH (DEPTH),
+        .WIDTH (WORD_W)
+    ) u_fifo (
+        .clk     (clk),
+        .rst     (rst),
+        .wr_en   (wr_en),
+        .wr_data (wr_data),
+        .rd_en   (rd_en),
+        .rd_data (rd_data),
+        .full    (full),
+        .empty   (empty),
+        .depth   (depth),
+        .overflow(overflow),
+        .underflow(underflow)
+    );
+
+    // Frame tracking
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            in_frame <= 1'b0;
+            frame_count <= {(ADDR_WIDTH+1){1'b0}};
+        end else begin
+            if (wr_en) begin
+                if (s_axis_tlast) begin
+                    in_frame <= 1'b0;
+                    frame_count <= {(ADDR_WIDTH+1){1'b0}};
+                end else begin
+                    in_frame <= 1'b1;
+                    frame_count <= frame_count + 1'b1;
+                end
+            end else if (rd_en) begin
+                if (rd_tlast) begin
+                    in_frame <= 1'b0;
+                    frame_count <= {(ADDR_WIDTH+1){1'b0}};
+                end else begin
+                    in_frame <= 1'b1;
+                    frame_count <= frame_count + 1'b1;
+                end
+            end
+        end
+    end
+
+    // Status latches
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            status_overflow_reg <= 1'b0;
+            status_bad_frame_reg <= 1'b0;
+            status_good_frame_reg <= 1'b0;
+        end else begin
+            if (overflow) status_overflow_reg <= 1'b1;
+            if (rd_en && frame_bad) status_bad_frame_reg <= 1'b1;
+            if (rd_en && rd_tlast && !frame_bad) status_good_frame_reg <= 1'b1;
+        end
+    end
+
+    // Pause ack
+    assign pause_ack = pause_active;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            pause_active <= 1'b0;
+        end else begin
+            pause_active <= pause_req_eff;
+        end
+    end
+
+    // Outputs
+    assign m_axis_tdata = rd_tdata;
+    assign m_axis_tkeep = rd_tkeep;
+    assign m_axis_tlast = rd_tlast;
+    assign m_axis_tid   = rd_tid;
+    assign m_axis_tdest = rd_tdest;
+    assign m_axis_tuser = rd_tuser;
+
+    assign status_depth = depth;
+    assign status_depth_commit = depth;
+    assign status_overflow = status_overflow_reg;
+    assign status_bad_frame = status_bad_frame_reg;
+    assign status_good_frame = status_good_frame_reg;
+
+endmodule
+
+module fifo_core #(
+    parameter DEPTH = 4096,
+    parameter WIDTH = 8
+) (
+    input  wire                  clk,
+    input  wire                  rst,
+    input  wire                  wr_en,
+    input  wire [WIDTH-1:0]      wr_data,
+    input  wire                  rd_en,
+    output reg  [WIDTH-1:0]      rd_data,
+    output wire                  full,
+    output wire                  empty,
+    output wire [$clog2(DEPTH):0] depth,
+    output wire                  overflow,
+    output wire                  underflow
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam DEPTH_POW2 = (1 << ADDR_WIDTH);
+    localparam DEPTH_MASK = DEPTH_POW2 - 1;
+
+    reg [WIDTH-1:0] mem [0:DEPTH_POW2-1];
+    reg [ADDR_WIDTH:0] wr_ptr;
+    reg [ADDR_WIDTH:0] rd_ptr;
+
+    wire [ADDR_WIDTH:0] depth_calc = wr_ptr - rd_ptr;
+    wire full = (depth_calc == DEPTH);
+    wire empty = (depth_calc == 0);
+
+    wire overflow = wr_en && full;
+    wire underflow = rd_en && empty;
+
+    assign depth = depth_calc;
+
+    always @(posedge clk) begin
+        if (wr_en && !full) begin
+            mem[wr_ptr[ADDR_WIDTH-1:0]] <= wr_data;
+            wr_ptr <= wr_ptr + 1'b1;
+        end
+    end
+
+    always @(posedge clk) begin
+        if (rd_en && !empty) begin
+            rd_data <= mem[rd_ptr[ADDR_WIDTH-1:0]];
+            rd_ptr <= rd_ptr + 1'b1;
+        end
+    end
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            wr_ptr <= {(ADDR_WIDTH+1){1'b0}};
+            rd_ptr <= {(ADDR_WIDTH+1){1'b0}};
+            rd_data <= {WIDTH{1'b0}};
+        end
+    end
+
+endmodule
+```<|im_end|>

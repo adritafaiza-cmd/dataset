@@ -1,0 +1,158 @@
+```verilog
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWFULL_THRESH = DEPTH - 2;
+    localparam AEMPTY_THRESH = 1;
+
+    // Write pointer (ASIZE+1 bits)
+    reg [ASIZE:0] wptr;
+    // Read pointer (ASIZE+1 bits)
+    reg [ASIZE:0] rptr;
+
+    // Memory
+    reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+    // Gray code pointers
+    wire [ASIZE:0] wptr_gray = wptr ^ {1'b0, wptr[ASIZE-1:0]} ^ {1'b0, wptr[ASIZE-1:0]};
+    // Proper gray code: gray[i] = ptr[i] ^ ptr[i+1]
+    // Let's compute properly
+    wire [ASIZE:0] wptr_gray_calc;
+    assign wptr_gray_calc[0] = wptr[0];
+    genvar gi;
+    generate
+        for (gi = 1; gi <= ASIZE; gi = gi + 1) begin : gen_wgray
+            assign wptr_gray_calc[gi] = wptr[gi] ^ wptr[gi-1];
+        end
+    endgenerate
+
+    wire [ASIZE:0] rptr_gray_calc;
+    assign rptr_gray_calc[0] = rptr[0];
+    generate
+        for (gi = 1; gi <= ASIZE; gi = gi + 1) begin : gen_rgray
+            assign rptr_gray_calc[gi] = rptr[gi] ^ rptr[gi-1];
+        end
+    endgenerate
+
+    // Synchronizers
+    // Write domain: sync read pointer gray
+    reg [ASIZE:0] rptr_gray_sync1, rptr_gray_sync2;
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_sync1 <= {(ASIZE+1){1'b0}};
+            rptr_gray_sync2 <= {(ASIZE+1){1'b0}};
+        end else begin
+            rptr_gray_sync1 <= rptr_gray_calc;
+            rptr_gray_sync2 <= rptr_gray_sync1;
+        end
+    end
+
+    // Read domain: sync write pointer gray
+    reg [ASIZE:0] wptr_gray_sync1, wptr_gray_sync2;
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_gray_sync1 <= {(ASIZE+1){1'b0}};
+            wptr_gray_sync2 <= {(ASIZE+1){1'b0}};
+        end else begin
+            wptr_gray_sync1 <= wptr_gray_calc;
+            wptr_gray_sync2 <= wptr_gray_sync1;
+        end
+    end
+
+    // Convert gray to binary for comparison
+    // Gray to binary: bin[MSB] = gray[MSB], bin[i] = bin[i+1] ^ gray[i]
+    function [ASIZE:0] gray2bin;
+        input [ASIZE:0] gray;
+        integer i;
+        begin
+            gray2bin[ASIZE] = gray[ASIZE];
+            for (i = ASIZE-1; i >= 0; i = i - 1) begin
+                gray2bin[i] = gray2bin[i+1] ^ gray[i];
+            end
+        end
+    endfunction
+
+    wire [ASIZE:0] rptr_gray_bin = gray2bin(rptr_gray_sync2);
+    wire [ASIZE:0] wptr_gray_bin = gray2bin(wptr_gray_sync2);
+
+    // Write enable
+    wire wvalid = winc & ~wfull;
+    // Read enable
+    wire rvalid = rinc & ~rempty;
+
+    // Full condition: write pointer MSB differs from read pointer MSB, and lower bits equal
+    // wfull: wptr[ASIZE] != rptr_gray_bin[ASIZE] && wptr[ASIZE-1:0] == rptr_gray_bin[ASIZE-1:0]
+    assign wfull = (wptr[ASIZE] != rptr_gray_bin[ASIZE]) && (wptr[ASIZE-1:0] == rptr_gray_bin[ASIZE-1:0]);
+
+    // Almost full: count of entries >= AWFULL_THRESH
+    // Number of entries = (wptr - rptr_gray_bin) mod DEPTH
+    // We can compute the difference
+    wire [ASIZE:0] wdiff = wptr - rptr_gray_bin;
+    assign awfull = (wdiff >= AWFULL_THRESH);
+
+    // Empty condition: read pointer MSB differs from write pointer MSB, and lower bits equal
+    // rempty: rptr[ASIZE] != wptr_gray_bin[ASIZE] && rptr[ASIZE-1:0] == wptr_gray_bin[ASIZE-1:0]
+    assign rempty = (rptr[ASIZE] != wptr_gray_bin[ASIZE]) && (rptr[ASIZE-1:0] == wptr_gray_bin[ASIZE-1:0]);
+
+    // Almost empty: count of entries <= AEMPTY_THRESH
+    wire [ASIZE:0] rdiff = wptr_gray_bin - rptr;
+    assign arempty = (rdiff <= AEMPTY_THRESH);
+
+    // Write pointer update
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            wptr <= {(ASIZE+1){1'b0}};
+        else if (wvalid)
+            wptr <= wptr + 1'b1;
+    end
+
+    // Read pointer update
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rptr <= {(ASIZE+1){1'b0}};
+        else if (rvalid)
+            rptr <= rptr + 1'b1;
+    end
+
+    // Memory write
+    always @(posedge wclk) begin
+        if (wvalid)
+            mem[wptr[ASIZE-1:0]] <= wdata;
+    end
+
+    // Read data
+    // For fall-through: rdata is the data at the current read pointer (oldest unread word)
+    // For non-fall-through: rdata is registered, updated on accepted read
+    reg [DSIZE-1:0] rdata_reg;
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rdata_reg <= {DSIZE{1'b0}};
+        else if (rvalid)
+            rdata_reg <= mem[rptr[ASIZE-1:0]];
+    end
+
+    // Fall-through: combinational read from memory at current rptr
+    wire [DSIZE-1:0] rdata_comb = mem[rptr[ASIZE-1:0]];
+
+    assign rdata = (FALLTHROUGH == "TRUE") ? rdata_comb : rdata_reg;
+
+endmodule
+```<|im_end|>

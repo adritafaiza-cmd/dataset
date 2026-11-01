@@ -1,0 +1,53 @@
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    // Normalize the reset polarity: work with an active-high internal signal
+    wire rst_active = (RST_POL == 1'b1) ? async_rst_i : ~async_rst_i;
+
+    // Synchronizer chain for the deassertion (release) of the reset.
+    // We synchronize the *negation* of the active reset, i.e., the "reset released" signal.
+    // When rst_active is 0 (released), ~rst_active is 1. We want to detect when it
+    // has been stable at 1 for CHAINS cycles before releasing sync_rst_o.
+
+    // The synchronizer chain tracks the "reset released" condition.
+    // sync_rst_o should be active (1 if RST_POL=1, 0 if RST_POL=0) when reset is asserted.
+    // sync_rst_o should be inactive when reset is released and the synchronizer has confirmed it.
+
+    // Let's define:
+    //   sync_rst_o = rst_active OR (NOT all_sync_released)
+    // where all_sync_released is 1 only after the synchronizer has seen ~rst_active stable at 1.
+
+    // Synchronizer chain for ~rst_active (i.e., reset released indicator)
+    reg [CHAINS-1:0] sync_chain;
+
+    integer i;
+    always @(posedge clk or posedge rst_active) begin
+        if (rst_active) begin
+            // When reset is asserted, force the chain to 0 (not released)
+            for (i = 0; i < CHAINS; i = i + 1)
+                sync_chain[i] <= 1'b0;
+        end else begin
+            // Shift the chain
+            sync_chain[0] <= ~rst_active;
+            for (i = 1; i < CHAINS; i = i + 1)
+                sync_chain[i] <= sync_chain[i-1];
+        end
+    end
+
+    // All stages must be 1 to confirm release
+    wire all_released = &sync_chain;
+
+    // sync_rst_o is active when reset is asserted OR when the synchronizer hasn't confirmed release yet
+    // If RST_POL is 1, active means 1; if RST_POL is 0, active means 0.
+    // Let's compute the active value:
+    wire sync_rst_active = rst_active | ~all_released;
+
+    assign sync_rst_o = (RST_POL == 1'b1) ? sync_rst_active : ~sync_rst_active;
+
+endmodule

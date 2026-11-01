@@ -1,0 +1,398 @@
+module axis_switch #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter S_ID_WIDTH = 8,
+    parameter M_ID_WIDTH = S_ID_WIDTH+$clog2(S_COUNT),
+    parameter M_DEST_WIDTH = 1,
+    parameter S_DEST_WIDTH = M_DEST_WIDTH+$clog2(M_COUNT),
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter M_BASE = 0,
+    parameter M_TOP = 0,
+    parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
+    parameter UPDATE_TID = 0,
+    parameter S_REG_TYPE = 0,
+    parameter M_REG_TYPE = 2,
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 1
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    /*
+     * AXI Stream inputs
+     */
+    input  wire [S_COUNT*DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [S_COUNT*KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire [S_COUNT-1:0]               s_axis_tvalid,
+    output wire [S_COUNT-1:0]               s_axis_tready,
+    input  wire [S_COUNT-1:0]               s_axis_tlast,
+    input  wire [S_COUNT*S_ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [S_COUNT*USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI Stream outputs
+     */
+    output wire [M_COUNT*DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [M_COUNT*KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire [M_COUNT-1:0]               m_axis_tvalid,
+    input  wire [M_COUNT-1:0]               m_axis_tready,
+    output wire [M_COUNT-1:0]               m_axis_tlast,
+    output wire [M_COUNT*M_ID_WIDTH-1:0]    m_axis_tid,
+    output wire [M_COUNT*M_DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [M_COUNT*USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    // Internal signals
+    wire [S_COUNT-1:0] s_tvalid;
+    wire [S_COUNT-1:0] s_tready;
+    wire [S_COUNT-1:0] s_tlast;
+    wire [S_COUNT*DATA_WIDTH-1:0] s_tdata;
+    wire [S_COUNT*KEEP_WIDTH-1:0] s_tkeep;
+    wire [S_COUNT*S_ID_WIDTH-1:0] s_tid;
+    wire [S_COUNT*S_DEST_WIDTH-1:0] s_tdest;
+    wire [S_COUNT*USER_WIDTH-1:0] s_tuser;
+
+    // Source register stage
+    if (S_REG_TYPE != 0) begin
+        reg [S_COUNT-1:0] s_tvalid_r;
+        reg [S_COUNT-1:0] s_tlast_r;
+        reg [S_COUNT*DATA_WIDTH-1:0] s_tdata_r;
+        reg [S_COUNT*KEEP_WIDTH-1:0] s_tkeep_r;
+        reg [S_COUNT*S_ID_WIDTH-1:0] s_tid_r;
+        reg [S_COUNT*S_DEST_WIDTH-1:0] s_tdest_r;
+        reg [S_COUNT*USER_WIDTH-1:0] s_tuser_r;
+
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                s_tvalid_r <= {S_COUNT{1'b0}};
+                s_tlast_r <= {S_COUNT{1'b0}};
+                s_tdata_r <= {S_COUNT*DATA_WIDTH{1'b0}};
+                s_tkeep_r <= {S_COUNT*KEEP_WIDTH{1'b0}};
+                s_tid_r <= {S_COUNT*S_ID_WIDTH{1'b0}};
+                s_tdest_r <= {S_COUNT*S_DEST_WIDTH{1'b0}};
+                s_tuser_r <= {S_COUNT*USER_WIDTH{1'b0}};
+            end else begin
+                for (genvar i = 0; i < S_COUNT; i = i + 1) begin
+                    if (s_axis_tvalid[i] && s_tready[i]) begin
+                        s_tvalid_r[i] <= 1'b1;
+                        s_tlast_r[i] <= s_axis_tlast[i];
+                        s_tdata_r[i*DATA_WIDTH +: DATA_WIDTH] <= s_axis_tdata[i*DATA_WIDTH +: DATA_WIDTH];
+                        s_tkeep_r[i*KEEP_WIDTH +: KEEP_WIDTH] <= s_axis_tkeep[i*KEEP_WIDTH +: KEEP_WIDTH];
+                        s_tid_r[i*S_ID_WIDTH +: S_ID_WIDTH] <= s_axis_tid[i*S_ID_WIDTH +: S_ID_WIDTH];
+                        s_tdest_r[i*S_DEST_WIDTH +: S_DEST_WIDTH] <= s_axis_tdest[i*S_DEST_WIDTH +: S_DEST_WIDTH];
+                        s_tuser_r[i*USER_WIDTH +: USER_WIDTH] <= s_axis_tuser[i*USER_WIDTH +: USER_WIDTH];
+                    end else if (s_tvalid_r[i] && s_tready[i]) begin
+                        s_tvalid_r[i] <= 1'b0;
+                    end
+                end
+            end
+        end
+
+        assign s_tvalid = s_tvalid_r;
+        assign s_tlast = s_tlast_r;
+        assign s_tdata = s_tdata_r;
+        assign s_tkeep = s_tkeep_r;
+        assign s_tid = s_tid_r;
+        assign s_tdest = s_tdest_r;
+        assign s_tuser = s_tuser_r;
+    end else begin
+        assign s_tvalid = s_axis_tvalid;
+        assign s_tlast = s_axis_tlast;
+        assign s_tdata = s_axis_tdata;
+        assign s_tkeep = s_axis_tkeep;
+        assign s_tid = s_axis_tid;
+        assign s_tdest = s_axis_tdest;
+        assign s_tuser = s_axis_tuser;
+    end
+
+    // Per-output arbitration and routing
+    // For each output port m, we need to select one source that is:
+    // 1. Connected to this output (M_CONNECT[m][s] == 1)
+    // 2. Has valid data
+    // 3. Is targeting this output (s_tdest[s] == m)
+    // 4. Is not currently in a packet (or is the first beat of a new packet)
+    
+    // We need to track which source is currently "locked" to which output
+    // to preserve packet boundaries. A source is locked to an output once
+    // it starts sending a packet to that output, until tlast is seen.
+
+    // State: for each source, which output it is currently committed to
+    // 0 = idle, 1..M_COUNT = committed to that output
+    reg [S_COUNT-1:0][$clog2(M_COUNT+1)-1:0] src_dest_commit;
+    
+    // Initialize
+    integer i, m, s;
+    
+    // Determine which sources are eligible for each output
+    // A source is eligible for output m if:
+    // - It's connected: M_CONNECT[m][s]
+    // - It has valid data: s_tvalid[s]
+    // - Either it's idle (src_dest_commit[s] == 0) and targeting m (s_tdest[s] == m)
+    //   OR it's already committed to m (src_dest_commit[s] == m)
+    
+    wire [S_COUNT-1:0] eligible [0:M_COUNT-1];
+    
+    genvar gm;
+    generate
+        for (gm = 0; gm < M_COUNT; gm = gm + 1) begin : gen_eligible
+            assign eligible[gm] = {S_COUNT{1'b0}};
+            for (genvar gs = 0; gs < S_COUNT; gs = gs + 1) begin : gen_eligible_s
+                wire connected = M_CONNECT[gm*S_COUNT + gs];
+                wire valid = s_tvalid[gs];
+                wire idle = (src_dest_commit[gs] == 0);
+                wire committed = (src_dest_commit[gs] == gm);
+                wire targeting = (s_tdest[gs][S_DEST_WIDTH-1:0] == gm);
+                wire eligible_bit = connected && valid && (idle ? targeting : committed);
+                assign eligible[gm][gs] = eligible_bit;
+            end
+        end
+    endgenerate
+
+    // Arbitration for each output
+    // We'll use round-robin or fixed priority based on ARB_TYPE_ROUND_ROBIN
+    // For simplicity, let's implement fixed priority (LSB high priority) first
+    // and add round-robin if needed.
+    
+    // For each output, select the winning source
+    reg [S_COUNT-1:0] arb_winner [0:M_COUNT-1];
+    reg [S_COUNT-1:0] arb_valid [0:M_COUNT-1];
+    
+    genvar ga;
+    generate
+        for (ga = 0; ga < M_COUNT; ga = ga + 1) begin : gen_arb
+            // Fixed priority: lowest source index wins
+            reg [S_COUNT-1:0] winner;
+            reg valid_out;
+            
+            always @* begin
+                winner = {S_COUNT{1'b0}};
+                valid_out = 1'b0;
+                for (i = 0; i < S_COUNT; i = i + 1) begin
+                    if (eligible[ga][i] && !valid_out) begin
+                        winner[i] = 1'b1;
+                        valid_out = 1'b1;
+                    end
+                end
+            end
+            
+            assign arb_winner[ga] = winner;
+            assign arb_valid[ga] = valid_out;
+        end
+    endgenerate
+
+    // Determine tready for each source
+    // A source is ready if:
+    // - It's the winner for its committed/targeting output
+    // - That output is ready (m_axis_tready[m])
+    
+    // First, determine which output each source is trying to reach
+    // If idle, it's targeting s_tdest[s]
+    // If committed, it's targeting src_dest_commit[s]
+    
+    wire [S_COUNT-1:0][$clog2(M_COUNT)-1:0] src_target;
+    genvar gt;
+    generate
+        for (gt = 0; gt < S_COUNT; gt = gt + 1) begin : gen_target
+            assign src_target[gt] = (src_dest_commit[gt] == 0) ? 
+                s_tdest[gt][S_DEST_WIDTH-1:0] : 
+                src_dest_commit[gt][$clog2(M_COUNT)-1:0];
+        end
+    endgenerate
+
+    // Check if the target output is ready
+    wire [S_COUNT-1:0] target_ready;
+    genvar gr;
+    generate
+        for (gr = 0; gr < S_COUNT; gr = gr + 1) begin : gen_ready
+            assign target_ready[gr] = m_axis_tready[src_target[gr]];
+        end
+    endgenerate
+
+    // A source is ready if it's the winner for its target output and that output is ready
+    assign s_tready = s_tvalid & target_ready & 
+        ({S_COUNT{1'b1}} & 
+         (arb_winner[0] | arb_winner[1] | arb_winner[2] | arb_winner[3] | 
+          (M_COUNT > 4 ? {S_COUNT{1'b1}} : {S_COUNT{1'b0}})));
+    
+    // More precise: source s is ready if arb_winner[src_target[s]][s] && m_axis_tready[src_target[s]]
+    // Let's redo this properly
+    
+    wire [S_COUNT-1:0] s_tready_internal;
+    genvar gs2;
+    generate
+        for (gs2 = 0; gs2 < S_COUNT; gs2 = gs2 + 1) begin : gen_sready
+            assign s_tready_internal[gs2] = arb_winner[src_target[gs2]][gs2] && 
+                                            m_axis_tready[src_target[gs2]];
+        end
+    endgenerate
+    
+    assign s_tready = s_tready_internal;
+
+    // Update commit state
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            for (i = 0; i < S_COUNT; i = i + 1) begin
+                src_dest_commit[i] <= 0;
+            end
+        end else begin
+            for (i = 0; i < S_COUNT; i = i + 1) begin
+                if (s_tvalid[i] && s_tready[i]) begin
+                    if (s_tlast[i]) begin
+                        // Packet complete, go idle
+                        src_dest_commit[i] <= 0;
+                    end else if (src_dest_commit[i] == 0) begin
+                        // Start of new packet, commit to target
+                        src_dest_commit[i] <= src_target[i];
+                    end
+                    // If already committed, stay committed
+                end
+            end
+        end
+    end
+
+    // Output muxing
+    // For each output m, select the data from the winning source
+    wire [M_COUNT*DATA_WIDTH-1:0] m_tdata_internal;
+    wire [M_COUNT*KEEP_WIDTH-1:0] m_tkeep_internal;
+    wire [M_COUNT-1:0] m_tvalid_internal;
+    wire [M_COUNT-1:0] m_tlast_internal;
+    wire [M_COUNT*M_ID_WIDTH-1:0] m_tid_internal;
+    wire [M_COUNT*M_DEST_WIDTH-1:0] m_tdest_internal;
+    wire [M_COUNT*USER_WIDTH-1:0] m_tuser_internal;
+
+    genvar go;
+    generate
+        for (go = 0; go < M_COUNT; go = go + 1) begin : gen_out
+            // Find the winning source for this output
+            reg [S_COUNT-1:0] winner_sel;
+            reg has_winner;
+            
+            always @* begin
+                winner_sel = {S_COUNT{1'b0}};
+                has_winner = 1'b0;
+                for (i = 0; i < S_COUNT; i = i + 1) begin
+                    if (arb_winner[go][i] && !has_winner) begin
+                        winner_sel[i] = 1'b1;
+                        has_winner = 1'b1;
+                    end
+                end
+            end
+            
+            // Mux data
+            reg [DATA_WIDTH-1:0] data_sel;
+            reg [KEEP_WIDTH-1:0] keep_sel;
+            reg [S_ID_WIDTH-1:0] tid_sel;
+            reg [S_DEST_WIDTH-1:0] tdest_sel;
+            reg [USER_WIDTH-1:0] tuser_sel;
+            reg tlast_sel;
+            
+            always @* begin
+                data_sel = {DATA_WIDTH{1'b0}};
+                keep_sel = {KEEP_WIDTH{1'b0}};
+                tid_sel = {S_ID_WIDTH{1'b0}};
+                tdest_sel = {S_DEST_WIDTH{1'b0}};
+                tuser_sel = {USER_WIDTH{1'b0}};
+                tlast_sel = 1'b0;
+                for (i = 0; i < S_COUNT; i = i + 1) begin
+                    if (winner_sel[i]) begin
+                        data_sel = s_tdata[i*DATA_WIDTH +: DATA_WIDTH];
+                        keep_sel = s_tkeep[i*KEEP_WIDTH +: KEEP_WIDTH];
+                        tid_sel = s_tid[i*S_ID_WIDTH +: S_ID_WIDTH];
+                        tdest_sel = s_tdest[i*S_DEST_WIDTH +: S_DEST_WIDTH];
+                        tuser_sel = s_tuser[i*USER_WIDTH +: USER_WIDTH];
+                        tlast_sel = s_tlast[i];
+                    end
+                end
+            end
+            
+            assign m_tdata_internal[go*DATA_WIDTH +: DATA_WIDTH] = data_sel;
+            assign m_tkeep_internal[go*KEEP_WIDTH +: KEEP_WIDTH] = keep_sel;
+            assign m_tvalid_internal[go] = has_winner;
+            assign m_tlast_internal[go] = tlast_sel;
+            
+            // ID handling
+            if (ID_ENABLE) begin
+                if (UPDATE_TID) begin
+                    // Extend ID with source index
+                    assign m_tid_internal[go*M_ID_WIDTH +: M_ID_WIDTH] = 
+                        {tid_sel, go[$clog2(S_COUNT)-1:0]};
+                end else begin
+                    assign m_tid_internal[go*M_ID_WIDTH +: M_ID_WIDTH] = 
+                        {tid_sel, {($clog2(S_COUNT)){1'b0}}};
+                end
+            end else begin
+                assign m_tid_internal[go*M_ID_WIDTH +: M_ID_WIDTH] = 
+                    {M_ID_WIDTH{1'b0}};
+            end
+            
+            // Dest handling
+            if (M_DEST_WIDTH > 0) begin
+                assign m_tdest_internal[go*M_DEST_WIDTH +: M_DEST_WIDTH] = go;
+            end else begin
+                assign m_tdest_internal[go*M_DEST_WIDTH +: M_DEST_WIDTH] = 1'b0;
+            end
+            
+            assign m_tuser_internal[go*USER_WIDTH +: USER_WIDTH] = tuser_sel;
+        end
+    endgenerate
+
+    // Output register stage
+    if (M_REG_TYPE != 0) begin
+        reg [M_COUNT-1:0] m_tvalid_r;
+        reg [M_COUNT-1:0] m_tlast_r;
+        reg [M_COUNT*DATA_WIDTH-1:0] m_tdata_r;
+        reg [M_COUNT*KEEP_WIDTH-1:0] m_tkeep_r;
+        reg [M_COUNT*M_ID_WIDTH-1:0] m_tid_r;
+        reg [M_COUNT*M_DEST_WIDTH-1:0] m_tdest_r;
+        reg [M_COUNT*USER_WIDTH-1:0] m_tuser_r;
+
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                m_tvalid_r <= {M_COUNT{1'b0}};
+                m_tlast_r <= {M_COUNT{1'b0}};
+                m_tdata_r <= {M_COUNT*DATA_WIDTH{1'b0}};
+                m_tkeep_r <= {M_COUNT*KEEP_WIDTH{1'b0}};
+                m_tid_r <= {M_COUNT*M_ID_WIDTH{1'b0}};
+                m_tdest_r <= {M_COUNT*M_DEST_WIDTH{1'b0}};
+                m_tuser_r <= {M_COUNT*USER_WIDTH{1'b0}};
+            end else begin
+                for (i = 0; i < M_COUNT; i = i + 1) begin
+                    if (m_tvalid_internal[i] && m_axis_tready[i]) begin
+                        m_tvalid_r[i] <= 1'b1;
+                        m_tlast_r[i] <= m_tlast_internal[i];
+                        m_tdata_r[i*DATA_WIDTH +: DATA_WIDTH] <= m_tdata_internal[i*DATA_WIDTH +: DATA_WIDTH];
+                        m_tkeep_r[i*KEEP_WIDTH +: KEEP_WIDTH] <= m_tkeep_internal[i*KEEP_WIDTH +: KEEP_WIDTH];
+                        m_tid_r[i*M_ID_WIDTH +: M_ID_WIDTH] <= m_tid_internal[i*M_ID_WIDTH +: M_ID_WIDTH];
+                        m_tdest_r[i*M_DEST_WIDTH +: M_DEST_WIDTH] <= m_tdest_internal[i*M_DEST_WIDTH +: M_DEST_WIDTH];
+                        m_tuser_r[i*USER_WIDTH +: USER_WIDTH] <= m_tuser_internal[i*USER_WIDTH +: USER_WIDTH];
+                    end else if (m_tvalid_r[i] && m_axis_tready[i]) begin
+                        m_tvalid_r[i] <= 1'b0;
+                    end
+                end
+            end
+        end
+
+        assign m_axis_tvalid = m_tvalid_r;
+        assign m_axis_tlast = m_tlast_r;
+        assign m_axis_tdata = m_tdata_r;
+        assign m_axis_tkeep = m_tkeep_r;
+        assign m_axis_tid = m_tid_r;
+        assign m_axis_tdest = m_tdest_r;
+        assign m_axis_tuser = m_tuser_r;
+    end else begin
+        assign m_axis_tvalid = m_tvalid_internal;
+        assign m_axis_tlast = m_tlast_internal;
+        assign m_axis_tdata = m_tdata_internal;
+        assign m_axis_tkeep = m_tkeep_internal;
+        assign m_axis_tid = m_tid_internal;
+        assign m_axis_tdest = m_tdest_internal;
+        assign m_axis_tuser = m_tuser_internal;
+    end
+
+endmodule

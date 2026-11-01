@@ -1,0 +1,425 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ========================================================================
+    // Synchronous reset synchronizers
+    // ========================================================================
+    reg [1:0] s_rst_sync;
+    reg [1:0] m_rst_sync;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_rst_sync <= 2'b11;
+        else
+            s_rst_sync <= {s_rst_sync[0], 1'b0};
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_rst_sync <= 2'b11;
+        else
+            m_rst_sync <= {m_rst_sync[0], 1'b0};
+    end
+
+    wire s_rst_n = ~s_rst_sync[1];
+    wire m_rst_n = ~m_rst_sync[1];
+
+    // ========================================================================
+    // Write Address Channel: S -> M
+    // ========================================================================
+    reg [ADDR_WIDTH-1:0] s_awaddr_reg;
+    reg [2:0]            s_awprot_reg;
+    reg                  s_awvalid_reg;
+
+    wire s_aw_handshake = s_axil_awvalid && s_axil_awready;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_awaddr_reg  <= {ADDR_WIDTH{1'b0}};
+            s_awprot_reg  <= 3'b000;
+            s_awvalid_reg <= 1'b0;
+        end else begin
+            if (s_aw_handshake) begin
+                s_awaddr_reg  <= s_axil_awaddr;
+                s_awprot_reg  <= s_axil_awprot;
+                s_awvalid_reg <= 1'b1;
+            end else if (s_awvalid_reg && m_awready_sync) begin
+                s_awvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // Synchronizer for m_awready into S domain
+    reg [1:0] m_awready_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_awready_sync <= 2'b00;
+        else
+            m_awready_sync <= {m_awready_sync[0], m_axil_awready};
+    end
+    wire m_awready_sync = m_awready_sync[1];
+
+    // Synchronizer for s_awvalid_reg into M domain
+    reg [1:0] s_awvalid_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_awvalid_sync <= 2'b00;
+        else
+            s_awvalid_sync <= {s_awvalid_sync[0], s_awvalid_reg};
+    end
+    wire s_awvalid_sync = s_awvalid_sync[1];
+
+    // Synchronizer for s_awaddr_reg into M domain
+    reg [ADDR_WIDTH-1:0] s_awaddr_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_awaddr_sync <= {ADDR_WIDTH{1'b0}};
+        else
+            s_awaddr_sync <= s_awaddr_reg;
+    end
+
+    // Synchronizer for s_awprot_reg into M domain
+    reg [2:0] s_awprot_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_awprot_sync <= 3'b000;
+        else
+            s_awprot_sync <= s_awprot_reg;
+    end
+
+    // M-side AW channel
+    assign m_axil_awaddr  = s_awaddr_sync;
+    assign m_axil_awprot  = s_awprot_sync;
+    assign m_axil_awvalid = s_awvalid_sync;
+
+    // S-side AW ready
+    assign s_axil_awready = m_awready_sync && !s_awvalid_reg;
+
+    // ========================================================================
+    // Write Data Channel: S -> M
+    // ========================================================================
+    reg [DATA_WIDTH-1:0] s_wdata_reg;
+    reg [STRB_WIDTH-1:0] s_wstrb_reg;
+    reg                  s_wvalid_reg;
+
+    wire s_w_handshake = s_axil_wvalid && s_axil_wready;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_wdata_reg  <= {DATA_WIDTH{1'b0}};
+            s_wstrb_reg  <= {STRB_WIDTH{1'b0}};
+            s_wvalid_reg <= 1'b0;
+        end else begin
+            if (s_w_handshake) begin
+                s_wdata_reg  <= s_axil_wdata;
+                s_wstrb_reg  <= s_axil_wstrb;
+                s_wvalid_reg <= 1'b1;
+            end else if (s_wvalid_reg && m_wready_sync) begin
+                s_wvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // Synchronizer for m_wready into S domain
+    reg [1:0] m_wready_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_wready_sync <= 2'b00;
+        else
+            m_wready_sync <= {m_wready_sync[0], m_axil_wready};
+    end
+    wire m_wready_sync = m_wready_sync[1];
+
+    // Synchronizer for s_wvalid_reg into M domain
+    reg [1:0] s_wvalid_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_wvalid_sync <= 2'b00;
+        else
+            s_wvalid_sync <= {s_wvalid_sync[0], s_wvalid_reg};
+    end
+    wire s_wvalid_sync = s_wvalid_sync[1];
+
+    // Synchronizer for s_wdata_reg into M domain
+    reg [DATA_WIDTH-1:0] s_wdata_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_wdata_sync <= {DATA_WIDTH{1'b0}};
+        else
+            s_wdata_sync <= s_wdata_reg;
+    end
+
+    // Synchronizer for s_wstrb_reg into M domain
+    reg [STRB_WIDTH-1:0] s_wstrb_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_wstrb_sync <= {STRB_WIDTH{1'b0}};
+        else
+            s_wstrb_sync <= s_wstrb_reg;
+    end
+
+    // M-side W channel
+    assign m_axil_wdata  = s_wdata_sync;
+    assign m_axil_wstrb  = s_wstrb_sync;
+    assign m_axil_wvalid = s_wvalid_sync;
+
+    // S-side W ready
+    assign s_axil_wready = m_wready_sync && !s_wvalid_reg;
+
+    // ========================================================================
+    // Write Response Channel: M -> S
+    // ========================================================================
+    reg [1:0] m_bresp_reg;
+    reg       m_bvalid_reg;
+
+    wire m_b_handshake = m_axil_bvalid && m_axil_bready;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_bresp_reg  <= 2'b00;
+            m_bvalid_reg <= 1'b0;
+        end else begin
+            if (m_b_handshake) begin
+                m_bresp_reg  <= m_axil_bresp;
+                m_bvalid_reg <= 1'b1;
+            end else if (m_bvalid_reg && s_bready_sync) begin
+                m_bvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // Synchronizer for s_bready into M domain
+    reg [1:0] s_bready_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_bready_sync <= 2'b00;
+        else
+            s_bready_sync <= {s_bready_sync[0], s_axil_bready};
+    end
+    wire s_bready_sync = s_bready_sync[1];
+
+    // Synchronizer for m_bvalid_reg into S domain
+    reg [1:0] m_bvalid_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_bvalid_sync <= 2'b00;
+        else
+            m_bvalid_sync <= {m_bvalid_sync[0], m_bvalid_reg};
+    end
+    wire m_bvalid_sync = m_bvalid_sync[1];
+
+    // Synchronizer for m_bresp_reg into S domain
+    reg [1:0] m_bresp_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_bresp_sync <= 2'b00;
+        else
+            m_bresp_sync <= m_bresp_reg;
+    end
+
+    // S-side B channel
+    assign s_axil_bresp  = m_bresp_sync;
+    assign s_axil_bvalid = m_bvalid_sync;
+
+    // M-side B ready
+    assign m_axil_bready = s_bready_sync && !m_bvalid_reg;
+
+    // ========================================================================
+    // Read Address Channel: S -> M
+    // ========================================================================
+    reg [ADDR_WIDTH-1:0] s_araddr_reg;
+    reg [2:0]            s_arprot_reg;
+    reg                  s_arvalid_reg;
+
+    wire s_ar_handshake = s_axil_arvalid && s_axil_arready;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_araddr_reg  <= {ADDR_WIDTH{1'b0}};
+            s_arprot_reg  <= 3'b000;
+            s_arvalid_reg <= 1'b0;
+        end else begin
+            if (s_ar_handshake) begin
+                s_araddr_reg  <= s_axil_araddr;
+                s_arprot_reg  <= s_axil_arprot;
+                s_arvalid_reg <= 1'b1;
+            end else if (s_arvalid_reg && m_arready_sync) begin
+                s_arvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // Synchronizer for m_arready into S domain
+    reg [1:0] m_arready_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_arready_sync <= 2'b00;
+        else
+            m_arready_sync <= {m_arready_sync[0], m_axil_arready};
+    end
+    wire m_arready_sync = m_arready_sync[1];
+
+    // Synchronizer for s_arvalid_reg into M domain
+    reg [1:0] s_arvalid_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_arvalid_sync <= 2'b00;
+        else
+            s_arvalid_sync <= {s_arvalid_sync[0], s_arvalid_reg};
+    end
+    wire s_arvalid_sync = s_arvalid_sync[1];
+
+    // Synchronizer for s_araddr_reg into M domain
+    reg [ADDR_WIDTH-1:0] s_araddr_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_araddr_sync <= {ADDR_WIDTH{1'b0}};
+        else
+            s_araddr_sync <= s_araddr_reg;
+    end
+
+    // Synchronizer for s_arprot_reg into M domain
+    reg [2:0] s_arprot_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_arprot_sync <= 3'b000;
+        else
+            s_arprot_sync <= s_arprot_reg;
+    end
+
+    // M-side AR channel
+    assign m_axil_araddr  = s_araddr_sync;
+    assign m_axil_arprot  = s_arprot_sync;
+    assign m_axil_arvalid = s_arvalid_sync;
+
+    // S-side AR ready
+    assign s_axil_arready = m_arready_sync && !s_arvalid_reg;
+
+    // ========================================================================
+    // Read Data Channel: M -> S
+    // ========================================================================
+    reg [DATA_WIDTH-1:0] m_rdata_reg;
+    reg [1:0]            m_rresp_reg;
+    reg                  m_rvalid_reg;
+
+    wire m_r_handshake = m_axil_rvalid && m_axil_rready;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rdata_reg  <= {DATA_WIDTH{1'b0}};
+            m_rresp_reg  <= 2'b00;
+            m_rvalid_reg <= 1'b0;
+        end else begin
+            if (m_r_handshake) begin
+                m_rdata_reg  <= m_axil_rdata;
+                m_rresp_reg  <= m_axil_rresp;
+                m_rvalid_reg <= 1'b1;
+            end else if (m_rvalid_reg && s_rready_sync) begin
+                m_rvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // Synchronizer for s_rready into M domain
+    reg [1:0] s_rready_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_rready_sync <= 2'b00;
+        else
+            s_rready_sync <= {s_rready_sync[0], s_axil_rready};
+    end
+    wire s_rready_sync = s_rready_sync[1];
+
+    // Synchronizer for m_rvalid_reg into S domain
+    reg [1:0] m_rvalid_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_rvalid_sync <= 2'b00;
+        else
+            m_rvalid_sync <= {m_rvalid_sync[0], m_rvalid_reg};
+    end
+    wire m_rvalid_sync = m_rvalid_sync[1];
+
+    // Synchronizer for m_rdata_reg into S domain
+    reg [DATA_WIDTH-1:0] m_rdata_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_rdata_sync <= {DATA_WIDTH{1'b0}};
+        else
+            m_rdata_sync <= m_rdata_reg;
+    end
+
+    // Synchronizer for m_rresp_reg into S domain
+    reg [1:0] m_rresp_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_rresp_sync <= 2'b00;
+        else
+            m_rresp_sync <= m_rresp_reg;
+    end
+
+    // S-side R channel
+    assign s_axil_rdata  = m_rdata_sync;
+    assign s_axil_rresp  = m_rresp_sync;
+    assign s_axil_rvalid = m_rvalid_sync;
+
+    // M-side R ready
+    assign m_axil_rready = s_rready_sync && !m_rvalid_reg;
+
+endmodule
+```<|im_end|>

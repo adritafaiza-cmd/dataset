@@ -1,0 +1,297 @@
+```verilog
+module isochronous_4phase_handshake (
+    input  src_clk_i,
+    input  src_rst_ni,
+    input  src_valid_i,
+    output src_ready_o,
+    input  dst_clk_i,
+    input  dst_rst_ni,
+    output dst_valid_o,
+    input  dst_ready_i
+);
+
+    // Source domain state
+    reg src_valid_r;
+    reg src_ack_r;
+
+    // Destination domain state
+    reg dst_valid_r;
+    reg dst_ack_r;
+
+    // Synchronizers for crossing from source to destination
+    reg [1:0] src_valid_sync;
+    reg [1:0] src_ack_sync;
+
+    // Synchronizers for crossing from destination to source
+    reg [1:0] dst_valid_sync;
+    reg [1:0] dst_ack_sync;
+
+    // Source domain logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_valid_r <= 1'b0;
+            src_ack_r   <= 1'b0;
+        end else begin
+            // Four-phase handshake in source domain
+            // src_valid_r is the local valid signal
+            // src_ack_r is the local ack signal (from dst_ack_r synchronized)
+            
+            // When not valid and not ack, we can assert valid if src_valid_i is high
+            // Actually, let's think about this more carefully.
+            
+            // In a 4-phase handshake:
+            // Phase 0: valid=0, ack=0 (idle)
+            // Phase 1: valid=1, ack=0 (request)
+            // Phase 2: valid=1, ack=1 (acknowledge)
+            // Phase 3: valid=0, ack=1 (deassert valid)
+            // Phase 4: valid=0, ack=0 (deassert ack, back to idle)
+            
+            // src_valid_r tracks the valid signal in source domain
+            // src_ack_r tracks the ack signal in source domain (synchronized from dst)
+            
+            // The source asserts valid when src_valid_i is high and we're in idle state
+            // The source deasserts valid when it sees ack=1 and valid=1
+            // The destination asserts ack when it sees valid=1
+            // The destination deasserts ack when it sees valid=0
+            
+            // Let's use a simpler approach:
+            // src_valid_r: the valid signal driven by source
+            // src_ack_r: the ack signal received from destination (synchronized)
+            
+            // State machine:
+            // If src_valid_r == 0 and src_ack_r == 0:
+            //   If src_valid_i == 1, set src_valid_r = 1
+            // If src_valid_r == 1 and src_ack_r == 0:
+            //   Wait for ack
+            // If src_valid_r == 1 and src_ack_r == 1:
+            //   Set src_valid_r = 0
+            // If src_valid_r == 0 and src_ack_r == 1:
+            //   Wait for ack to deassert (handled by destination)
+            
+            if (src_valid_r == 1'b0 && src_ack_r == 1'b0) begin
+                if (src_valid_i)
+                    src_valid_r <= 1'b1;
+                else
+                    src_valid_r <= 1'b0;
+            end else if (src_valid_r == 1'b1 && src_ack_r == 1'b0) begin
+                src_valid_r <= 1'b1;
+            end else if (src_valid_r == 1'b1 && src_ack_r == 1'b1) begin
+                src_valid_r <= 1'b0;
+            end else if (src_valid_r == 1'b0 && src_ack_r == 1'b1) begin
+                src_valid_r <= 1'b0;
+            end
+        end
+    end
+
+    // Destination domain logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_valid_r <= 1'b0;
+            dst_ack_r   <= 1'b0;
+        end else begin
+            // dst_valid_r: the valid signal received from source (synchronized)
+            // dst_ack_r: the ack signal driven by destination
+            
+            // State machine:
+            // If dst_valid_r == 0 and dst_ack_r == 0:
+            //   Wait for valid
+            // If dst_valid_r == 1 and dst_ack_r == 0:
+            //   If dst_ready_i == 1, set dst_ack_r = 1
+            // If dst_valid_r == 1 and dst_ack_r == 1:
+            //   Wait for valid to deassert
+            // If dst_valid_r == 0 and dst_ack_r == 1:
+            //   Set dst_ack_r = 0
+            
+            if (dst_valid_r == 1'b0 && dst_ack_r == 1'b0) begin
+                dst_ack_r <= 1'b0;
+            end else if (dst_valid_r == 1'b1 && dst_ack_r == 1'b0) begin
+                if (dst_ready_i)
+                    dst_ack_r <= 1'b1;
+                else
+                    dst_ack_r <= 1'b0;
+            end else if (dst_valid_r == 1'b1 && dst_ack_r == 1'b1) begin
+                dst_ack_r <= 1'b1;
+            end else if (dst_valid_r == 1'b0 && dst_ack_r == 1'b1) begin
+                dst_ack_r <= 1'b0;
+            end
+        end
+    end
+
+    // Synchronizers: source valid to destination
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_valid_sync <= 2'b00;
+        else
+            src_valid_sync <= {src_valid_sync[0], src_valid_r};
+    end
+
+    // Synchronizers: source ack to destination (actually dst_ack to source)
+    // Wait, I need to synchronize dst_ack_r to source domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ack_sync <= 2'b00;
+        else
+            dst_ack_sync <= {dst_ack_sync[0], dst_ack_r};
+    end
+
+    // Synchronizers: dst_valid to source (actually src_valid to dst)
+    // We already have src_valid_sync in dst domain
+    
+    // Synchronizers: dst_ack to source
+    // We already have dst_ack_sync in src domain
+    
+    // Synchronizers: src_valid to dst
+    // We already have src_valid_sync in dst domain
+    
+    // Synchronizers: dst_ack to src
+    // We already have dst_ack_sync in src domain
+    
+    // But wait, I also need to synchronize dst_valid_r to source? No, dst_valid_r is in dst domain.
+    // And src_ack_r is in src domain, synchronized from dst_ack_r.
+    
+    // Let me reconsider the architecture.
+    
+    // Actually, let me redo this with a cleaner approach.
+    
+    // The four-phase handshake involves two signals crossing domains:
+    // 1. valid: from source to destination
+    // 2. ack: from destination to source
+    
+    // Source domain:
+    // - Drives valid (src_valid_r)
+    // - Receives ack (synchronized from dst_ack_r)
+    
+    // Destination domain:
+    // - Receives valid (synchronized from src_valid_r)
+    // - Drives ack (dst_ack_r)
+    
+    // So I need:
+    // - src_valid_r (src domain) -> sync to dst domain -> dst_valid_sync
+    // - dst_ack_r (dst domain) -> sync to src domain -> src_ack_sync
+    
+    // Let me rewrite this properly.
+
+endmodule
+```
+
+Wait, I made a mess. Let me redo this cleanly.
+
+```verilog
+module isochronous_4phase_handshake (
+    input  src_clk_i,
+    input  src_rst_ni,
+    input  src_valid_i,
+    output src_ready_o,
+    input  dst_clk_i,
+    input  dst_rst_ni,
+    output dst_valid_o,
+    input  dst_ready_i
+);
+
+    // Source domain registers
+    reg src_valid_r;
+    reg src_ack_r;
+
+    // Destination domain registers
+    reg dst_valid_r;
+    reg dst_ack_r;
+
+    // Synchronizer: src_valid_r (src domain) to dst domain
+    reg [1:0] src_valid_sync;
+
+    // Synchronizer: dst_ack_r (dst domain) to src domain
+    reg [1:0] dst_ack_sync;
+
+    // Synchronizer: dst_valid_r (dst domain) to src domain - not needed for 4-phase
+    // Synchronizer: src_ack_r (src domain) to dst domain - not needed for 4-phase
+
+    // Source domain: drive valid, receive ack
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_valid_r <= 1'b0;
+            src_ack_r   <= 1'b0;
+        end else begin
+            // Four-phase handshake source side
+            // src_valid_r: valid signal driven by source
+            // src_ack_r: ack signal received from destination (synchronized)
+            
+            // Phase 0: valid=0, ack=0 -> idle
+            // Phase 1: valid=1, ack=0 -> request
+            // Phase 2: valid=1, ack=1 -> acknowledged
+            // Phase 3: valid=0, ack=1 -> deasserting valid
+            // Phase 4: valid=0, ack=0 -> back to idle
+            
+            if (src_valid_r == 1'b0 && src_ack_r == 1'b0) begin
+                // Idle state
+                if (src_valid_i)
+                    src_valid_r <= 1'b1;
+                else
+                    src_valid_r <= 1'b0;
+            end else if (src_valid_r == 1'b1 && src_ack_r == 1'b0) begin
+                // Request state, wait for ack
+                src_valid_r <= 1'b1;
+            end else if (src_valid_r == 1'b1 && src_ack_r == 1'b1) begin
+                // Acknowledged state, deassert valid
+                src_valid_r <= 1'b0;
+            end else if (src_valid_r == 1'b0 && src_ack_r == 1'b1) begin
+                // Deasserting valid, wait for ack to deassert
+                src_valid_r <= 1'b0;
+            end
+        end
+    end
+
+    // Destination domain: receive valid, drive ack
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_valid_r <= 1'b0;
+            dst_ack_r   <= 1'b0;
+        end else begin
+            // Four-phase handshake destination side
+            // dst_valid_r: valid signal received from source (synchronized)
+            // dst_ack_r: ack signal driven by destination
+            
+            if (dst_valid_r == 1'b0 && dst_ack_r == 1'b0) begin
+                // Idle state
+                dst_ack_r <= 1'b0;
+            end else if (dst_valid_r == 1'b1 && dst_ack_r == 1'b0) begin
+                // Request received, assert ack if ready
+                if (dst_ready_i)
+                    dst_ack_r <= 1'b1;
+                else
+                    dst_ack_r <= 1'b0;
+            end else if (dst_valid_r == 1'b1 && dst_ack_r == 1'b1) begin
+                // Acknowledged, wait for valid to deassert
+                dst_ack_r <= 1'b1;
+            end else if (dst_valid_r == 1'b0 && dst_ack_r == 1'b1) begin
+                // Valid deasserted, deassert ack
+                dst_ack_r <= 1'b0;
+            end
+        end
+    end
+
+    // Synchronize src_valid_r from src domain to dst domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_valid_sync <= 2'b00;
+        else
+            src_valid_sync <= {src_valid_sync[0], src_valid_r};
+    end
+
+    // Synchronize dst_ack_r from dst domain to src domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ack_sync <= 2'b00;
+        else
+            dst_ack_sync <= {dst_ack_sync[0], dst_ack_r};
+    end
+
+    // Assign synchronized values to domain registers
+    assign dst_valid_r = src_valid_sync[1];
+    assign src_ack_r   = dst_ack_sync[1];
+
+    // Output assignments
+    assign src_ready_o = ~src_valid_r | src_ack_r;
+    assign dst_valid_o = dst_valid_r;
+
+endmodule
+```<|im_end|>

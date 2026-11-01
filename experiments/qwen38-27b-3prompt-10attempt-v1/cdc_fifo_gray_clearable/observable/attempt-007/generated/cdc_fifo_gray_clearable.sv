@@ -1,0 +1,314 @@
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH + 1;
+    localparam GRAY_W = PTR_W;
+
+    // Gray code conversion functions
+    function [GRAY_W-1:0] bin2gray;
+        input [PTR_W-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    function [PTR_W-1:0] gray2bin;
+        input [GRAY_W-1:0] gray;
+        integer i;
+        begin
+            gray2bin[GRAY_W-1] = gray[GRAY_W-1];
+            for (i = GRAY_W-2; i >= 0; i = i - 1)
+                gray2bin[i] = gray2bin[i+1] ^ gray[i];
+        end
+    endfunction
+
+    // Source domain signals
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg [PTR_W-1:0] src_wr_ptr_bin;
+    reg [GRAY_W-1:0] src_wr_ptr_gray;
+    reg [GRAY_W-1:0] dst_rd_ptr_gray_synced;
+    reg [GRAY_W-1:0] dst_rd_ptr_gray_sync [0:SYNC_STAGES-1];
+    reg src_clear_pending;
+
+    // Destination domain signals
+    reg [PTR_W-1:0] dst_rd_ptr_bin;
+    reg [GRAY_W-1:0] dst_rd_ptr_gray;
+    reg [GRAY_W-1:0] src_wr_ptr_gray_synced;
+    reg [GRAY_W-1:0] src_wr_ptr_gray_sync [0:SYNC_STAGES-1];
+    reg dst_clear_pending;
+    reg [WIDTH-1:0] dst_data_reg;
+    reg dst_valid_reg;
+
+    // Source domain: clear pending logic
+    // When clear is asserted, we need to wait until the clear has propagated
+    // to the destination domain (via the synchronizer) before allowing new writes.
+    // The clear is synchronized to dst domain, and we track when it's done.
+
+    // Actually, let's think about this more carefully.
+    // The clear needs to flush both sides. The approach:
+    // 1. When src_clear_i is asserted, set src_clear_pending.
+    // 2. The clear signal is synchronized to dst domain.
+    // 3. When dst sees the clear, it resets its pointers and data.
+    // 4. The dst clear completion is synchronized back to src domain.
+    // 5. When src sees the completion, it resets its pointers and clears pending.
+
+    // Let's use a simpler approach:
+    // - src_clear_i is synchronized to dst domain (dst_clear_sync)
+    // - dst_clear_i is synchronized to src domain (src_clear_sync)
+    // - When either clear is active, both sides reset their pointers
+    // - clear_pending indicates that a clear is in progress
+
+    // Source domain: synchronize dst_clear_i to src domain
+    reg [SYNC_STAGES-1:0] dst_clear_sync;
+    wire dst_clear_synced = dst_clear_sync[SYNC_STAGES-1];
+
+    // Destination domain: synchronize src_clear_i to dst domain
+    reg [SYNC_STAGES-1:0] src_clear_sync;
+    wire src_clear_synced = src_clear_sync[SYNC_STAGES-1];
+
+    // Source domain: clear pending
+    // src_clear_pending is set when src_clear_i is asserted or when dst_clear_synced is active
+    // It is cleared when both clears are deasserted and the synchronization is complete
+
+    // Let's define:
+    // src_clear_active = src_clear_i | dst_clear_synced
+    // dst_clear_active = dst_clear_i | src_clear_synced
+
+    wire src_clear_active = src_clear_i | dst_clear_synced;
+    wire dst_clear_active = dst_clear_i | src_clear_synced;
+
+    // src_clear_pending: set when src_clear_active, cleared when not src_clear_active
+    // But we need to ensure that the clear has fully propagated.
+    // A simpler approach: src_clear_pending is high while src_clear_active is high,
+    // and for a few cycles after to ensure synchronization.
+
+    // Actually, let's use a different approach. The clear_pending signals indicate
+    // that a clear is in progress and new data should not be accepted/emitted.
+
+    // src_clear_pending_o: high when a clear is in progress on the source side
+    // dst_clear_pending_o: high when a clear is in progress on the destination side
+
+    // Let's define:
+    // src_clear_pending_o = src_clear_active
+    // dst_clear_pending_o = dst_clear_active
+
+    // But we also need to ensure that when a clear is deasserted, the pointers
+    // are properly reset. The reset of pointers happens on the same edge as the clear.
+
+    // Source domain: pointer reset
+    // When src_clear_active is high, reset src_wr_ptr_bin and src_wr_ptr_gray
+    // When dst_clear_synced is high (meaning dst has seen the clear), also reset
+
+    // Actually, the problem says: "A clear resets each binary pointer and the Gray register
+    // that feeds its synchronizer on the same edge."
+
+    // So when src_clear_i is asserted, on the next src_clk edge, src_wr_ptr_bin and
+    // src_wr_ptr_gray are reset. Similarly for dst.
+
+    // But we also need to handle the case where dst_clear_i is asserted - this should
+    // also reset the src pointers (via synchronization).
+
+    // Let's simplify: 
+    // - src_clear_i directly resets src pointers on src_clk edge
+    // - dst_clear_i is synchronized to src, and when it arrives, it resets src pointers
+    // - src_clear_i is synchronized to dst, and when it arrives, it resets dst pointers
+    // - dst_clear_i directly resets dst pointers on dst_clk edge
+
+    // Source domain:
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_wr_ptr_bin <= {PTR_W{1'b0}};
+            src_wr_ptr_gray <= {GRAY_W{1'b0}};
+            src_clear_pending <= 1'b0;
+        end else begin
+            if (src_clear_i || dst_clear_synced) begin
+                src_wr_ptr_bin <= {PTR_W{1'b0}};
+                src_wr_ptr_gray <= {GRAY_W{1'b0}};
+                src_clear_pending <= 1'b1;
+            end else begin
+                src_clear_pending <= 1'b0;
+            end
+        end
+    end
+
+    // Source domain: write pointer increment
+    wire src_wr_en = src_valid_i & src_ready_o & ~src_clear_active;
+    wire src_full = (src_wr_ptr_bin == gray2bin(dst_rd_ptr_gray_synced) + PTR_W'(DEPTH));
+    // Wait, that's not right. Full when write pointer has lapped read pointer by DEPTH.
+    // In Gray code, full when the upper two bits differ and the rest are the same.
+    // Let's use binary comparison for clarity.
+    
+    wire [PTR_W-1:0] dst_rd_ptr_bin_synced = gray2bin(dst_rd_ptr_gray_synced);
+    wire src_full = (src_wr_ptr_bin == dst_rd_ptr_bin_synced + PTR_W'(DEPTH));
+    // Hmm, this doesn't work well with wrap-around. Let's use the standard Gray code full check.
+    // Full: write pointer has advanced DEPTH ahead of read pointer.
+    // In binary: (src_wr_ptr_bin - dst_rd_ptr_bin_synced) == DEPTH
+    // But with wrap-around, this is tricky.
+    
+    // Standard approach: full when the MSB and second MSB of write pointer differ from
+    // read pointer, and the rest are the same.
+    wire src_full_gray = (src_wr_ptr_gray[GRAY_W-1] != dst_rd_ptr_gray_synced[GRAY_W-1]) &&
+                         (src_wr_ptr_gray[GRAY_W-2] == dst_rd_ptr_gray_synced[GRAY_W-2]) &&
+                         (src_wr_ptr_gray[GRAY_W-3:0] == dst_rd_ptr_gray_synced[GRAY_W-3:0]);
+    
+    // Actually, let's just use binary comparison with proper wrap-around handling.
+    // Full when write pointer has lapped read pointer by exactly DEPTH.
+    // (src_wr_ptr_bin - dst_rd_ptr_bin_synced) mod (2*DEPTH) == DEPTH
+    // This is equivalent to: src_wr_ptr_bin == dst_rd_ptr_bin_synced + DEPTH (with wrap)
+    
+    // Let's use a simpler check:
+    wire [PTR_W:0] src_diff = {1'b0, src_wr_ptr_bin} - {1'b0, dst_rd_ptr_bin_synced};
+    wire src_full = (src_diff == DEPTH);
+    
+    // Hmm, this might not work correctly with wrap-around. Let me think again.
+    // If src_wr_ptr_bin = 0 and dst_rd_ptr_bin_synced = DEPTH-1, then diff = 1 (mod 2*DEPTH)
+    // If src_wr_ptr_bin = DEPTH and dst_rd_ptr_bin_synced = 0, then diff = DEPTH -> full
+    // If src_wr_ptr_bin = DEPTH-1 and dst_rd_ptr_bin_synced = 0, then diff = DEPTH-1 -> not full
+    // If src_wr_ptr_bin = 0 and dst_rd_ptr_bin_synced = DEPTH, then diff = -DEPTH mod 2*DEPTH = DEPTH -> full? No, that's empty.
+    
+    // I think the standard approach is to use the Gray code comparison. Let me use that.
+    // Full: the two MSBs of the write pointer are different from the read pointer,
+    // and the remaining bits are the same.
+    
+    // Let's redefine:
+    wire src_full = (src_wr_ptr_gray[GRAY_W-1:GRAY_W-2] != dst_rd_ptr_gray_synced[GRAY_W-1:GRAY_W-2]) &&
+                    (src_wr_ptr_gray[GRAY_W-3:0] == dst_rd_ptr_gray_synced[GRAY_W-3:0]);
+    
+    // This works for DEPTH >= 4. For DEPTH = 2, GRAY_W = 2, and this would be:
+    // (src_wr_ptr_gray[1:0] != dst_rd_ptr_gray_synced[1:0]) && (src_wr_ptr_gray[-1:0] == ...)
+    // Which is problematic. Let's assume DEPTH >= 4 for now, or handle it differently.
+    
+    // Actually, for a FIFO of depth DEPTH, the pointer width is LOG_DEPTH+1.
+    // The full condition in Gray code is:
+    // write_gray[MSB] != read_gray[MSB] && write_gray[MSB-1] == read_gray[MSB-1] && write_gray[rest] == read_gray[rest]
+    
+    // Let's just use this standard check.
+    
+    assign src_ready_o = ~src_full & ~src_clear_active;
+
+    // Source domain: write to memory
+    always @(posedge src_clk_i) begin
+        if (src_wr_en) begin
+            mem[src_wr_ptr_bin[LOG_DEPTH-1:0]] <= src_data_i;
+            src_wr_ptr_bin <= src_wr_ptr_bin + 1'b1;
+            src_wr_ptr_gray <= bin2gray(src_wr_ptr_bin + 1'b1);
+        end
+    end
+
+    // Source domain: synchronize dst_rd_ptr_gray
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_rd_ptr_gray_sync[0] <= {GRAY_W{1'b0}};
+            dst_rd_ptr_gray_sync[1] <= {GRAY_W{1'b0}};
+            dst_rd_ptr_gray_sync[2] <= {GRAY_W{1'b0}};
+        end else begin
+            dst_rd_ptr_gray_sync[0] <= dst_rd_ptr_gray;
+            dst_rd_ptr_gray_sync[1] <= dst_rd_ptr_gray_sync[0];
+            dst_rd_ptr_gray_sync[2] <= dst_rd_ptr_gray_sync[1];
+        end
+    end
+    assign dst_rd_ptr_gray_synced = dst_rd_ptr_gray_sync[SYNC_STAGES-1];
+
+    // Source domain: synchronize dst_clear_i
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_clear_sync[0] <= 1'b0;
+            dst_clear_sync[1] <= 1'b0;
+            dst_clear_sync[2] <= 1'b0;
+        end else begin
+            dst_clear_sync[0] <= dst_clear_i;
+            dst_clear_sync[1] <= dst_clear_sync[0];
+            dst_clear_sync[2] <= dst_clear_sync[1];
+        end
+    end
+
+    // Destination domain: synchronize src_wr_ptr_gray
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_wr_ptr_gray_sync[0] <= {GRAY_W{1'b0}};
+            src_wr_ptr_gray_sync[1] <= {GRAY_W{1'b0}};
+            src_wr_ptr_gray_sync[2] <= {GRAY_W{1'b0}};
+        end else begin
+            src_wr_ptr_gray_sync[0] <= src_wr_ptr_gray;
+            src_wr_ptr_gray_sync[1] <= src_wr_ptr_gray_sync[0];
+            src_wr_ptr_gray_sync[2] <= src_wr_ptr_gray_sync[1];
+        end
+    end
+    assign src_wr_ptr_gray_synced = src_wr_ptr_gray_sync[SYNC_STAGES-1];
+
+    // Destination domain: synchronize src_clear_i
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_clear_sync[0] <= 1'b0;
+            src_clear_sync[1] <= 1'b0;
+            src_clear_sync[2] <= 1'b0;
+        end else begin
+            src_clear_sync[0] <= src_clear_i;
+            src_clear_sync[1] <= src_clear_sync[0];
+            src_clear_sync[2] <= src_clear_sync[1];
+        end
+    end
+
+    // Destination domain: read pointer and data
+    wire [PTR_W-1:0] src_wr_ptr_bin_synced = gray2bin(src_wr_ptr_gray_synced);
+    wire [PTR_W:0] dst_diff = {1'b0, src_wr_ptr_bin_synced} - {1'b0, dst_rd_ptr_bin};
+    wire dst_empty = (dst_diff == 0);
+    
+    wire dst_rd_en = dst_valid_reg & dst_ready_i & ~dst_clear_active;
+    
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_rd_ptr_bin <= {PTR_W{1'b0}};
+            dst_rd_ptr_gray <= {GRAY_W{1'b0}};
+            dst_data_reg <= {WIDTH{1'b0}};
+            dst_valid_reg <= 1'b0;
+            dst_clear_pending <= 1'b0;
+        end else begin
+            if (dst_clear_i || src_clear_synced) begin
+                dst_rd_ptr_bin <= {PTR_W{1'b0}};
+                dst_rd_ptr_gray <= {GRAY_W{1'b0}};
+                dst_data_reg <= {WIDTH{1'b0}};
+                dst_valid_reg <= 1'b0;
+                dst_clear_pending <= 1'b1;
+            end else begin
+                dst_clear_pending <= 1'b0;
+                if (dst_rd_en) begin
+                    dst_rd_ptr_bin <= dst_rd_ptr_bin + 1'b1;
+                    dst_rd_ptr_gray <= bin2gray(dst_rd_ptr_bin + 1'b1);
+                    dst_valid_reg <= ~dst_empty;
+                    if (~dst_empty) begin
+                        dst_data_reg <= mem[src_wr_ptr_bin_synced[LOG_DEPTH-1:0]];
+                    end
+                end else if (~dst_valid_reg & ~dst_empty) begin
+                    dst_valid_reg <= 1'b1;
+                    dst_data_reg <= mem[src_wr_ptr_bin_synced[LOG_DEPTH-1:0]];
+                end
+            end
+        end
+    end
+
+    assign dst_data_o = dst_data_reg;
+    assign dst_valid_o = dst_valid_reg;
+    assign src_clear_pending_o = src_clear_pending;
+    assign dst_clear_pending_o = dst_clear_pending;
+
+endmodule

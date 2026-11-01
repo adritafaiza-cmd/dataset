@@ -1,0 +1,89 @@
+```systemverilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Extract APB signals from req_t
+  wire        pwrite   = req_i.pwrite;
+  wire        psel     = req_i.psel;
+  wire        penable  = req_i.penable;
+  wire [31:0] paddr    = req_i.paddr;
+  wire [31:0] pwdata   = req_i.pwdata;
+  wire [3:0]  pstrb    = req_i.pstrb;
+
+  // Extract APB signals from resp_t
+  resp_o.pready  = 1'b1;
+  resp_o.pslverr = 1'b0;
+  resp_o.prdata  = 32'h0;
+
+  // Compute register index from address
+  wire [ApbAddrWidth-1:0] addr_offset = paddr - base_addr_i;
+  wire [ApbAddrWidth-1:0] reg_index   = addr_offset / AddrOffset;
+  wire [ApbAddrWidth-1:0] byte_offset = addr_offset % AddrOffset;
+
+  // Check if address is valid (within range)
+  wire addr_valid = (reg_index < NoApbRegs) && (byte_offset == 0);
+
+  // Read data
+  reg_data_t read_data;
+  assign read_data = addr_valid ? reg_q_o[reg_index] : '0;
+
+  // Write data with byte strobes
+  reg_data_t write_data;
+  if (RegDataWidth == 32) begin
+    write_data = {
+      (pstrb[3] ? pwdata[31:24] : reg_q_o[reg_index][31:24]),
+      (pstrb[2] ? pwdata[23:16] : reg_q_o[reg_index][23:16]),
+      (pstrb[1] ? pwdata[15:8]  : reg_q_o[reg_index][15:8]),
+      (pstrb[0] ? pwdata[7:0]   : reg_q_o[reg_index][7:0])
+    };
+  end else begin
+    write_data = reg_data_t'(pwdata);
+  end
+
+  // Write enable
+  wire write_en = psel & penable & pwrite & addr_valid;
+
+  // Register update logic
+  always @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        reg_q_o[i] <= reg_init_i[i];
+      end
+    end else begin
+      if (write_en) begin
+        if (!ReadOnly[reg_index]) begin
+          reg_q_o[reg_index] <= write_data;
+        end
+      end
+    end
+  end
+
+  // Read data output
+  always @(*) begin
+    if (psel & penable & !pwrite) begin
+      resp_o.prdata = 32'(read_data);
+    end else begin
+      resp_o.prdata = 32'h0;
+    end
+  end
+
+endmodule
+```<|im_end|>

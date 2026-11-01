@@ -1,0 +1,244 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // SPI clock divider counter
+    localparam SPI_CLK_DIV_MAX = SPI_2X_CLK_DIV - 1;
+    reg [31:0] spi_clk_cnt;
+    reg spi_clk_phase;
+
+    // SPI state machine
+    localparam SPI_IDLE = 2'd0;
+    localparam SPI_TX   = 2'd1;
+    localparam SPI_RX   = 2'd2;
+    localparam SPI_DONE = 2'd3;
+    reg [1:0] spi_state;
+
+    // SPI shift registers
+    reg [N-1:0] tx_shift;
+    reg [N-1:0] rx_shift;
+    reg [31:0] bit_cnt;
+
+    // Parallel interface FIFO (simple 2-entry)
+    reg [N-1:0] fifo_mem [0:1];
+    reg [1:0] fifo_wr_ptr;
+    reg [1:0] fifo_rd_ptr;
+    reg fifo_empty;
+    reg fifo_full;
+
+    // Synchronization for reset
+    reg rst_sync_1, rst_sync_2;
+
+    // Synchronization for wren_i
+    reg wren_sync_1, wren_sync_2, wren_sync_3;
+
+    // Synchronization for di_i
+    reg [N-1:0] di_sync_1, di_sync_2;
+
+    // Synchronization for spi_miso_i
+    reg miso_sync_1, miso_sync_2;
+
+    // Internal signals
+    wire spi_clk_edge;
+    wire spi_clk_rising;
+    wire spi_clk_falling;
+
+    // Reset synchronization
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            rst_sync_1 <= 1'b1;
+            rst_sync_2 <= 1'b1;
+        end else begin
+            rst_sync_1 <= 1'b0;
+            rst_sync_2 <= rst_sync_1;
+        end
+    end
+
+    wire rst_sync = rst_sync_2;
+
+    // Wren synchronization
+    always @(posedge pclk_i) begin
+        wren_sync_1 <= wren_i;
+        wren_sync_2 <= wren_sync_1;
+        wren_sync_3 <= wren_sync_2;
+    end
+
+    wire wren_sync = wren_sync_2;
+    wire wren_rise = wren_sync & ~wren_sync_3;
+
+    // DI synchronization
+    always @(posedge pclk_i) begin
+        di_sync_1 <= di_i;
+        di_sync_2 <= di_sync_1;
+    end
+
+    wire [N-1:0] di_sync = di_sync_2;
+
+    // MISO synchronization
+    always @(posedge sclk_i) begin
+        miso_sync_1 <= spi_miso_i;
+        miso_sync_2 <= miso_sync_1;
+    end
+
+    wire miso_sync = miso_sync_2;
+
+    // SPI clock generation
+    always @(posedge sclk_i or posedge rst_sync) begin
+        if (rst_sync) begin
+            spi_clk_cnt <= 0;
+            spi_clk_phase <= 1'b0;
+        end else begin
+            if (spi_clk_cnt == SPI_CLK_DIV_MAX) begin
+                spi_clk_cnt <= 0;
+                spi_clk_phase <= ~spi_clk_phase;
+            end else begin
+                spi_clk_cnt <= spi_clk_cnt + 1;
+            end
+        end
+    end
+
+    // Detect rising and falling edges of generated SPI clock
+    reg spi_clk_phase_prev;
+    always @(posedge sclk_i) begin
+        spi_clk_phase_prev <= spi_clk_phase;
+    end
+
+    wire spi_clk_rising = spi_clk_phase & ~spi_clk_phase_prev;
+    wire spi_clk_falling = ~spi_clk_phase & spi_clk_phase_prev;
+
+    // SPI state machine
+    always @(posedge sclk_i or posedge rst_sync) begin
+        if (rst_sync) begin
+            spi_state <= SPI_IDLE;
+            spi_ssel_o <= 1'b1;
+            spi_sck_o <= 1'b0;
+            tx_shift <= {N{1'b0}};
+            rx_shift <= {N{1'b0}};
+            bit_cnt <= 0;
+        end else begin
+            case (spi_state)
+                SPI_IDLE: begin
+                    spi_ssel_o <= 1'b1;
+                    spi_sck_o <= 1'b0;
+                    if (fifo_empty == 1'b0) begin
+                        spi_state <= SPI_TX;
+                        spi_ssel_o <= 1'b0;
+                        tx_shift <= fifo_mem[fifo_rd_ptr];
+                        bit_cnt <= 0;
+                    end
+                end
+                SPI_TX: begin
+                    spi_ssel_o <= 1'b0;
+                    if (spi_clk_rising) begin
+                        spi_sck_o <= 1'b1;
+                        tx_shift <= {tx_shift[N-2:0], 1'b0};
+                        if (bit_cnt == N-1) begin
+                            spi_state <= SPI_RX;
+                            bit_cnt <= 0;
+                        end else begin
+                            bit_cnt <= bit_cnt + 1;
+                        end
+                    end else if (spi_clk_falling) begin
+                        spi_sck_o <= 1'b0;
+                        rx_shift <= {rx_shift[N-2:0], miso_sync};
+                        if (bit_cnt == N-1) begin
+                            spi_state <= SPI_DONE;
+                        end else begin
+                            bit_cnt <= bit_cnt + 1;
+                        end
+                    end
+                end
+                SPI_RX: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o <= 1'b0;
+                    spi_state <= SPI_DONE;
+                end
+                SPI_DONE: begin
+                    spi_ssel_o <= 1'b1;
+                    spi_sck_o <= 1'b0;
+                    spi_state <= SPI_IDLE;
+                end
+                default: begin
+                    spi_state <= SPI_IDLE;
+                    spi_ssel_o <= 1'b1;
+                    spi_sck_o <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // MOSI output
+    assign spi_mosi_o = tx_shift[N-1];
+
+    // Parallel interface FIFO management
+    always @(posedge pclk_i or posedge rst_sync) begin
+        if (rst_sync) begin
+            fifo_wr_ptr <= 0;
+            fifo_rd_ptr <= 0;
+            fifo_empty <= 1'b1;
+            fifo_full <= 1'b0;
+            di_req_o <= 1'b0;
+            wr_ack_o <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o <= {N{1'b0}};
+        end else begin
+            // Default: clear one-cycle pulses
+            di_req_o <= 1'b0;
+            wr_ack_o <= 1'b0;
+            do_valid_o <= 1'b0;
+
+            // Check if SPI is idle and FIFO is not full
+            if (spi_state == SPI_IDLE && fifo_full == 1'b0) begin
+                di_req_o <= 1'b1;
+            end
+
+            // Accept data when wren is high and we're requesting
+            if (wren_rise && di_req_o) begin
+                fifo_mem[fifo_wr_ptr] <= di_sync;
+                fifo_wr_ptr <= fifo_wr_ptr + 1;
+                wr_ack_o <= 1'b1;
+                if (fifo_wr_ptr == 1) begin
+                    fifo_full <= 1'b1;
+                    fifo_empty <= 1'b0;
+                end else begin
+                    fifo_empty <= 1'b0;
+                end
+            end
+
+            // Read from FIFO when SPI starts transmitting
+            if (spi_state == SPI_IDLE && fifo_empty == 1'b0) begin
+                fifo_rd_ptr <= fifo_rd_ptr + 1;
+                if (fifo_rd_ptr == 1) begin
+                    fifo_empty <= 1'b1;
+                    fifo_full <= 1'b0;
+                end else begin
+                    fifo_full <= 1'b0;
+                end
+            end
+
+            // Output received data when SPI completes
+            if (spi_state == SPI_DONE) begin
+                do_o <= rx_shift;
+                do_valid_o <= 1'b1;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

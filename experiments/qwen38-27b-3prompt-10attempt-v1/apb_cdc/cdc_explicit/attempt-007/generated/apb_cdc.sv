@@ -1,0 +1,269 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    // ========================================================================
+    // Source Domain State Machine
+    // ========================================================================
+    localparam SRC_IDLE  = 1'b0;
+    localparam SRC_WAIT  = 1'b1;
+
+    reg src_state;
+    reg [ADDR_WIDTH-1:0] src_addr_reg;
+    reg [DATA_WIDTH-1:0] src_wdata_reg;
+    reg [DATA_WIDTH/8-1:0] src_strb_reg;
+    reg [2:0] src_prot_reg;
+    reg src_write_reg;
+
+    // Handshake signals to destination domain
+    reg src_req_valid;
+    reg src_req_valid_sync;
+    reg src_req_valid_sync2;
+    reg src_req_valid_sync3;
+    reg src_req_valid_sync4;
+
+    // Handshake signals from destination domain
+    reg dst_done_sync;
+    reg dst_done_sync2;
+    reg dst_done_sync3;
+    reg dst_done_sync4;
+
+    // Read data and error from destination
+    reg [DATA_WIDTH-1:0] dst_rdata_sync;
+    reg [DATA_WIDTH-1:0] dst_rdata_sync2;
+    reg dst_err_sync;
+    reg dst_err_sync2;
+
+    // ========================================================================
+    // Destination Domain State Machine
+    // ========================================================================
+    localparam DST_IDLE  = 1'b0;
+    localparam DST_SETUP = 1'b1;
+    localparam DST_ACCESS = 1'b2;
+
+    reg [1:0] dst_state;
+    reg [ADDR_WIDTH-1:0] dst_addr_reg;
+    reg [DATA_WIDTH-1:0] dst_wdata_reg;
+    reg [DATA_WIDTH/8-1:0] dst_strb_reg;
+    reg [2:0] dst_prot_reg;
+    reg dst_write_reg;
+
+    // Handshake to source domain
+    reg dst_done_valid;
+    reg dst_done_valid_sync;
+    reg dst_done_valid_sync2;
+    reg dst_done_valid_sync3;
+    reg dst_done_valid_sync4;
+
+    // ========================================================================
+    // Source Domain Logic
+    // ========================================================================
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_state <= SRC_IDLE;
+            src_addr_reg <= {ADDR_WIDTH{1'b0}};
+            src_wdata_reg <= {DATA_WIDTH{1'b0}};
+            src_strb_reg <= {(DATA_WIDTH/8){1'b0}};
+            src_prot_reg <= 3'b000;
+            src_write_reg <= 1'b0;
+            src_req_valid <= 1'b0;
+            src_pready_o <= 1'b0;
+            src_prdata_o <= {DATA_WIDTH{1'b0}};
+            src_pslverr_o <= 1'b0;
+        end else begin
+            case (src_state)
+                SRC_IDLE: begin
+                    src_pready_o <= 1'b0;
+                    if (src_psel_i) begin
+                        src_addr_reg <= src_paddr_i;
+                        src_wdata_reg <= src_pwdata_i;
+                        src_strb_reg <= src_pstrb_i;
+                        src_prot_reg <= src_pprot_i;
+                        src_write_reg <= src_pwrite_i;
+                        src_req_valid <= 1'b1;
+                        src_state <= SRC_WAIT;
+                    end
+                end
+                SRC_WAIT: begin
+                    src_pready_o <= 1'b0;
+                    if (dst_done_sync4) begin
+                        src_req_valid <= 1'b0;
+                        src_state <= SRC_IDLE;
+                        if (src_write_reg) begin
+                            src_pready_o <= 1'b1;
+                        end else begin
+                            src_prdata_o <= dst_rdata_sync2;
+                            src_pslverr_o <= dst_err_sync2;
+                            src_pready_o <= 1'b1;
+                        end
+                    end
+                end
+                default: begin
+                    src_state <= SRC_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Synchronize dst_done from dst domain to src domain
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            dst_done_sync <= 1'b0;
+            dst_done_sync2 <= 1'b0;
+            dst_done_sync3 <= 1'b0;
+            dst_done_sync4 <= 1'b0;
+        end else begin
+            dst_done_sync <= dst_done_valid;
+            dst_done_sync2 <= dst_done_sync;
+            dst_done_sync3 <= dst_done_sync2;
+            dst_done_sync4 <= dst_done_sync3;
+        end
+    end
+
+    // Synchronize read data and error from dst domain to src domain
+    // Data is stable when dst_done is asserted, so we can safely sample
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            dst_rdata_sync <= {DATA_WIDTH{1'b0}};
+            dst_rdata_sync2 <= {DATA_WIDTH{1'b0}};
+            dst_err_sync <= 1'b0;
+            dst_err_sync2 <= 1'b0;
+        end else begin
+            // Sample when dst_done is stable (sync4)
+            if (dst_done_sync4) begin
+                dst_rdata_sync <= dst_prdata_i;
+                dst_err_sync <= dst_pslverr_i;
+            end
+            dst_rdata_sync2 <= dst_rdata_sync;
+            dst_err_sync2 <= dst_err_sync;
+        end
+    end
+
+    // ========================================================================
+    // Destination Domain Logic
+    // ========================================================================
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_state <= DST_IDLE;
+            dst_addr_reg <= {ADDR_WIDTH{1'b0}};
+            dst_wdata_reg <= {DATA_WIDTH{1'b0}};
+            dst_strb_reg <= {(DATA_WIDTH/8){1'b0}};
+            dst_prot_reg <= 3'b000;
+            dst_write_reg <= 1'b0;
+            dst_psel_o <= 1'b0;
+            dst_penable_o <= 1'b0;
+            dst_pwrite_o <= 1'b0;
+            dst_paddr_o <= {ADDR_WIDTH{1'b0}};
+            dst_pwdata_o <= {DATA_WIDTH{1'b0}};
+            dst_pstrb_o <= {(DATA_WIDTH/8){1'b0}};
+            dst_pprot_o <= 3'b000;
+            dst_done_valid <= 1'b0;
+        end else begin
+            case (dst_state)
+                DST_IDLE: begin
+                    dst_psel_o <= 1'b0;
+                    dst_penable_o <= 1'b0;
+                    dst_done_valid <= 1'b0;
+                    if (src_req_valid_sync4) begin
+                        dst_addr_reg <= src_paddr_i;
+                        dst_wdata_reg <= src_pwdata_i;
+                        dst_strb_reg <= src_pstrb_i;
+                        dst_prot_reg <= src_pprot_i;
+                        dst_write_reg <= src_pwrite_i;
+                        dst_psel_o <= 1'b1;
+                        dst_paddr_o <= src_paddr_i;
+                        dst_pwdata_o <= src_pwdata_i;
+                        dst_pstrb_o <= src_pstrb_i;
+                        dst_pprot_o <= src_pprot_i;
+                        dst_pwrite_o <= src_pwrite_i;
+                        dst_state <= DST_SETUP;
+                    end
+                end
+                DST_SETUP: begin
+                    dst_psel_o <= 1'b1;
+                    dst_penable_o <= 1'b1;
+                    dst_paddr_o <= dst_addr_reg;
+                    dst_pwdata_o <= dst_wdata_reg;
+                    dst_pstrb_o <= dst_strb_reg;
+                    dst_pprot_o <= dst_prot_reg;
+                    dst_pwrite_o <= dst_write_reg;
+                    dst_state <= DST_ACCESS;
+                end
+                DST_ACCESS: begin
+                    dst_psel_o <= 1'b1;
+                    dst_penable_o <= 1'b1;
+                    dst_paddr_o <= dst_addr_reg;
+                    dst_pwdata_o <= dst_wdata_reg;
+                    dst_pstrb_o <= dst_strb_reg;
+                    dst_pprot_o <= dst_prot_reg;
+                    dst_pwrite_o <= dst_write_reg;
+                    if (dst_pready_i) begin
+                        dst_done_valid <= 1'b1;
+                        dst_state <= DST_IDLE;
+                    end
+                end
+                default: begin
+                    dst_state <= DST_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Synchronize src_req_valid from src domain to dst domain
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            src_req_valid_sync <= 1'b0;
+            src_req_valid_sync2 <= 1'b0;
+            src_req_valid_sync3 <= 1'b0;
+            src_req_valid_sync4 <= 1'b0;
+        end else begin
+            src_req_valid_sync <= src_req_valid;
+            src_req_valid_sync2 <= src_req_valid_sync;
+            src_req_valid_sync3 <= src_req_valid_sync2;
+            src_req_valid_sync4 <= src_req_valid_sync3;
+        end
+    end
+
+    // Synchronize dst_done_valid from dst domain to src domain
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_done_valid_sync <= 1'b0;
+            dst_done_valid_sync2 <= 1'b0;
+            dst_done_valid_sync3 <= 1'b0;
+            dst_done_valid_sync4 <= 1'b0;
+        end else begin
+            dst_done_valid_sync <= dst_done_valid;
+            dst_done_valid_sync2 <= dst_done_valid_sync;
+            dst_done_valid_sync3 <= dst_done_valid_sync2;
+            dst_done_valid_sync4 <= dst_done_valid_sync3;
+        end
+    end
+
+endmodule

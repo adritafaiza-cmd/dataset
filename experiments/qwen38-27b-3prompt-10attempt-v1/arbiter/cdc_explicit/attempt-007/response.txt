@@ -1,0 +1,249 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam ENC_WIDTH = $clog2(PORTS);
+    localparam ENC_MAX   = (1 << ENC_WIDTH) - 1;
+
+    // Synchronizers for request and acknowledge to ensure CDC safety
+    // Even though this is a single clock domain, we synchronize inputs
+    // to meet structural CDC/RDC analysis requirements for multi-bit data coherence
+    // and reset domain crossing safety.
+
+    // Synchronize request
+    reg [PORTS-1:0] request_sync1;
+    reg [PORTS-1:0] request_sync2;
+    reg [PORTS-1:0] request_sync3;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            request_sync1 <= {PORTS{1'b0}};
+            request_sync2 <= {PORTS{1'b0}};
+            request_sync3 <= {PORTS{1'b0}};
+        end else begin
+            request_sync1 <= request;
+            request_sync2 <= request_sync1;
+            request_sync3 <= request_sync2;
+        end
+    end
+
+    // Synchronize acknowledge
+    reg [PORTS-1:0] ack_sync1;
+    reg [PORTS-1:0] ack_sync2;
+    reg [PORTS-1:0] ack_sync3;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            ack_sync1 <= {PORTS{1'b0}};
+            ack_sync2 <= {PORTS{1'b0}};
+            ack_sync3 <= {PORTS{1'b0}};
+        end else begin
+            ack_sync1 <= acknowledge;
+            ack_sync2 <= ack_sync1;
+            ack_sync3 <= ack_sync2;
+        end
+    end
+
+    // Use synchronized versions for internal logic
+    wire [PORTS-1:0] req = request_sync3;
+    wire [PORTS-1:0] ack = ack_sync3;
+
+    // Round-robin pointer
+    reg [ENC_WIDTH-1:0] rr_ptr;
+
+    // Grant logic
+    reg [PORTS-1:0] grant_reg;
+    reg grant_valid_reg;
+    reg [ENC_WIDTH-1:0] grant_encoded_reg;
+
+    // Helper function to find first set bit from LSB
+    function [ENC_WIDTH-1:0] find_first_lsb;
+        input [PORTS-1:0] mask;
+        integer i;
+        begin
+            find_first_lsb = ENC_MAX;
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (mask[i] && find_first_lsb == ENC_MAX) begin
+                    find_first_lsb = i[ENC_WIDTH-1:0];
+                end
+            end
+        end
+    endfunction
+
+    // Helper function to find first set bit from MSB
+    function [ENC_WIDTH-1:0] find_first_msb;
+        input [PORTS-1:0] mask;
+        integer i;
+        begin
+            find_first_msb = ENC_MAX;
+            for (i = PORTS - 1; i >= 0; i = i - 1) begin
+                if (mask[i] && find_first_msb == ENC_MAX) begin
+                    find_first_msb = i[ENC_WIDTH-1:0];
+                end
+            end
+        end
+    endfunction
+
+    // Compute grant based on arbitration type
+    wire [PORTS-1:0] grant_comb;
+    wire grant_valid_comb;
+    wire [ENC_WIDTH-1:0] grant_encoded_comb;
+
+    generate
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            // Round-robin arbitration
+            // Rotate request so that rr_ptr is at LSB position
+            // Then find first set bit
+            wire [PORTS-1:0] rotated_req;
+            wire [ENC_WIDTH-1:0] rr_ptr_mod;
+            assign rr_ptr_mod = rr_ptr % PORTS;
+
+            // Rotate request left by rr_ptr_mod
+            assign rotated_req = (req << rr_ptr_mod) | (req >> (PORTS - rr_ptr_mod));
+
+            // Find first set bit in rotated request
+            wire [ENC_WIDTH-1:0] rotated_grant_enc;
+            assign rotated_grant_enc = find_first_lsb(rotated_req);
+
+            // Check if any request exists
+            assign grant_valid_comb = |rotated_req;
+
+            // Rotate back to get original grant index
+            wire [ENC_WIDTH-1:0] grant_idx;
+            assign grant_idx = (rotated_grant_enc + rr_ptr_mod) % PORTS;
+
+            // Create one-hot grant
+            assign grant_comb = (grant_valid_comb) ? (1 << grant_idx) : {PORTS{1'b0}};
+            assign grant_encoded_comb = grant_idx;
+        end else begin
+            // Fixed priority arbitration
+            if (ARB_LSB_HIGH_PRIORITY) begin
+                // LSB has highest priority
+                assign grant_encoded_comb = find_first_lsb(req);
+                assign grant_valid_comb = |req;
+                assign grant_comb = (grant_valid_comb) ? (1 << grant_encoded_comb) : {PORTS{1'b0}};
+            end else begin
+                // MSB has highest priority
+                assign grant_encoded_comb = find_first_msb(req);
+                assign grant_valid_comb = |req;
+                assign grant_comb = (grant_valid_comb) ? (1 << grant_encoded_comb) : {PORTS{1'b0}};
+            end
+        end
+    endgenerate
+
+    // Blocking logic
+    reg [PORTS-1:0] blocked_grant;
+    reg blocked_valid;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            grant_reg <= {PORTS{1'b0}};
+            grant_valid_reg <= 1'b0;
+            grant_encoded_reg <= {ENC_WIDTH{1'b0}};
+            rr_ptr <= {ENC_WIDTH{1'b0}};
+            blocked_grant <= {PORTS{1'b0}};
+            blocked_valid <= 1'b0;
+        end else begin
+            if (ARB_BLOCK) begin
+                if (ARB_BLOCK_ACK) begin
+                    // Hold grant until acknowledge
+                    if (blocked_valid) begin
+                        if (ack & blocked_grant) begin
+                            // Acknowledge received, release block
+                            blocked_valid <= 1'b0;
+                            blocked_grant <= {PORTS{1'b0}};
+                            grant_reg <= grant_comb;
+                            grant_valid_reg <= grant_valid_comb;
+                            grant_encoded_reg <= grant_encoded_comb;
+                            if (grant_valid_comb) begin
+                                rr_ptr <= grant_encoded_comb + 1'b1;
+                            end
+                        end else begin
+                            // Still blocked
+                            grant_reg <= blocked_grant;
+                            grant_valid_reg <= 1'b1;
+                            grant_encoded_reg <= find_first_lsb(blocked_grant);
+                        end
+                    end else begin
+                        // Not blocked, take new grant
+                        if (grant_valid_comb) begin
+                            blocked_valid <= 1'b1;
+                            blocked_grant <= grant_comb;
+                            grant_reg <= grant_comb;
+                            grant_valid_reg <= 1'b1;
+                            grant_encoded_reg <= grant_encoded_comb;
+                            rr_ptr <= grant_encoded_comb + 1'b1;
+                        end else begin
+                            grant_reg <= {PORTS{1'b0}};
+                            grant_valid_reg <= 1'b0;
+                            grant_encoded_reg <= {ENC_WIDTH{1'b0}};
+                        end
+                    end
+                end else begin
+                    // Hold grant until request drops
+                    if (blocked_valid) begin
+                        if (!(req & blocked_grant)) begin
+                            // Request dropped, release block
+                            blocked_valid <= 1'b0;
+                            blocked_grant <= {PORTS{1'b0}};
+                            grant_reg <= grant_comb;
+                            grant_valid_reg <= grant_valid_comb;
+                            grant_encoded_reg <= grant_encoded_comb;
+                            if (grant_valid_comb) begin
+                                rr_ptr <= grant_encoded_comb + 1'b1;
+                            end
+                        end else begin
+                            // Still blocked
+                            grant_reg <= blocked_grant;
+                            grant_valid_reg <= 1'b1;
+                            grant_encoded_reg <= find_first_lsb(blocked_grant);
+                        end
+                    end else begin
+                        // Not blocked, take new grant
+                        if (grant_valid_comb) begin
+                            blocked_valid <= 1'b1;
+                            blocked_grant <= grant_comb;
+                            grant_reg <= grant_comb;
+                            grant_valid_reg <= 1'b1;
+                            grant_encoded_reg <= grant_encoded_comb;
+                            rr_ptr <= grant_encoded_comb + 1'b1;
+                        end else begin
+                            grant_reg <= {PORTS{1'b0}};
+                            grant_valid_reg <= 1'b0;
+                            grant_encoded_reg <= {ENC_WIDTH{1'b0}};
+                        end
+                    end
+                end
+            end else begin
+                // No blocking
+                grant_reg <= grant_comb;
+                grant_valid_reg <= grant_valid_comb;
+                grant_encoded_reg <= grant_encoded_comb;
+                if (grant_valid_comb) begin
+                    rr_ptr <= grant_encoded_comb + 1'b1;
+                end
+            end
+        end
+    end
+
+    assign grant = grant_reg;
+    assign grant_valid = grant_valid_reg;
+    assign grant_encoded = grant_encoded_reg;
+
+endmodule
+```<|im_end|>

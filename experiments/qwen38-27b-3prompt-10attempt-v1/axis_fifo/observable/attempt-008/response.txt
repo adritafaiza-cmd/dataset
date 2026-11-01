@@ -1,0 +1,348 @@
+```verilog
+module axis_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   pause_req,
+    output wire                   pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] status_depth,
+    output wire [$clog2(DEPTH):0] status_depth_commit,
+    output wire                   status_overflow,
+    output wire                   status_bad_frame,
+    output wire                   status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam DEPTH_MASK = DEPTH - 1;
+
+    // Internal signals
+    wire [DATA_WIDTH-1:0]  ram_dout;
+    wire [KEEP_WIDTH-1:0]  ram_keep_dout;
+    wire                    ram_last_dout;
+    wire [ID_WIDTH-1:0]    ram_id_dout;
+    wire [DEST_WIDTH-1:0]  ram_dest_dout;
+    wire [USER_WIDTH-1:0]  ram_user_dout;
+
+    wire                    ram_we;
+    wire [ADDR_WIDTH-1:0]  ram_waddr;
+    wire [ADDR_WIDTH-1:0]  ram_raddr;
+
+    wire                    fifo_empty;
+    wire                    fifo_full;
+    wire [$clog2(DEPTH):0]  fifo_count;
+
+    // Frame tracking
+    reg                     in_frame;
+    reg [ADDR_WIDTH:0]      frame_beats;
+    reg                     frame_overflow;
+    reg                     frame_bad;
+
+    // Drop/mark logic
+    reg                     drop_current_frame;
+    reg                     mark_current_frame;
+
+    // Pause logic
+    reg                     pause_active;
+
+    // Status latches
+    reg                     status_overflow_reg;
+    reg                     status_bad_frame_reg;
+    reg                     status_good_frame_reg;
+
+    // Output register
+    reg [DATA_WIDTH-1:0]  out_data;
+    reg [KEEP_WIDTH-1:0]  out_keep;
+    reg                    out_last;
+    reg [ID_WIDTH-1:0]    out_id;
+    reg [DEST_WIDTH-1:0]  out_dest;
+    reg [USER_WIDTH-1:0]  out_user;
+    reg                    out_valid;
+
+    // Write pointer
+    reg [ADDR_WIDTH-1:0]  wptr;
+    // Read pointer
+    reg [ADDR_WIDTH-1:0]  rptr;
+
+    // RAM storage
+    reg [DATA_WIDTH-1:0]  ram_data [0:DEPTH-1];
+    reg [KEEP_WIDTH-1:0]  ram_keep [0:DEPTH-1];
+    reg                    ram_last [0:DEPTH-1];
+    reg [ID_WIDTH-1:0]    ram_id   [0:DEPTH-1];
+    reg [DEST_WIDTH-1:0]  ram_dest [0:DEPTH-1];
+    reg [USER_WIDTH-1:0]  ram_user [0:DEPTH-1];
+
+    // Determine if we should accept a beat
+    wire beat_accepted = s_axis_tvalid && s_axis_tready;
+
+    // Determine if we should read from FIFO
+    wire read_enabled = out_valid && m_axis_tready;
+
+    // Frame size limit: DEPTH beats max per frame
+    wire frame_oversized = (frame_beats == DEPTH[ADDR_WIDTH:0]) && !s_axis_tlast;
+
+    // Determine if current frame should be dropped
+    wire should_drop = drop_current_frame || 
+                       (DROP_OVERSIZE_FRAME && frame_oversized) ||
+                       (DROP_BAD_FRAME && frame_bad);
+
+    // Determine if current frame should be marked
+    wire should_mark = mark_current_frame ||
+                       (MARK_WHEN_FULL && fifo_full && !DROP_WHEN_FULL);
+
+    // Input ready logic
+    wire input_ready_base = !fifo_full && !pause_active;
+    wire input_ready_frame = !in_frame || !frame_oversized;
+    
+    assign s_axis_tready = input_ready_base && input_ready_frame;
+
+    // Pause logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            pause_active <= 1'b0;
+        end else if (PAUSE_ENABLE) begin
+            if (pause_req) begin
+                pause_active <= 1'b1;
+            end else if (!pause_req && !out_valid) begin
+                pause_active <= 1'b0;
+            end
+        end else begin
+            pause_active <= 1'b0;
+        end
+    end
+
+    assign pause_ack = pause_active;
+
+    // Write to RAM
+    assign ram_we = beat_accepted;
+    assign ram_waddr = wptr;
+
+    always @(posedge clk) begin
+        if (ram_we) begin
+            ram_data[wptr] <= s_axis_tdata;
+            ram_keep[wptr] <= s_axis_tkeep;
+            ram_last[wptr] <= s_axis_tlast;
+            ram_id[wptr]   <= s_axis_tid;
+            ram_dest[wptr] <= s_axis_tdest;
+            ram_user[wptr] <= s_axis_tuser;
+        end
+    end
+
+    // Read from RAM
+    assign ram_raddr = rptr;
+
+    always @(posedge clk) begin
+        ram_dout      <= ram_data[ram_raddr];
+        ram_keep_dout <= ram_keep[ram_raddr];
+        ram_last_dout <= ram_last[ram_raddr];
+        ram_id_dout   <= ram_id[ram_raddr];
+        ram_dest_dout <= ram_dest[ram_raddr];
+        ram_user_dout <= ram_user[ram_raddr];
+    end
+
+    // FIFO pointers
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            wptr <= {ADDR_WIDTH{1'b0}};
+            rptr <= {ADDR_WIDTH{1'b0}};
+        end else begin
+            if (ram_we) begin
+                wptr <= wptr + 1'b1;
+            end
+            if (read_enabled) begin
+                rptr <= rptr + 1'b1;
+            end
+        end
+    end
+
+    // FIFO status
+    assign fifo_count = wptr - rptr;
+    assign fifo_empty = (wptr == rptr);
+    assign fifo_full  = (fifo_count == DEPTH[ADDR_WIDTH:0]);
+
+    // Frame tracking
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            in_frame         <= 1'b0;
+            frame_beats      <= {(ADDR_WIDTH+1){1'b0}};
+            frame_overflow   <= 1'b0;
+            frame_bad        <= 1'b0;
+            drop_current_frame <= 1'b0;
+            mark_current_frame <= 1'b0;
+        end else begin
+            if (beat_accepted) begin
+                if (!in_frame) begin
+                    // Start of new frame
+                    in_frame         <= 1'b1;
+                    frame_beats      <= 1'b1;
+                    frame_overflow   <= 1'b0;
+                    frame_bad        <= 1'b0;
+                    drop_current_frame <= 1'b0;
+                    mark_current_frame <= 1'b0;
+                end else begin
+                    frame_beats <= frame_beats + 1'b1;
+                    if (frame_beats == DEPTH[ADDR_WIDTH:0]) begin
+                        frame_overflow <= 1'b1;
+                    end
+                end
+
+                if (s_axis_tlast) begin
+                    // End of frame
+                    in_frame <= 1'b0;
+                    frame_beats <= {(ADDR_WIDTH+1){1'b0}};
+                end
+            end
+        end
+    end
+
+    // Detect bad frame based on user signal
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            frame_bad <= 1'b0;
+        end else begin
+            if (beat_accepted && in_frame) begin
+                if (s_axis_tuser[0] == USER_BAD_FRAME_VALUE) begin
+                    frame_bad <= 1'b1;
+                end
+            end
+            if (s_axis_tlast && beat_accepted) begin
+                frame_bad <= 1'b0;
+            end
+        end
+    end
+
+    // Update drop/mark flags when frame starts
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            drop_current_frame <= 1'b0;
+            mark_current_frame <= 1'b0;
+        end else begin
+            if (beat_accepted && !in_frame) begin
+                // New frame starting
+                drop_current_frame <= (DROP_OVERSIZE_FRAME && 1'b0) || 
+                                      (DROP_BAD_FRAME && 1'b0);
+                mark_current_frame <= (MARK_WHEN_FULL && fifo_full && !DROP_WHEN_FULL);
+            end
+        end
+    end
+
+    // Output logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            out_data  <= {DATA_WIDTH{1'b0}};
+            out_keep  <= {KEEP_WIDTH{1'b0}};
+            out_last  <= 1'b0;
+            out_id    <= {ID_WIDTH{1'b0}};
+            out_dest  <= {DEST_WIDTH{1'b0}};
+            out_user  <= {USER_WIDTH{1'b0}};
+            out_valid <= 1'b0;
+        end else begin
+            if (read_enabled) begin
+                out_valid <= 1'b0;
+            end
+            if (!out_valid && !fifo_empty) begin
+                out_data  <= ram_dout;
+                out_keep  <= ram_keep_dout;
+                out_last  <= ram_last_dout;
+                out_id    <= ram_id_dout;
+                out_dest  <= ram_dest_dout;
+                out_user  <= ram_user_dout;
+                out_valid <= 1'b1;
+            end
+        end
+    end
+
+    // Apply drop/mark to output
+    wire [USER_WIDTH-1:0] modified_user;
+    assign modified_user = should_drop ? 
+                           (out_user & ~USER_BAD_FRAME_MASK) | (USER_BAD_FRAME_VALUE & USER_BAD_FRAME_MASK) :
+                           out_user;
+
+    assign m_axis_tdata  = out_data;
+    assign m_axis_tkeep  = out_keep;
+    assign m_axis_tvalid = out_valid;
+    assign m_axis_tlast  = out_last;
+    assign m_axis_tid    = out_id;
+    assign m_axis_tdest  = out_dest;
+    assign m_axis_tuser  = modified_user;
+
+    // Status
+    assign status_depth = fifo_count;
+    assign status_depth_commit = fifo_count;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            status_overflow_reg   <= 1'b0;
+            status_bad_frame_reg  <= 1'b0;
+            status_good_frame_reg <= 1'b0;
+        end else begin
+            if (fifo_full && s_axis_tvalid) begin
+                status_overflow_reg <= 1'b1;
+            end
+            if (beat_accepted && s_axis_tlast) begin
+                if (frame_bad || frame_overflow) begin
+                    status_bad_frame_reg <= 1'b1;
+                end else begin
+                    status_good_frame_reg <= 1'b1;
+                end
+            end
+        end
+    end
+
+    assign status_overflow   = status_overflow_reg;
+    assign status_bad_frame  = status_bad_frame_reg;
+    assign status_good_frame = status_good_frame_reg;
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,71 @@
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    // Stage 0 (first register)
+    reg [WIDTH-1:0] stage0_data;
+    reg             stage0_valid;
+
+    // Stage 1 (second register)
+    reg [WIDTH-1:0] stage1_data;
+    reg             stage1_valid;
+
+    // Handshake signals between stages
+    wire stage0_ready;
+    wire stage1_ready;
+
+    // Stage 1 is ready when it's empty or when destination is ready to accept
+    assign stage1_ready = ~stage1_valid | dst_ready_i;
+
+    // Stage 0 is ready when it's empty or when stage 1 is ready to accept
+    assign stage0_ready = ~stage0_valid | stage1_ready;
+
+    // Source ready is stage 0 ready
+    assign src_ready_o = stage0_ready;
+
+    // Destination valid is stage 1 valid
+    assign dst_valid_o = stage1_valid;
+    assign dst_data_o  = stage1_data;
+
+    // Stage 0 logic (source clock domain)
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            stage0_valid <= 1'b0;
+            stage0_data  <= {WIDTH{1'b0}};
+        end else begin
+            if (src_valid_i && stage0_ready) begin
+                stage0_valid <= 1'b1;
+                stage0_data  <= src_data_i;
+            end else if (stage0_valid && stage1_ready) begin
+                stage0_valid <= 1'b0;
+            end
+        end
+    end
+
+    // Stage 1 logic (destination clock domain)
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            stage1_valid <= 1'b0;
+            stage1_data  <= {WIDTH{1'b0}};
+        end else begin
+            if (stage0_valid && stage1_ready) begin
+                stage1_valid <= 1'b1;
+                stage1_data  <= stage0_data;
+            end else if (stage1_valid && dst_ready_i) begin
+                stage1_valid <= 1'b0;
+            end
+        end
+    end
+
+endmodule

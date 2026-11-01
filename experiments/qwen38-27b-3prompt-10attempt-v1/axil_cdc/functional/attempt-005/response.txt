@@ -1,0 +1,571 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ========================================================================
+    // Internal signals
+    // ========================================================================
+
+    // Slave side: AW channel
+    reg  [ADDR_WIDTH-1:0] s_awaddr_reg;
+    reg  [2:0]            s_awprot_reg;
+    reg                   s_awvalid_reg;
+    reg                   s_awready_reg;
+
+    // Slave side: W channel
+    reg  [DATA_WIDTH-1:0] s_wdata_reg;
+    reg  [STRB_WIDTH-1:0] s_wstrb_reg;
+    reg                   s_wvalid_reg;
+    reg                   s_wready_reg;
+
+    // Slave side: B channel
+    reg  [1:0]            s_bresp_reg;
+    reg                   s_bvalid_reg;
+
+    // Slave side: AR channel
+    reg  [ADDR_WIDTH-1:0] s_araddr_reg;
+    reg  [2:0]            s_arprot_reg;
+    reg                   s_arvalid_reg;
+    reg                   s_arready_reg;
+
+    // Slave side: R channel
+    reg  [DATA_WIDTH-1:0] s_rdata_reg;
+    reg  [1:0]            s_rresp_reg;
+    reg                   s_rvalid_reg;
+
+    // Master side: AW channel
+    reg  [ADDR_WIDTH-1:0] m_awaddr_reg;
+    reg  [2:0]            m_awprot_reg;
+    reg                   m_awvalid_reg;
+
+    // Master side: W channel
+    reg  [DATA_WIDTH-1:0] m_wdata_reg;
+    reg  [STRB_WIDTH-1:0] m_wstrb_reg;
+    reg                   m_wvalid_reg;
+
+    // Master side: B channel
+    reg                   m_bready_reg;
+
+    // Master side: AR channel
+    reg  [ADDR_WIDTH-1:0] m_araddr_reg;
+    reg  [2:0]            m_arprot_reg;
+    reg                   m_arvalid_reg;
+
+    // Master side: R channel
+    reg                   m_rready_reg;
+
+    // CDC synchronization signals
+    // AW channel: s -> m
+    wire s_awreq;
+    wire m_awreq_sync;
+    wire m_awack;
+    wire s_awack_sync;
+
+    // W channel: s -> m
+    wire s_wreq;
+    wire m_wreq_sync;
+    wire m_wack;
+    wire s_wack_sync;
+
+    // B channel: m -> s
+    wire m_breq;
+    wire s_breq_sync;
+    wire s_back;
+    wire m_back_sync;
+
+    // AR channel: s -> m
+    wire s_arreq;
+    wire m_arreq_sync;
+    wire m_arack;
+    wire s_arack_sync;
+
+    // R channel: m -> s
+    wire m_rreq;
+    wire s_rreq_sync;
+    wire s_rack;
+    wire m_rack_sync;
+
+    // ========================================================================
+    // Slave side: AW channel logic
+    // ========================================================================
+
+    // AW handshake: accept when valid and ready
+    wire s_aw_handshake = s_axil_awvalid & s_axil_awready;
+
+    // AW ready: can accept new AW when not currently sending
+    assign s_axil_awready = s_awready_reg;
+
+    // AW valid: forward to master when ready
+    assign s_awreq = s_awvalid_reg;
+
+    // AW data registers
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_awaddr_reg  <= {ADDR_WIDTH{1'b0}};
+            s_awprot_reg  <= 3'b000;
+            s_awvalid_reg <= 1'b0;
+            s_awready_reg <= 1'b0;
+        end else begin
+            if (s_aw_handshake) begin
+                s_awaddr_reg  <= s_axil_awaddr;
+                s_awprot_reg  <= s_axil_awprot;
+                s_awvalid_reg <= 1'b1;
+                s_awready_reg <= 1'b0;
+            end else if (s_awvalid_reg && s_awack_sync) begin
+                s_awvalid_reg <= 1'b0;
+                s_awready_reg <= 1'b1;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Slave side: W channel logic
+    // ========================================================================
+
+    // W handshake: accept when valid and ready
+    wire s_w_handshake = s_axil_wvalid & s_axil_wready;
+
+    // W ready: can accept new W when not currently sending
+    assign s_axil_wready = s_wready_reg;
+
+    // W valid: forward to master when ready
+    assign s_wreq = s_wvalid_reg;
+
+    // W data registers
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_wdata_reg  <= {DATA_WIDTH{1'b0}};
+            s_wstrb_reg  <= {STRB_WIDTH{1'b0}};
+            s_wvalid_reg <= 1'b0;
+            s_wready_reg <= 1'b0;
+        end else begin
+            if (s_w_handshake) begin
+                s_wdata_reg  <= s_axil_wdata;
+                s_wstrb_reg  <= s_axil_wstrb;
+                s_wvalid_reg <= 1'b1;
+                s_wready_reg <= 1'b0;
+            end else if (s_wvalid_reg && s_wack_sync) begin
+                s_wvalid_reg <= 1'b0;
+                s_wready_reg <= 1'b1;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Slave side: B channel logic
+    // ========================================================================
+
+    // B valid: forward from master
+    assign s_axil_bvalid = s_bvalid_reg;
+    assign s_axil_bresp  = s_bresp_reg;
+
+    // B ready: can accept new B when not currently receiving
+    wire s_b_handshake = s_axil_bready & s_bvalid_reg;
+
+    // B request to master
+    assign s_back = s_bvalid_reg;
+
+    // B data registers
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_bresp_reg  <= 2'b00;
+            s_bvalid_reg <= 1'b0;
+        end else begin
+            if (s_breq_sync && !s_bvalid_reg) begin
+                s_bresp_reg  <= m_axil_bresp;
+                s_bvalid_reg <= 1'b1;
+            end else if (s_b_handshake) begin
+                s_bvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Slave side: AR channel logic
+    // ========================================================================
+
+    // AR handshake: accept when valid and ready
+    wire s_ar_handshake = s_axil_arvalid & s_axil_arready;
+
+    // AR ready: can accept new AR when not currently sending
+    assign s_axil_arready = s_arready_reg;
+
+    // AR valid: forward to master when ready
+    assign s_arreq = s_arvalid_reg;
+
+    // AR data registers
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_araddr_reg  <= {ADDR_WIDTH{1'b0}};
+            s_arprot_reg  <= 3'b000;
+            s_arvalid_reg <= 1'b0;
+            s_arready_reg <= 1'b0;
+        end else begin
+            if (s_ar_handshake) begin
+                s_araddr_reg  <= s_axil_araddr;
+                s_arprot_reg  <= s_axil_arprot;
+                s_arvalid_reg <= 1'b1;
+                s_arready_reg <= 1'b0;
+            end else if (s_arvalid_reg && s_arack_sync) begin
+                s_arvalid_reg <= 1'b0;
+                s_arready_reg <= 1'b1;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Slave side: R channel logic
+    // ========================================================================
+
+    // R valid: forward from master
+    assign s_axil_rvalid = s_rvalid_reg;
+    assign s_axil_rdata  = s_rdata_reg;
+    assign s_axil_rresp  = s_rresp_reg;
+
+    // R ready: can accept new R when not currently receiving
+    wire s_r_handshake = s_axil_rready & s_rvalid_reg;
+
+    // R request to master
+    assign s_rack = s_rvalid_reg;
+
+    // R data registers
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_rdata_reg  <= {DATA_WIDTH{1'b0}};
+            s_rresp_reg  <= 2'b00;
+            s_rvalid_reg <= 1'b0;
+        end else begin
+            if (s_rreq_sync && !s_rvalid_reg) begin
+                s_rdata_reg  <= m_axil_rdata;
+                s_rresp_reg  <= m_axil_rresp;
+                s_rvalid_reg <= 1'b1;
+            end else if (s_r_handshake) begin
+                s_rvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Master side: AW channel logic
+    // ========================================================================
+
+    // AW valid: forward from slave
+    assign m_axil_awvalid = m_awvalid_reg;
+    assign m_axil_awaddr  = m_awaddr_reg;
+    assign m_axil_awprot  = m_awprot_reg;
+
+    // AW handshake: accept when valid and ready
+    wire m_aw_handshake = m_axil_awvalid & m_axil_awready;
+
+    // AW acknowledge to slave
+    assign m_awack = m_awvalid_reg;
+
+    // AW data registers
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_awaddr_reg  <= {ADDR_WIDTH{1'b0}};
+            m_awprot_reg  <= 3'b000;
+            m_awvalid_reg <= 1'b0;
+        end else begin
+            if (m_awreq_sync && !m_awvalid_reg) begin
+                m_awaddr_reg  <= s_axil_awaddr;
+                m_awprot_reg  <= s_axil_awprot;
+                m_awvalid_reg <= 1'b1;
+            end else if (m_aw_handshake) begin
+                m_awvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Master side: W channel logic
+    // ========================================================================
+
+    // W valid: forward from slave
+    assign m_axil_wvalid = m_wvalid_reg;
+    assign m_axil_wdata  = m_wdata_reg;
+    assign m_axil_wstrb  = m_wstrb_reg;
+
+    // W handshake: accept when valid and ready
+    wire m_w_handshake = m_axil_wvalid & m_axil_wready;
+
+    // W acknowledge to slave
+    assign m_wack = m_wvalid_reg;
+
+    // W data registers
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_wdata_reg  <= {DATA_WIDTH{1'b0}};
+            m_wstrb_reg  <= {STRB_WIDTH{1'b0}};
+            m_wvalid_reg <= 1'b0;
+        end else begin
+            if (m_wreq_sync && !m_wvalid_reg) begin
+                m_wdata_reg  <= s_axil_wdata;
+                m_wstrb_reg  <= s_axil_wstrb;
+                m_wvalid_reg <= 1'b1;
+            end else if (m_w_handshake) begin
+                m_wvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Master side: B channel logic
+    // ========================================================================
+
+    // B ready: forward to slave
+    assign m_axil_bready = m_bready_reg;
+
+    // B handshake: accept when valid and ready
+    wire m_b_handshake = m_axil_bvalid & m_axil_bready;
+
+    // B request to slave
+    assign m_breq = m_axil_bvalid;
+
+    // B ready register
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_bready_reg <= 1'b0;
+        end else begin
+            if (m_back_sync && !m_bready_reg) begin
+                m_bready_reg <= 1'b1;
+            end else if (m_b_handshake) begin
+                m_bready_reg <= 1'b0;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Master side: AR channel logic
+    // ========================================================================
+
+    // AR valid: forward from slave
+    assign m_axil_arvalid = m_arvalid_reg;
+    assign m_axil_araddr  = m_araddr_reg;
+    assign m_axil_arprot  = m_arprot_reg;
+
+    // AR handshake: accept when valid and ready
+    wire m_ar_handshake = m_axil_arvalid & m_axil_arready;
+
+    // AR acknowledge to slave
+    assign m_arack = m_arvalid_reg;
+
+    // AR data registers
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_araddr_reg  <= {ADDR_WIDTH{1'b0}};
+            m_arprot_reg  <= 3'b000;
+            m_arvalid_reg <= 1'b0;
+        end else begin
+            if (m_arreq_sync && !m_arvalid_reg) begin
+                m_araddr_reg  <= s_axil_araddr;
+                m_arprot_reg  <= s_axil_arprot;
+                m_arvalid_reg <= 1'b1;
+            end else if (m_ar_handshake) begin
+                m_arvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // ========================================================================
+    // Master side: R channel logic
+    // ========================================================================
+
+    // R ready: forward to slave
+    assign m_axil_rready = m_rready_reg;
+
+    // R handshake: accept when valid and ready
+    wire m_r_handshake = m_axil_rvalid & m_axil_rready;
+
+    // R request to slave
+    assign m_rreq = m_axil_rvalid;
+
+    // R ready register
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rready_reg <= 1'b0;
+        end else begin
+            if (m_rack_sync && !m_rready_reg) begin
+                m_rready_reg <= 1'b1;
+            end else if (m_r_handshake) begin
+                m_rready_reg <= 1'b0;
+            end
+        end
+    end
+
+    // ========================================================================
+    // CDC Synchronization: AW channel (s -> m)
+    // ========================================================================
+
+    // Request: s -> m
+    reg [2:0] s_awreq_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_awreq_sync <= 3'b000;
+        else
+            s_awreq_sync <= {s_awreq_sync[1:0], s_awreq};
+    end
+    assign m_awreq_sync = s_awreq_sync[2];
+
+    // Acknowledge: m -> s
+    reg [2:0] m_awack_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_awack_sync <= 3'b000;
+        else
+            m_awack_sync <= {m_awack_sync[1:0], m_awack};
+    end
+    assign s_awack_sync = m_awack_sync[2];
+
+    // ========================================================================
+    // CDC Synchronization: W channel (s -> m)
+    // ========================================================================
+
+    // Request: s -> m
+    reg [2:0] s_wreq_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_wreq_sync <= 3'b000;
+        else
+            s_wreq_sync <= {s_wreq_sync[1:0], s_wreq};
+    end
+    assign m_wreq_sync = s_wreq_sync[2];
+
+    // Acknowledge: m -> s
+    reg [2:0] m_wack_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_wack_sync <= 3'b000;
+        else
+            m_wack_sync <= {m_wack_sync[1:0], m_wack};
+    end
+    assign s_wack_sync = m_wack_sync[2];
+
+    // ========================================================================
+    // CDC Synchronization: B channel (m -> s)
+    // ========================================================================
+
+    // Request: m -> s
+    reg [2:0] m_breq_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_breq_sync <= 3'b000;
+        else
+            m_breq_sync <= {m_breq_sync[1:0], m_breq};
+    end
+    assign s_breq_sync = m_breq_sync[2];
+
+    // Acknowledge: s -> m
+    reg [2:0] s_back_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_back_sync <= 3'b000;
+        else
+            s_back_sync <= {s_back_sync[1:0], s_back};
+    end
+    assign m_back_sync = s_back_sync[2];
+
+    // ========================================================================
+    // CDC Synchronization: AR channel (s -> m)
+    // ========================================================================
+
+    // Request: s -> m
+    reg [2:0] s_arreq_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_arreq_sync <= 3'b000;
+        else
+            s_arreq_sync <= {s_arreq_sync[1:0], s_arreq};
+    end
+    assign m_arreq_sync = s_arreq_sync[2];
+
+    // Acknowledge: m -> s
+    reg [2:0] m_arack_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_arack_sync <= 3'b000;
+        else
+            m_arack_sync <= {m_arack_sync[1:0], m_arack};
+    end
+    assign s_arack_sync = m_arack_sync[2];
+
+    // ========================================================================
+    // CDC Synchronization: R channel (m -> s)
+    // ========================================================================
+
+    // Request: m -> s
+    reg [2:0] m_rreq_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            m_rreq_sync <= 3'b000;
+        else
+            m_rreq_sync <= {m_rreq_sync[1:0], m_rreq};
+    end
+    assign s_rreq_sync = m_rreq_sync[2];
+
+    // Acknowledge: s -> m
+    reg [2:0] s_rack_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            s_rack_sync <= 3'b000;
+        else
+            s_rack_sync <= {s_rack_sync[1:0], s_rack};
+    end
+    assign m_rack_sync = s_rack_sync[2];
+
+endmodule
+```<|im_end|>

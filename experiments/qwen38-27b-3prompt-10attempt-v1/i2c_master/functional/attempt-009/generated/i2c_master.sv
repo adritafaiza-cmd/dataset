@@ -1,0 +1,493 @@
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // State machine states
+    localparam S_IDLE            = 4'd0;
+    localparam S_START           = 4'd1;
+    localparam S_ADDR_BIT        = 4'd2;
+    localparam S_ADDR_ACK        = 4'd3;
+    localparam S_DATA_BIT        = 4'd4;
+    localparam S_DATA_ACK        = 4'd5;
+    localparam S_READ_BIT        = 4'd6;
+    localparam S_READ_ACK        = 4'd7;
+    localparam S_STOP            = 4'd8;
+    localparam S_WAIT_DATA       = 4'd9;
+    localparam S_WAIT_CMD        = 4'd10;
+
+    reg [3:0]  state;
+    reg [3:0]  bit_cnt;
+    reg [7:0]  tx_byte;
+    reg [7:0]  rx_byte;
+    reg        is_read;
+    reg        is_write;
+    reg        is_write_multiple;
+    reg        do_stop;
+    reg        do_start;
+    reg        addr_phase;
+    reg        data_phase;
+    reg        ack_phase;
+    reg        bit_out;
+    reg        bit_in;
+    reg        scl_high;
+    reg        sda_high;
+    reg        scl_drive;
+    reg        sda_drive;
+    reg        scl_release;
+    reg        sda_release;
+    reg        scl_next;
+    reg        sda_next;
+    reg [15:0] prescale_cnt;
+    reg        prescale_done;
+    reg        missed_ack_reg;
+    reg        busy_reg;
+    reg        bus_control_reg;
+    reg        bus_active_reg;
+    reg        cmd_pending;
+    reg [6:0]  cmd_address;
+    reg        cmd_read;
+    reg        cmd_write;
+    reg        cmd_write_multiple;
+    reg        cmd_stop;
+    reg        cmd_start;
+    reg        data_pending;
+    reg [7:0]  data_byte;
+    reg        data_last;
+    reg        m_axis_valid;
+    reg [7:0]  m_axis_data;
+    reg        m_axis_last;
+    reg        s_axis_data_ready;
+    reg        s_axis_cmd_ready;
+
+    // Open-drain outputs
+    assign scl_o = ~scl_drive;
+    assign scl_t = scl_release;
+    assign sda_o = ~sda_drive;
+    assign sda_t = sda_release;
+
+    // Status outputs
+    assign busy = busy_reg;
+    assign bus_control = bus_control_reg;
+    assign bus_active = bus_active_reg;
+    assign missed_ack = missed_ack_reg;
+    assign s_axis_cmd_ready = s_axis_cmd_ready;
+    assign s_axis_data_tready = s_axis_data_ready;
+    assign m_axis_data_tvalid = m_axis_valid;
+    assign m_axis_data_tdata = m_axis_data;
+    assign m_axis_data_tlast = m_axis_last;
+
+    // Prescale counter
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            prescale_cnt <= 16'd0;
+            prescale_done <= 1'b0;
+        end else begin
+            if (prescale_done) begin
+                prescale_cnt <= 16'd0;
+                prescale_done <= 1'b0;
+            end else if (prescale_cnt >= prescale) begin
+                prescale_cnt <= 16'd0;
+                prescale_done <= 1'b1;
+            end else begin
+                prescale_cnt <= prescale_cnt + 16'd1;
+                prescale_done <= 1'b0;
+            end
+        end
+    end
+
+    // Main state machine
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= S_IDLE;
+            bit_cnt <= 4'd0;
+            tx_byte <= 8'd0;
+            rx_byte <= 8'd0;
+            is_read <= 1'b0;
+            is_write <= 1'b0;
+            is_write_multiple <= 1'b0;
+            do_stop <= 1'b0;
+            do_start <= 1'b0;
+            addr_phase <= 1'b0;
+            data_phase <= 1'b0;
+            ack_phase <= 1'b0;
+            bit_out <= 1'b0;
+            bit_in <= 1'b0;
+            scl_high <= 1'b1;
+            sda_high <= 1'b1;
+            scl_drive <= 1'b0;
+            sda_drive <= 1'b0;
+            scl_release <= 1'b1;
+            sda_release <= 1'b1;
+            scl_next <= 1'b1;
+            sda_next <= 1'b1;
+            missed_ack_reg <= 1'b0;
+            busy_reg <= 1'b0;
+            bus_control_reg <= 1'b0;
+            bus_active_reg <= 1'b0;
+            cmd_pending <= 1'b0;
+            cmd_address <= 7'd0;
+            cmd_read <= 1'b0;
+            cmd_write <= 1'b0;
+            cmd_write_multiple <= 1'b0;
+            cmd_stop <= 1'b0;
+            cmd_start <= 1'b0;
+            data_pending <= 1'b0;
+            data_byte <= 8'd0;
+            data_last <= 1'b0;
+            m_axis_valid <= 1'b0;
+            m_axis_data <= 8'd0;
+            m_axis_last <= 1'b0;
+            s_axis_data_ready <= 1'b0;
+            s_axis_cmd_ready <= 1'b1;
+        end else begin
+            // Default: hold current values
+            s_axis_cmd_ready <= s_axis_cmd_ready;
+            s_axis_data_ready <= s_axis_data_ready;
+            m_axis_valid <= m_axis_valid;
+            m_axis_data <= m_axis_data;
+            m_axis_last <= m_axis_last;
+            missed_ack_reg <= missed_ack_reg;
+            busy_reg <= busy_reg;
+            bus_control_reg <= bus_control_reg;
+            bus_active_reg <= bus_active_reg;
+
+            case (state)
+                S_IDLE: begin
+                    // Release bus
+                    scl_drive <= 1'b0;
+                    sda_drive <= 1'b0;
+                    scl_release <= 1'b1;
+                    sda_release <= 1'b1;
+                    scl_high <= 1'b1;
+                    sda_high <= 1'b1;
+                    busy_reg <= 1'b0;
+                    bus_control_reg <= 1'b0;
+                    bus_active_reg <= 1'b0;
+                    s_axis_cmd_ready <= 1'b1;
+                    s_axis_data_ready <= 1'b0;
+                    m_axis_valid <= 1'b0;
+
+                    if (s_axis_cmd_valid) begin
+                        cmd_pending <= 1'b1;
+                        cmd_address <= s_axis_cmd_address;
+                        cmd_read <= s_axis_cmd_read;
+                        cmd_write <= s_axis_cmd_write;
+                        cmd_write_multiple <= s_axis_cmd_write_multiple;
+                        cmd_stop <= s_axis_cmd_stop;
+                        cmd_start <= s_axis_cmd_start;
+                        s_axis_cmd_ready <= 1'b0;
+                        busy_reg <= 1'b1;
+                        bus_control_reg <= 1'b1;
+                        bus_active_reg <= 1'b1;
+                        state <= S_START;
+                        bit_cnt <= 4'd0;
+                        is_read <= s_axis_cmd_read;
+                        is_write <= s_axis_cmd_write;
+                        is_write_multiple <= s_axis_cmd_write_multiple;
+                        do_stop <= s_axis_cmd_stop;
+                        do_start <= s_axis_cmd_start;
+                        addr_phase <= 1'b1;
+                        data_phase <= 1'b0;
+                        ack_phase <= 1'b0;
+                        missed_ack_reg <= 1'b0;
+                    end
+                end
+
+                S_START: begin
+                    // Generate START condition: SDA high->low while SCL high
+                    // First, ensure SCL is high
+                    if (!scl_high) begin
+                        scl_drive <= 1'b0;
+                        scl_release <= 1'b1;
+                        scl_high <= 1'b1;
+                    end else begin
+                        // SCL is high, now pull SDA low
+                        if (sda_high) begin
+                            sda_drive <= 1'b1;
+                            sda_release <= 1'b0;
+                            sda_high <= 1'b0;
+                        end else begin
+                            // START complete, move to address phase
+                            state <= S_ADDR_BIT;
+                            bit_cnt <= 4'd7;
+                            // Prepare address byte: 7-bit address + R/W bit
+                            if (is_read) begin
+                                tx_byte <= {s_axis_cmd_address, 1'b1};
+                            end else begin
+                                tx_byte <= {s_axis_cmd_address, 1'b0};
+                            end
+                            bit_out <= tx_byte[7];
+                        end
+                    end
+                end
+
+                S_ADDR_BIT: begin
+                    // Clock out address bits
+                    if (!scl_high) begin
+                        // SCL low, set SDA for next bit
+                        sda_drive <= ~bit_out;
+                        sda_release <= 1'b0;
+                        // Raise SCL
+                        scl_drive <= 1'b0;
+                        scl_release <= 1'b1;
+                        scl_high <= 1'b1;
+                    end else begin
+                        // SCL high, sample or wait
+                        // Lower SCL
+                        scl_drive <= 1'b1;
+                        scl_release <= 1'b0;
+                        scl_high <= 1'b0;
+                        if (bit_cnt == 4'd0) begin
+                            state <= S_ADDR_ACK;
+                        end else begin
+                            bit_cnt <= bit_cnt - 4'd1;
+                            bit_out <= tx_byte[bit_cnt - 4'd1];
+                        end
+                    end
+                end
+
+                S_ADDR_ACK: begin
+                    // Release SDA, clock ACK bit
+                    if (!scl_high) begin
+                        // SCL low, release SDA
+                        sda_drive <= 1'b0;
+                        sda_release <= 1'b1;
+                        // Raise SCL
+                        scl_drive <= 1'b0;
+                        scl_release <= 1'b1;
+                        scl_high <= 1'b1;
+                    end else begin
+                        // SCL high, sample ACK
+                        bit_in <= sda_i;
+                        // Lower SCL
+                        scl_drive <= 1'b1;
+                        scl_release <= 1'b0;
+                        scl_high <= 1'b0;
+                        if (bit_in) begin
+                            // NACK
+                            missed_ack_reg <= 1'b1;
+                            state <= S_STOP;
+                        end else begin
+                            // ACK
+                            if (is_read) begin
+                                state <= S_READ_BIT;
+                                bit_cnt <= 4'd7;
+                                rx_byte <= 8'd0;
+                            end else begin
+                                state <= S_WAIT_DATA;
+                            end
+                        end
+                    end
+                end
+
+                S_WAIT_DATA: begin
+                    // Wait for data from host
+                    s_axis_data_ready <= 1'b1;
+                    if (s_axis_data_tvalid) begin
+                        data_byte <= s_axis_data_tdata;
+                        data_last <= s_axis_data_tlast;
+                        s_axis_data_ready <= 1'b0;
+                        state <= S_DATA_BIT;
+                        bit_cnt <= 4'd7;
+                        tx_byte <= s_axis_data_tdata;
+                        bit_out <= tx_byte[7];
+                    end
+                end
+
+                S_DATA_BIT: begin
+                    // Clock out data bits
+                    if (!scl_high) begin
+                        // SCL low, set SDA for next bit
+                        sda_drive <= ~bit_out;
+                        sda_release <= 1'b0;
+                        // Raise SCL
+                        scl_drive <= 1'b0;
+                        scl_release <= 1'b1;
+                        scl_high <= 1'b1;
+                    end else begin
+                        // SCL high, lower SCL
+                        scl_drive <= 1'b1;
+                        scl_release <= 1'b0;
+                        scl_high <= 1'b0;
+                        if (bit_cnt == 4'd0) begin
+                            state <= S_DATA_ACK;
+                        end else begin
+                            bit_cnt <= bit_cnt - 4'd1;
+                            bit_out <= tx_byte[bit_cnt - 4'd1];
+                        end
+                    end
+                end
+
+                S_DATA_ACK: begin
+                    // Release SDA, clock ACK bit
+                    if (!scl_high) begin
+                        // SCL low, release SDA
+                        sda_drive <= 1'b0;
+                        sda_release <= 1'b1;
+                        // Raise SCL
+                        scl_drive <= 1'b0;
+                        scl_release <= 1'b1;
+                        scl_high <= 1'b1;
+                    end else begin
+                        // SCL high, sample ACK
+                        bit_in <= sda_i;
+                        // Lower SCL
+                        scl_drive <= 1'b1;
+                        scl_release <= 1'b0;
+                        scl_high <= 1'b0;
+                        if (bit_in) begin
+                            // NACK
+                            missed_ack_reg <= 1'b1;
+                            state <= S_STOP;
+                        end else begin
+                            // ACK
+                            if (data_last) begin
+                                if (is_write_multiple) begin
+                                    state <= S_WAIT_DATA;
+                                end else begin
+                                    state <= S_STOP;
+                                end
+                            end else begin
+                                state <= S_WAIT_DATA;
+                            end
+                        end
+                    end
+                end
+
+                S_READ_BIT: begin
+                    // Clock in read bits
+                    if (!scl_high) begin
+                        // SCL low, release SDA
+                        sda_drive <= 1'b0;
+                        sda_release <= 1'b1;
+                        // Raise SCL
+                        scl_drive <= 1'b0;
+                        scl_release <= 1'b1;
+                        scl_high <= 1'b1;
+                    end else begin
+                        // SCL high, sample data
+                        bit_in <= sda_i;
+                        rx_byte <= {rx_byte[6:0], bit_in};
+                        // Lower SCL
+                        scl_drive <= 1'b1;
+                        scl_release <= 1'b0;
+                        scl_high <= 1'b0;
+                        if (bit_cnt == 4'd0) begin
+                            state <= S_READ_ACK;
+                        end else begin
+                            bit_cnt <= bit_cnt - 4'd1;
+                        end
+                    end
+                end
+
+                S_READ_ACK: begin
+                    // Drive ACK/NACK
+                    if (!scl_high) begin
+                        // SCL low, drive ACK (low) or NACK (high)
+                        // For now, always ACK
+                        sda_drive <= 1'b1;
+                        sda_release <= 1'b0;
+                        // Raise SCL
+                        scl_drive <= 1'b0;
+                        scl_release <= 1'b1;
+                        scl_high <= 1'b1;
+                    end else begin
+                        // SCL high, lower SCL
+                        scl_drive <= 1'b1;
+                        scl_release <= 1'b0;
+                        scl_high <= 1'b0;
+                        // Release SDA
+                        sda_drive <= 1'b0;
+                        sda_release <= 1'b1;
+                        // Output read byte
+                        m_axis_valid <= 1'b1;
+                        m_axis_data <= rx_byte;
+                        m_axis_last <= 1'b0;
+                        if (m_axis_data_tready) begin
+                            m_axis_valid <= 1'b0;
+                            state <= S_READ_BIT;
+                            bit_cnt <= 4'd7;
+                            rx_byte <= 8'd0;
+                        end else begin
+                            state <= S_READ_BIT;
+                            bit_cnt <= 4'd7;
+                            rx_byte <= 8'd0;
+                        end
+                    end
+                end
+
+                S_STOP: begin
+                    // Generate STOP condition: SDA low->high while SCL high
+                    // First, ensure SCL is high
+                    if (!scl_high) begin
+                        scl_drive <= 1'b0;
+                        scl_release <= 1'b1;
+                        scl_high <= 1'b1;
+                    end else begin
+                        // SCL is high, now release SDA (pull high)
+                        if (!sda_high) begin
+                            sda_drive <= 1'b0;
+                            sda_release <= 1'b1;
+                            sda_high <= 1'b1;
+                        end else begin
+                            // STOP complete
+                            state <= S_IDLE;
+                            busy_reg <= 1'b0;
+                            bus_control_reg <= 1'b0;
+                            bus_active_reg <= 1'b0;
+                            s_axis_cmd_ready <= 1'b1;
+                            s_axis_data_ready <= 1'b0;
+                            m_axis_valid <= 1'b0;
+                        end
+                    end
+                end
+
+                default: begin
+                    state <= S_IDLE;
+                end
+            end
+        end
+    end
+
+endmodule

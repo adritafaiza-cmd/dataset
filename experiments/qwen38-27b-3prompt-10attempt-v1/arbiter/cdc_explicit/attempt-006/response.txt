@@ -1,0 +1,250 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam ENC_WIDTH = $clog2(PORTS);
+
+    // Internal signals
+    wire [PORTS-1:0] grant_comb;
+    wire             grant_valid_comb;
+    wire [ENC_WIDTH-1:0] grant_encoded_comb;
+
+    // State for round-robin and blocking
+    reg [PORTS-1:0] rr_mask;
+    reg [PORTS-1:0] blocked_grant;
+    reg             blocked_valid;
+
+    // Combinational logic for grant selection
+    // First, determine the candidate request based on blocking mode
+    wire [PORTS-1:0] effective_request;
+    
+    generate
+        if (ARB_BLOCK) begin
+            // If blocked, use the blocked grant as the only candidate
+            // Otherwise, use the current request
+            assign effective_request = blocked_valid ? blocked_grant : request;
+        end else begin
+            assign effective_request = request;
+        end
+    endgenerate
+
+    // Priority encoder logic
+    // We need to select one port from effective_request based on priority scheme
+    
+    // For fixed priority:
+    //   If ARB_LSB_HIGH_PRIORITY, LSB has highest priority
+    //   Otherwise, MSB has highest priority
+    
+    // For round-robin:
+    //   Rotate the request based on rr_mask, then apply fixed priority
+    
+    wire [PORTS-1:0] rotated_request;
+    wire [PORTS-1:0] priority_request;
+    
+    generate
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            // Rotate request so that the next candidate after the last granted port is at LSB
+            // rr_mask indicates which ports have been "passed" - we rotate so that
+            // the port after the last granted one becomes LSB
+            // Simple approach: use a priority encoder that considers rr_mask
+            // We'll compute the grant by finding the first set bit in a rotated view
+            
+            // Create a rotated version of effective_request
+            // If rr_mask[i] is 1, port i has lower priority than ports not in rr_mask
+            // Actually, let's use a simpler approach:
+            // The round-robin priority is determined by the last granted port.
+            // We store the last granted port index and rotate accordingly.
+            
+            // Alternative: Use a mask-based approach
+            // Ports with rr_mask=1 have lower priority than ports with rr_mask=0
+            // Among ports with same mask value, use fixed priority
+            
+            // Let's compute two candidates:
+            // 1. Highest priority port among those NOT in rr_mask (higher priority group)
+            // 2. Highest priority port among those IN rr_mask (lower priority group)
+            // Grant = candidate 1 if valid, else candidate 2
+            
+            wire [PORTS-1:0] high_priority_req = effective_request & ~rr_mask;
+            wire [PORTS-1:0] low_priority_req  = effective_request & rr_mask;
+            
+            wire [PORTS-1:0] high_priority_grant;
+            wire             high_priority_valid;
+            wire [ENC_WIDTH-1:0] high_priority_enc;
+            
+            wire [PORTS-1:0] low_priority_grant;
+            wire             low_priority_valid;
+            wire [ENC_WIDTH-1:0] low_priority_enc;
+            
+            // Fixed priority encoder for high priority group
+            generate
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    // LSB wins: find lowest set bit
+                    assign high_priority_grant = high_priority_req & ~(high_priority_req - 1'b1);
+                    assign low_priority_grant  = low_priority_req & ~(low_priority_req - 1'b1);
+                end else begin
+                    // MSB wins: find highest set bit
+                    // Use a priority encoder
+                    reg [PORTS-1:0] hp_enc_reg;
+                    reg [PORTS-1:0] lp_enc_reg;
+                    integer i;
+                    always @* begin
+                        hp_enc_reg = {PORTS{1'b0}};
+                        lp_enc_reg = {PORTS{1'b0}};
+                        for (i = PORTS-1; i >= 0; i = i-1) begin
+                            if (high_priority_req[i]) begin
+                                hp_enc_reg[i] = 1'b1;
+                            end
+                            if (low_priority_req[i]) begin
+                                lp_enc_reg[i] = 1'b1;
+                            end
+                        end
+                    end
+                    assign high_priority_grant = hp_enc_reg;
+                    assign low_priority_grant  = lp_enc_reg;
+                end
+            endgenerate
+            
+            // Encode the grants
+            // For one-hot to binary encoding
+            function [ENC_WIDTH-1:0] onehot_to_bin;
+                input [PORTS-1:0] onehot;
+                integer j;
+                begin
+                    onehot_to_bin = {ENC_WIDTH{1'b0}};
+                    for (j = 0; j < PORTS; j = j+1) begin
+                        if (onehot[j]) begin
+                            onehot_to_bin = j[ENC_WIDTH-1:0];
+                        end
+                    end
+                end
+            endfunction
+            
+            assign high_priority_enc = onehot_to_bin(high_priority_grant);
+            assign low_priority_enc  = onehot_to_bin(low_priority_grant);
+            
+            assign high_priority_valid = |high_priority_grant;
+            assign low_priority_valid  = |low_priority_grant;
+            
+            // Select between high and low priority
+            assign priority_request = high_priority_valid ? high_priority_grant : low_priority_grant;
+            
+        end else begin
+            // Fixed priority
+            generate
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    // LSB wins: find lowest set bit
+                    assign priority_request = effective_request & ~(effective_request - 1'b1);
+                end else begin
+                    // MSB wins: find highest set bit
+                    reg [PORTS-1:0] fp_enc_reg;
+                    integer i;
+                    always @* begin
+                        fp_enc_reg = {PORTS{1'b0}};
+                        for (i = PORTS-1; i >= 0; i = i-1) begin
+                            if (effective_request[i]) begin
+                                fp_enc_reg[i] = 1'b1;
+                            end
+                        end
+                    end
+                    assign priority_request = fp_enc_reg;
+                end
+            endgenerate
+        end
+    endgenerate
+
+    assign grant_comb = priority_request;
+    assign grant_valid_comb = |priority_request;
+    
+    // Encode the grant
+    function [ENC_WIDTH-1:0] onehot_to_bin_enc;
+        input [PORTS-1:0] onehot;
+        integer j;
+        begin
+            onehot_to_bin_enc = {ENC_WIDTH{1'b0}};
+            for (j = 0; j < PORTS; j = j+1) begin
+                if (onehot[j]) begin
+                    onehot_to_bin_enc = j[ENC_WIDTH-1:0];
+                end
+            end
+        end
+    endfunction
+    
+    assign grant_encoded_comb = onehot_to_bin_enc(priority_request);
+
+    // Sequential logic for round-robin mask and blocking
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rr_mask <= {PORTS{1'b0}};
+            blocked_grant <= {PORTS{1'b0}};
+            blocked_valid <= 1'b0;
+        end else begin
+            // Update round-robin mask
+            if (ARB_TYPE_ROUND_ROBIN && grant_valid_comb) begin
+                // Set all bits below the granted port to 1 (they have lower priority now)
+                // Actually, for round-robin, after granting port i, ports 0..i-1 should have
+                // lower priority than ports i+1..PORTS-1
+                // So rr_mask should have bits 0..i-1 set to 1
+                // Wait, let me reconsider. The typical round-robin approach:
+                // After granting port i, the next grant should start from i+1.
+                // So ports i+1..PORTS-1 have higher priority than ports 0..i.
+                // This means rr_mask should have bits 0..i set to 1 (lower priority group)
+                // and bits i+1..PORTS-1 set to 0 (higher priority group)
+                
+                // Let's set rr_mask such that bits 0..granted_port are 1
+                // This way, ports not in rr_mask (i+1..PORTS-1) have higher priority
+                reg [PORTS-1:0] new_rr_mask;
+                integer k;
+                always @* begin
+                    new_rr_mask = {PORTS{1'b0}};
+                    for (k = 0; k < PORTS; k = k+1) begin
+                        if (k <= grant_encoded_comb) begin
+                            new_rr_mask[k] = 1'b1;
+                        end
+                    end
+                end
+                rr_mask <= new_rr_mask;
+            end
+            
+            // Update blocking state
+            if (ARB_BLOCK) begin
+                if (grant_valid_comb) begin
+                    blocked_grant <= grant_comb;
+                    blocked_valid <= 1'b1;
+                end else if (blocked_valid) begin
+                    // Release block if acknowledge or request drops
+                    if (ARB_BLOCK_ACK) begin
+                        if (acknowledge & blocked_grant) begin
+                            blocked_valid <= 1'b0;
+                        end
+                    end else begin
+                        if (!(request & blocked_grant)) begin
+                            blocked_valid <= 1'b0;
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    // Final outputs
+    assign grant = grant_comb;
+    assign grant_valid = grant_valid_comb;
+    assign grant_encoded = grant_encoded_comb;
+
+endmodule
+```<|im_end|>

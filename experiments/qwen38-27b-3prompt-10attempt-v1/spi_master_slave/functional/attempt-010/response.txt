@@ -1,0 +1,155 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // State machine states
+    localparam S_IDLE    = 2'd0;
+    localparam S_WAIT_WR = 2'd1;
+    localparam S_SHIFT   = 2'd2;
+    localparam S_DONE    = 2'd3;
+
+    reg [1:0] state;
+    reg [N-1:0] tx_shift_reg;
+    reg [N-1:0] rx_shift_reg;
+    reg [N-1:0] bit_count;
+    reg [N-1:0] tx_data;
+    reg         tx_valid;
+
+    // SCLK divider counter
+    reg [31:0] sclk_div_cnt;
+    reg        sclk_phase;
+
+    // Synchronizers for pclk domain signals
+    reg [1:0] wren_sync;
+    reg [N-1:0] di_sync;
+    reg [1:0] di_req_sync;
+
+    // Synchronizers for sclk domain signals
+    reg [1:0] do_valid_sync;
+    reg [N-1:0] do_sync;
+
+    // PCLK domain logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            wren_sync <= 2'b00;
+            di_sync <= {N{1'b0}};
+            di_req_sync <= 2'b00;
+        end else begin
+            wren_sync <= {wren_sync[0], wren_i};
+            di_sync <= {di_sync[N-2:0], di_i[0]};
+            di_req_sync <= {di_req_sync[0], di_req_o};
+        end
+    end
+
+    // SCLK domain logic
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state <= S_IDLE;
+            spi_ssel_o <= 1'b0;
+            spi_sck_o <= 1'b0;
+            di_req_o <= 1'b0;
+            wr_ack_o <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o <= {N{1'b0}};
+            tx_shift_reg <= {N{1'b0}};
+            rx_shift_reg <= {N{1'b0}};
+            bit_count <= {N{1'b0}};
+            tx_data <= {N{1'b0}};
+            tx_valid <= 1'b0;
+            sclk_div_cnt <= 32'd0;
+            sclk_phase <= 1'b0;
+        end else begin
+            // Default: clear one-shot signals
+            wr_ack_o <= 1'b0;
+            do_valid_o <= 1'b0;
+
+            case (state)
+                S_IDLE: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o <= 1'b0;
+                    di_req_o <= 1'b0;
+                    // Check if write is available
+                    if (wren_sync[1]) begin
+                        tx_data <= di_sync;
+                        tx_valid <= 1'b1;
+                        state <= S_WAIT_WR;
+                    end
+                end
+
+                S_WAIT_WR: begin
+                    // Wait for write to be stable, then start transfer
+                    if (wren_sync[1]) begin
+                        tx_data <= di_sync;
+                        tx_valid <= 1'b1;
+                        spi_ssel_o <= 1'b1;
+                        tx_shift_reg <= tx_data;
+                        rx_shift_reg <= {N{1'b0}};
+                        bit_count <= {N{1'b0}};
+                        sclk_div_cnt <= 32'd0;
+                        sclk_phase <= 1'b0;
+                        state <= S_SHIFT;
+                    end
+                end
+
+                S_SHIFT: begin
+                    spi_ssel_o <= 1'b1;
+                    // Generate SCLK
+                    if (sclk_div_cnt >= SPI_2X_CLK_DIV - 1) begin
+                        sclk_div_cnt <= 32'd0;
+                        sclk_phase <= ~sclk_phase;
+                        if (sclk_phase) begin
+                            // Rising edge of SCLK: shift out MSB, capture MISO
+                            spi_sck_o <= 1'b1;
+                            spi_mosi_o <= tx_shift_reg[N-1];
+                            rx_shift_reg <= {spi_miso_i, rx_shift_reg[N-1:1]};
+                            tx_shift_reg <= {tx_shift_reg[N-2:0], 1'b0};
+                            bit_count <= bit_count + 1'b1;
+                            if (bit_count == N - 1) begin
+                                state <= S_DONE;
+                            end
+                        end else begin
+                            // Falling edge of SCLK
+                            spi_sck_o <= 1'b0;
+                        end
+                    end else begin
+                        sclk_div_cnt <= sclk_div_cnt + 1'b1;
+                    end
+                end
+
+                S_DONE: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o <= 1'b0;
+                    do_o <= rx_shift_reg;
+                    do_valid_o <= 1'b1;
+                    di_req_o <= 1'b1;
+                    state <= S_IDLE;
+                end
+
+                default: begin
+                    state <= S_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // MOSI output
+    assign spi_mosi_o = tx_shift_reg[N-1];
+
+endmodule
+```<|im_end|>

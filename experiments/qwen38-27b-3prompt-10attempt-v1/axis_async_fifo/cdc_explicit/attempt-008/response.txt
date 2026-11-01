@@ -1,0 +1,320 @@
+```verilog
+module axis_async_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    /*
+     * AXI input
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   s_pause_req,
+    output wire                   s_pause_ack,
+    input  wire                   m_pause_req,
+    output wire                   m_pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] s_status_depth,
+    output wire [$clog2(DEPTH):0] s_status_depth_commit,
+    output wire                   s_status_overflow,
+    output wire                   s_status_bad_frame,
+    output wire                   s_status_good_frame,
+    output wire [$clog2(DEPTH):0] m_status_depth,
+    output wire [$clog2(DEPTH):0] m_status_depth_commit,
+    output wire                   m_status_overflow,
+    output wire                   m_status_bad_frame,
+    output wire                   m_status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam PTR_WIDTH = ADDR_WIDTH + 1;
+    localparam DEPTH_MASK = DEPTH - 1;
+
+    // Total sideband width
+    localparam SIDE_WIDTH = (KEEP_ENABLE ? KEEP_WIDTH : 0) +
+                            (LAST_ENABLE ? 1 : 0) +
+                            (ID_ENABLE ? ID_WIDTH : 0) +
+                            (DEST_ENABLE ? DEST_WIDTH : 0) +
+                            (USER_ENABLE ? USER_WIDTH : 0);
+
+    // Internal signal widths
+    localparam TOTAL_DATA_WIDTH = DATA_WIDTH + SIDE_WIDTH;
+
+    // Pack sideband into a single vector for easier handling
+    // Order: keep, last, id, dest, user
+    wire [SIDE_WIDTH-1:0] s_sideband;
+    assign s_sideband = {
+        (USER_ENABLE ? s_axis_tuser : {USER_WIDTH{1'b0}}),
+        (DEST_ENABLE ? s_axis_tdest : {DEST_WIDTH{1'b0}}),
+        (ID_ENABLE ? s_axis_tid : {ID_WIDTH{1'b0}}),
+        (LAST_ENABLE ? s_axis_tlast : 1'b0),
+        (KEEP_ENABLE ? s_axis_tkeep : {KEEP_WIDTH{1'b0}})
+    };
+
+    // Unpack sideband
+    wire [KEEP_WIDTH-1:0] m_sideband_keep;
+    wire                   m_sideband_last;
+    wire [ID_WIDTH-1:0]    m_sideband_id;
+    wire [DEST_WIDTH-1:0]  m_sideband_dest;
+    wire [USER_WIDTH-1:0]  m_sideband_user;
+
+    // We'll use a simple approach: store data and sideband separately in RAM
+    // But for CDC, we need to be careful. Let's use a standard async FIFO structure.
+
+    // Write pointer (s_clk domain)
+    reg [PTR_WIDTH-1:0] s_wr_ptr;
+    reg [PTR_WIDTH-1:0] s_wr_ptr_m; // synchronized to m_clk
+
+    // Read pointer (m_clk domain)
+    reg [PTR_WIDTH-1:0] m_rd_ptr;
+    reg [PTR_WIDTH-1:0] m_rd_ptr_s; // synchronized to s_clk
+
+    // Synchronization registers
+    reg [PTR_WIDTH-1:0] s_wr_ptr_sync1, s_wr_ptr_sync2;
+    reg [PTR_WIDTH-1:0] m_rd_ptr_sync1, m_rd_ptr_sync2;
+
+    // RAM storage
+    reg [DATA_WIDTH-1:0] ram_data [0:DEPTH-1];
+    reg [SIDE_WIDTH-1:0] ram_side [0:DEPTH-1];
+
+    // Write enable
+    wire s_wr_en;
+    wire m_rd_en;
+
+    // Full and empty detection
+    wire s_full;
+    wire m_empty;
+
+    // Depth calculation
+    wire [PTR_WIDTH-1:0] s_wr_ptr_m_sync;
+    wire [PTR_WIDTH-1:0] m_rd_ptr_s_sync;
+
+    // Synchronize write pointer to m_clk domain
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            s_wr_ptr_sync1 <= {PTR_WIDTH{1'b0}};
+            s_wr_ptr_sync2 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            s_wr_ptr_sync1 <= s_wr_ptr;
+            s_wr_ptr_sync2 <= s_wr_ptr_sync1;
+        end
+    end
+
+    // Synchronize read pointer to s_clk domain
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            m_rd_ptr_sync1 <= {PTR_WIDTH{1'b0}};
+            m_rd_ptr_sync2 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            m_rd_ptr_sync1 <= m_rd_ptr;
+            m_rd_ptr_sync2 <= m_rd_ptr_sync1;
+        end
+    end
+
+    assign s_wr_ptr_m = s_wr_ptr_sync2;
+    assign m_rd_ptr_s = m_rd_ptr_sync2;
+
+    // Full condition: write pointer has lapped read pointer by DEPTH
+    assign s_full = (s_wr_ptr[ADDR_WIDTH-1:0] == m_rd_ptr_s[ADDR_WIDTH-1:0]) &&
+                    (s_wr_ptr[ADDR_WIDTH] != m_rd_ptr_s[ADDR_WIDTH]);
+
+    // Empty condition: write pointer equals read pointer
+    assign m_empty = (s_wr_ptr_m == m_rd_ptr);
+
+    // Write logic
+    assign s_wr_en = s_axis_tvalid && s_axis_tready;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_wr_ptr <= {PTR_WIDTH{1'b0}};
+        end else if (s_wr_en) begin
+            s_wr_ptr <= s_wr_ptr + 1'b1;
+            ram_data[s_wr_ptr[ADDR_WIDTH-1:0]] <= s_axis_tdata;
+            ram_side[s_wr_ptr[ADDR_WIDTH-1:0]] <= s_sideband;
+        end
+    end
+
+    // Read logic
+    assign m_rd_en = m_axis_tvalid && m_axis_tready;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rd_ptr <= {PTR_WIDTH{1'b0}};
+        end else if (m_rd_en) begin
+            m_rd_ptr <= m_rd_ptr + 1'b1;
+        end
+    end
+
+    // Read data
+    wire [DATA_WIDTH-1:0] rd_data;
+    wire [SIDE_WIDTH-1:0] rd_side;
+    assign rd_data = ram_data[m_rd_ptr[ADDR_WIDTH-1:0]];
+    assign rd_side = ram_side[m_rd_ptr[ADDR_WIDTH-1:0]];
+
+    // Unpack sideband
+    // Order: user, dest, id, last, keep
+    wire [USER_WIDTH-1:0]   rd_user;
+    wire [DEST_WIDTH-1:0]   rd_dest;
+    wire [ID_WIDTH-1:0]     rd_id;
+    wire                     rd_last;
+    wire [KEEP_WIDTH-1:0]   rd_keep;
+
+    // Extract fields from rd_side
+    // We need to carefully slice based on enables
+    // For simplicity, let's define the offsets
+    localparam KEEP_OFF = 0;
+    localparam LAST_OFF = KEEP_OFF + (KEEP_ENABLE ? KEEP_WIDTH : 0);
+    localparam ID_OFF   = LAST_OFF + (LAST_ENABLE ? 1 : 0);
+    localparam DEST_OFF = ID_OFF + (ID_ENABLE ? ID_WIDTH : 0);
+    localparam USER_OFF = DEST_OFF + (DEST_ENABLE ? DEST_WIDTH : 0);
+
+    assign rd_keep = KEEP_ENABLE ? rd_side[KEEP_OFF + KEEP_WIDTH-1:KEEP_OFF] : {KEEP_WIDTH{1'b0}};
+    assign rd_last = LAST_ENABLE ? rd_side[LAST_OFF] : 1'b0;
+    assign rd_id   = ID_ENABLE ? rd_side[ID_OFF + ID_WIDTH-1:ID_OFF] : {ID_WIDTH{1'b0}};
+    assign rd_dest = DEST_ENABLE ? rd_side[DEST_OFF + DEST_WIDTH-1:DEST_OFF] : {DEST_WIDTH{1'b0}};
+    assign rd_user = USER_ENABLE ? rd_side[USER_OFF + USER_WIDTH-1:USER_OFF] : {USER_WIDTH{1'b0}};
+
+    // Output assignment
+    assign m_axis_tdata = rd_data;
+    assign m_axis_tkeep = rd_keep;
+    assign m_axis_tlast = rd_last;
+    assign m_axis_tid   = rd_id;
+    assign m_axis_tdest = rd_dest;
+    assign m_axis_tuser = rd_user;
+
+    // Valid and ready
+    assign m_axis_tvalid = ~m_empty;
+    assign s_axis_tready = ~s_full;
+
+    // Depth calculation
+    // s_status_depth: depth in s_clk domain
+    wire [PTR_WIDTH-1:0] s_depth_raw;
+    assign s_depth_raw = s_wr_ptr - m_rd_ptr_s;
+    assign s_status_depth = s_depth_raw[ADDR_WIDTH:0];
+
+    // m_status_depth: depth in m_clk domain
+    wire [PTR_WIDTH-1:0] m_depth_raw;
+    assign m_depth_raw = s_wr_ptr_m - m_rd_ptr;
+    assign m_status_depth = m_depth_raw[ADDR_WIDTH:0];
+
+    // Commit depth (same as depth for this simple implementation)
+    assign s_status_depth_commit = s_status_depth;
+    assign m_status_depth_commit = m_status_depth;
+
+    // Status flags
+    // Overflow: write when full
+    reg s_overflow_reg;
+    reg m_overflow_reg;
+
+    wire s_overflow_pulse = s_wr_en && s_full;
+    wire m_overflow_pulse = m_rd_en && m_empty; // This shouldn't happen, but for safety
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_overflow_reg <= 1'b0;
+        end else if (s_overflow_pulse) begin
+            s_overflow_reg <= 1'b1;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_overflow_reg <= 1'b0;
+        end else if (m_overflow_pulse) begin
+            m_overflow_reg <= 1'b1;
+        end
+    end
+
+    assign s_status_overflow = s_overflow_reg;
+    assign m_status_overflow = m_overflow_reg;
+
+    // Frame status (simplified: good frame if last beat is received, bad frame if not)
+    // For this implementation, we'll track frame completion
+    reg s_good_frame_reg;
+    reg s_bad_frame_reg;
+    reg m_good_frame_reg;
+    reg m_bad_frame_reg;
+
+    // Detect last beat in s_clk domain
+    wire s_last_beat = s_wr_en && s_axis_tlast;
+    // Detect last beat in m_clk domain
+    wire m_last_beat = m_rd_en && rd_last;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_good_frame_reg <= 1'b0;
+            s_bad_frame_reg <= 1'b0;
+        end else if (s_last_beat) begin
+            s_good_frame_reg <= 1'b1;
+            s_bad_frame_reg <= 1'b0;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_good_frame_reg <= 1'b0;
+            m_bad_frame_reg <= 1'b0;
+        end else if (m_last_beat) begin
+            m_good_frame_reg <= 1'b1;
+            m_bad_frame_reg <= 1'b0;
+        end
+    end
+
+    assign s_status_good_frame = s_good_frame_reg;
+    assign s_status_bad_frame = s_bad_frame_reg;
+    assign m_status_good_frame = m_good_frame_reg;
+    assign m_status_bad_frame = m_bad_frame_reg;
+
+    // Pause logic
+    assign s_pause_ack = PAUSE_ENABLE ? s_pause_req : 1'b0;
+    assign m_pause_ack = PAUSE_ENABLE ? m_pause_req : 1'b0;
+
+endmodule
+```<|im_end|>

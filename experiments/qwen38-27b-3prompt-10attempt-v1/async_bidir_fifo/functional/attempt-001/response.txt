@@ -1,0 +1,293 @@
+```verilog
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam PTR_W = ASIZE + 1;
+  localparam AFULL_THRESH = DEPTH - 2;
+  localparam AEMPTY_THRESH = 1;
+
+  // Internal signals for A-to-B FIFO
+  wire a2b_winc = a_dir & a_winc;
+  wire a2b_rinc = ~b_dir & b_rinc;
+  wire [DSIZE-1:0] a2b_wdata = a_wdata;
+  wire [DSIZE-1:0] a2b_rdata;
+  wire a2b_full;
+  wire a2b_afull;
+  wire a2b_empty;
+  wire a2b_aempty;
+
+  // Internal signals for B-to-A FIFO
+  wire b2a_winc = b_dir & b_winc;
+  wire b2a_rinc = ~a_dir & a_rinc;
+  wire [DSIZE-1:0] b2a_wdata = b_wdata;
+  wire [DSIZE-1:0] b2a_rdata;
+  wire b2a_full;
+  wire b2a_afull;
+  wire b2a_empty;
+  wire b2a_aempty;
+
+  // Instantiate A-to-B FIFO
+  async_fifo #(
+    .DSIZE(DSIZE),
+    .ASIZE(ASIZE),
+    .FALLTHROUGH(FALLTHROUGH)
+  ) u_a2b_fifo (
+    .wclk(a_clk),
+    .wrst_n(a_rst_n),
+    .winc(a2b_winc),
+    .wdata(a2b_wdata),
+    .rclk(b_clk),
+    .rrst_n(b_rst_n),
+    .rinc(a2b_rinc),
+    .rdata(a2b_rdata),
+    .full(a2b_full),
+    .afull(a2b_afull),
+    .empty(a2b_empty),
+    .aempty(a2b_aempty)
+  );
+
+  // Instantiate B-to-A FIFO
+  async_fifo #(
+    .DSIZE(DSIZE),
+    .ASIZE(ASIZE),
+    .FALLTHROUGH(FALLTHROUGH)
+  ) u_b2a_fifo (
+    .wclk(b_clk),
+    .wrst_n(b_rst_n),
+    .winc(b2a_winc),
+    .wdata(b2a_wdata),
+    .rclk(a_clk),
+    .rrst_n(a_rst_n),
+    .rinc(b2a_rinc),
+    .rdata(b2a_rdata),
+    .full(b2a_full),
+    .afull(b2a_afull),
+    .empty(b2a_empty),
+    .aempty(b2a_aempty)
+  );
+
+  // A side outputs
+  assign a_rdata = a_dir ? a2b_rdata : b2a_rdata;
+  assign a_full  = a_dir ? a2b_full  : b2a_full;
+  assign a_afull = a_dir ? a2b_afull : b2a_afull;
+  assign a_empty = a_dir ? a2b_empty : b2a_empty;
+  assign a_aempty = a_dir ? a2b_aempty : b2a_aempty;
+
+  // B side outputs
+  assign b_rdata = b_dir ? b2a_rdata : a2b_rdata;
+  assign b_full  = b_dir ? b2a_full  : a2b_full;
+  assign b_afull = b_dir ? b2a_afull : a2b_afull;
+  assign b_empty = b_dir ? b2a_empty : a2b_empty;
+  assign b_aempty = b_dir ? b2a_aempty : a2b_aempty;
+
+endmodule
+
+module async_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              wclk,
+       input wire              wrst_n,
+       input wire              winc,
+       input wire [DSIZE-1:0]  wdata,
+       input wire              rclk,
+       input wire              rrst_n,
+       input wire              rinc,
+       output wire [DSIZE-1:0] rdata,
+       output wire             full,
+       output wire             afull,
+       output wire             empty,
+       output wire             aempty
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam PTR_W = ASIZE + 1;
+  localparam AFULL_THRESH = DEPTH - 2;
+  localparam AEMPTY_THRESH = 1;
+
+  // Memory
+  reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+  // Write pointer (write clock domain)
+  reg [PTR_W-1:0] wptr;
+  // Read pointer (read clock domain)
+  reg [PTR_W-1:0] rptr;
+
+  // Gray code pointers for CDC
+  reg [ASIZE-1:0] wptr_gray;
+  reg [ASIZE-1:0] rptr_gray;
+
+  // Synchronized read pointer in write clock domain
+  reg [ASIZE-1:0] rptr_gray_sync1;
+  reg [ASIZE-1:0] rptr_gray_sync2;
+
+  // Synchronized write pointer in read clock domain
+  reg [ASIZE-1:0] wptr_gray_sync1;
+  reg [ASIZE-1:0] wptr_gray_sync2;
+
+  // Binary read pointer synchronized to write clock domain
+  reg [PTR_W-1:0] rptr_bin_sync1;
+  reg [PTR_W-1:0] rptr_bin_sync2;
+
+  // Binary write pointer synchronized to read clock domain
+  reg [PTR_W-1:0] wptr_bin_sync1;
+  reg [PTR_W-1:0] wptr_bin_sync2;
+
+  // Gray to binary conversion
+  function [ASIZE-1:0] gray_to_bin;
+    input [ASIZE-1:0] gray;
+    integer i;
+    begin
+      gray_to_bin[ASIZE-1] = gray[ASIZE-1];
+      for (i = ASIZE-2; i >= 0; i = i - 1)
+        gray_to_bin[i] = gray_to_bin[i+1] ^ gray[i];
+    end
+  endfunction
+
+  // Binary to gray conversion
+  function [ASIZE-1:0] bin_to_gray;
+    input [ASIZE-1:0] bin;
+    begin
+      bin_to_gray = bin ^ (bin >> 1);
+    end
+  endfunction
+
+  // Write clock domain
+  always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+      wptr <= {PTR_W{1'b0}};
+      wptr_gray <= {ASIZE{1'b0}};
+    end else if (winc && !full) begin
+      wptr <= wptr + 1'b1;
+      wptr_gray <= bin_to_gray(wptr[ASIZE-1:0] + 1'b1);
+    end
+  end
+
+  // Read clock domain
+  always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+      rptr <= {PTR_W{1'b0}};
+      rptr_gray <= {ASIZE{1'b0}};
+    end else if (rinc && !empty) begin
+      rptr <= rptr + 1'b1;
+      rptr_gray <= bin_to_gray(rptr[ASIZE-1:0] + 1'b1);
+    end
+  end
+
+  // Synchronize read pointer gray to write clock domain
+  always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+      rptr_gray_sync1 <= {ASIZE{1'b0}};
+      rptr_gray_sync2 <= {ASIZE{1'b0}};
+    end else begin
+      rptr_gray_sync1 <= rptr_gray;
+      rptr_gray_sync2 <= rptr_gray_sync1;
+    end
+  end
+
+  // Synchronize write pointer gray to read clock domain
+  always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+      wptr_gray_sync1 <= {ASIZE{1'b0}};
+      wptr_gray_sync2 <= {ASIZE{1'b0}};
+    end else begin
+      wptr_gray_sync1 <= wptr_gray;
+      wptr_gray_sync2 <= wptr_gray_sync1;
+    end
+  end
+
+  // Synchronize read pointer binary to write clock domain
+  always @(posedge wclk or negedge wrst_n) begin
+    if (!wrst_n) begin
+      rptr_bin_sync1 <= {PTR_W{1'b0}};
+      rptr_bin_sync2 <= {PTR_W{1'b0}};
+    end else begin
+      rptr_bin_sync1 <= rptr;
+      rptr_bin_sync2 <= rptr_bin_sync1;
+    end
+  end
+
+  // Synchronize write pointer binary to read clock domain
+  always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n) begin
+      wptr_bin_sync1 <= {PTR_W{1'b0}};
+      wptr_bin_sync2 <= {PTR_W{1'b0}};
+    end else begin
+      wptr_bin_sync1 <= wptr;
+      wptr_bin_sync2 <= wptr_bin_sync1;
+    end
+  end
+
+  // Write memory
+  always @(posedge wclk) begin
+    if (winc && !full)
+      mem[wptr[ASIZE-1:0]] <= wdata;
+  end
+
+  // Read data
+  reg [DSIZE-1:0] rdata_reg;
+  always @(posedge rclk or negedge rrst_n) begin
+    if (!rrst_n)
+      rdata_reg <= {DSIZE{1'b0}};
+    else
+      rdata_reg <= mem[rptr[ASIZE-1:0]];
+  end
+
+  assign rdata = rdata_reg;
+
+  // Full flag (write clock domain)
+  // Full when write pointer has lapped read pointer by DEPTH
+  wire [PTR_W-1:0] rptr_bin_from_gray = {1'b0, gray_to_bin(rptr_gray_sync2)};
+  // Need to reconstruct full binary read pointer
+  // The MSB of the binary pointer is the wrap bit
+  // We use the synchronized binary pointer
+  wire [PTR_W-1:0] rptr_sync = rptr_bin_sync2;
+  wire full_internal = (wptr[ASIZE-1:0] == rptr_sync[ASIZE-1:0]) && 
+                       (wptr[ASIZE] != rptr_sync[ASIZE]);
+  assign full = full_internal;
+
+  // Almost full flag
+  wire [PTR_W-1:0] diff = wptr - rptr_sync;
+  assign afull = (diff >= AFULL_THRESH);
+
+  // Empty flag (read clock domain)
+  wire [PTR_W-1:0] wptr_sync = wptr_bin_sync2;
+  wire empty_internal = (wptr_sync == rptr);
+  assign empty = empty_internal;
+
+  // Almost empty flag
+  wire [PTR_W-1:0] diff_read = wptr_sync - rptr;
+  assign aempty = (diff_read <= AEMPTY_THRESH);
+
+endmodule
+```<|im_end|>

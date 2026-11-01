@@ -1,0 +1,238 @@
+module axis_register #
+(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter REG_TYPE = 2
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI Stream input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI Stream output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser
+);
+
+    // Internal signals
+    wire s_axis_tvalid_int;
+    wire s_axis_tready_int;
+    wire m_axis_tvalid_int;
+    wire m_axis_tready_int;
+
+    // For REG_TYPE 0 (wire)
+    assign s_axis_tready = m_axis_tready;
+    assign m_axis_tdata = s_axis_tdata;
+    assign m_axis_tvalid = s_axis_tvalid;
+    assign m_axis_tlast = s_axis_tlast;
+    assign m_axis_tid = s_axis_tid;
+    assign m_axis_tdest = s_axis_tdest;
+    assign m_axis_tuser = s_axis_tuser;
+    assign m_axis_tkeep = s_axis_tkeep;
+
+    // For REG_TYPE 1 (simple buffer)
+    reg [DATA_WIDTH-1:0] buf_tdata;
+    reg [KEEP_WIDTH-1:0] buf_tkeep;
+    reg buf_tlast;
+    reg [ID_WIDTH-1:0] buf_tid;
+    reg [DEST_WIDTH-1:0] buf_tdest;
+    reg [USER_WIDTH-1:0] buf_tuser;
+    reg buf_tvalid;
+
+    // For REG_TYPE 2 (skid buffer)
+    reg [DATA_WIDTH-1:0] skid_tdata;
+    reg [KEEP_WIDTH-1:0] skid_tkeep;
+    reg skid_tlast;
+    reg [ID_WIDTH-1:0] skid_tid;
+    reg [DEST_WIDTH-1:0] skid_tdest;
+    reg [USER_WIDTH-1:0] skid_tuser;
+    reg skid_tvalid;
+
+    reg [DATA_WIDTH-1:0] main_tdata;
+    reg [KEEP_WIDTH-1:0] main_tkeep;
+    reg main_tlast;
+    reg [ID_WIDTH-1:0] main_tid;
+    reg [DEST_WIDTH-1:0] main_tdest;
+    reg [USER_WIDTH-1:0] main_tuser;
+    reg main_tvalid;
+
+    // Control signals
+    wire s_axis_tready_wire;
+    wire s_axis_tready_buf;
+    wire s_axis_tready_skid;
+
+    wire m_axis_tvalid_wire;
+    wire m_axis_tvalid_buf;
+    wire m_axis_tvalid_skid;
+
+    // Wire mode
+    assign s_axis_tready_wire = m_axis_tready;
+    assign m_axis_tvalid_wire = s_axis_tvalid;
+
+    // Buffer mode
+    wire buf_can_accept = !buf_tvalid || m_axis_tready;
+    assign s_axis_tready_buf = buf_can_accept;
+    assign m_axis_tvalid_buf = buf_tvalid;
+
+    // Skid buffer mode
+    wire skid_can_accept = !main_tvalid || m_axis_tready;
+    wire skid_can_accept_skid = !skid_tvalid;
+    wire skid_can_accept_both = skid_can_accept && skid_can_accept_skid;
+    
+    // Skid buffer logic
+    // If main is empty or draining, accept from source
+    // If main is full and not draining, accept into skid if skid is empty
+    wire skid_accept_main = s_axis_tvalid && (skid_can_accept || (main_tvalid && !m_axis_tready && skid_can_accept_skid));
+    wire skid_accept_skid = s_axis_tvalid && main_tvalid && !m_axis_tready && skid_can_accept_skid;
+    
+    // Simplified skid buffer control
+    wire skid_s_axis_tready = !main_tvalid || m_axis_tready || (!skid_tvalid && main_tvalid && !m_axis_tready);
+    assign s_axis_tready_skid = skid_s_axis_tready;
+    assign m_axis_tvalid_skid = main_tvalid || skid_tvalid;
+
+    // Select based on REG_TYPE
+    generate
+        if (REG_TYPE == 0) begin : gen_wire
+            // Already handled by continuous assignments above
+        end
+        else if (REG_TYPE == 1) begin : gen_buf
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    buf_tvalid <= 1'b0;
+                    buf_tdata <= {DATA_WIDTH{1'b0}};
+                    buf_tkeep <= {KEEP_WIDTH{1'b0}};
+                    buf_tlast <= 1'b0;
+                    buf_tid <= {ID_WIDTH{1'b0}};
+                    buf_tdest <= {DEST_WIDTH{1'b0}};
+                    buf_tuser <= {USER_WIDTH{1'b0}};
+                end else begin
+                    if (s_axis_tvalid && buf_can_accept) begin
+                        buf_tvalid <= 1'b1;
+                        buf_tdata <= s_axis_tdata;
+                        buf_tkeep <= s_axis_tkeep;
+                        buf_tlast <= s_axis_tlast;
+                        buf_tid <= s_axis_tid;
+                        buf_tdest <= s_axis_tdest;
+                        buf_tuser <= s_axis_tuser;
+                    end
+                    if (buf_tvalid && m_axis_tready) begin
+                        buf_tvalid <= 1'b0;
+                    end
+                end
+            end
+
+            assign m_axis_tdata = buf_tdata;
+            assign m_axis_tkeep = buf_tkeep;
+            assign m_axis_tvalid = buf_tvalid;
+            assign m_axis_tlast = buf_tlast;
+            assign m_axis_tid = buf_tid;
+            assign m_axis_tdest = buf_tdest;
+            assign m_axis_tuser = buf_tuser;
+            assign s_axis_tready = buf_can_accept;
+        end
+        else if (REG_TYPE == 2) begin : gen_skid
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    main_tvalid <= 1'b0;
+                    main_tdata <= {DATA_WIDTH{1'b0}};
+                    main_tkeep <= {KEEP_WIDTH{1'b0}};
+                    main_tlast <= 1'b0;
+                    main_tid <= {ID_WIDTH{1'b0}};
+                    main_tdest <= {DEST_WIDTH{1'b0}};
+                    main_tuser <= {USER_WIDTH{1'b0}};
+                    
+                    skid_tvalid <= 1'b0;
+                    skid_tdata <= {DATA_WIDTH{1'b0}};
+                    skid_tkeep <= {KEEP_WIDTH{1'b0}};
+                    skid_tlast <= 1'b0;
+                    skid_tid <= {ID_WIDTH{1'b0}};
+                    skid_tdest <= {DEST_WIDTH{1'b0}};
+                    skid_tuser <= {USER_WIDTH{1'b0}};
+                end else begin
+                    // Main buffer logic
+                    if (main_tvalid && m_axis_tready) begin
+                        // Main is draining
+                        if (skid_tvalid) begin
+                            // Move skid to main
+                            main_tdata <= skid_tdata;
+                            main_tkeep <= skid_tkeep;
+                            main_tlast <= skid_tlast;
+                            main_tid <= skid_tid;
+                            main_tdest <= skid_tdest;
+                            main_tuser <= skid_tuser;
+                            skid_tvalid <= 1'b0;
+                        end else if (s_axis_tvalid) begin
+                            // Accept new data into main
+                            main_tdata <= s_axis_tdata;
+                            main_tkeep <= s_axis_tkeep;
+                            main_tlast <= s_axis_tlast;
+                            main_tid <= s_axis_tid;
+                            main_tdest <= s_axis_tdest;
+                            main_tuser <= s_axis_tuser;
+                        end else begin
+                            main_tvalid <= 1'b0;
+                        end
+                    end else if (main_tvalid && !m_axis_tready) begin
+                        // Main is stalled
+                        if (s_axis_tvalid && !skid_tvalid) begin
+                            // Accept into skid
+                            skid_tvalid <= 1'b1;
+                            skid_tdata <= s_axis_tdata;
+                            skid_tkeep <= s_axis_tkeep;
+                            skid_tlast <= s_axis_tlast;
+                            skid_tid <= s_axis_tid;
+                            skid_tdest <= s_axis_tdest;
+                            skid_tuser <= s_axis_tuser;
+                        end
+                    end else if (!main_tvalid) begin
+                        // Main is empty
+                        if (s_axis_tvalid) begin
+                            main_tvalid <= 1'b1;
+                            main_tdata <= s_axis_tdata;
+                            main_tkeep <= s_axis_tkeep;
+                            main_tlast <= s_axis_tlast;
+                            main_tid <= s_axis_tid;
+                            main_tdest <= s_axis_tdest;
+                            main_tuser <= s_axis_tuser;
+                        end
+                    end
+                end
+            end
+
+            assign m_axis_tdata = main_tdata;
+            assign m_axis_tkeep = main_tkeep;
+            assign m_axis_tvalid = main_tvalid;
+            assign m_axis_tlast = main_tlast;
+            assign m_axis_tid = main_tid;
+            assign m_axis_tdest = main_tdest;
+            assign m_axis_tuser = main_tuser;
+            assign s_axis_tready = !main_tvalid || m_axis_tready || (!skid_tvalid && main_tvalid && !m_axis_tready);
+        end
+    endgenerate
+
+endmodule

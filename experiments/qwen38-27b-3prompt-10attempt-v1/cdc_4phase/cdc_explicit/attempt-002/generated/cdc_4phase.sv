@@ -1,0 +1,105 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire src_to_dst_valid;
+  wire dst_to_src_ready;
+
+  // Source domain: handshake state
+  reg src_valid_reg;
+  reg [WIDTH-1:0] src_data_reg;
+
+  // Destination domain: handshake state
+  reg dst_valid_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+
+  // CDC synchronizers
+  // src_valid_reg -> dst domain
+  reg [1:0] src_valid_sync;
+  // dst_to_src_ready -> src domain
+  reg [1:0] dst_ready_sync;
+
+  // Synchronize src_valid_reg to dst domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_valid_sync <= 2'b00;
+    else
+      src_valid_sync <= {src_valid_sync[0], src_valid_reg};
+  end
+
+  // Synchronize dst_to_src_ready to src domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_ready_sync <= 2'b00;
+    else
+      dst_ready_sync <= {dst_ready_sync[0], dst_to_src_ready};
+  end
+
+  // Destination domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_data_reg  <= {WIDTH{1'b0}};
+    end else begin
+      if (src_valid_sync[1]) begin
+        // New valid from source
+        dst_valid_reg <= 1'b1;
+        dst_data_reg  <= src_data_reg;
+      end else if (dst_valid_reg && dst_ready_i) begin
+        // Handshake complete
+        dst_valid_reg <= 1'b0;
+      end
+    end
+  end
+
+  // dst_to_src_ready is high when destination is not currently holding a valid
+  // that hasn't been consumed yet, OR when it's about to be consumed.
+  // In a 4-phase handshake, the ready signal goes high after the destination
+  // has accepted the data and the valid has been deasserted.
+  // For simplicity and safety, we use a 2-phase-like approach where:
+  // - dst_to_src_ready is high when dst_valid_reg is low (no pending data)
+  // This ensures the source only sends when the destination is ready.
+  
+  assign dst_to_src_ready = ~dst_valid_reg;
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_data_reg  <= {WIDTH{1'b0}};
+    end else begin
+      if (src_valid_i && src_ready_o) begin
+        // Accept new data
+        src_valid_reg <= 1'b1;
+        src_data_reg  <= src_data_i;
+      end else if (src_valid_reg && dst_ready_sync[1]) begin
+        // Destination has acknowledged, clear valid
+        src_valid_reg <= 1'b0;
+      end
+    end
+  end
+
+  // src_ready_o is high when the source is not currently holding a valid
+  // that hasn't been acknowledged by the destination.
+  assign src_ready_o = ~src_valid_reg;
+
+  // Outputs
+  assign dst_valid_o = dst_valid_reg;
+  assign dst_data_o  = dst_data_reg;
+
+endmodule

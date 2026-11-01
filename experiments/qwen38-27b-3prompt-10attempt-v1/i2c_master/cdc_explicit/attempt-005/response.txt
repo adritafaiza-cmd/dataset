@@ -1,0 +1,458 @@
+```verilog
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // State machine states
+    localparam S_IDLE            = 4'd0;
+    localparam S_START           = 4'd1;
+    localparam S_ADDR_BIT        = 4'd2;
+    localparam S_ADDR_ACK        = 4'd3;
+    localparam S_DATA_BIT        = 4'd4;
+    localparam S_DATA_ACK        = 4'd5;
+    localparam S_READ_BIT        = 4'd6;
+    localparam S_READ_ACK        = 4'd7;
+    localparam S_STOP            = 4'd8;
+    localparam S_WAIT_IDLE       = 4'd9;
+
+    reg [3:0]  state;
+    reg [3:0]  bit_count;
+    reg [7:0]  tx_data;
+    reg [7:0]  rx_data;
+    reg        tx_is_addr;
+    reg        tx_is_read;
+    reg        tx_is_write;
+    reg        tx_is_write_multiple;
+    reg        tx_is_stop;
+    reg        need_start;
+    reg        need_stop;
+    reg        ack_received;
+    reg        missed_ack_reg;
+    reg        bus_active_reg;
+    reg        bus_control_reg;
+    reg        busy_reg;
+    reg        scl_out;
+    reg        sda_out;
+    reg        scl_tristate;
+    reg        sda_tristate;
+    reg [15:0] prescale_reg;
+    reg [15:0] prescale_count;
+    reg        prescale_en;
+    reg        stop_on_idle_reg;
+
+    // Synchronizers for inputs
+    reg [1:0]  scl_i_sync;
+    reg [1:0]  sda_i_sync;
+    reg [1:0]  prescale_sync_0;
+    reg [1:0]  prescale_sync_1;
+    reg [1:0]  prescale_sync_2;
+    reg [1:0]  prescale_sync_3;
+    reg [1:0]  prescale_sync_4;
+    reg [1:0]  prescale_sync_5;
+    reg [1:0]  prescale_sync_6;
+    reg [1:0]  prescale_sync_7;
+    reg [1:0]  prescale_sync_8;
+    reg [1:0]  prescale_sync_9;
+    reg [1:0]  prescale_sync_10;
+    reg [1:0]  prescale_sync_11;
+    reg [1:0]  prescale_sync_12;
+    reg [1:0]  prescale_sync_13;
+    reg [1:0]  prescale_sync_14;
+    reg [1:0]  prescale_sync_15;
+    reg [1:0]  stop_on_idle_sync;
+
+    wire scl_i_synced = scl_i_sync[1];
+    wire sda_i_synced = sda_i_sync[1];
+    wire [15:0] prescale_synced = {prescale_sync_15[1], prescale_sync_14[1], prescale_sync_13[1], prescale_sync_12[1],
+                                   prescale_sync_11[1], prescale_sync_10[1], prescale_sync_9[1], prescale_sync_8[1],
+                                   prescale_sync_7[1], prescale_sync_6[1], prescale_sync_5[1], prescale_sync_4[1],
+                                   prescale_sync_3[1], prescale_sync_2[1], prescale_sync_1[1], prescale_sync_0[1]};
+    wire stop_on_idle_synced = stop_on_idle_sync[1];
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            scl_i_sync <= 2'b11;
+            sda_i_sync <= 2'b11;
+            prescale_sync_0 <= 2'b00;
+            prescale_sync_1 <= 2'b00;
+            prescale_sync_2 <= 2'b00;
+            prescale_sync_3 <= 2'b00;
+            prescale_sync_4 <= 2'b00;
+            prescale_sync_5 <= 2'b00;
+            prescale_sync_6 <= 2'b00;
+            prescale_sync_7 <= 2'b00;
+            prescale_sync_8 <= 2'b00;
+            prescale_sync_9 <= 2'b00;
+            prescale_sync_10 <= 2'b00;
+            prescale_sync_11 <= 2'b00;
+            prescale_sync_12 <= 2'b00;
+            prescale_sync_13 <= 2'b00;
+            prescale_sync_14 <= 2'b00;
+            prescale_sync_15 <= 2'b00;
+            stop_on_idle_sync <= 2'b00;
+        end else begin
+            scl_i_sync <= {scl_i_sync[0], scl_i};
+            sda_i_sync <= {sda_i_sync[0], sda_i};
+            prescale_sync_0 <= {prescale_sync_0[0], prescale[0]};
+            prescale_sync_1 <= {prescale_sync_1[0], prescale[1]};
+            prescale_sync_2 <= {prescale_sync_2[0], prescale[2]};
+            prescale_sync_3 <= {prescale_sync_3[0], prescale[3]};
+            prescale_sync_4 <= {prescale_sync_4[0], prescale[4]};
+            prescale_sync_5 <= {prescale_sync_5[0], prescale[5]};
+            prescale_sync_6 <= {prescale_sync_6[0], prescale[6]};
+            prescale_sync_7 <= {prescale_sync_7[0], prescale[7]};
+            prescale_sync_8 <= {prescale_sync_8[0], prescale[8]};
+            prescale_sync_9 <= {prescale_sync_9[0], prescale[9]};
+            prescale_sync_10 <= {prescale_sync_10[0], prescale[10]};
+            prescale_sync_11 <= {prescale_sync_11[0], prescale[11]};
+            prescale_sync_12 <= {prescale_sync_12[0], prescale[12]};
+            prescale_sync_13 <= {prescale_sync_13[0], prescale[13]};
+            prescale_sync_14 <= {prescale_sync_14[0], prescale[14]};
+            prescale_sync_15 <= {prescale_sync_15[0], prescale[15]};
+            stop_on_idle_sync <= {stop_on_idle_sync[0], stop_on_idle};
+        end
+    end
+
+    // Main state machine
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= S_IDLE;
+            bit_count <= 4'd0;
+            tx_data <= 8'd0;
+            rx_data <= 8'd0;
+            tx_is_addr <= 1'b0;
+            tx_is_read <= 1'b0;
+            tx_is_write <= 1'b0;
+            tx_is_write_multiple <= 1'b0;
+            tx_is_stop <= 1'b0;
+            need_start <= 1'b0;
+            need_stop <= 1'b0;
+            ack_received <= 1'b0;
+            missed_ack_reg <= 1'b0;
+            bus_active_reg <= 1'b0;
+            bus_control_reg <= 1'b0;
+            busy_reg <= 1'b0;
+            scl_out <= 1'b1;
+            sda_out <= 1'b1;
+            scl_tristate <= 1'b1;
+            sda_tristate <= 1'b1;
+            prescale_reg <= 16'd0;
+            prescale_count <= 16'd0;
+            prescale_en <= 1'b0;
+            stop_on_idle_reg <= 1'b0;
+        end else begin
+            // Update configuration registers
+            prescale_reg <= prescale_synced;
+            stop_on_idle_reg <= stop_on_idle_synced;
+
+            // Default: release bus
+            scl_tristate <= 1'b1;
+            sda_tristate <= 1'b1;
+            scl_out <= 1'b1;
+            sda_out <= 1'b1;
+
+            case (state)
+                S_IDLE: begin
+                    busy_reg <= 1'b0;
+                    bus_active_reg <= 1'b0;
+                    bus_control_reg <= 1'b0;
+                    missed_ack_reg <= 1'b0;
+                    need_start <= 1'b0;
+                    need_stop <= 1'b0;
+                    prescale_en <= 1'b0;
+                    prescale_count <= 16'd0;
+
+                    if (s_axis_cmd_valid) begin
+                        busy_reg <= 1'b1;
+                        bus_control_reg <= 1'b1;
+                        tx_is_addr <= 1'b1;
+                        tx_is_read <= s_axis_cmd_read;
+                        tx_is_write <= s_axis_cmd_write;
+                        tx_is_write_multiple <= s_axis_cmd_write_multiple;
+                        tx_is_stop <= s_axis_cmd_stop;
+                        tx_data <= {s_axis_cmd_address, s_axis_cmd_read};
+                        need_start <= 1'b1;
+                        need_stop <= 1'b0;
+                        state <= S_START;
+                    end
+                end
+
+                S_START: begin
+                    busy_reg <= 1'b1;
+                    bus_control_reg <= 1'b1;
+                    bus_active_reg <= 1'b1;
+                    scl_tristate <= 1'b0;
+                    sda_tristate <= 1'b0;
+                    scl_out <= 1'b1;
+                    sda_out <= 1'b1;
+                    prescale_en <= 1'b1;
+                    prescale_count <= prescale_reg;
+
+                    if (prescale_count == 16'd0) begin
+                        // SDA high to low while SCL high = START
+                        sda_out <= 1'b0;
+                        prescale_en <= 1'b1;
+                        prescale_count <= prescale_reg;
+                    end
+                end
+
+                S_ADDR_BIT: begin
+                    busy_reg <= 1'b1;
+                    bus_control_reg <= 1'b1;
+                    bus_active_reg <= 1'b1;
+                    scl_tristate <= 1'b0;
+                    sda_tristate <= 1'b0;
+                    prescale_en <= 1'b1;
+
+                    if (bit_count == 4'd0) begin
+                        // First bit: SCL low, SDA = MSB
+                        scl_out <= 1'b0;
+                        sda_out <= tx_data[7];
+                        prescale_count <= prescale_reg;
+                    end else if (prescale_count == 16'd0) begin
+                        // SCL high
+                        scl_out <= 1'b1;
+                        prescale_count <= prescale_reg;
+                    end else if (scl_out == 1'b1 && prescale_count == 16'd0) begin
+                        // SCL low, next bit
+                        scl_out <= 1'b0;
+                        bit_count <= bit_count + 1'b1;
+                        if (bit_count == 4'd7) begin
+                            state <= S_ADDR_ACK;
+                        end else begin
+                            sda_out <= tx_data[7 - bit_count - 1'b1];
+                        end
+                        prescale_count <= prescale_reg;
+                    end
+                end
+
+                S_ADDR_ACK: begin
+                    busy_reg <= 1'b1;
+                    bus_control_reg <= 1'b1;
+                    bus_active_reg <= 1'b1;
+                    scl_tristate <= 1'b0;
+                    sda_tristate <= 1'b1; // Release SDA for ACK
+                    scl_out <= 1'b0;
+                    prescale_en <= 1'b1;
+                    prescale_count <= prescale_reg;
+
+                    if (prescale_count == 16'd0) begin
+                        // SCL high, sample SDA
+                        scl_out <= 1'b1;
+                        prescale_count <= prescale_reg;
+                    end else if (scl_out == 1'b1 && prescale_count == 16'd0) begin
+                        // SCL low, check ACK
+                        scl_out <= 1'b0;
+                        ack_received <= ~sda_i_synced;
+                        if (sda_i_synced) begin
+                            missed_ack_reg <= 1'b1;
+                        end
+                        state <= S_IDLE;
+                        need_start <= 1'b0;
+                        need_stop <= 1'b0;
+                    end
+                end
+
+                S_DATA_BIT: begin
+                    busy_reg <= 1'b1;
+                    bus_control_reg <= 1'b1;
+                    bus_active_reg <= 1'b1;
+                    scl_tristate <= 1'b0;
+                    sda_tristate <= 1'b0;
+                    prescale_en <= 1'b1;
+
+                    if (bit_count == 4'd0) begin
+                        scl_out <= 1'b0;
+                        sda_out <= tx_data[7];
+                        prescale_count <= prescale_reg;
+                    end else if (prescale_count == 16'd0) begin
+                        scl_out <= 1'b1;
+                        prescale_count <= prescale_reg;
+                    end else if (scl_out == 1'b1 && prescale_count == 16'd0) begin
+                        scl_out <= 1'b0;
+                        bit_count <= bit_count + 1'b1;
+                        if (bit_count == 4'd7) begin
+                            state <= S_DATA_ACK;
+                        end else begin
+                            sda_out <= tx_data[7 - bit_count - 1'b1];
+                        end
+                        prescale_count <= prescale_reg;
+                    end
+                end
+
+                S_DATA_ACK: begin
+                    busy_reg <= 1'b1;
+                    bus_control_reg <= 1'b1;
+                    bus_active_reg <= 1'b1;
+                    scl_tristate <= 1'b0;
+                    sda_tristate <= 1'b1;
+                    scl_out <= 1'b0;
+                    prescale_en <= 1'b1;
+                    prescale_count <= prescale_reg;
+
+                    if (prescale_count == 16'd0) begin
+                        scl_out <= 1'b1;
+                        prescale_count <= prescale_reg;
+                    end else if (scl_out == 1'b1 && prescale_count == 16'd0) begin
+                        scl_out <= 1'b0;
+                        ack_received <= ~sda_i_synced;
+                        if (sda_i_synced) begin
+                            missed_ack_reg <= 1'b1;
+                        end
+                        state <= S_IDLE;
+                        need_start <= 1'b0;
+                        need_stop <= 1'b0;
+                    end
+                end
+
+                S_READ_BIT: begin
+                    busy_reg <= 1'b1;
+                    bus_control_reg <= 1'b1;
+                    bus_active_reg <= 1'b1;
+                    scl_tristate <= 1'b0;
+                    sda_tristate <= 1'b1; // Release SDA for read
+                    prescale_en <= 1'b1;
+
+                    if (bit_count == 4'd0) begin
+                        scl_out <= 1'b0;
+                        prescale_count <= prescale_reg;
+                    end else if (prescale_count == 16'd0) begin
+                        scl_out <= 1'b1;
+                        prescale_count <= prescale_reg;
+                    end else if (scl_out == 1'b1 && prescale_count == 16'd0) begin
+                        scl_out <= 1'b0;
+                        rx_data[7 - bit_count] <= sda_i_synced;
+                        bit_count <= bit_count + 1'b1;
+                        if (bit_count == 4'd7) begin
+                            state <= S_READ_ACK;
+                        end
+                        prescale_count <= prescale_reg;
+                    end
+                end
+
+                S_READ_ACK: begin
+                    busy_reg <= 1'b1;
+                    bus_control_reg <= 1'b1;
+                    bus_active_reg <= 1'b1;
+                    scl_tristate <= 1'b0;
+                    sda_tristate <= 1'b0;
+                    scl_out <= 1'b0;
+                    sda_out <= 1'b0; // Send ACK
+                    prescale_en <= 1'b1;
+                    prescale_count <= prescale_reg;
+
+                    if (prescale_count == 16'd0) begin
+                        scl_out <= 1'b1;
+                        prescale_count <= prescale_reg;
+                    end else if (scl_out == 1'b1 && prescale_count == 16'd0) begin
+                        scl_out <= 1'b0;
+                        state <= S_IDLE;
+                        need_start <= 1'b0;
+                        need_stop <= 1'b0;
+                    end
+                end
+
+                S_STOP: begin
+                    busy_reg <= 1'b1;
+                    bus_control_reg <= 1'b1;
+                    bus_active_reg <= 1'b1;
+                    scl_tristate <= 1'b0;
+                    sda_tristate <= 1'b0;
+                    scl_out <= 1'b0;
+                    sda_out <= 1'b0;
+                    prescale_en <= 1'b1;
+                    prescale_count <= prescale_reg;
+
+                    if (prescale_count == 16'd0) begin
+                        // SCL high
+                        scl_out <= 1'b1;
+                        prescale_count <= prescale_reg;
+                    end else if (scl_out == 1'b1 && prescale_count == 16'd0) begin
+                        // SDA low to high while SCL high = STOP
+                        sda_out <= 1'b1;
+                        prescale_count <= prescale_reg;
+                    end else if (sda_out == 1'b1 && prescale_count == 16'd0) begin
+                        // Release bus
+                        state <= S_IDLE;
+                        need_start <= 1'b0;
+                        need_stop <= 1'b0;
+                    end
+                end
+
+                S_WAIT_IDLE: begin
+                    busy_reg <= 1'b0;
+                    bus_active_reg <= 1'b0;
+                    bus_control_reg <= 1'b0;
+                    prescale_en <= 1'b0;
+                    prescale_count <= 16'd0;
+
+                    if (stop_on_idle_reg && scl_i_synced && sda_i_synced) begin
+                        state <= S_IDLE;
+                    end
+                end
+
+                default: begin
+                    state <= S_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Outputs
+    assign s_axis_cmd_ready = (state == S_IDLE) && !busy_reg;
+    assign s_axis_data_tready = 1'b0; // Not used in this implementation
+    assign m_axis_data_tdata = rx_data;
+    assign m_axis_data_tvalid = 1'b0; // Not used in this implementation
+    assign m_axis_data_tlast = 1'b0; // Not used in this implementation
+    assign scl_o = scl_out;
+    assign scl_t = scl_tristate;
+    assign sda_o = sda_out;
+    assign sda_t = sda_tristate;
+    assign busy = busy_reg;
+    assign bus_control = bus_control_reg;
+    assign bus_active = bus_active_reg;
+    assign missed_ack = missed_ack_reg;
+
+endmodule
+```<|im_end|>

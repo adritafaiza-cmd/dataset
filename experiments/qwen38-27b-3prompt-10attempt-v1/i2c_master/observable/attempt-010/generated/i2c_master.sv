@@ -1,0 +1,461 @@
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // State machine states
+    localparam S_IDLE          = 4'd0;
+    localparam S_START         = 4'd1;
+    localparam S_SEND_BIT      = 4'd2;
+    localparam S_RECV_BIT      = 4'd3;
+    localparam S_ACK           = 4'd4;
+    localparam S_STOP          = 4'd5;
+    localparam S_WAIT_ACK      = 4'd6;
+    localparam S_DONE          = 4'd7;
+
+    // Internal signals
+    reg [3:0]  state;
+    reg [3:0]  bit_count;
+    reg [7:0]  tx_byte;
+    reg [7:0]  rx_byte;
+    reg        is_read;
+    reg        is_write;
+    reg        is_write_multiple;
+    reg        need_stop;
+    reg        ack_received;
+    reg        ack_missed;
+    reg        scl_reg;
+    reg        sda_reg;
+    reg        scl_t_reg;
+    reg        sda_t_reg;
+    reg [15:0] prescale_reg;
+    reg [15:0] counter;
+    reg        counter_done;
+    reg        bit_out;
+    reg        bit_in;
+    reg        byte_done;
+    reg        ack_phase;
+    reg        stop_pending;
+    reg        start_pending;
+    reg        read_pending;
+    reg        write_pending;
+    reg        write_multiple_pending;
+    reg        stop_cmd_pending;
+    reg        cmd_valid_reg;
+    reg [6:0]  cmd_address_reg;
+    reg        cmd_read_reg;
+    reg        cmd_write_reg;
+    reg        cmd_write_multiple_reg;
+    reg        cmd_stop_reg;
+    reg        data_valid_reg;
+    reg [7:0]  data_tdata_reg;
+    reg        data_tlast_reg;
+    reg        m_axis_data_tvalid_reg;
+    reg [7:0]  m_axis_data_tdata_reg;
+    reg        m_axis_data_tlast_reg;
+    reg        busy_reg;
+    reg        bus_control_reg;
+    reg        bus_active_reg;
+    reg        missed_ack_reg;
+
+    // Outputs
+    assign scl_o = scl_reg;
+    assign sda_o = sda_reg;
+    assign scl_t = scl_t_reg;
+    assign sda_t = sda_t_reg;
+    assign busy = busy_reg;
+    assign bus_control = bus_control_reg;
+    assign bus_active = bus_active_reg;
+    assign missed_ack = missed_ack_reg;
+    assign s_axis_cmd_ready = (state == S_IDLE) && !busy_reg;
+    assign s_axis_data_tready = (state == S_SEND_BIT) && is_write && !ack_phase;
+    assign m_axis_data_tdata = m_axis_data_tdata_reg;
+    assign m_axis_data_tvalid = m_axis_data_tvalid_reg;
+    assign m_axis_data_tlast = m_axis_data_tlast_reg;
+
+    // Prescale register
+    always @(posedge clk or posedge rst) begin
+        if (rst)
+            prescale_reg <= 16'd1;
+        else
+            prescale_reg <= prescale;
+    end
+
+    // Main state machine
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= S_IDLE;
+            bit_count <= 4'd0;
+            tx_byte <= 8'd0;
+            rx_byte <= 8'd0;
+            is_read <= 1'b0;
+            is_write <= 1'b0;
+            is_write_multiple <= 1'b0;
+            need_stop <= 1'b0;
+            ack_received <= 1'b0;
+            ack_missed <= 1'b0;
+            scl_reg <= 1'b1;
+            sda_reg <= 1'b1;
+            scl_t_reg <= 1'b0;
+            sda_t_reg <= 1'b0;
+            counter <= 16'd0;
+            counter_done <= 1'b0;
+            bit_out <= 1'b0;
+            bit_in <= 1'b0;
+            byte_done <= 1'b0;
+            ack_phase <= 1'b0;
+            stop_pending <= 1'b0;
+            start_pending <= 1'b0;
+            read_pending <= 1'b0;
+            write_pending <= 1'b0;
+            write_multiple_pending <= 1'b0;
+            stop_cmd_pending <= 1'b0;
+            cmd_valid_reg <= 1'b0;
+            cmd_address_reg <= 7'd0;
+            cmd_read_reg <= 1'b0;
+            cmd_write_reg <= 1'b0;
+            cmd_write_multiple_reg <= 1'b0;
+            cmd_stop_reg <= 1'b0;
+            data_valid_reg <= 1'b0;
+            data_tdata_reg <= 8'd0;
+            data_tlast_reg <= 1'b0;
+            m_axis_data_tvalid_reg <= 1'b0;
+            m_axis_data_tdata_reg <= 8'd0;
+            m_axis_data_tlast_reg <= 1'b0;
+            busy_reg <= 1'b0;
+            bus_control_reg <= 1'b0;
+            bus_active_reg <= 1'b0;
+            missed_ack_reg <= 1'b0;
+        end else begin
+            // Default assignments
+            counter_done <= 1'b0;
+            byte_done <= 1'b0;
+            m_axis_data_tvalid_reg <= 1'b0;
+            m_axis_data_tlast_reg <= 1'b0;
+
+            // Counter logic
+            if (counter < prescale_reg) begin
+                counter <= counter + 16'd1;
+            end else begin
+                counter <= 16'd0;
+                counter_done <= 1'b1;
+            end
+
+            case (state)
+                S_IDLE: begin
+                    busy_reg <= 1'b0;
+                    bus_control_reg <= 1'b0;
+                    bus_active_reg <= 1'b0;
+                    missed_ack_reg <= 1'b0;
+                    scl_reg <= 1'b1;
+                    sda_reg <= 1'b1;
+                    scl_t_reg <= 1'b0;
+                    sda_t_reg <= 1'b0;
+                    ack_phase <= 1'b0;
+                    stop_pending <= 1'b0;
+                    start_pending <= 1'b0;
+                    read_pending <= 1'b0;
+                    write_pending <= 1'b0;
+                    write_multiple_pending <= 1'b0;
+                    stop_cmd_pending <= 1'b0;
+                    cmd_valid_reg <= 1'b0;
+                    data_valid_reg <= 1'b0;
+                    m_axis_data_tvalid_reg <= 1'b0;
+                    m_axis_data_tlast_reg <= 1'b0;
+
+                    if (s_axis_cmd_valid) begin
+                        cmd_valid_reg <= 1'b1;
+                        cmd_address_reg <= s_axis_cmd_address;
+                        cmd_read_reg <= s_axis_cmd_read;
+                        cmd_write_reg <= s_axis_cmd_write;
+                        cmd_write_multiple_reg <= s_axis_cmd_write_multiple;
+                        cmd_stop_reg <= s_axis_cmd_stop;
+                        busy_reg <= 1'b1;
+                        bus_control_reg <= 1'b1;
+                        bus_active_reg <= 1'b1;
+                        scl_t_reg <= 1'b1;
+                        sda_t_reg <= 1'b1;
+
+                        if (s_axis_cmd_start) begin
+                            start_pending <= 1'b1;
+                            state <= S_START;
+                        end else if (s_axis_cmd_stop) begin
+                            stop_pending <= 1'b1;
+                            state <= S_STOP;
+                        end else if (s_axis_cmd_read) begin
+                            is_read <= 1'b1;
+                            is_write <= 1'b0;
+                            is_write_multiple <= 1'b0;
+                            start_pending <= 1'b1;
+                            state <= S_START;
+                        end else if (s_axis_cmd_write || s_axis_cmd_write_multiple) begin
+                            is_read <= 1'b0;
+                            is_write <= 1'b1;
+                            is_write_multiple <= s_axis_cmd_write_multiple;
+                            start_pending <= 1'b1;
+                            state <= S_START;
+                        end
+                    end
+                end
+
+                S_START: begin
+                    if (counter_done) begin
+                        // START condition: SDA high to low while SCL high
+                        if (sda_reg == 1'b1 && scl_reg == 1'b1) begin
+                            sda_reg <= 1'b0;
+                            state <= S_SEND_BIT;
+                            bit_count <= 4'd0;
+                            tx_byte <= {cmd_address_reg, cmd_read_reg};
+                            ack_phase <= 1'b0;
+                        end else begin
+                            // Already in start condition or invalid state
+                            sda_reg <= 1'b0;
+                            state <= S_SEND_BIT;
+                            bit_count <= 4'd0;
+                            tx_byte <= {cmd_address_reg, cmd_read_reg};
+                            ack_phase <= 1'b0;
+                        end
+                    end
+                end
+
+                S_SEND_BIT: begin
+                    if (counter_done) begin
+                        if (!ack_phase) begin
+                            // Sending data bits
+                            if (bit_count < 4'd8) begin
+                                // Drive SDA with current bit
+                                bit_out <= tx_byte[7 - bit_count];
+                                sda_reg <= bit_out;
+                                // Toggle SCL
+                                if (scl_reg == 1'b1) begin
+                                    scl_reg <= 1'b0;
+                                end else begin
+                                    scl_reg <= 1'b1;
+                                    bit_count <= bit_count + 4'd1;
+                                end
+                            end else begin
+                                // All 8 bits sent, go to ACK phase
+                                ack_phase <= 1'b1;
+                                bit_count <= 4'd0;
+                                // Release SDA for ACK
+                                sda_reg <= 1'b1;
+                                sda_t_reg <= 1'b0;
+                                scl_reg <= 1'b0;
+                                state <= S_WAIT_ACK;
+                            end
+                        end else begin
+                            // In ACK phase, waiting for slave ACK
+                            if (scl_reg == 1'b0) begin
+                                scl_reg <= 1'b1;
+                            end else begin
+                                // Sample SDA during ACK
+                                ack_received <= ~sda_i;
+                                if (sda_i) begin
+                                    ack_missed <= 1'b1;
+                                    missed_ack_reg <= 1'b1;
+                                end
+                                scl_reg <= 1'b0;
+                                state <= S_SEND_BIT;
+                                bit_count <= 4'd0;
+                                ack_phase <= 1'b0;
+                                // Prepare next byte
+                                if (is_read) begin
+                                    // For read, we need to send ACK/NACK after receiving
+                                    // But first we need to receive the byte
+                                    // Actually, for read operations, after address ACK,
+                                    // we switch to receive mode
+                                    if (bit_count == 4'd0 && !ack_phase) begin
+                                        // This is the first bit after address
+                                        // Switch to receive mode
+                                        is_read <= 1'b1;
+                                        is_write <= 1'b0;
+                                        state <= S_RECV_BIT;
+                                    end
+                                end else begin
+                                    // For write, get next byte from data interface
+                                    if (s_axis_data_tvalid) begin
+                                        tx_byte <= s_axis_data_tdata;
+                                        data_tlast_reg <= s_axis_data_tlast;
+                                        if (s_axis_data_tlast && !is_write_multiple) begin
+                                            need_stop <= 1'b1;
+                                        end
+                                    end else begin
+                                        // No data available, wait
+                                        // Stay in S_SEND_BIT with bit_count = 0
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+
+                S_RECV_BIT: begin
+                    if (counter_done) begin
+                        if (bit_count < 4'd8) begin
+                            // Toggle SCL to sample data
+                            if (scl_reg == 1'b0) begin
+                                scl_reg <= 1'b1;
+                            end else begin
+                                // Sample SDA
+                                bit_in <= sda_i;
+                                rx_byte <= {rx_byte[6:0], bit_in};
+                                scl_reg <= 1'b0;
+                                bit_count <= bit_count + 4'd1;
+                            end
+                        end else begin
+                            // All 8 bits received, go to ACK phase
+                            ack_phase <= 1'b1;
+                            bit_count <= 4'd0;
+                            // Drive ACK (low) or NACK (high)
+                            // For now, always ACK
+                            sda_reg <= 1'b0;
+                            sda_t_reg <= 1'b1;
+                            scl_reg <= 1'b0;
+                            state <= S_WAIT_ACK;
+                        end
+                    end
+                end
+
+                S_WAIT_ACK: begin
+                    if (counter_done) begin
+                        if (scl_reg == 1'b0) begin
+                            scl_reg <= 1'b1;
+                        end else begin
+                            // Sample SDA during ACK
+                            if (is_read) begin
+                                // We are sending ACK/NACK, no need to sample
+                                // Just complete the ACK phase
+                                sda_reg <= 1'b1;
+                                sda_t_reg <= 1'b0;
+                                scl_reg <= 1'b0;
+                                ack_phase <= 1'b0;
+                                // Output received byte
+                                m_axis_data_tdata_reg <= rx_byte;
+                                m_axis_data_tvalid_reg <= 1'b1;
+                                m_axis_data_tlast_reg <= 1'b0;
+                                // Check if we need to stop
+                                if (need_stop) begin
+                                    state <= S_STOP;
+                                end else begin
+                                    // Continue receiving more bytes
+                                    state <= S_RECV_BIT;
+                                    bit_count <= 4'd0;
+                                    rx_byte <= 8'd0;
+                                end
+                            end else begin
+                                // We are receiving ACK from slave
+                                ack_received <= ~sda_i;
+                                if (sda_i) begin
+                                    ack_missed <= 1'b1;
+                                    missed_ack_reg <= 1'b1;
+                                end
+                                scl_reg <= 1'b0;
+                                ack_phase <= 1'b0;
+                                // Prepare next byte
+                                if (is_write) begin
+                                    if (s_axis_data_tvalid) begin
+                                        tx_byte <= s_axis_data_tdata;
+                                        data_tlast_reg <= s_axis_data_tlast;
+                                        if (s_axis_data_tlast && !is_write_multiple) begin
+                                            need_stop <= 1'b1;
+                                        end
+                                        state <= S_SEND_BIT;
+                                        bit_count <= 4'd0;
+                                    end else begin
+                                        // No data available
+                                        state <= S_SEND_BIT;
+                                        bit_count <= 4'd0;
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+
+                S_STOP: begin
+                    if (counter_done) begin
+                        // STOP condition: SDA low to high while SCL high
+                        if (sda_reg == 1'b0 && scl_reg == 1'b1) begin
+                            sda_reg <= 1'b1;
+                            state <= S_IDLE;
+                            busy_reg <= 1'b0;
+                            bus_control_reg <= 1'b0;
+                            bus_active_reg <= 1'b0;
+                            scl_t_reg <= 1'b0;
+                            sda_t_reg <= 1'b0;
+                            need_stop <= 1'b0;
+                            ack_phase <= 1'b0;
+                        end else begin
+                            // Ensure SCL is high and SDA is low before STOP
+                            if (scl_reg == 1'b0) begin
+                                scl_reg <= 1'b1;
+                            end else if (sda_reg == 1'b1) begin
+                                sda_reg <= 1'b0;
+                            end else begin
+                                sda_reg <= 1'b1;
+                                state <= S_IDLE;
+                                busy_reg <= 1'b0;
+                                bus_control_reg <= 1'b0;
+                                bus_active_reg <= 1'b0;
+                                scl_t_reg <= 1'b0;
+                                sda_t_reg <= 1'b0;
+                                need_stop <= 1'b0;
+                                ack_phase <= 1'b0;
+                            end
+                        end
+                    end
+                end
+
+                default: begin
+                    state <= S_IDLE;
+                    busy_reg <= 1'b0;
+                    bus_control_reg <= 1'b0;
+                    bus_active_reg <= 1'b0;
+                    scl_t_reg <= 1'b0;
+                    sda_t_reg <= 1'b0;
+                end
+            end
+        end
+    end
+
+endmodule

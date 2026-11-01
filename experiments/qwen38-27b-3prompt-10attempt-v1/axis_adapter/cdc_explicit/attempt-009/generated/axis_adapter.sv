@@ -1,0 +1,278 @@
+module axis_adapter #
+(
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    /*
+     * AXI input
+     */
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    // Internal signals
+    reg [S_DATA_WIDTH-1:0] s_data_reg;
+    reg [S_KEEP_WIDTH-1:0] s_keep_reg;
+    reg                    s_last_reg;
+    reg [ID_WIDTH-1:0]     s_id_reg;
+    reg [DEST_WIDTH-1:0]   s_dest_reg;
+    reg [USER_WIDTH-1:0]   s_user_reg;
+    reg                    s_valid_reg;
+    reg                    s_ready_reg;
+
+    reg [M_DATA_WIDTH-1:0] m_data_reg;
+    reg [M_KEEP_WIDTH-1:0] m_keep_reg;
+    reg                    m_last_reg;
+    reg [ID_WIDTH-1:0]     m_id_reg;
+    reg [DEST_WIDTH-1:0]   m_dest_reg;
+    reg [USER_WIDTH-1:0]   m_user_reg;
+    reg                    m_valid_reg;
+    reg                    m_ready_reg;
+
+    // State machine
+    localparam IDLE = 1'b0;
+    localparam ACTIVE = 1'b1;
+    reg state;
+
+    // Byte count tracking
+    // For S side: number of valid bytes in current beat
+    // For M side: number of bytes accumulated so far
+    reg [31:0] s_byte_count;
+    reg [31:0] m_byte_count;
+
+    // Accumulator for M data
+    reg [M_DATA_WIDTH-1:0] m_accum_data;
+    reg [M_KEEP_WIDTH-1:0] m_accum_keep;
+    reg                    m_accum_last;
+    reg [ID_WIDTH-1:0]     m_accum_id;
+    reg [DEST_WIDTH-1:0]   m_accum_dest;
+    reg [USER_WIDTH-1:0]   m_accum_user;
+
+    // Helper: count valid bytes from tkeep
+    function [31:0] count_keep_bytes;
+        input [S_KEEP_WIDTH-1:0] keep;
+        integer i;
+        begin
+            count_keep_bytes = 0;
+            for (i = 0; i < S_KEEP_WIDTH; i = i + 1) begin
+                count_keep_bytes = count_keep_bytes + keep[i];
+            end
+        end
+    endfunction
+
+    // Helper: count valid bytes from M tkeep
+    function [31:0] count_m_keep_bytes;
+        input [M_KEEP_WIDTH-1:0] keep;
+        integer i;
+        begin
+            count_m_keep_bytes = 0;
+            for (i = 0; i < M_KEEP_WIDTH; i = i + 1) begin
+                count_m_keep_bytes = count_m_keep_bytes + keep[i];
+            end
+        end
+    endfunction
+
+    // S side ready
+    assign s_axis_tready = s_ready_reg;
+
+    // M side outputs
+    assign m_axis_tdata  = m_data_reg;
+    assign m_axis_tkeep  = m_keep_reg;
+    assign m_axis_tvalid = m_valid_reg;
+    assign m_axis_tlast  = m_last_reg;
+    assign m_axis_tid    = m_id_reg;
+    assign m_axis_tdest  = m_dest_reg;
+    assign m_axis_tuser  = m_user_reg;
+
+    // M side ready
+    assign m_ready_reg = m_axis_tready;
+
+    // S side valid
+    assign s_valid_reg = s_axis_tvalid;
+
+    // Main logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= IDLE;
+            s_data_reg <= {S_DATA_WIDTH{1'b0}};
+            s_keep_reg <= {S_KEEP_WIDTH{1'b0}};
+            s_last_reg <= 1'b0;
+            s_id_reg <= {ID_WIDTH{1'b0}};
+            s_dest_reg <= {DEST_WIDTH{1'b0}};
+            s_user_reg <= {USER_WIDTH{1'b0}};
+            s_ready_reg <= 1'b0;
+            
+            m_data_reg <= {M_DATA_WIDTH{1'b0}};
+            m_keep_reg <= {M_KEEP_WIDTH{1'b0}};
+            m_last_reg <= 1'b0;
+            m_id_reg <= {ID_WIDTH{1'b0}};
+            m_dest_reg <= {DEST_WIDTH{1'b0}};
+            m_user_reg <= {USER_WIDTH{1'b0}};
+            m_valid_reg <= 1'b0;
+            
+            s_byte_count <= 32'd0;
+            m_byte_count <= 32'd0;
+            
+            m_accum_data <= {M_DATA_WIDTH{1'b0}};
+            m_accum_keep <= {M_KEEP_WIDTH{1'b0}};
+            m_accum_last <= 1'b0;
+            m_accum_id <= {ID_WIDTH{1'b0}};
+            m_accum_dest <= {DEST_WIDTH{1'b0}};
+            m_accum_user <= {USER_WIDTH{1'b0}};
+        end else begin
+            // Default: no change
+            s_ready_reg <= 1'b0;
+            m_valid_reg <= 1'b0;
+
+            case (state)
+                IDLE: begin
+                    // Wait for valid input
+                    if (s_axis_tvalid) begin
+                        state <= ACTIVE;
+                        s_data_reg <= s_axis_tdata;
+                        s_keep_reg <= s_axis_tkeep;
+                        s_last_reg <= s_axis_tlast;
+                        s_id_reg <= s_axis_tid;
+                        s_dest_reg <= s_axis_tdest;
+                        s_user_reg <= s_axis_tuser;
+                        s_byte_count <= count_keep_bytes(s_axis_tkeep);
+                        
+                        // Initialize M accumulator
+                        m_accum_data <= {M_DATA_WIDTH{1'b0}};
+                        m_accum_keep <= {M_KEEP_WIDTH{1'b0}};
+                        m_accum_last <= 1'b0;
+                        m_accum_id <= s_axis_tid;
+                        m_accum_dest <= s_axis_tdest;
+                        m_accum_user <= s_axis_tuser;
+                        m_byte_count <= 32'd0;
+                        
+                        // Process first beat
+                        process_beat;
+                    end
+                end
+
+                ACTIVE: begin
+                    // Check if M side can accept data
+                    if (m_axis_tready && m_valid_reg) begin
+                        // M side accepted, clear valid
+                        m_valid_reg <= 1'b0;
+                        
+                        // Check if we're done with current S beat
+                        if (s_byte_count == 32'd0) begin
+                            // S beat fully processed
+                            if (s_last_reg) begin
+                                // Packet complete, go to IDLE
+                                state <= IDLE;
+                                s_ready_reg <= 1'b0;
+                            end else begin
+                                // Wait for next S beat
+                                s_ready_reg <= 1'b1;
+                            end
+                        end else begin
+                            // Still processing, keep M valid if there's more
+                            // Actually, we should only assert m_valid when we have a full M beat
+                        end
+                    end
+
+                    // Check if S side can provide new data
+                    if (s_ready_reg && s_axis_tvalid) begin
+                        // Accept new S beat
+                        s_data_reg <= s_axis_tdata;
+                        s_keep_reg <= s_axis_tkeep;
+                        s_last_reg <= s_axis_tlast;
+                        s_id_reg <= s_axis_tid;
+                        s_dest_reg <= s_axis_tdest;
+                        s_user_reg <= s_axis_tuser;
+                        s_byte_count <= count_keep_bytes(s_axis_tkeep);
+                        s_ready_reg <= 1'b0;
+                        
+                        // Process new beat
+                        process_beat;
+                    end
+                end
+
+                default: begin
+                    state <= IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Process beat: transfer bytes from S to M accumulator
+    // This is a combinational block that updates m_accum_* and m_byte_count
+    // and potentially asserts m_valid_reg
+    task process_beat;
+        integer i;
+        integer byte_idx;
+        integer m_byte_idx;
+        reg [7:0] byte_val;
+        begin
+            // Transfer bytes from S beat to M accumulator
+            for (i = 0; i < S_KEEP_WIDTH; i = i + 1) begin
+                if (s_keep_reg[i]) begin
+                    byte_val = s_data_reg[i*8 +: 8];
+                    m_byte_idx = m_byte_count;
+                    
+                    // Place byte in M accumulator
+                    m_accum_data[m_byte_idx*8 +: 8] = byte_val;
+                    m_accum_keep[m_byte_idx] = 1'b1;
+                    m_byte_count = m_byte_count + 1;
+                    
+                    // Check if M beat is full
+                    if (m_byte_count == M_KEEP_WIDTH) begin
+                        // M beat complete, output it
+                        m_data_reg <= m_accum_data;
+                        m_keep_reg <= m_accum_keep;
+                        m_last_reg <= m_accum_last;
+                        m_id_reg <= m_accum_id;
+                        m_dest_reg <= m_accum_dest;
+                        m_user_reg <= m_accum_user;
+                        m_valid_reg <= 1'b1;
+                        
+                        // Reset accumulator
+                        m_accum_data <= {M_DATA_WIDTH{1'b0}};
+                        m_accum_keep <= {M_KEEP_WIDTH{1'b0}};
+                        m_accum_last <= 1'b0;
+                        m_byte_count <= 32'd0;
+                    end
+                end
+            end
+            
+            // If S beat had tlast, mark M accumulator with tlast
+            if (s_last_reg) begin
+                m_accum_last <= 1'b1;
+            end
+        end
+    endtask
+
+endmodule

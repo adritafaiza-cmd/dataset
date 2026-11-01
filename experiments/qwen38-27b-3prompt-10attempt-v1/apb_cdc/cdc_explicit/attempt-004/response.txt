@@ -1,0 +1,341 @@
+```verilog
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam STRB_WIDTH = DATA_WIDTH/8;
+    localparam FIFO_DEPTH = 1 << LOG_DEPTH;
+    localparam FIFO_ADDR_WIDTH = LOG_DEPTH;
+
+    // Source domain state
+    reg src_idle = 1'b1;
+    reg src_setup = 1'b0;
+    reg src_access = 1'b0;
+    reg src_wait_dst = 1'b0;
+
+    // Source domain registers for request
+    reg [ADDR_WIDTH-1:0] src_addr_reg;
+    reg [DATA_WIDTH-1:0] src_wdata_reg;
+    reg [STRB_WIDTH-1:0] src_strb_reg;
+    reg [2:0] src_pprot_reg;
+    reg src_write_reg;
+
+    // Source domain response registers
+    reg [DATA_WIDTH-1:0] src_rdata_reg;
+    reg src_slverr_reg;
+
+    // FIFO control signals (source domain)
+    reg src_fifo_wr_en;
+    reg [FIFO_ADDR_WIDTH-1:0] src_fifo_wr_ptr;
+    reg [FIFO_ADDR_WIDTH-1:0] src_fifo_rd_ptr;
+    wire src_fifo_full;
+    wire src_fifo_empty;
+
+    // FIFO data bus (source domain write, destination domain read)
+    // We use a simple FIFO with one entry per beat
+    // For LOG_DEPTH=1, we have 1 entry. For larger, we have more.
+    // The FIFO stores: addr, wdata, strb, pprot, write
+    // We'll use a simple synchronous FIFO structure.
+
+    // Actually, let's use a simpler approach: a single-entry buffer with handshake
+    // Since we only have one outstanding transaction, we can use a simple valid/ready handshake
+    // with a 2-phase handshake for the request and a 2-phase handshake for the response.
+
+    // Let's use a 2-phase handshake (valid/ack) for both directions.
+    // Request: src -> dst
+    // Response: dst -> src
+
+    // Request handshake
+    reg src_req_valid = 1'b0;
+    reg [ADDR_WIDTH-1:0] src_req_addr;
+    reg [DATA_WIDTH-1:0] src_req_wdata;
+    reg [STRB_WIDTH-1:0] src_req_strb;
+    reg [2:0] src_req_pprot;
+    reg src_req_write;
+
+    // Request ack from dst domain
+    reg dst_req_ack = 1'b0;
+    reg dst_req_ack_sync1 = 1'b0;
+    reg dst_req_ack_sync2 = 1'b0;
+
+    // Response handshake
+    reg dst_resp_valid = 1'b0;
+    reg [DATA_WIDTH-1:0] dst_resp_rdata;
+    reg dst_resp_slverr;
+
+    // Response ack from src domain
+    reg src_resp_ack = 1'b0;
+    reg src_resp_ack_sync1 = 1'b0;
+    reg src_resp_ack_sync2 = 1'b0;
+
+    // Destination domain state
+    reg dst_idle = 1'b1;
+    reg dst_setup = 1'b0;
+    reg dst_access = 1'b0;
+    reg dst_wait_src = 1'b0;
+
+    // Destination domain registers for request
+    reg [ADDR_WIDTH-1:0] dst_addr_reg;
+    reg [DATA_WIDTH-1:0] dst_wdata_reg;
+    reg [STRB_WIDTH-1:0] dst_strb_reg;
+    reg [2:0] dst_pprot_reg;
+    reg dst_write_reg;
+
+    // Destination domain response registers
+    reg [DATA_WIDTH-1:0] dst_rdata_reg;
+    reg dst_slverr_reg;
+
+    // Source domain outputs
+    assign src_pready_o = src_idle | (src_wait_dst & dst_req_ack_sync2);
+    assign src_prdata_o = src_rdata_reg;
+    assign src_pslverr_o = src_slverr_reg;
+
+    // Destination domain outputs
+    assign dst_psel_o = dst_setup | dst_access;
+    assign dst_penable_o = dst_access;
+    assign dst_pwrite_o = dst_write_reg;
+    assign dst_paddr_o = dst_addr_reg;
+    assign dst_pwdata_o = dst_wdata_reg;
+    assign dst_pstrb_o = dst_strb_reg;
+    assign dst_pprot_o = dst_pprot_reg;
+
+    // Source domain logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_idle <= 1'b1;
+            src_setup <= 1'b0;
+            src_access <= 1'b0;
+            src_wait_dst <= 1'b0;
+            src_addr_reg <= {ADDR_WIDTH{1'b0}};
+            src_wdata_reg <= {DATA_WIDTH{1'b0}};
+            src_strb_reg <= {STRB_WIDTH{1'b0}};
+            src_pprot_reg <= 3'b000;
+            src_write_reg <= 1'b0;
+            src_rdata_reg <= {DATA_WIDTH{1'b0}};
+            src_slverr_reg <= 1'b0;
+            src_req_valid <= 1'b0;
+            src_req_addr <= {ADDR_WIDTH{1'b0}};
+            src_req_wdata <= {DATA_WIDTH{1'b0}};
+            src_req_strb <= {STRB_WIDTH{1'b0}};
+            src_req_pprot <= 3'b000;
+            src_req_write <= 1'b0;
+            src_resp_ack <= 1'b0;
+            src_resp_ack_sync1 <= 1'b0;
+            src_resp_ack_sync2 <= 1'b0;
+        end else begin
+            // Sync dst_req_ack
+            dst_req_ack_sync1 <= dst_req_ack;
+            dst_req_ack_sync2 <= dst_req_ack_sync1;
+
+            // Sync src_resp_ack to dst domain (this is done in dst domain)
+            // src_resp_ack is generated here, synced in dst domain
+
+            if (src_idle) begin
+                if (src_psel_i) begin
+                    src_idle <= 1'b0;
+                    src_setup <= 1'b1;
+                    src_access <= 1'b0;
+                    src_wait_dst <= 1'b0;
+                    src_addr_reg <= src_paddr_i;
+                    src_wdata_reg <= src_pwdata_i;
+                    src_strb_reg <= src_pstrb_i;
+                    src_pprot_reg <= src_pprot_i;
+                    src_write_reg <= src_pwrite_i;
+                    src_rdata_reg <= {DATA_WIDTH{1'b0}};
+                    src_slverr_reg <= 1'b0;
+                    src_req_valid <= 1'b0;
+                    src_resp_ack <= 1'b0;
+                end
+            end else if (src_setup) begin
+                if (src_penable_i) begin
+                    src_setup <= 1'b0;
+                    src_access <= 1'b1;
+                    src_wait_dst <= 1'b1;
+                    // Send request to dst domain
+                    src_req_valid <= 1'b1;
+                    src_req_addr <= src_addr_reg;
+                    src_req_wdata <= src_wdata_reg;
+                    src_req_strb <= src_strb_reg;
+                    src_req_pprot <= src_pprot_reg;
+                    src_req_write <= src_write_reg;
+                end
+            end else if (src_access) begin
+                if (dst_req_ack_sync2) begin
+                    src_access <= 1'b0;
+                    src_wait_dst <= 1'b0;
+                    src_idle <= 1'b1;
+                    src_req_valid <= 1'b0;
+                    // Response should be available
+                    src_rdata_reg <= dst_resp_rdata_sync2;
+                    src_slverr_reg <= dst_resp_slverr_sync2;
+                    src_resp_ack <= 1'b1;
+                end
+            end
+        end
+    end
+
+    // Response data from dst domain, synced to src domain
+    reg [DATA_WIDTH-1:0] dst_resp_rdata_sync1;
+    reg [DATA_WIDTH-1:0] dst_resp_rdata_sync2;
+    reg dst_resp_slverr_sync1;
+    reg dst_resp_slverr_sync2;
+    reg dst_resp_valid_sync1;
+    reg dst_resp_valid_sync2;
+
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            dst_resp_rdata_sync1 <= {DATA_WIDTH{1'b0}};
+            dst_resp_rdata_sync2 <= {DATA_WIDTH{1'b0}};
+            dst_resp_slverr_sync1 <= 1'b0;
+            dst_resp_slverr_sync2 <= 1'b0;
+            dst_resp_valid_sync1 <= 1'b0;
+            dst_resp_valid_sync2 <= 1'b0;
+        end else begin
+            dst_resp_rdata_sync1 <= dst_resp_rdata;
+            dst_resp_rdata_sync2 <= dst_resp_rdata_sync1;
+            dst_resp_slverr_sync1 <= dst_resp_slverr;
+            dst_resp_slverr_sync2 <= dst_resp_slverr_sync1;
+            dst_resp_valid_sync1 <= dst_resp_valid;
+            dst_resp_valid_sync2 <= dst_resp_valid_sync1;
+        end
+    end
+
+    // Destination domain logic
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_idle <= 1'b1;
+            dst_setup <= 1'b0;
+            dst_access <= 1'b0;
+            dst_wait_src <= 1'b0;
+            dst_addr_reg <= {ADDR_WIDTH{1'b0}};
+            dst_wdata_reg <= {DATA_WIDTH{1'b0}};
+            dst_strb_reg <= {STRB_WIDTH{1'b0}};
+            dst_pprot_reg <= 3'b000;
+            dst_write_reg <= 1'b0;
+            dst_rdata_reg <= {DATA_WIDTH{1'b0}};
+            dst_slverr_reg <= 1'b0;
+            dst_req_ack <= 1'b0;
+            dst_resp_valid <= 1'b0;
+            dst_resp_rdata <= {DATA_WIDTH{1'b0}};
+            dst_resp_slverr <= 1'b0;
+            src_resp_ack_sync1 <= 1'b0;
+            src_resp_ack_sync2 <= 1'b0;
+        end else begin
+            // Sync src_resp_ack
+            src_resp_ack_sync1 <= src_resp_ack;
+            src_resp_ack_sync2 <= src_resp_ack_sync1;
+
+            // Sync src_req_valid and data
+            // We need to sync the request data when src_req_valid is high
+
+            if (dst_idle) begin
+                if (src_req_valid_sync2) begin
+                    dst_idle <= 1'b0;
+                    dst_setup <= 1'b1;
+                    dst_access <= 1'b0;
+                    dst_wait_src <= 1'b0;
+                    dst_addr_reg <= src_req_addr_sync2;
+                    dst_wdata_reg <= src_req_wdata_sync2;
+                    dst_strb_reg <= src_req_strb_sync2;
+                    dst_pprot_reg <= src_req_pprot_sync2;
+                    dst_write_reg <= src_req_write_sync2;
+                    dst_req_ack <= 1'b1;
+                    dst_resp_valid <= 1'b0;
+                end
+            end else if (dst_setup) begin
+                dst_setup <= 1'b0;
+                dst_access <= 1'b1;
+            end else if (dst_access) begin
+                if (dst_pready_i) begin
+                    dst_access <= 1'b0;
+                    dst_idle <= 1'b1;
+                    dst_req_ack <= 1'b0;
+                    // Capture response
+                    dst_rdata_reg <= dst_prdata_i;
+                    dst_slverr_reg <= dst_pslverr_i;
+                    dst_resp_valid <= 1'b1;
+                    dst_resp_rdata <= dst_prdata_i;
+                    dst_resp_slverr <= dst_pslverr_i;
+                end
+            end
+
+            // Clear response valid when src acks
+            if (dst_resp_valid && src_resp_ack_sync2) begin
+                dst_resp_valid <= 1'b0;
+            end
+        end
+    end
+
+    // Sync src_req_valid and data to dst domain
+    reg src_req_valid_sync1;
+    reg src_req_valid_sync2;
+    reg [ADDR_WIDTH-1:0] src_req_addr_sync1;
+    reg [ADDR_WIDTH-1:0] src_req_addr_sync2;
+    reg [DATA_WIDTH-1:0] src_req_wdata_sync1;
+    reg [DATA_WIDTH-1:0] src_req_wdata_sync2;
+    reg [STRB_WIDTH-1:0] src_req_strb_sync1;
+    reg [STRB_WIDTH-1:0] src_req_strb_sync2;
+    reg [2:0] src_req_pprot_sync1;
+    reg [2:0] src_req_pprot_sync2;
+    reg src_req_write_sync1;
+    reg src_req_write_sync2;
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            src_req_valid_sync1 <= 1'b0;
+            src_req_valid_sync2 <= 1'b0;
+            src_req_addr_sync1 <= {ADDR_WIDTH{1'b0}};
+            src_req_addr_sync2 <= {ADDR_WIDTH{1'b0}};
+            src_req_wdata_sync1 <= {DATA_WIDTH{1'b0}};
+            src_req_wdata_sync2 <= {DATA_WIDTH{1'b0}};
+            src_req_strb_sync1 <= {STRB_WIDTH{1'b0}};
+            src_req_strb_sync2 <= {STRB_WIDTH{1'b0}};
+            src_req_pprot_sync1 <= 3'b000;
+            src_req_pprot_sync2 <= 3'b000;
+            src_req_write_sync1 <= 1'b0;
+            src_req_write_sync2 <= 1'b0;
+        end else begin
+            src_req_valid_sync1 <= src_req_valid;
+            src_req_valid_sync2 <= src_req_valid_sync1;
+            src_req_addr_sync1 <= src_req_addr;
+            src_req_addr_sync2 <= src_req_addr_sync1;
+            src_req_wdata_sync1 <= src_req_wdata;
+            src_req_wdata_sync2 <= src_req_wdata_sync1;
+            src_req_strb_sync1 <= src_req_strb;
+            src_req_strb_sync2 <= src_req_strb_sync1;
+            src_req_pprot_sync1 <= src_req_pprot;
+            src_req_pprot_sync2 <= src_req_pprot_sync1;
+            src_req_write_sync1 <= src_req_write;
+            src_req_write_sync2 <= src_req_write_sync1;
+        end
+    end
+
+endmodule
+```<|im_end|>

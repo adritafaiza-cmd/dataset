@@ -1,0 +1,224 @@
+module apbxclk #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	parameter [0:0]	OPT_REGISTERED = 1'b0,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH
+) (
+	input	wire			S_APB_PCLK, S_PRESETn,
+	input	wire			S_APB_PSEL,
+	input	wire			S_APB_PENABLE,
+	output	reg			S_APB_PREADY,
+	input	wire	[AW-1:0]	S_APB_PADDR,
+	input	wire			S_APB_PWRITE,
+	input	wire	[DW-1:0]	S_APB_PWDATA,
+	input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+	input	wire	[2:0]		S_APB_PPROT,
+	output	wire	[DW-1:0]	S_APB_PRDATA,
+	output	wire			S_APB_PSLVERR,
+	input	wire			M_APB_PCLK,
+	output	reg			M_PRESETn,
+	output	reg			M_APB_PSEL,
+	output	reg			M_APB_PENABLE,
+	input	wire			M_APB_PREADY,
+	output	wire	[AW-1:0]	M_APB_PADDR,
+	output	wire			M_APB_PWRITE,
+	output	wire	[DW-1:0]	M_APB_PWDATA,
+	output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+	output	wire	[2:0]		M_APB_PPROT,
+	input	wire	[DW-1:0]	M_APB_PRDATA,
+	input	wire			M_APB_PSLVERR
+);
+
+	// Internal signals
+	wire [AW-1:0] m_addr;
+	wire m_write;
+	wire [DW-1:0] m_wdata;
+	wire [DW/8-1:0] m_wstrb;
+	wire [2:0] m_pprot;
+	wire m_req_valid;
+	wire m_req_ready;
+	wire m_resp_valid;
+	wire m_resp_ready;
+	wire [DW-1:0] m_rdata;
+	wire m_rslverr;
+
+	// Reset synchronizer for M domain
+	reg [1:0] m_reset_sync;
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn)
+			m_reset_sync <= 2'b00;
+		else
+			m_reset_sync <= {m_reset_sync[0], 1'b1};
+	end
+	assign M_PRESETn = m_reset_sync[1];
+
+	// S domain: request generation
+	reg s_req_pending;
+	reg [AW-1:0] s_addr_reg;
+	reg s_write_reg;
+	reg [DW-1:0] s_wdata_reg;
+	reg [DW/8-1:0] s_wstrb_reg;
+	reg [2:0] s_pprot_reg;
+
+	// Detect setup phase: PSEL high, PENABLE low
+	wire s_setup = S_APB_PSEL & ~S_APB_PENABLE;
+	// Detect access phase: PSEL high, PENABLE high
+	wire s_access = S_APB_PSEL & S_APB_PENABLE;
+
+	// Capture request on setup phase
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_req_pending <= 1'b0;
+			s_addr_reg <= {AW{1'b0}};
+			s_write_reg <= 1'b0;
+			s_wdata_reg <= {DW{1'b0}};
+			s_wstrb_reg <= {(DW/8){1'b0}};
+			s_pprot_reg <= 3'b000;
+		end else begin
+			if (s_setup) begin
+				s_req_pending <= 1'b1;
+				s_addr_reg <= S_APB_PADDR;
+				s_write_reg <= S_APB_PWRITE;
+				s_wdata_reg <= S_APB_PWDATA;
+				s_wstrb_reg <= S_APB_PWSTRB;
+				s_pprot_reg <= S_APB_PPROT;
+			end else if (m_resp_valid) begin
+				s_req_pending <= 1'b0;
+			end
+		end
+	end
+
+	// S_APB_PREADY: assert when response is valid
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn)
+			S_APB_PREADY <= 1'b0;
+		else
+			S_APB_PREADY <= m_resp_valid;
+	end
+
+	// S domain outputs
+	assign S_APB_PRDATA = m_rdata;
+	assign S_APB_PSLVERR = m_rslverr;
+
+	// M domain: request handshake and APB generation
+	reg m_req_pending;
+	reg [AW-1:0] m_addr_reg;
+	reg m_write_reg;
+	reg [DW-1:0] m_wdata_reg;
+	reg [DW/8-1:0] m_wstrb_reg;
+	reg [2:0] m_pprot_reg;
+	reg m_apb_phase; // 0: idle, 1: setup, 2: access
+
+	// Synchronizer for request valid
+	reg [1:0] s_req_sync;
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn)
+			s_req_sync <= 2'b00;
+		else
+			s_req_sync <= {s_req_sync[0], s_req_pending};
+	end
+	assign m_req_valid = s_req_sync[1];
+
+	// Synchronizer for response ready (from S domain, indicating S is ready to accept response)
+	// Actually, we need to know when S domain is ready to accept the response.
+	// The S domain is ready when it's not in the middle of a transaction.
+	// We can use a simple approach: the M domain sends the response, and the S domain
+	// captures it when m_resp_valid is high.
+	
+	// M domain: APB state machine
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_req_pending <= 1'b0;
+			m_addr_reg <= {AW{1'b0}};
+			m_write_reg <= 1'b0;
+			m_wdata_reg <= {DW{1'b0}};
+			m_wstrb_reg <= {(DW/8){1'b0}};
+			m_pprot_reg <= 3'b000;
+			m_apb_phase <= 1'b0;
+		end else begin
+			case (m_apb_phase)
+				1'b0: begin // Idle
+					if (m_req_valid) begin
+						m_req_pending <= 1'b1;
+						m_addr_reg <= s_addr_reg;
+						m_write_reg <= s_write_reg;
+						m_wdata_reg <= s_wdata_reg;
+						m_wstrb_reg <= s_wstrb_reg;
+						m_pprot_reg <= s_pprot_reg;
+						m_apb_phase <= 1'b1;
+					end
+				end
+				1'b1: begin // Setup phase
+					if (M_APB_PREADY) begin
+						m_apb_phase <= 1'b0;
+						m_req_pending <= 1'b0;
+					end
+				end
+				default: begin
+					m_apb_phase <= 1'b0;
+				end
+			endcase
+		end
+	end
+
+	// M_APB outputs
+	assign M_APB_PSEL = (m_apb_phase == 1'b1) | m_req_pending;
+	assign M_APB_PENABLE = (m_apb_phase == 1'b1);
+	assign M_APB_PADDR = m_addr_reg;
+	assign M_APB_PWRITE = m_write_reg;
+	assign M_APB_PWDATA = m_wdata_reg;
+	assign M_APB_PWSTRB = m_wstrb_reg;
+	assign M_APB_PPROT = m_pprot_reg;
+
+	// Response synchronizer
+	reg [1:0] m_resp_sync;
+	reg [DW-1:0] m_rdata_reg;
+	reg m_rslverr_reg;
+	reg m_resp_valid_reg;
+
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_resp_sync <= 2'b00;
+			m_rdata_reg <= {DW{1'b0}};
+			m_rslverr_reg <= 1'b0;
+			m_resp_valid_reg <= 1'b0;
+		end else begin
+			// Capture response when M_APB_PREADY is high during access phase
+			if (m_apb_phase == 1'b1 && M_APB_PREADY) begin
+				m_rdata_reg <= M_APB_PRDATA;
+				m_rslverr_reg <= M_APB_PSLVERR;
+				m_resp_valid_reg <= 1'b1;
+			end else if (m_resp_valid_reg && m_req_valid) begin
+				// Response was consumed by S domain, clear valid
+				m_resp_valid_reg <= 1'b0;
+			end
+		end
+	end
+
+	// Synchronize response valid to S domain
+	reg [1:0] m_resp_valid_sync;
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn)
+			m_resp_valid_sync <= 2'b00;
+		else
+			m_resp_valid_sync <= {m_resp_valid_sync[0], m_resp_valid_reg};
+	end
+	assign m_resp_valid = m_resp_valid_sync[1];
+
+	// Synchronize response data to S domain
+	reg [DW-1:0] m_rdata_sync;
+	reg m_rslverr_sync;
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_rdata_sync <= {DW{1'b0}};
+			m_rslverr_sync <= 1'b0;
+		end else begin
+			m_rdata_sync <= m_rdata_reg;
+			m_rslverr_sync <= m_rslverr_reg;
+		end
+	end
+	assign m_rdata = m_rdata_sync;
+	assign m_rslverr = m_rslverr_sync;
+
+endmodule

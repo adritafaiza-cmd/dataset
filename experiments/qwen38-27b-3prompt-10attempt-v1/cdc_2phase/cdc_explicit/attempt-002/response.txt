@@ -1,0 +1,167 @@
+```systemverilog
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain state
+  reg src_valid_reg;
+  reg [WIDTH-1:0] src_data_reg;
+
+  // Destination domain state
+  reg dst_valid_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+
+  // Handshake signals crossing domains
+  // src_to_dst_valid: source indicates it has data to send
+  // dst_to_src_ready: destination indicates it is ready to accept new data
+
+  reg src_to_dst_valid;
+  reg dst_to_src_ready;
+
+  // Synchronizers for src_to_dst_valid (2-stage)
+  reg [1:0] src_to_dst_valid_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_to_dst_valid_sync <= 2'b00;
+    else
+      src_to_dst_valid_sync <= {src_to_dst_valid_sync[0], src_to_dst_valid};
+  end
+
+  // Synchronizers for dst_to_src_ready (2-stage)
+  reg [1:0] dst_to_src_ready_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_to_src_ready_sync <= 2'b00;
+    else
+      dst_to_src_ready_sync <= {dst_to_src_ready_sync[0], dst_to_src_ready};
+  end
+
+  // Destination domain logic
+  // dst_valid_o is high when we have data to present
+  // We accept new data from source when dst_to_src_ready is high
+  // dst_to_src_ready is high when we are not currently holding valid data
+  //   OR when we are holding valid data and dst_ready_i is high (handshake complete)
+
+  // Let's think about this more carefully.
+  // The source can send data when src_ready_o is high.
+  // src_ready_o should be high when the destination can accept new data.
+  // The destination can accept new data when it is not currently holding a valid item,
+  //   or when it is holding a valid item and the destination is ready to consume it.
+  
+  // Actually, let's use a simpler approach:
+  // - dst_to_src_ready is high when the destination is ready to accept a new item.
+  // - The destination is ready when dst_valid_reg is low (no item held) 
+  //   OR when dst_valid_reg is high and dst_ready_i is high (current item being consumed).
+  // - When dst_to_src_ready is high and src_to_dst_valid is high, a transfer occurs.
+  //   The destination captures the data and sets dst_valid_reg high.
+  //   The source clears its valid.
+
+  // Let's define:
+  // dst_can_accept = !dst_valid_reg | (dst_valid_reg & dst_ready_i)
+  // dst_to_src_ready = dst_can_accept
+
+  // When a transfer happens (src_to_dst_valid & dst_to_src_ready):
+  // - dst_data_reg <= src_data_reg (but src_data_reg is in src domain!)
+  // This is a problem. We need to transfer the data safely.
+
+  // Better approach: Use a data FIFO or a data register that is written in src domain
+  // and read in dst domain, with proper synchronization.
+
+  // Let's use a different architecture:
+  // - Source holds data in src_data_reg when src_valid_reg is high.
+  // - When src_valid_reg is high and dst_to_src_ready_sync[1] is high, a transfer is initiated.
+  // - The data is transferred via a data path that is safe for CDC.
+  //   Since we only have one outstanding item, we can use a simple approach:
+  //   The data is stable in src_data_reg while src_valid_reg is high.
+  //   The destination samples the data when it sees the valid signal transition.
+
+  // Actually, the cleanest approach for one outstanding item:
+  // - src_valid_reg is set when src_valid_i & src_ready_o.
+  // - src_ready_o = dst_to_src_ready_sync[1] (destination is ready).
+  // - When src_valid_reg is high, src_data_reg holds the data.
+  // - The valid signal src_to_dst_valid is high when src_valid_reg is high.
+  // - The destination sees src_to_dst_valid_sync[1] high.
+  // - When dst_valid_reg is low and src_to_dst_valid_sync[1] is high, the destination
+  //   captures the data and sets dst_valid_reg high.
+  // - When dst_valid_reg is high and dst_ready_i is high, the destination clears dst_valid_reg.
+  // - dst_to_src_ready is high when dst_valid_reg is low.
+  //   This way, the source can only send a new item when the destination has no item.
+
+  // But wait, this means the source can only send one item at a time, and the destination
+  // must consume it before the source can send another. This is correct for one outstanding item.
+
+  // Data transfer: The data is in src_data_reg in the src domain. The destination needs to
+  // read it. Since the data is stable while src_valid_reg is high, and the destination
+  // only samples it when it transitions from no-valid to valid, we need to ensure the data
+  // is stable long enough.
+
+  // A safer approach: Use a data register in the dst domain that is updated when a transfer
+  // occurs. But the data comes from the src domain. We can use a data synchronizer, but for
+  // multi-bit data, we need to ensure coherence.
+
+  // Since the data is stable while src_valid_reg is high, and the valid signal is synchronized,
+  // we can sample the data in the dst domain when the synchronized valid signal is high and
+  // the destination is ready to accept. The data will be stable because src_valid_reg is high
+  // and the source won't change src_data_reg until src_valid_reg is cleared.
+
+  // Let's implement this:
+
+  // Source domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_data_reg  <= {WIDTH{1'b0}};
+    end else begin
+      if (src_valid_i && src_ready_o) begin
+        src_valid_reg <= 1'b1;
+        src_data_reg  <= src_data_i;
+      end else if (src_valid_reg && dst_to_src_ready_sync[1]) begin
+        // Transfer complete, clear valid
+        src_valid_reg <= 1'b0;
+      end
+    end
+  end
+
+  // src_ready_o is high when destination is ready to accept
+  assign src_ready_o = dst_to_src_ready_sync[1];
+
+  // src_to_dst_valid is high when source has data
+  assign src_to_dst_valid = src_valid_reg;
+
+  // Destination domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_data_reg  <= {WIDTH{1'b0}};
+    end else begin
+      if (!dst_valid_reg && src_to_dst_valid_sync[1]) begin
+        // Accept new data
+        dst_valid_reg <= 1'b1;
+        dst_data_reg  <= src_data_reg; // Sample data from src domain
+      end else if (dst_valid_reg && dst_ready_i) begin
+        // Handshake complete, clear valid
+        dst_valid_reg <= 1'b0;
+      end
+    end
+  end
+
+  // dst_to_src_ready is high when destination can accept new data
+  assign dst_to_src_ready = !dst_valid_reg;
+
+  // Outputs
+  assign dst_data_o  = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+endmodule
+```<|im_end|>

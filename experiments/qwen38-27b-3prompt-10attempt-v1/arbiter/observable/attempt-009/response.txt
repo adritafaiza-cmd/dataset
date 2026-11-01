@@ -1,0 +1,160 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam NUM_PORTS = PORTS;
+    localparam ENC_WIDTH = $clog2(PORTS);
+
+    // Internal state
+    reg [NUM_PORTS-1:0] grant_reg;
+    reg                 grant_valid_reg;
+    reg [ENC_WIDTH-1:0] grant_encoded_reg;
+    reg [NUM_PORTS-1:0] last_grant_mask; // For round-robin: mask of ports with lower priority than last granted
+
+    // For round-robin, we track the last granted port to rotate priority
+    reg [ENC_WIDTH-1:0] last_grant_port;
+
+    // Function to find the first set bit (lowest index) in a vector
+    // Returns the index of the first 1, or 0 if none
+    function [ENC_WIDTH-1:0] find_first_set;
+        input [NUM_PORTS-1:0] vec;
+        integer i;
+        begin
+            find_first_set = 0;
+            for (i = 0; i < NUM_PORTS; i = i + 1) begin
+                if (vec[i]) begin
+                    find_first_set = i[ENC_WIDTH-1:0];
+                    disable find_first_set;
+                end
+            end
+        end
+    endfunction
+
+    // Function to find the first set bit starting from a given index (wrapping around)
+    function [ENC_WIDTH-1:0] find_first_set_wrapped;
+        input [NUM_PORTS-1:0] vec;
+        input [ENC_WIDTH-1:0] start_idx;
+        integer i;
+        integer idx;
+        begin
+            find_first_set_wrapped = 0;
+            for (i = 0; i < NUM_PORTS; i = i + 1) begin
+                idx = (start_idx + i) % NUM_PORTS;
+                if (vec[idx]) begin
+                    find_first_set_wrapped = idx[ENC_WIDTH-1:0];
+                    disable find_first_set_wrapped;
+                end
+            end
+        end
+    endfunction
+
+    // Determine which port to grant based on arbitration type
+    wire [NUM_PORTS-1:0] arb_request;
+    wire [ENC_WIDTH-1:0] arb_grant_port;
+    wire                 arb_grant_valid;
+
+    // For fixed priority: LSB high priority means port 0 has highest priority
+    // We find the first set bit in request
+    // For round-robin: we rotate based on last granted port
+
+    generate
+        if (ARB_TYPE_ROUND_ROBIN == 0) begin : gen_fixed
+            // Fixed priority arbitration
+            // If ARB_LSB_HIGH_PRIORITY == 0, port 0 has highest priority (find first set bit)
+            // If ARB_LSB_HIGH_PRIORITY == 1, port 0 has highest priority as well (same interpretation)
+            // Actually, let's interpret: LSB high priority means lower index = higher priority
+            // So we always find the first set bit (lowest index)
+            assign arb_grant_port = find_first_set(request);
+            assign arb_grant_valid = |request;
+        end
+        else begin : gen_round_robin
+            // Round-robin arbitration
+            // Start searching from the port after the last granted port
+            // If no previous grant, start from 0
+            wire [ENC_WIDTH-1:0] search_start;
+            assign search_start = (grant_valid_reg) ? (last_grant_port + 1) % NUM_PORTS : 0;
+            
+            assign arb_grant_port = find_first_set_wrapped(request, search_start);
+            assign arb_grant_valid = |request;
+        end
+    endgenerate
+
+    // Blocking logic
+    wire block_active;
+    wire release_event;
+
+    generate
+        if (ARB_BLOCK == 0) begin : gen_no_block
+            assign block_active = 1'b0;
+            assign release_event = 1'b0;
+        end
+        else begin : gen_block
+            // Block is active when a grant is pending and not yet released
+            // Release event depends on ARB_BLOCK_ACK
+            if (ARB_BLOCK_ACK == 0) begin : gen_block_no_ack
+                // Release on next clock edge after grant (immediate release)
+                // Actually, if ARB_BLOCK_ACK=0, we don't wait for acknowledge
+                // The grant is held for one cycle then released
+                assign block_active = grant_valid_reg;
+                assign release_event = 1'b1; // Always release after one cycle
+            end
+            else begin : gen_block_ack
+                // Release when acknowledge is received
+                assign block_active = grant_valid_reg;
+                assign release_event = (grant_valid_reg && (acknowledge & grant_reg) != 0);
+            end
+        end
+    endgenerate
+
+    // Main state machine
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            grant_reg <= {NUM_PORTS{1'b0}};
+            grant_valid_reg <= 1'b0;
+            grant_encoded_reg <= {ENC_WIDTH{1'b0}};
+            last_grant_port <= {ENC_WIDTH{1'b0}};
+        end
+        else begin
+            if (block_active && !release_event) begin
+                // Hold current grant
+                // No change
+            end
+            else begin
+                // Can issue new grant or clear
+                if (arb_grant_valid) begin
+                    grant_reg <= {NUM_PORTS{1'b0}};
+                    grant_reg[arb_grant_port] <= 1'b1;
+                    grant_valid_reg <= 1'b1;
+                    grant_encoded_reg <= arb_grant_port;
+                    last_grant_port <= arb_grant_port;
+                end
+                else begin
+                    grant_reg <= {NUM_PORTS{1'b0}};
+                    grant_valid_reg <= 1'b0;
+                    grant_encoded_reg <= {ENC_WIDTH{1'b0}};
+                end
+            end
+        end
+    end
+
+    assign grant = grant_reg;
+    assign grant_valid = grant_valid_reg;
+    assign grant_encoded = grant_encoded_reg;
+
+endmodule
+```<|im_end|>

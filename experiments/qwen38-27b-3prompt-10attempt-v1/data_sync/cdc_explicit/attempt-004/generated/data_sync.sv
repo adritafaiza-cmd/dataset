@@ -1,0 +1,61 @@
+module data_sync #(
+    parameter STAGES = 2,
+    parameter DWIDTH = 8
+)(
+    input                  clk,
+    input                  rstn,
+    input  [DWIDTH-1:0]    din,
+    input                  dready_i,
+    output reg [DWIDTH-1:0] dout,
+    output reg             dready_o
+);
+
+    // Ensure STAGES is at least 2 for safe multi-bit synchronization
+    localparam SAFE_STAGES = (STAGES < 2) ? 2 : STAGES;
+
+    // Synchronizer chain for the ready signal
+    reg [SAFE_STAGES-1:0] ready_sync;
+
+    // Data register to hold the value when ready is asserted
+    reg [DWIDTH-1:0] data_reg;
+
+    // Internal ready signal after synchronization
+    wire ready_synced = ready_sync[SAFE_STAGES-1];
+
+    // Synchronize the ready signal
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            ready_sync <= {SAFE_STAGES{1'b0}};
+        end else begin
+            ready_sync[0] <= dready_i;
+            if (SAFE_STAGES > 1) begin
+                integer i;
+                for (i = 1; i < SAFE_STAGES; i = i + 1) begin
+                    ready_sync[i] <= ready_sync[i-1];
+                end
+            end
+        end
+    end
+
+    // Capture data when ready is asserted and update output
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            dout <= {DWIDTH{1'b0}};
+            dready_o <= 1'b0;
+            data_reg <= {DWIDTH{1'b0}};
+        end else begin
+            if (ready_synced) begin
+                // Capture the data when ready is asserted
+                data_reg <= din;
+                // Present the coherent data
+                dout <= din;
+                // Pulse dready_o for one cycle
+                dready_o <= 1'b1;
+            end else begin
+                // Deassert dready_o after one cycle
+                dready_o <= 1'b0;
+            end
+        end
+    end
+
+endmodule

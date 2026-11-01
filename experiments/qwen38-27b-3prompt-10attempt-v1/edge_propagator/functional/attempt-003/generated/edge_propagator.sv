@@ -1,0 +1,56 @@
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  // TX domain: detect edge on edge_i and generate a toggle
+  logic edge_i_d;
+  logic tx_toggle;
+
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      edge_i_d    <= 1'b0;
+      tx_toggle   <= 1'b0;
+    end else begin
+      edge_i_d    <= edge_i;
+      if (edge_i ^ edge_i_d)
+        tx_toggle <= ~tx_toggle;
+    end
+  end
+
+  // Synchronize tx_toggle into RX domain
+  logic rx_sync0, rx_sync1, rx_sync2;
+
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      rx_sync0 <= 1'b0;
+      rx_sync1 <= 1'b0;
+      rx_sync2 <= 1'b0;
+    end else begin
+      rx_sync0 <= tx_toggle;
+      rx_sync1 <= rx_sync0;
+      rx_sync2 <= rx_sync1;
+    end
+  end
+
+  // RX domain: detect edge on synchronized signal and generate pulse
+  logic rx_toggle_d;
+  logic edge_o_int;
+
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      rx_toggle_d <= 1'b0;
+      edge_o_int  <= 1'b0;
+    end else begin
+      rx_toggle_d <= rx_sync1;
+      edge_o_int  <= (rx_sync1 ^ rx_toggle_d);
+    end
+  end
+
+  assign edge_o = edge_o_int;
+
+endmodule

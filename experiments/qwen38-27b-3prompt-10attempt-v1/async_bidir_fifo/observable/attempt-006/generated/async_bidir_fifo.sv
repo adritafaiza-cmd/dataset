@@ -1,0 +1,392 @@
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam AWIDTH = ASIZE;
+  localparam DEPTH  = 1 << AWIDTH;
+  localparam AWIDTH1 = AWIDTH + 1;
+
+  // Storage
+  reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+  // A-side pointers
+  reg [AWIDTH1-1:0] a_wr_ptr;
+  reg [AWIDTH1-1:0] a_rd_ptr;
+
+  // B-side pointers
+  reg [AWIDTH1-1:0] b_wr_ptr;
+  reg [AWIDTH1-1:0] b_rd_ptr;
+
+  // Synchronizers for A-side pointers to B domain
+  reg [AWIDTH1-1:0] a_wr_ptr_sync1, a_wr_ptr_sync2;
+  reg [AWIDTH1-1:0] a_rd_ptr_sync1, a_rd_ptr_sync2;
+
+  // Synchronizers for B-side pointers to A domain
+  reg [AWIDTH1-1:0] b_wr_ptr_sync1, b_wr_ptr_sync2;
+  reg [AWIDTH1-1:0] b_rd_ptr_sync1, b_rd_ptr_sync2;
+
+  // Synchronizers for direction signals
+  reg a_dir_sync1, a_dir_sync2;
+  reg b_dir_sync1, b_dir_sync2;
+
+  // Synchronizers for write enables
+  reg a_winc_sync1, a_winc_sync2;
+  reg b_winc_sync1, b_winc_sync2;
+
+  // Synchronizers for read enables
+  reg a_rinc_sync1, a_rinc_sync2;
+  reg b_rinc_sync1, b_rinc_sync2;
+
+  // Synchronizers for write data
+  reg [DSIZE-1:0] a_wdata_sync1, a_wdata_sync2;
+  reg [DSIZE-1:0] b_wdata_sync1, b_wdata_sync2;
+
+  // Synchronizers for read data
+  reg [DSIZE-1:0] a_rdata_sync1, a_rdata_sync2;
+  reg [DSIZE-1:0] b_rdata_sync1, b_rdata_sync2;
+
+  // Synchronizers for full/empty flags
+  reg a_full_sync1, a_full_sync2;
+  reg a_empty_sync1, a_empty_sync2;
+  reg b_full_sync1, b_full_sync2;
+  reg b_empty_sync1, b_empty_sync2;
+
+  // Synchronizers for almost full/empty flags
+  reg a_afull_sync1, a_afull_sync2;
+  reg a_aempty_sync1, a_aempty_sync2;
+  reg b_afull_sync1, b_afull_sync2;
+  reg b_aempty_sync1, b_aempty_sync2;
+
+  // A-side logic
+  wire a_wr_en = a_winc & a_dir;
+  wire a_rd_en = a_rinc & ~a_dir;
+
+  wire [AWIDTH1-1:0] a_wr_ptr_next = a_wr_ptr + a_wr_en;
+  wire [AWIDTH1-1:0] a_rd_ptr_next = a_rd_ptr + a_rd_en;
+
+  wire a_full  = (a_wr_ptr[AWIDTH-1:0] == a_rd_ptr[AWIDTH-1:0]) && (a_wr_ptr[AWIDTH] != a_rd_ptr[AWIDTH]);
+  wire a_empty = (a_wr_ptr == a_rd_ptr);
+
+  wire a_afull  = a_full | (a_wr_ptr[AWIDTH-1:0] == (a_rd_ptr[AWIDTH-1:0] + (DEPTH-2)));
+  wire a_aempty = a_empty | (a_rd_ptr[AWIDTH-1:0] == (a_wr_ptr[AWIDTH-1:0] + (DEPTH-2)));
+
+  // B-side logic
+  wire b_wr_en = b_winc & b_dir;
+  wire b_rd_en = b_rinc & ~b_dir;
+
+  wire [AWIDTH1-1:0] b_wr_ptr_next = b_wr_ptr + b_wr_en;
+  wire [AWIDTH1-1:0] b_rd_ptr_next = b_rd_ptr + b_rd_en;
+
+  wire b_full  = (b_wr_ptr[AWIDTH-1:0] == b_rd_ptr[AWIDTH-1:0]) && (b_wr_ptr[AWIDTH] != b_rd_ptr[AWIDTH]);
+  wire b_empty = (b_wr_ptr == b_rd_ptr);
+
+  wire b_afull  = b_full | (b_wr_ptr[AWIDTH-1:0] == (b_rd_ptr[AWIDTH-1:0] + (DEPTH-2)));
+  wire b_aempty = b_empty | (b_rd_ptr[AWIDTH-1:0] == (b_wr_ptr[AWIDTH-1:0] + (DEPTH-2)));
+
+  // A-side pointer updates
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_wr_ptr <= {AWIDTH1{1'b0}};
+      a_rd_ptr <= {AWIDTH1{1'b0}};
+    end else begin
+      a_wr_ptr <= a_wr_ptr_next;
+      a_rd_ptr <= a_rd_ptr_next;
+    end
+  end
+
+  // B-side pointer updates
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_wr_ptr <= {AWIDTH1{1'b0}};
+      b_rd_ptr <= {AWIDTH1{1'b0}};
+    end else begin
+      b_wr_ptr <= b_wr_ptr_next;
+      b_rd_ptr <= b_rd_ptr_next;
+    end
+  end
+
+  // A-side write to memory
+  always @(posedge a_clk) begin
+    if (a_wr_en) begin
+      mem[a_wr_ptr[AWIDTH-1:0]] <= a_wdata;
+    end
+  end
+
+  // B-side write to memory
+  always @(posedge b_clk) begin
+    if (b_wr_en) begin
+      mem[b_wr_ptr[AWIDTH-1:0]] <= b_wdata;
+    end
+  end
+
+  // A-side read from memory
+  wire [AWIDTH-1:0] a_rd_addr = a_rd_ptr[AWIDTH-1:0];
+  wire [DSIZE-1:0] a_rd_data_reg;
+  always @(*) begin
+    a_rd_data_reg = mem[a_rd_addr];
+  end
+
+  // B-side read from memory
+  wire [AWIDTH-1:0] b_rd_addr = b_rd_ptr[AWIDTH-1:0];
+  wire [DSIZE-1:0] b_rd_data_reg;
+  always @(*) begin
+    b_rd_data_reg = mem[b_rd_addr];
+  end
+
+  // Fall-through logic for A-side
+  wire a_fallthrough = (FALLTHROUGH == "TRUE");
+  wire a_rd_data_comb = a_fallthrough ? a_rd_data_reg : a_rd_data_reg;
+  reg [DSIZE-1:0] a_rdata_reg;
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_rdata_reg <= {DSIZE{1'b0}};
+    end else if (a_rd_en) begin
+      a_rdata_reg <= a_rd_data_reg;
+    end
+  end
+  assign a_rdata = a_fallthrough ? a_rd_data_reg : a_rdata_reg;
+
+  // Fall-through logic for B-side
+  wire b_fallthrough = (FALLTHROUGH == "TRUE");
+  wire b_rd_data_comb = b_fallthrough ? b_rd_data_reg : b_rd_data_reg;
+  reg [DSIZE-1:0] b_rdata_reg;
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_rdata_reg <= {DSIZE{1'b0}};
+    end else if (b_rd_en) begin
+      b_rdata_reg <= b_rd_data_reg;
+    end
+  end
+  assign b_rdata = b_fallthrough ? b_rd_data_reg : b_rdata_reg;
+
+  // Synchronizers for A-side pointers to B domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_wr_ptr_sync1 <= {AWIDTH1{1'b0}};
+      a_wr_ptr_sync2 <= {AWIDTH1{1'b0}};
+      a_rd_ptr_sync1 <= {AWIDTH1{1'b0}};
+      a_rd_ptr_sync2 <= {AWIDTH1{1'b0}};
+    end else begin
+      a_wr_ptr_sync1 <= a_wr_ptr;
+      a_wr_ptr_sync2 <= a_wr_ptr_sync1;
+      a_rd_ptr_sync1 <= a_rd_ptr;
+      a_rd_ptr_sync2 <= a_rd_ptr_sync1;
+    end
+  end
+
+  // Synchronizers for B-side pointers to A domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_wr_ptr_sync1 <= {AWIDTH1{1'b0}};
+      b_wr_ptr_sync2 <= {AWIDTH1{1'b0}};
+      b_rd_ptr_sync1 <= {AWIDTH1{1'b0}};
+      b_rd_ptr_sync2 <= {AWIDTH1{1'b0}};
+    end else begin
+      b_wr_ptr_sync1 <= b_wr_ptr;
+      b_wr_ptr_sync2 <= b_wr_ptr_sync1;
+      b_rd_ptr_sync1 <= b_rd_ptr;
+      b_rd_ptr_sync2 <= b_rd_ptr_sync1;
+    end
+  end
+
+  // Synchronizers for direction signals
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_dir_sync1 <= 1'b0;
+      a_dir_sync2 <= 1'b0;
+    end else begin
+      a_dir_sync1 <= a_dir;
+      a_dir_sync2 <= a_dir_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_dir_sync1 <= 1'b0;
+      b_dir_sync2 <= 1'b0;
+    end else begin
+      b_dir_sync1 <= b_dir;
+      b_dir_sync2 <= b_dir_sync1;
+    end
+  end
+
+  // Synchronizers for write enables
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_winc_sync1 <= 1'b0;
+      a_winc_sync2 <= 1'b0;
+    end else begin
+      a_winc_sync1 <= a_winc;
+      a_winc_sync2 <= a_winc_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_winc_sync1 <= 1'b0;
+      b_winc_sync2 <= 1'b0;
+    end else begin
+      b_winc_sync1 <= b_winc;
+      b_winc_sync2 <= b_winc_sync1;
+    end
+  end
+
+  // Synchronizers for read enables
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_rinc_sync1 <= 1'b0;
+      a_rinc_sync2 <= 1'b0;
+    end else begin
+      a_rinc_sync1 <= a_rinc;
+      a_rinc_sync2 <= a_rinc_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_rinc_sync1 <= 1'b0;
+      b_rinc_sync2 <= 1'b0;
+    end else begin
+      b_rinc_sync1 <= b_rinc;
+      b_rinc_sync2 <= b_rinc_sync1;
+    end
+  end
+
+  // Synchronizers for write data
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_wdata_sync1 <= {DSIZE{1'b0}};
+      a_wdata_sync2 <= {DSIZE{1'b0}};
+    end else begin
+      a_wdata_sync1 <= a_wdata;
+      a_wdata_sync2 <= a_wdata_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_wdata_sync1 <= {DSIZE{1'b0}};
+      b_wdata_sync2 <= {DSIZE{1'b0}};
+    end else begin
+      b_wdata_sync1 <= b_wdata;
+      b_wdata_sync2 <= b_wdata_sync1;
+    end
+  end
+
+  // Synchronizers for read data
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_rdata_sync1 <= {DSIZE{1'b0}};
+      a_rdata_sync2 <= {DSIZE{1'b0}};
+    end else begin
+      a_rdata_sync1 <= a_rdata;
+      a_rdata_sync2 <= a_rdata_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_rdata_sync1 <= {DSIZE{1'b0}};
+      b_rdata_sync2 <= {DSIZE{1'b0}};
+    end else begin
+      b_rdata_sync1 <= b_rdata;
+      b_rdata_sync2 <= b_rdata_sync1;
+    end
+  end
+
+  // Synchronizers for full/empty flags
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_full_sync1 <= 1'b0;
+      a_full_sync2 <= 1'b0;
+      a_empty_sync1 <= 1'b0;
+      a_empty_sync2 <= 1'b0;
+    end else begin
+      a_full_sync1 <= a_full;
+      a_full_sync2 <= a_full_sync1;
+      a_empty_sync1 <= a_empty;
+      a_empty_sync2 <= a_empty_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_full_sync1 <= 1'b0;
+      b_full_sync2 <= 1'b0;
+      b_empty_sync1 <= 1'b0;
+      b_empty_sync2 <= 1'b0;
+    end else begin
+      b_full_sync1 <= b_full;
+      b_full_sync2 <= b_full_sync1;
+      b_empty_sync1 <= b_empty;
+      b_empty_sync2 <= b_empty_sync1;
+    end
+  end
+
+  // Synchronizers for almost full/empty flags
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_afull_sync1 <= 1'b0;
+      a_afull_sync2 <= 1'b0;
+      a_aempty_sync1 <= 1'b0;
+      a_aempty_sync2 <= 1'b0;
+    end else begin
+      a_afull_sync1 <= a_afull;
+      a_afull_sync2 <= a_afull_sync1;
+      a_aempty_sync1 <= a_aempty;
+      a_aempty_sync2 <= a_aempty_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_afull_sync1 <= 1'b0;
+      b_afull_sync2 <= 1'b0;
+      b_aempty_sync1 <= 1'b0;
+      b_aempty_sync2 <= 1'b0;
+    end else begin
+      b_afull_sync1 <= b_afull;
+      b_afull_sync2 <= b_afull_sync1;
+      b_aempty_sync1 <= b_aempty;
+      b_aempty_sync2 <= b_aempty_sync1;
+    end
+  end
+
+  // Output assignments
+  assign a_full   = a_full;
+  assign a_afull  = a_afull;
+  assign a_empty  = a_empty;
+  assign a_aempty = a_aempty;
+
+  assign b_full   = b_full;
+  assign b_afull  = b_afull;
+  assign b_empty  = b_empty;
+  assign b_aempty = b_aempty;
+
+endmodule

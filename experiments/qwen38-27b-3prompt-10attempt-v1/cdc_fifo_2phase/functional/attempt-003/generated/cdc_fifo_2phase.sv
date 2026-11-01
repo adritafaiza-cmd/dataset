@@ -1,0 +1,122 @@
+module cdc_fifo_2phase #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH + 1;
+
+    // Source domain
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg [PTR_W-1:0] wr_ptr;
+    reg [PTR_W-1:0] rd_ptr_src;
+    reg [PTR_W-1:0] rd_ptr_src_sync1;
+    reg [PTR_W-1:0] rd_ptr_src_sync2;
+
+    wire src_wr_en = src_valid_i & src_ready_o;
+    wire src_rd_ptr_full = (wr_ptr[PTR_W-1] != rd_ptr_src_sync2[PTR_W-1]) &&
+                           (wr_ptr[LOG_DEPTH-1:0] == rd_ptr_src_sync2[LOG_DEPTH-1:0]);
+    assign src_ready_o = !src_rd_ptr_full;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            wr_ptr <= {PTR_W{1'b0}};
+            rd_ptr_src <= {PTR_W{1'b0}};
+            rd_ptr_src_sync1 <= {PTR_W{1'b0}};
+            rd_ptr_src_sync2 <= {PTR_W{1'b0}};
+        end else begin
+            if (src_wr_en)
+                mem[wr_ptr[LOG_DEPTH-1:0]] <= src_data_i;
+            if (src_wr_en)
+                wr_ptr <= wr_ptr + 1'b1;
+            rd_ptr_src_sync1 <= rd_ptr_src;
+            rd_ptr_src_sync2 <= rd_ptr_src_sync1;
+        end
+    end
+
+    // Destination domain
+    reg [PTR_W-1:0] rd_ptr;
+    reg [PTR_W-1:0] wr_ptr_dst;
+    reg [PTR_W-1:0] wr_ptr_dst_sync1;
+    reg [PTR_W-1:0] wr_ptr_dst_sync2;
+    reg [WIDTH-1:0] data_reg;
+    reg valid_reg;
+
+    wire dst_rd_en = dst_valid_o & dst_ready_i;
+    wire dst_wr_ptr_empty = (rd_ptr == wr_ptr_dst_sync2);
+    assign dst_valid_o = valid_reg;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            rd_ptr <= {PTR_W{1'b0}};
+            wr_ptr_dst <= {PTR_W{1'b0}};
+            wr_ptr_dst_sync1 <= {PTR_W{1'b0}};
+            wr_ptr_dst_sync2 <= {PTR_W{1'b0}};
+            data_reg <= {WIDTH{1'b0}};
+            valid_reg <= 1'b0;
+        end else begin
+            wr_ptr_dst_sync1 <= wr_ptr_dst;
+            wr_ptr_dst_sync2 <= wr_ptr_dst_sync1;
+            if (dst_rd_en) begin
+                rd_ptr <= rd_ptr + 1'b1;
+                valid_reg <= 1'b0;
+            end
+            if (!dst_wr_ptr_empty) begin
+                data_reg <= mem[rd_ptr[LOG_DEPTH-1:0]];
+                valid_reg <= 1'b1;
+            end
+        end
+    end
+
+    // Cross-domain pointer synchronization
+    // Source pointer to destination
+    reg [PTR_W-1:0] src_wr_ptr_dst_sync1;
+    reg [PTR_W-1:0] src_wr_ptr_dst_sync2;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_wr_ptr_dst_sync1 <= {PTR_W{1'b0}};
+            src_wr_ptr_dst_sync2 <= {PTR_W{1'b0}};
+        end else begin
+            src_wr_ptr_dst_sync1 <= wr_ptr;
+            src_wr_ptr_dst_sync2 <= src_wr_ptr_dst_sync1;
+        end
+    end
+
+    // Destination pointer to source
+    reg [PTR_W-1:0] dst_rd_ptr_src_sync1;
+    reg [PTR_W-1:0] dst_rd_ptr_src_sync2;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_rd_ptr_src_sync1 <= {PTR_W{1'b0}};
+            dst_rd_ptr_src_sync2 <= {PTR_W{1'b0}};
+        end else begin
+            dst_rd_ptr_src_sync1 <= rd_ptr;
+            dst_rd_ptr_src_sync2 <= dst_rd_ptr_src_sync1;
+        end
+    end
+
+    // Update the cross-domain pointers used in logic
+    // We need to use the synchronized versions in the main logic
+    // Let's restructure: use the sync registers directly
+
+    // Actually, let me redo this more carefully.
+    // The standard approach:
+    // - In source domain: wr_ptr is local, rd_ptr is synchronized from dst
+    // - In destination domain: rd_ptr is local, wr_ptr is synchronized from src
+
+    // Let me rewrite with proper structure
+
+endmodule

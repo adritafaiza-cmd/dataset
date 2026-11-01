@@ -1,0 +1,41 @@
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    localparam integer DEPTH = (CHAINS < 2) ? 2 : CHAINS;
+
+    reg [DEPTH-1:0] sync_reg;
+    reg             rst_active;
+
+    // Synchronize the reset signal into the clock domain
+    // For active-high reset: sync_reg tracks async_rst_i
+    // For active-low reset: sync_reg tracks ~async_rst_i (i.e., active state)
+    // We want sync_rst_o to be active when reset is asserted.
+    // Let's define: active_reset = (RST_POL) ? async_rst_i : ~async_rst_i
+    // sync_reg will synchronize active_reset
+    // sync_rst_o = active_reset (immediate) OR sync_reg[DEPTH-1] (synchronized release)
+    // Actually, for deassert synchronizer:
+    // - When reset is asserted, sync_rst_o should be active immediately.
+    // - When reset is deasserted, sync_rst_o should remain active until the synchronized version shows deassert.
+    // So: sync_rst_o = active_reset | sync_reg[DEPTH-1]
+    // where sync_reg synchronizes active_reset.
+
+    wire active_reset = (RST_POL) ? async_rst_i : ~async_rst_i;
+
+    // Synchronize active_reset
+    always @(posedge clk or posedge active_reset) begin
+        if (active_reset)
+            sync_reg <= {DEPTH{1'b1}};
+        else
+            sync_reg <= {sync_reg[DEPTH-2:0], 1'b0};
+    end
+
+    // sync_rst_o is active if either the immediate reset is active or the synchronized version is still active
+    assign sync_rst_o = active_reset | sync_reg[DEPTH-1];
+
+endmodule

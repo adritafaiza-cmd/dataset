@@ -1,0 +1,58 @@
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // Synchronizer for pulseA_i into clk_b domain
+    reg [STAGES-1:0] sync_reg;
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b)
+            sync_reg <= {STAGES{1'b0}};
+        else
+            sync_reg <= {sync_reg[STAGES-2:0], pulseA_i};
+    end
+
+    // Detect rising edge of synchronized signal
+    reg sync_prev;
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b)
+            sync_prev <= 1'b0;
+        else
+            sync_prev <= sync_reg[STAGES-1];
+    end
+
+    wire sync_rise = sync_reg[STAGES-1] & ~sync_prev;
+
+    // Busy flag in clk_b domain
+    reg busy_b;
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b)
+            busy_b <= 1'b0;
+        else if (sync_rise)
+            busy_b <= 1'b1;
+        else if (pulseB_o)
+            busy_b <= 1'b0;
+    end
+
+    // Generate one-pulse output in clk_b domain
+    reg pulseB_reg;
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b)
+            pulseB_reg <= 1'b0;
+        else if (sync_rise && !busy_b)
+            pulseB_reg <= 1'b1;
+        else
+            pulseB_reg <= 1'b0;
+    end
+
+    assign pulseB_o = pulseB_reg;
+    assign busy_o   = busy_b;
+
+endmodule

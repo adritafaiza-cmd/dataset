@@ -1,0 +1,179 @@
+module cdc_fifo_gray #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 2
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH + 1;
+
+    // Source domain
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg [PTR_W-1:0] src_wr_ptr;
+    reg [PTR_W-1:0] dst_rd_ptr_synced;
+    reg [PTR_W-1:0] dst_rd_ptr_synced_d1;
+    reg [PTR_W-1:0] dst_rd_ptr_synced_d2;
+
+    // Destination domain
+    reg [PTR_W-1:0] dst_rd_ptr;
+    reg [PTR_W-1:0] src_wr_ptr_synced;
+    reg [PTR_W-1:0] src_wr_ptr_synced_d1;
+    reg [PTR_W-1:0] src_wr_ptr_synced_d2;
+
+    wire src_wr_en = src_valid_i & src_ready_o;
+    wire dst_rd_en = dst_valid_o & dst_ready_i;
+
+    // Source ready: FIFO not full
+    // Full when src_wr_ptr == dst_rd_ptr_synced (with extra bit for wrap)
+    wire src_full = (src_wr_ptr == dst_rd_ptr_synced);
+    assign src_ready_o = ~src_full;
+
+    // Destination valid: FIFO not empty
+    // Empty when dst_rd_ptr == src_wr_ptr_synced
+    wire dst_empty = (dst_rd_ptr == src_wr_ptr_synced);
+    assign dst_valid_o = ~dst_empty;
+
+    // Destination data output
+    wire [PTR_W-1:0] dst_rd_addr = dst_rd_ptr[PTR_W-2:0];
+    assign dst_data_o = mem[dst_rd_addr];
+
+    // Source write
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_wr_ptr <= {PTR_W{1'b0}};
+        end else if (src_wr_en) begin
+            src_wr_ptr <= src_wr_ptr + 1'b1;
+            mem[src_wr_ptr[PTR_W-2:0]] <= src_data_i;
+        end
+    end
+
+    // Synchronize dst_rd_ptr to source domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_rd_ptr_synced <= {PTR_W{1'b0}};
+            dst_rd_ptr_synced_d1 <= {PTR_W{1'b0}};
+            dst_rd_ptr_synced_d2 <= {PTR_W{1'b0}};
+        end else begin
+            dst_rd_ptr_synced <= dst_rd_ptr;
+            dst_rd_ptr_synced_d1 <= dst_rd_ptr_synced;
+            dst_rd_ptr_synced_d2 <= dst_rd_ptr_synced_d1;
+        end
+    end
+
+    // Use the last synchronized stage for full check
+    // Actually, we need to use the most stable version. Let's use dst_rd_ptr_synced_d2
+    // But wait, the full check should use the synchronized pointer.
+    // Let me reconsider: the standard approach is to synchronize the read pointer
+    // to the write domain and use it for the full check.
+
+    // Let me redo this properly.
+
+    // Actually, let me restructure. The standard CDC FIFO uses:
+    // - Write pointer in source domain, synchronized to destination domain for empty check
+    // - Read pointer in destination domain, synchronized to source domain for full check
+
+    // Let me fix the synchronization logic.
+
+endmodule
+
+module cdc_fifo_gray #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 2
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH + 1;
+
+    // Source domain
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg [PTR_W-1:0] src_wr_ptr;
+
+    // Destination domain
+    reg [PTR_W-1:0] dst_rd_ptr;
+
+    // Synchronization registers
+    reg [PTR_W-1:0] src_wr_ptr_synced_d1;
+    reg [PTR_W-1:0] src_wr_ptr_synced_d2;
+    reg [PTR_W-1:0] dst_rd_ptr_synced_d1;
+    reg [PTR_W-1:0] dst_rd_ptr_synced_d2;
+
+    wire src_wr_en = src_valid_i & src_ready_o;
+    wire dst_rd_en = dst_valid_o & dst_ready_i;
+
+    // Full check in source domain: use synchronized read pointer
+    wire src_full = (src_wr_ptr == dst_rd_ptr_synced_d2);
+    assign src_ready_o = ~src_full;
+
+    // Empty check in destination domain: use synchronized write pointer
+    wire dst_empty = (dst_rd_ptr == src_wr_ptr_synced_d2);
+    assign dst_valid_o = ~dst_empty;
+
+    // Destination data output
+    wire [PTR_W-1:0] dst_rd_addr = dst_rd_ptr[PTR_W-2:0];
+    assign dst_data_o = mem[dst_rd_addr];
+
+    // Source write pointer and memory
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_wr_ptr <= {PTR_W{1'b0}};
+        end else if (src_wr_en) begin
+            src_wr_ptr <= src_wr_ptr + 1'b1;
+            mem[src_wr_ptr[PTR_W-2:0]] <= src_data_i;
+        end
+    end
+
+    // Synchronize write pointer to destination domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_wr_ptr_synced_d1 <= {PTR_W{1'b0}};
+            src_wr_ptr_synced_d2 <= {PTR_W{1'b0}};
+        end else begin
+            src_wr_ptr_synced_d1 <= src_wr_ptr;
+            src_wr_ptr_synced_d2 <= src_wr_ptr_synced_d1;
+        end
+    end
+
+    // Destination read pointer
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_rd_ptr <= {PTR_W{1'b0}};
+        end else if (dst_rd_en) begin
+            dst_rd_ptr <= dst_rd_ptr + 1'b1;
+        end
+    end
+
+    // Synchronize read pointer to source domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_rd_ptr_synced_d1 <= {PTR_W{1'b0}};
+            dst_rd_ptr_synced_d2 <= {PTR_W{1'b0}};
+        end else begin
+            dst_rd_ptr_synced_d1 <= dst_rd_ptr;
+            dst_rd_ptr_synced_d2 <= dst_rd_ptr_synced_d1;
+        end
+    end
+
+endmodule

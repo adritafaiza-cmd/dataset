@@ -1,0 +1,129 @@
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam PTR_W = LGFIFO + 1;
+	localparam SYNC_STAGES = (NFF < 2) ? 2 : NFF;
+
+	// Write domain
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+	reg [PTR_W-1:0] wptr;
+	reg [PTR_W-1:0] rptr_w;
+	reg [PTR_W-1:0] rptr_w_sync [0:SYNC_STAGES-1];
+	reg [PTR_W-1:0] rptr_w_sync_next;
+	reg wclk_en;
+	reg wclk_neg;
+
+	// Read domain
+	reg [PTR_W-1:0] rptr;
+	reg [PTR_W-1:0] wptr_r;
+	reg [PTR_W-1:0] wptr_r_sync [0:SYNC_STAGES-1];
+	reg [PTR_W-1:0] wptr_r_sync_next;
+	reg rclk_en;
+	reg rclk_neg;
+
+	// Write clock edge selection
+	wire wclk_edge = WRITE_ON_POSEDGE ? i_wclk : ~i_wclk;
+	wire wclk_edge_neg = WRITE_ON_POSEDGE ? ~i_wclk : i_wclk;
+
+	// Read clock edge selection (always posedge for reads)
+	wire rclk_edge = i_rclk;
+	wire rclk_edge_neg = ~i_rclk;
+
+	// Write pointer increment
+	wire wptr_inc = i_wr && !o_wr_full;
+
+	// Read pointer increment
+	wire rptr_inc = i_rd && !o_rd_empty;
+
+	// Write domain logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wptr <= {PTR_W{1'b0}};
+			rptr_w_sync[0] <= {PTR_W{1'b0}};
+			rptr_w_sync[1] <= {PTR_W{1'b0}};
+			if (SYNC_STAGES > 2) begin
+				int i;
+				for (i = 2; i < SYNC_STAGES; i = i + 1)
+					rptr_w_sync[i] <= {PTR_W{1'b0}};
+			end
+			o_wr_full <= 1'b0;
+		end else begin
+			if (wptr_inc)
+				wptr <= wptr + 1'b1;
+			
+			// Synchronize read pointer into write domain
+			rptr_w_sync[0] <= rptr;
+			rptr_w_sync[1] <= rptr_w_sync[0];
+			if (SYNC_STAGES > 2) begin
+				int i;
+				for (i = 2; i < SYNC_STAGES; i = i + 1)
+					rptr_w_sync[i] <= rptr_w_sync[i-1];
+			end
+			rptr_w <= rptr_w_sync[SYNC_STAGES-1];
+			
+			// Full condition: write pointer has lapped read pointer by DEPTH
+			o_wr_full <= (wptr[PTR_W-1:1] == rptr_w[PTR_W-1:1]) && (wptr[0] != rptr_w[0]);
+		end
+	end
+
+	// Write data
+	always @(posedge i_wclk) begin
+		if (wptr_inc)
+			mem[wptr[LGFIFO-1:0]] <= i_wr_data;
+	end
+
+	// Read domain logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rptr <= {PTR_W{1'b0}};
+			wptr_r_sync[0] <= {PTR_W{1'b0}};
+			wptr_r_sync[1] <= {PTR_W{1'b0}};
+			if (SYNC_STAGES > 2) begin
+				int i;
+				for (i = 2; i < SYNC_STAGES; i = i + 1)
+					wptr_r_sync[i] <= {PTR_W{1'b0}};
+			end
+			o_rd_empty <= 1'b1;
+			o_rd_data <= {WIDTH{1'b0}};
+		end else begin
+			if (rptr_inc)
+				rptr <= rptr + 1'b1;
+			
+			// Synchronize write pointer into read domain
+			wptr_r_sync[0] <= wptr;
+			wptr_r_sync[1] <= wptr_r_sync[0];
+			if (SYNC_STAGES > 2) begin
+				int i;
+				for (i = 2; i < SYNC_STAGES; i = i + 1)
+					wptr_r_sync[i] <= wptr_r_sync[i-1];
+			end
+			wptr_r <= wptr_r_sync[SYNC_STAGES-1];
+			
+			// Empty condition: write pointer equals read pointer
+			o_rd_empty <= (wptr_r == rptr);
+			
+			// Read data
+			if (OPT_REGISTER_READS) begin
+				if (rptr_inc)
+					o_rd_data <= mem[rptr[LGFIFO-1:0]];
+			end else begin
+				if (rptr_inc)
+					o_rd_data <= mem[rptr[LGFIFO-1:0]];
+			end
+		end
+	end
+
+endmodule

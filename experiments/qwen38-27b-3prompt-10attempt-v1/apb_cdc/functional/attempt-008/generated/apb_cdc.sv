@@ -1,0 +1,273 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam STRB_WIDTH = DATA_WIDTH/8;
+    localparam FIFO_DEPTH = 1 << LOG_DEPTH;
+    localparam FIFO_ADDR_WIDTH = LOG_DEPTH;
+
+    // Source side state
+    reg src_state;
+    localparam SRC_IDLE = 1'b0;
+    localparam SRC_BUSY = 1'b1;
+
+    // Destination side state
+    reg dst_state;
+    localparam DST_IDLE = 1'b0;
+    localparam DST_SETUP = 1'b1;
+    localparam DST_ACCESS = 1'b0; // Reuse, but we need to track phase
+
+    // Actually, let's use a proper state machine for destination
+    // DST_IDLE: waiting for request
+    // DST_SETUP: PSEL high, PENABLE low
+    // DST_ACCESS: PSEL high, PENABLE high, waiting for PREADY
+
+    reg dst_phase;
+    localparam DST_PHASE_IDLE = 2'b00;
+    localparam DST_PHASE_SETUP = 2'b01;
+    localparam DST_PHASE_ACCESS = 2'b10;
+
+    // FIFO signals
+    reg [FIFO_ADDR_WIDTH-1:0] src_wr_ptr;
+    reg [FIFO_ADDR_WIDTH-1:0] dst_rd_ptr;
+    reg [FIFO_ADDR_WIDTH-1:0] src_wr_ptr_sync;
+    reg [FIFO_ADDR_WIDTH-1:0] dst_rd_ptr_sync;
+
+    // FIFO storage
+    reg [ADDR_WIDTH-1:0] fifo_addr [0:FIFO_DEPTH-1];
+    reg [DATA_WIDTH-1:0] fifo_wdata [0:FIFO_DEPTH-1];
+    reg [STRB_WIDTH-1:0] fifo_strb [0:FIFO_DEPTH-1];
+    reg [2:0] fifo_pprot [0:FIFO_DEPTH-1];
+    reg fifo_write [0:FIFO_DEPTH-1];
+
+    // Destination output registers
+    reg dst_psel_r;
+    reg dst_penable_r;
+    reg dst_pwrite_r;
+    reg [ADDR_WIDTH-1:0] dst_paddr_r;
+    reg [DATA_WIDTH-1:0] dst_pwdata_r;
+    reg [STRB_WIDTH-1:0] dst_pstrb_r;
+    reg [2:0] dst_pprot_r;
+
+    // Source output registers
+    reg src_pready_r;
+    reg [DATA_WIDTH-1:0] src_prdata_r;
+    reg src_pslverr_r;
+
+    // Synchronization signals
+    reg [1:0] src_wr_ptr_sync_r;
+    reg [1:0] dst_rd_ptr_sync_r;
+
+    // Source side: detect APB setup phase completion
+    wire src_setup_done = src_psel_i & ~src_penable_i;
+    wire src_access_done = src_psel_i & src_penable_i & src_pready_o;
+
+    // Source state machine
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_state <= SRC_IDLE;
+            src_pready_r <= 1'b0;
+            src_prdata_r <= {DATA_WIDTH{1'b0}};
+            src_pslverr_r <= 1'b0;
+            src_wr_ptr <= {FIFO_ADDR_WIDTH{1'b0}};
+        end else begin
+            case (src_state)
+                SRC_IDLE: begin
+                    src_pready_r <= 1'b0;
+                    if (src_setup_done) begin
+                        // Capture request and write to FIFO
+                        fifo_addr[src_wr_ptr] <= src_paddr_i;
+                        fifo_wdata[src_wr_ptr] <= src_pwdata_i;
+                        fifo_strb[src_wr_ptr] <= src_pstrb_i;
+                        fifo_pprot[src_wr_ptr] <= src_pprot_i;
+                        fifo_write[src_wr_ptr] <= src_pwrite_i;
+                        src_wr_ptr <= src_wr_ptr + 1'b1;
+                        src_state <= SRC_BUSY;
+                    end
+                end
+                SRC_BUSY: begin
+                    // Wait for destination to complete
+                    // We need to know when the destination has completed
+                    // This is signaled by dst_rd_ptr catching up to src_wr_ptr
+                    // But we need to synchronize dst_rd_ptr to source domain
+                    // For simplicity, let's use a different approach:
+                    // The destination will signal completion via a synchronized flag
+                    // Actually, let's use the FIFO pointers to determine completion
+                    // When dst_rd_ptr == src_wr_ptr, the FIFO is empty and the transaction is done
+                    // But we need to be careful about the synchronization
+                    // Let's use a simpler approach: the destination sends a "done" signal
+                    // that is synchronized to the source domain
+                    // For now, let's assume the destination completes when dst_rd_ptr catches up
+                    // We'll synchronize dst_rd_ptr to source domain
+                    if (dst_rd_ptr_sync == src_wr_ptr) begin
+                        src_state <= SRC_IDLE;
+                        src_pready_r <= 1'b1;
+                        // Read data and error are already captured in src_prdata_r and src_pslverr_r
+                    end
+                end
+                default: begin
+                    src_state <= SRC_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Synchronize src_wr_ptr to destination domain
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            src_wr_ptr_sync <= {FIFO_ADDR_WIDTH{1'b0}};
+        end else begin
+            src_wr_ptr_sync <= src_wr_ptr;
+        end
+    end
+
+    // Synchronize dst_rd_ptr to source domain
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            dst_rd_ptr_sync <= {FIFO_ADDR_WIDTH{1'b0}};
+        end else begin
+            dst_rd_ptr_sync <= dst_rd_ptr;
+        end
+    end
+
+    // Destination state machine
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_phase <= DST_PHASE_IDLE;
+            dst_psel_r <= 1'b0;
+            dst_penable_r <= 1'b0;
+            dst_pwrite_r <= 1'b0;
+            dst_paddr_r <= {ADDR_WIDTH{1'b0}};
+            dst_pwdata_r <= {DATA_WIDTH{1'b0}};
+            dst_pstrb_r <= {STRB_WIDTH{1'b0}};
+            dst_pprot_r <= 3'b0;
+            dst_rd_ptr <= {FIFO_ADDR_WIDTH{1'b0}};
+        end else begin
+            case (dst_phase)
+                DST_PHASE_IDLE: begin
+                    dst_psel_r <= 1'b0;
+                    dst_penable_r <= 1'b0;
+                    if (dst_rd_ptr != src_wr_ptr_sync) begin
+                        // Load next request from FIFO
+                        dst_paddr_r <= fifo_addr[dst_rd_ptr];
+                        dst_pwdata_r <= fifo_wdata[dst_rd_ptr];
+                        dst_pstrb_r <= fifo_strb[dst_rd_ptr];
+                        dst_pprot_r <= fifo_pprot[dst_rd_ptr];
+                        dst_pwrite_r <= fifo_write[dst_rd_ptr];
+                        dst_psel_r <= 1'b1;
+                        dst_penable_r <= 1'b0;
+                        dst_phase <= DST_PHASE_SETUP;
+                    end
+                end
+                DST_PHASE_SETUP: begin
+                    dst_psel_r <= 1'b1;
+                    dst_penable_r <= 1'b1;
+                    dst_phase <= DST_PHASE_ACCESS;
+                end
+                DST_PHASE_ACCESS: begin
+                    dst_psel_r <= 1'b1;
+                    dst_penable_r <= 1'b1;
+                    if (dst_pready_i) begin
+                        // Capture read data and error
+                        // These will be synchronized to source domain
+                        // For now, we'll use registers that are synchronized
+                        dst_rd_ptr <= dst_rd_ptr + 1'b1;
+                        dst_phase <= DST_PHASE_IDLE;
+                    end
+                end
+                default: begin
+                    dst_phase <= DST_PHASE_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Synchronize read data and error to source domain
+    // We need to capture dst_prdata_i and dst_pslverr_i when dst_pready_i is high
+    // and then synchronize them to the source domain
+
+    reg [DATA_WIDTH-1:0] dst_prdata_sync;
+    reg dst_pslverr_sync;
+    reg dst_done_pulse;
+    reg [1:0] dst_done_sync_r;
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_prdata_sync <= {DATA_WIDTH{1'b0}};
+            dst_pslverr_sync <= 1'b0;
+            dst_done_pulse <= 1'b0;
+        end else begin
+            if (dst_phase == DST_PHASE_ACCESS && dst_pready_i) begin
+                dst_prdata_sync <= dst_prdata_i;
+                dst_pslverr_sync <= dst_pslverr_i;
+                dst_done_pulse <= 1'b1;
+            end else begin
+                dst_done_pulse <= 1'b0;
+            end
+        end
+    end
+
+    // Synchronize done pulse to source domain
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            dst_done_sync_r <= 2'b00;
+        end else begin
+            dst_done_sync_r <= {dst_done_sync_r[0], dst_done_pulse};
+        end
+    end
+
+    wire dst_done_src = dst_done_sync_r[1] & ~dst_done_sync_r[0];
+
+    // Update source outputs when done
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_prdata_r <= {DATA_WIDTH{1'b0}};
+            src_pslverr_r <= 1'b0;
+        end else begin
+            if (dst_done_src) begin
+                src_prdata_r <= dst_prdata_sync;
+                src_pslverr_r <= dst_pslverr_sync;
+            end
+        end
+    end
+
+    // Assign outputs
+    assign src_pready_o = src_pready_r;
+    assign src_prdata_o = src_prdata_r;
+    assign src_pslverr_o = src_pslverr_r;
+    assign dst_psel_o = dst_psel_r;
+    assign dst_penable_o = dst_penable_r;
+    assign dst_pwrite_o = dst_pwrite_r;
+    assign dst_paddr_o = dst_paddr_r;
+    assign dst_pwdata_o = dst_pwdata_r;
+    assign dst_pstrb_o = dst_pstrb_r;
+    assign dst_pprot_o = dst_pprot_r;
+
+endmodule

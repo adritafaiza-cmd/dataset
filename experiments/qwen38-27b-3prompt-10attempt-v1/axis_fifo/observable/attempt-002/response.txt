@@ -1,0 +1,367 @@
+```verilog
+module axis_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   pause_req,
+    output wire                   pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] status_depth,
+    output wire [$clog2(DEPTH):0] status_depth_commit,
+    output wire                   status_overflow,
+    output wire                   status_bad_frame,
+    output wire                   status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam DEPTH_MASK = DEPTH - 1;
+
+    // Internal signals
+    reg [DATA_WIDTH-1:0] mem_data [0:DEPTH-1];
+    reg [KEEP_WIDTH-1:0] mem_keep [0:DEPTH-1];
+    reg                  mem_last [0:DEPTH-1];
+    reg [ID_WIDTH-1:0]   mem_tid  [0:DEPTH-1];
+    reg [DEST_WIDTH-1:0] mem_tdest[0:DEPTH-1];
+    reg [USER_WIDTH-1:0] mem_tuser[0:DEPTH-1];
+
+    reg [ADDR_WIDTH:0] wr_ptr;
+    reg [ADDR_WIDTH:0] rd_ptr;
+    reg [ADDR_WIDTH:0] rd_ptr_commit;
+
+    wire [ADDR_WIDTH:0] depth = wr_ptr - rd_ptr;
+    wire [ADDR_WIDTH:0] depth_commit = wr_ptr - rd_ptr_commit;
+
+    assign status_depth = depth;
+    assign status_depth_commit = depth_commit;
+
+    // Frame tracking
+    reg in_frame;
+    reg [ADDR_WIDTH:0] frame_count;
+    reg frame_overflow;
+
+    // Status flags
+    reg status_overflow_reg;
+    reg status_bad_frame_reg;
+    reg status_good_frame_reg;
+
+    assign status_overflow = status_overflow_reg;
+    assign status_bad_frame = status_bad_frame_reg;
+    assign status_good_frame = status_good_frame_reg;
+
+    // Pause logic
+    reg pause_active;
+    assign pause_ack = pause_active;
+
+    // Write enable
+    wire wr_en = s_axis_tvalid && s_axis_tready && !pause_active;
+
+    // Read enable
+    wire rd_en = m_axis_tvalid && m_axis_tready;
+
+    // FIFO full
+    wire fifo_full = (depth == DEPTH);
+
+    // Frame full (for FRAME_FIFO mode)
+    wire frame_full = (frame_count == DEPTH);
+
+    // Determine if we should accept a write
+    wire can_write;
+    wire drop_write;
+    wire mark_write;
+
+    generate
+        if (DROP_WHEN_FULL) begin
+            assign can_write = !fifo_full && !pause_active;
+            assign drop_write = fifo_full && s_axis_tvalid;
+            assign mark_write = 1'b0;
+        end
+        else if (MARK_WHEN_FULL) begin
+            assign can_write = !pause_active;
+            assign drop_write = 1'b0;
+            assign mark_write = fifo_full && s_axis_tvalid;
+        end
+        else begin
+            assign can_write = !fifo_full && !pause_active;
+            assign drop_write = 1'b0;
+            assign mark_write = 1'b0;
+        end
+    endgenerate
+
+    // Frame FIFO logic
+    generate
+        if (FRAME_FIFO) begin
+            // Frame overflow detection
+            wire frame_oversize = in_frame && (frame_count == DEPTH) && s_axis_tvalid && s_axis_tready;
+            
+            // Drop oversize frame
+            wire drop_oversize = DROP_OVERSIZE_FRAME && frame_oversize;
+            
+            // Bad frame detection based on user signal
+            wire bad_frame = (s_axis_tuser & USER_BAD_FRAME_MASK) == USER_BAD_FRAME_VALUE;
+            
+            // Drop bad frame
+            wire drop_bad = DROP_BAD_FRAME && bad_frame && s_axis_tlast;
+            
+            // Effective write enable considering frame drops
+            wire eff_wr_en = wr_en && !drop_oversize && !drop_bad;
+            
+            // Frame pause
+            wire frame_pause_active = FRAME_PAUSE && in_frame && frame_full;
+            
+            assign s_axis_tready = can_write && !frame_pause_active;
+            
+            // Update frame tracking
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    in_frame <= 1'b0;
+                    frame_count <= {ADDR_WIDTH+1{1'b0}};
+                    frame_overflow <= 1'b0;
+                end else begin
+                    if (eff_wr_en) begin
+                        if (s_axis_tlast) begin
+                            in_frame <= 1'b0;
+                            frame_count <= {ADDR_WIDTH+1{1'b0}};
+                        end else begin
+                            in_frame <= 1'b1;
+                            frame_count <= frame_count + 1'b1;
+                        end
+                    end
+                    if (frame_oversize) begin
+                        frame_overflow <= 1'b1;
+                    end
+                end
+            end
+            
+            // Status updates for frame FIFO
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    status_overflow_reg <= 1'b0;
+                    status_bad_frame_reg <= 1'b0;
+                    status_good_frame_reg <= 1'b0;
+                end else begin
+                    if (frame_oversize) begin
+                        status_overflow_reg <= 1'b1;
+                    end
+                    if (drop_bad) begin
+                        status_bad_frame_reg <= 1'b1;
+                    end
+                    if (eff_wr_en && s_axis_tlast && !drop_bad && !drop_oversize) begin
+                        status_good_frame_reg <= 1'b1;
+                    end
+                end
+            end
+            
+            // Memory write
+            always @(posedge clk) begin
+                if (eff_wr_en) begin
+                    mem_data[wr_ptr[ADDR_WIDTH-1:0]] <= s_axis_tdata;
+                    mem_keep[wr_ptr[ADDR_WIDTH-1:0]] <= s_axis_tkeep;
+                    mem_last[wr_ptr[ADDR_WIDTH-1:0]] <= s_axis_tlast;
+                    mem_tid[wr_ptr[ADDR_WIDTH-1:0]] <= s_axis_tid;
+                    mem_tdest[wr_ptr[ADDR_WIDTH-1:0]] <= s_axis_tdest;
+                    mem_tuser[wr_ptr[ADDR_WIDTH-1:0]] <= s_axis_tuser;
+                end
+            end
+            
+            // Write pointer
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    wr_ptr <= {ADDR_WIDTH+1{1'b0}};
+                end else if (eff_wr_en) begin
+                    wr_ptr <= wr_ptr + 1'b1;
+                end
+            end
+            
+        end
+        else begin
+            // Non-frame FIFO mode
+            assign s_axis_tready = can_write;
+            
+            // Status updates
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    status_overflow_reg <= 1'b0;
+                    status_bad_frame_reg <= 1'b0;
+                    status_good_frame_reg <= 1'b0;
+                end else begin
+                    if (drop_write) begin
+                        status_overflow_reg <= 1'b1;
+                    end
+                    if (mark_write) begin
+                        status_overflow_reg <= 1'b1;
+                    end
+                end
+            end
+            
+            // Memory write
+            always @(posedge clk) begin
+                if (wr_en) begin
+                    mem_data[wr_ptr[ADDR_WIDTH-1:0]] <= s_axis_tdata;
+                    mem_keep[wr_ptr[ADDR_WIDTH-1:0]] <= s_axis_tkeep;
+                    mem_last[wr_ptr[ADDR_WIDTH-1:0]] <= s_axis_tlast;
+                    mem_tid[wr_ptr[ADDR_WIDTH-1:0]] <= s_axis_tid;
+                    mem_tdest[wr_ptr[ADDR_WIDTH-1:0]] <= s_axis_tdest;
+                    mem_tuser[wr_ptr[ADDR_WIDTH-1:0]] <= s_axis_tuser;
+                end
+            end
+            
+            // Write pointer
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    wr_ptr <= {ADDR_WIDTH+1{1'b0}};
+                end else if (wr_en) begin
+                    wr_ptr <= wr_ptr + 1'b1;
+                end
+            end
+        end
+    endgenerate
+
+    // Read logic
+    wire [ADDR_WIDTH-1:0] rd_addr = rd_ptr[ADDR_WIDTH-1:0];
+    wire [ADDR_WIDTH-1:0] rd_addr_commit = rd_ptr_commit[ADDR_WIDTH-1:0];
+
+    // Output data
+    wire [DATA_WIDTH-1:0] out_data;
+    wire [KEEP_WIDTH-1:0] out_keep;
+    wire                  out_last;
+    wire [ID_WIDTH-1:0]   out_tid;
+    wire [DEST_WIDTH-1:0] out_tdest;
+    wire [USER_WIDTH-1:0] out_tuser;
+
+    generate
+        if (RAM_PIPELINE) begin
+            // Pipelined read
+            reg [DATA_WIDTH-1:0] pipe_data;
+            reg [KEEP_WIDTH-1:0] pipe_keep;
+            reg                  pipe_last;
+            reg [ID_WIDTH-1:0]   pipe_tid;
+            reg [DEST_WIDTH-1:0] pipe_tdest;
+            reg [USER_WIDTH-1:0] pipe_tuser;
+            reg                  pipe_valid;
+
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    pipe_valid <= 1'b0;
+                end else begin
+                    if (rd_en) begin
+                        pipe_valid <= 1'b0;
+                    end else if (!pipe_valid) begin
+                        pipe_valid <= (depth > 0);
+                        pipe_data <= mem_data[rd_addr];
+                        pipe_keep <= mem_keep[rd_addr];
+                        pipe_last <= mem_last[rd_addr];
+                        pipe_tid <= mem_tid[rd_addr];
+                        pipe_tdest <= mem_tdest[rd_addr];
+                        pipe_tuser <= mem_tuser[rd_addr];
+                    end
+                end
+            end
+
+            assign out_data = pipe_data;
+            assign out_keep = pipe_keep;
+            assign out_last = pipe_last;
+            assign out_tid = pipe_tid;
+            assign out_tdest = pipe_tdest;
+            assign out_tuser = pipe_tuser;
+            assign m_axis_tvalid = pipe_valid;
+            
+        end
+        else begin
+            // Non-pipelined read
+            assign out_data = mem_data[rd_addr];
+            assign out_keep = mem_keep[rd_addr];
+            assign out_last = mem_last[rd_addr];
+            assign out_tid = mem_tid[rd_addr];
+            assign out_tdest = mem_tdest[rd_addr];
+            assign out_tuser = mem_tuser[rd_addr];
+            assign m_axis_tvalid = (depth > 0);
+        end
+    endgenerate
+
+    // Output assignments
+    assign m_axis_tdata = out_data;
+    assign m_axis_tkeep = out_keep;
+    assign m_axis_tlast = out_last;
+    assign m_axis_tid = out_tid;
+    assign m_axis_tdest = out_tdest;
+    assign m_axis_tuser = out_tuser;
+
+    // Read pointer update
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rd_ptr <= {ADDR_WIDTH+1{1'b0}};
+            rd_ptr_commit <= {ADDR_WIDTH+1{1'b0}};
+        end else begin
+            if (rd_en) begin
+                rd_ptr <= rd_ptr + 1'b1;
+                rd_ptr_commit <= rd_ptr_commit + 1'b1;
+            end
+        end
+    end
+
+    // Pause logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            pause_active <= 1'b0;
+        end else begin
+            if (PAUSE_ENABLE) begin
+                pause_active <= pause_req;
+            end else begin
+                pause_active <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

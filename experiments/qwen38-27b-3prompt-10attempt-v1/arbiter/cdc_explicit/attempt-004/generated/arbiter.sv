@@ -1,0 +1,192 @@
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam ENC_WIDTH = $clog2(PORTS);
+
+    // Synchronous reset synchronizer for RDC safety
+    reg [1:0] rst_sync;
+    always @(posedge clk) begin
+        if (rst)
+            rst_sync <= 2'b11;
+        else
+            rst_sync <= {rst_sync[0], 1'b0};
+    end
+    wire rst_synced = rst_sync[1];
+
+    // Internal state
+    reg [PORTS-1:0] grant_reg;
+    reg             grant_valid_reg;
+    reg [ENC_WIDTH-1:0] grant_encoded_reg;
+
+    // Round-robin pointer: index of the next highest priority port
+    // For round-robin, we track the last granted port and start searching from the next one
+    reg [ENC_WIDTH-1:0] rr_pointer;
+
+    // Compute the grant combinationally based on current state and inputs
+    wire [PORTS-1:0] grant_comb;
+    wire             grant_valid_comb;
+    wire [ENC_WIDTH-1:0] grant_encoded_comb;
+
+    // Helper: find first set bit (LSB) or last set bit (MSB) depending on priority
+    // For fixed priority:
+    //   ARB_LSB_HIGH_PRIORITY=1: LSB has highest priority (port 0 wins)
+    //   ARB_LSB_HIGH_PRIORITY=0: MSB has highest priority (port PORTS-1 wins)
+    // For round-robin:
+    //   Rotate the request vector so that rr_pointer is at the LSB position,
+    //   then apply the same fixed-priority logic.
+
+    // Function to find the index of the first set bit (LSB) in a vector
+    function [ENC_WIDTH-1:0] find_lsb;
+        input [PORTS-1:0] vec;
+        integer i;
+        begin
+            find_lsb = {ENC_WIDTH{1'b0}};
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (vec[i]) begin
+                    find_lsb = i[ENC_WIDTH-1:0];
+                    disable find_lsb;
+                end
+            end
+        end
+    endfunction
+
+    // Function to find the index of the last set bit (MSB) in a vector
+    function [ENC_WIDTH-1:0] find_msb;
+        input [PORTS-1:0] vec;
+        integer i;
+        begin
+            find_msb = {ENC_WIDTH{1'b0}};
+            for (i = PORTS-1; i >= 0; i = i - 1) begin
+                if (vec[i]) begin
+                    find_msb = i[ENC_WIDTH-1:0];
+                    disable find_msb;
+                end
+            end
+        end
+    endfunction
+
+    // For round-robin, we need to rotate the request vector
+    // The rotation is such that the port after rr_pointer becomes the LSB
+    // If rr_pointer = k, then port (k+1) mod PORTS should be at position 0
+    // rotated[i] = request[(i + rr_pointer + 1) % PORTS]
+    wire [PORTS-1:0] rotated_request;
+    genvar gi;
+    generate
+        for (gi = 0; gi < PORTS; gi = gi + 1) begin : rotate_gen
+            assign rotated_request[gi] = request[(gi + rr_pointer + 1) % PORTS];
+        end
+    endgenerate
+
+    // Determine the effective request vector and priority mode
+    wire [PORTS-1:0] effective_request;
+    wire             use_lsb_priority;
+
+    // For round-robin, we always use LSB priority on the rotated vector
+    // For fixed priority, we use the configured priority
+    assign effective_request = ARB_TYPE_ROUND_ROBIN ? rotated_request : request;
+    assign use_lsb_priority  = ARB_TYPE_ROUND_ROBIN ? 1'b1 : ARB_LSB_HIGH_PRIORITY;
+
+    // Find the grant index in the effective (possibly rotated) space
+    wire [ENC_WIDTH-1:0] eff_grant_idx;
+    wire                 eff_grant_valid;
+
+    assign eff_grant_valid = |effective_request;
+    assign eff_grant_idx   = use_lsb_priority ? find_lsb(effective_request) : find_msb(effective_request);
+
+    // Map back to original port index if round-robin
+    wire [ENC_WIDTH-1:0] grant_idx;
+    assign grant_idx = ARB_TYPE_ROUND_ROBIN ? (eff_grant_idx + rr_pointer + 1) % PORTS : eff_grant_idx;
+
+    // One-hot grant
+    wire [PORTS-1:0] grant_onehot;
+    genvar gj;
+    generate
+        for (gj = 0; gj < PORTS; gj = gj + 1) begin : grant_onehot_gen
+            assign grant_onehot[gj] = (grant_idx == gj[ENC_WIDTH-1:0]) && eff_grant_valid;
+        end
+    endgenerate
+
+    // Blocking logic:
+    // If ARB_BLOCK is set:
+    //   - If ARB_BLOCK_ACK is nonzero: hold grant until acknowledge is received
+    //   - If ARB_BLOCK_ACK is zero: hold grant until request drops
+    // Otherwise: grant is purely combinational from request
+
+    wire block_active;
+    wire block_release;
+
+    // Determine if we should hold the previous grant
+    // block_active: we are currently blocking (holding a grant)
+    // block_release: condition to release the block
+
+    // For ARB_BLOCK_ACK != 0: release when acknowledge is asserted for the granted port
+    // For ARB_BLOCK_ACK == 0: release when the request for the granted port drops
+
+    wire ack_for_grant;
+    wire req_for_grant;
+
+    assign ack_for_grant = (grant_reg & acknowledge) != 0;
+    assign req_for_grant = (grant_reg & request) != 0;
+
+    assign block_release = (ARB_BLOCK_ACK != 0) ? ack_for_grant : ~req_for_grant;
+
+    // State machine for blocking
+    // When not blocking, grant is combinational
+    // When blocking, grant is held from grant_reg
+
+    wire [PORTS-1:0] grant_out;
+    wire             grant_valid_out;
+    wire [ENC_WIDTH-1:0] grant_encoded_out;
+
+    if (ARB_BLOCK) begin : block_logic
+        // If currently blocking and not released, hold the grant
+        // Otherwise, use combinational grant
+        assign grant_out = (grant_valid_reg && !block_release) ? grant_reg : grant_onehot;
+        assign grant_valid_out = (grant_valid_reg && !block_release) ? grant_valid_reg : eff_grant_valid;
+        assign grant_encoded_out = (grant_valid_reg && !block_release) ? grant_encoded_reg : grant_idx;
+    end else begin : no_block_logic
+        assign grant_out = grant_onehot;
+        assign grant_valid_out = eff_grant_valid;
+        assign grant_encoded_out = grant_idx;
+    end
+
+    // Register the outputs for timing
+    always @(posedge clk) begin
+        if (rst_synced) begin
+            grant_reg         <= {PORTS{1'b0}};
+            grant_valid_reg   <= 1'b0;
+            grant_encoded_reg <= {ENC_WIDTH{1'b0}};
+            rr_pointer        <= {ENC_WIDTH{1'b0}};
+        end else begin
+            grant_reg         <= grant_out;
+            grant_valid_reg   <= grant_valid_out;
+            grant_encoded_reg <= grant_encoded_out;
+
+            // Update round-robin pointer when a grant is issued
+            if (ARB_TYPE_ROUND_ROBIN && grant_valid_out) begin
+                rr_pointer <= grant_idx;
+            end
+        end
+    end
+
+    // Final outputs
+    assign grant         = grant_reg;
+    assign grant_valid   = grant_valid_reg;
+    assign grant_encoded = grant_encoded_reg;
+
+endmodule

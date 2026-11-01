@@ -1,0 +1,267 @@
+```verilog
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam AWIDTH = ASIZE;
+  localparam DEPTH  = 1 << AWIDTH;
+  localparam AFULL_THRESH  = DEPTH - 2;
+  localparam AEMPTY_THRESH = 1;
+
+  // Internal FIFO memory
+  reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+  // Direction registers (synchronized to each clock domain)
+  reg a_dir_reg;
+  reg b_dir_reg;
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_dir_reg <= 1'b0;
+    else
+      a_dir_reg <= a_dir;
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_dir_reg <= 1'b0;
+    else
+      b_dir_reg <= b_dir;
+  end
+
+  // Write pointer in A domain
+  reg [AWIDTH:0] a_wr_ptr;
+  // Read pointer in A domain
+  reg [AWIDTH:0] a_rd_ptr;
+
+  // Write pointer in B domain
+  reg [AWIDTH:0] b_wr_ptr;
+  // Read pointer in B domain
+  reg [AWIDTH:0] b_rd_ptr;
+
+  // Synchronized pointers for status generation
+  // A domain: synchronized B pointers
+  reg [AWIDTH:0] b_wr_ptr_sync1, b_wr_ptr_sync2, b_wr_ptr_sync3;
+  reg [AWIDTH:0] b_rd_ptr_sync1, b_rd_ptr_sync2, b_rd_ptr_sync3;
+
+  // B domain: synchronized A pointers
+  reg [AWIDTH:0] a_wr_ptr_sync1, a_wr_ptr_sync2, a_wr_ptr_sync3;
+  reg [AWIDTH:0] a_rd_ptr_sync1, a_rd_ptr_sync2, a_rd_ptr_sync3;
+
+  // Synchronize B write pointer to A domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_wr_ptr_sync1 <= {(AWIDTH+1){1'b0}};
+      b_wr_ptr_sync2 <= {(AWIDTH+1){1'b0}};
+      b_wr_ptr_sync3 <= {(AWIDTH+1){1'b0}};
+    end else begin
+      b_wr_ptr_sync1 <= b_wr_ptr;
+      b_wr_ptr_sync2 <= b_wr_ptr_sync1;
+      b_wr_ptr_sync3 <= b_wr_ptr_sync2;
+    end
+  end
+
+  // Synchronize B read pointer to A domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_rd_ptr_sync1 <= {(AWIDTH+1){1'b0}};
+      b_rd_ptr_sync2 <= {(AWIDTH+1){1'b0}};
+      b_rd_ptr_sync3 <= {(AWIDTH+1){1'b0}};
+    end else begin
+      b_rd_ptr_sync1 <= b_rd_ptr;
+      b_rd_ptr_sync2 <= b_rd_ptr_sync1;
+      b_rd_ptr_sync3 <= b_rd_ptr_sync2;
+    end
+  end
+
+  // Synchronize A write pointer to B domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_wr_ptr_sync1 <= {(AWIDTH+1){1'b0}};
+      a_wr_ptr_sync2 <= {(AWIDTH+1){1'b0}};
+      a_wr_ptr_sync3 <= {(AWIDTH+1){1'b0}};
+    end else begin
+      a_wr_ptr_sync1 <= a_wr_ptr;
+      a_wr_ptr_sync2 <= a_wr_ptr_sync1;
+      a_wr_ptr_sync3 <= a_wr_ptr_sync2;
+    end
+  end
+
+  // Synchronize A read pointer to B domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_rd_ptr_sync1 <= {(AWIDTH+1){1'b0}};
+      a_rd_ptr_sync2 <= {(AWIDTH+1){1'b0}};
+      a_rd_ptr_sync3 <= {(AWIDTH+1){1'b0}};
+    end else begin
+      a_rd_ptr_sync1 <= a_rd_ptr;
+      a_rd_ptr_sync2 <= a_rd_ptr_sync1;
+      a_rd_ptr_sync3 <= a_rd_ptr_sync2;
+    end
+  end
+
+  // Determine effective write/read pointers based on direction
+  // When a_dir_reg == 0: A is writing, B is reading
+  // When a_dir_reg == 1: A is reading, B is writing
+
+  // A domain:
+  // If a_dir_reg == 0 (A writes): A write pointer is a_wr_ptr, A read pointer is b_rd_ptr_sync3
+  // If a_dir_reg == 1 (A reads):  A write pointer is b_wr_ptr_sync3, A read pointer is a_rd_ptr
+
+  wire a_is_writer = ~a_dir_reg;
+  wire a_is_reader = a_dir_reg;
+
+  // Effective write pointer for A domain (who is writing into the shared FIFO)
+  wire [AWIDTH:0] a_eff_wr_ptr = a_is_writer ? a_wr_ptr : b_wr_ptr_sync3;
+  // Effective read pointer for A domain (who is reading from the shared FIFO)
+  wire [AWIDTH:0] a_eff_rd_ptr = a_is_reader ? a_rd_ptr : b_rd_ptr_sync3;
+
+  // B domain:
+  // If b_dir_reg == 0 (B writes): B write pointer is b_wr_ptr, B read pointer is a_rd_ptr_sync3
+  // If b_dir_reg == 1 (B reads):  B write pointer is a_wr_ptr_sync3, B read pointer is b_rd_ptr
+
+  wire b_is_writer = ~b_dir_reg;
+  wire b_is_reader = b_dir_reg;
+
+  wire [AWIDTH+1:0] a_diff = a_eff_wr_ptr - a_eff_rd_ptr;
+  wire [AWIDTH+1:0] b_diff = b_eff_wr_ptr - b_eff_rd_ptr;
+
+  // Full/Empty status
+  // Full when write pointer has lapped read pointer by DEPTH
+  // Empty when write pointer equals read pointer
+
+  assign a_full   = (a_diff == DEPTH);
+  assign a_empty  = (a_diff == 0);
+  assign a_afull  = (a_diff >= AFULL_THRESH);
+  assign a_aempty = (a_diff <= AEMPTY_THRESH);
+
+  assign b_full   = (b_diff == DEPTH);
+  assign b_empty  = (b_diff == 0);
+  assign b_afull  = (b_diff >= AFULL_THRESH);
+  assign b_aempty = (b_diff <= AEMPTY_THRESH);
+
+  // Write enable for A domain
+  wire a_write_en = a_is_writer && a_winc && !a_full;
+  // Read enable for A domain
+  wire a_read_en  = a_is_reader && a_rinc && !a_empty;
+
+  // Write enable for B domain
+  wire b_write_en = b_is_writer && b_winc && !b_full;
+  // Read enable for B domain
+  wire b_read_en  = b_is_reader && b_rinc && !b_empty;
+
+  // Update A write pointer
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_wr_ptr <= {(AWIDTH+1){1'b0}};
+    else if (a_write_en)
+      a_wr_ptr <= a_wr_ptr + 1'b1;
+  end
+
+  // Update A read pointer
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_rd_ptr <= {(AWIDTH+1){1'b0}};
+    else if (a_read_en)
+      a_rd_ptr <= a_rd_ptr + 1'b1;
+  end
+
+  // Update B write pointer
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_wr_ptr <= {(AWIDTH+1){1'b0}};
+    else if (b_write_en)
+      b_wr_ptr <= b_wr_ptr + 1'b1;
+  end
+
+  // Update B read pointer
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_rd_ptr <= {(AWIDTH+1){1'b0}};
+    else if (b_read_en)
+      b_rd_ptr <= b_rd_ptr + 1'b1;
+  end
+
+  // Memory write
+  // A writes when a_is_writer
+  // B writes when b_is_writer
+  // Only one side can be writer at a time (direction is exclusive)
+  // But we need to handle the case where both could potentially write if directions are misconfigured.
+  // Per spec, direction selects which side writes. We assume valid direction.
+
+  always @(posedge a_clk) begin
+    if (a_write_en)
+      mem[a_wr_ptr[AWIDTH-1:0]] <= a_wdata;
+  end
+
+  always @(posedge b_clk) begin
+    if (b_write_en)
+      mem[b_wr_ptr[AWIDTH-1:0]] <= b_wdata;
+  end
+
+  // Read data
+  // A reads when a_is_reader
+  // B reads when b_is_reader
+
+  // For fall-through: if FALLTHROUGH is "TRUE", the read data is combinational from memory
+  // The read pointer used for data is the current effective read pointer
+
+  wire [AWIDTH-1:0] a_rd_addr = a_eff_rd_ptr[AWIDTH-1:0];
+  wire [AWIDTH-1:0] b_rd_addr = b_eff_rd_ptr[AWIDTH-1:0];
+
+  reg [DSIZE-1:0] a_rdata_reg;
+  reg [DSIZE-1:0] b_rdata_reg;
+
+  // A read data
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_rdata_reg <= {DSIZE{1'b0}};
+    else if (a_read_en)
+      a_rdata_reg <= mem[a_rd_addr];
+  end
+
+  // B read data
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_rdata_reg <= {DSIZE{1'b0}};
+    else if (b_read_en)
+      b_rdata_reg <= mem[b_rd_addr];
+  end
+
+  // Fall-through: combinational read
+  // When FALLTHROUGH is "TRUE", output is combinational from memory at current read address
+  // When FALLTHROUGH is not "TRUE", output is registered
+
+  wire fallthrough_en = (FALLTHROUGH == "TRUE");
+
+  assign a_rdata = fallthrough_en ? mem[a_rd_addr] : a_rdata_reg;
+  assign b_rdata = fallthrough_en ? mem[b_rd_addr] : b_rdata_reg;
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,196 @@
+```verilog
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    // Source side state
+    reg src_state;
+    localparam SRC_IDLE = 1'b0;
+    localparam SRC_WAIT = 1'b1;
+
+    // Destination side state
+    reg dst_state;
+    localparam DST_IDLE = 1'b0;
+    localparam DST_SETUP = 1'b1;
+    localparam DST_ACCESS = 1'b2;
+
+    // Synchronization signals
+    reg [1:0] req_sync;
+    reg [1:0] done_sync;
+
+    // Request FIFO (1 entry)
+    reg req_valid;
+    reg [ADDR_WIDTH-1:0] req_addr;
+    reg [DATA_WIDTH-1:0] req_wdata;
+    reg [DATA_WIDTH/8-1:0] req_strb;
+    reg [2:0] req_prot;
+    reg req_write;
+
+    // Response FIFO (1 entry)
+    reg rsp_valid;
+    reg [DATA_WIDTH-1:0] rsp_data;
+    reg rsp_err;
+
+    // Source side logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_state <= SRC_IDLE;
+            src_pready_o <= 1'b0;
+            src_prdata_o <= {DATA_WIDTH{1'b0}};
+            src_pslverr_o <= 1'b0;
+            req_valid <= 1'b0;
+            req_addr <= {ADDR_WIDTH{1'b0}};
+            req_wdata <= {DATA_WIDTH{1'b0}};
+            req_strb <= {(DATA_WIDTH/8){1'b0}};
+            req_prot <= 3'b0;
+            req_write <= 1'b0;
+            rsp_valid <= 1'b0;
+            rsp_data <= {DATA_WIDTH{1'b0}};
+            rsp_err <= 1'b0;
+        end else begin
+            case (src_state)
+                SRC_IDLE: begin
+                    src_pready_o <= 1'b0;
+                    if (src_psel_i && !src_penable_i) begin
+                        // Setup phase: capture request
+                        req_addr <= src_paddr_i;
+                        req_wdata <= src_pwdata_i;
+                        req_strb <= src_pstrb_i;
+                        req_prot <= src_pprot_i;
+                        req_write <= src_pwrite_i;
+                        req_valid <= 1'b1;
+                        src_state <= SRC_WAIT;
+                    end
+                end
+                SRC_WAIT: begin
+                    src_pready_o <= 1'b0;
+                    if (src_psel_i && src_penable_i) begin
+                        // Access phase: wait for response
+                        if (rsp_valid) begin
+                            src_prdata_o <= rsp_data;
+                            src_pslverr_o <= rsp_err;
+                            src_pready_o <= 1'b1;
+                            rsp_valid <= 1'b0;
+                            req_valid <= 1'b0;
+                            src_state <= SRC_IDLE;
+                        end
+                    end
+                end
+                default: begin
+                    src_state <= SRC_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Synchronize req_valid to destination clock
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            req_sync <= 2'b00;
+        end else begin
+            req_sync <= {req_sync[0], req_valid};
+        end
+    end
+
+    // Synchronize done signal to source clock
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            done_sync <= 2'b00;
+        end else begin
+            done_sync <= {done_sync[0], dst_state == DST_IDLE};
+        end
+    end
+
+    // Destination side logic
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_state <= DST_IDLE;
+            dst_psel_o <= 1'b0;
+            dst_penable_o <= 1'b0;
+            dst_pwrite_o <= 1'b0;
+            dst_paddr_o <= {ADDR_WIDTH{1'b0}};
+            dst_pwdata_o <= {DATA_WIDTH{1'b0}};
+            dst_pstrb_o <= {(DATA_WIDTH/8){1'b0}};
+            dst_pprot_o <= 3'b0;
+        end else begin
+            case (dst_state)
+                DST_IDLE: begin
+                    dst_psel_o <= 1'b0;
+                    dst_penable_o <= 1'b0;
+                    if (req_sync[1]) begin
+                        // Start setup phase
+                        dst_psel_o <= 1'b1;
+                        dst_penable_o <= 1'b0;
+                        dst_pwrite_o <= req_write;
+                        dst_paddr_o <= req_addr;
+                        dst_pwdata_o <= req_wdata;
+                        dst_pstrb_o <= req_strb;
+                        dst_pprot_o <= req_prot;
+                        dst_state <= DST_SETUP;
+                    end
+                end
+                DST_SETUP: begin
+                    // Move to access phase
+                    dst_psel_o <= 1'b1;
+                    dst_penable_o <= 1'b1;
+                    dst_state <= DST_ACCESS;
+                end
+                DST_ACCESS: begin
+                    if (dst_pready_i) begin
+                        // Transfer complete
+                        dst_psel_o <= 1'b0;
+                        dst_penable_o <= 1'b0;
+                        dst_state <= DST_IDLE;
+                    end
+                end
+                default: begin
+                    dst_state <= DST_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Capture response on destination side
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            rsp_valid <= 1'b0;
+            rsp_data <= {DATA_WIDTH{1'b0}};
+            rsp_err <= 1'b0;
+        end else begin
+            if (dst_state == DST_ACCESS && dst_pready_i) begin
+                rsp_data <= dst_prdata_i;
+                rsp_err <= dst_pslverr_i;
+                rsp_valid <= 1'b1;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

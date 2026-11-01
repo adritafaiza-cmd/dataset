@@ -1,0 +1,38 @@
+module sync_wedge #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    localparam SYNC_DEPTH = (STAGES < 2) ? 2 : STAGES;
+
+    reg [SYNC_DEPTH-1:0] sync_reg;
+    reg                  prev_sync;
+
+    wire sync_out = sync_reg[SYNC_DEPTH-1];
+
+    assign serial_o = sync_out;
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            sync_reg <= {SYNC_DEPTH{1'b0}};
+            prev_sync <= 1'b0;
+        end else begin
+            sync_reg <= {sync_reg[SYNC_DEPTH-2:0], serial_i};
+            prev_sync <= sync_out;
+        end
+    end
+
+    wire rising_edge  = sync_out & ~prev_sync;
+    wire falling_edge = ~sync_out & prev_sync;
+
+    assign r_edge_o = en_i & rising_edge;
+    assign f_edge_o = en_i & falling_edge;
+
+endmodule

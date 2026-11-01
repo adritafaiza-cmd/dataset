@@ -1,0 +1,162 @@
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    // Source domain registers
+    reg [WIDTH-1:0] src_reg0;
+    reg             src_valid0;
+    reg [WIDTH-1:0] src_reg1;
+    reg             src_valid1;
+
+    // Destination domain registers
+    reg [WIDTH-1:0] dst_reg0;
+    reg             dst_valid0;
+    reg [WIDTH-1:0] dst_reg1;
+    reg             dst_valid1;
+
+    // Synchronization of source valid signals to destination domain
+    reg [1:0] src_valid0_sync;
+    reg [1:0] src_valid1_sync;
+
+    // Synchronization of destination ready signals to source domain
+    reg [1:0] dst_ready0_sync;
+    reg [1:0] dst_ready1_sync;
+
+    // Synchronization of destination valid signals to source domain
+    reg [1:0] dst_valid0_sync;
+    reg [1:0] dst_valid1_sync;
+
+    // Synchronization of source ready signals to destination domain
+    reg [1:0] src_ready0_sync;
+    reg [1:0] src_ready1_sync;
+
+    // Source domain logic
+    wire src_ready0 = !src_valid0 || (dst_ready0_sync[1] && !dst_valid0_sync[1]);
+    wire src_ready1 = !src_valid1 || (dst_ready1_sync[1] && !dst_valid1_sync[1]);
+
+    assign src_ready_o = src_ready0 && src_ready1;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_valid0 <= 1'b0;
+            src_valid1 <= 1'b0;
+            src_reg0   <= {WIDTH{1'b0}};
+            src_reg1   <= {WIDTH{1'b0}};
+        end else begin
+            if (src_valid_i && src_ready0) begin
+                src_valid0 <= 1'b1;
+                src_reg0   <= src_data_i;
+            end else if (src_valid0 && dst_ready0_sync[1] && !dst_valid0_sync[1]) begin
+                src_valid0 <= 1'b0;
+            end
+
+            if (src_valid_i && src_ready1) begin
+                src_valid1 <= 1'b1;
+                src_reg1   <= src_data_i;
+            end else if (src_valid1 && dst_ready1_sync[1] && !dst_valid1_sync[1]) begin
+                src_valid1 <= 1'b0;
+            end
+        end
+    end
+
+    // Synchronize source valids to destination domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_valid0_sync <= 2'b00;
+            src_valid1_sync <= 2'b00;
+        end else begin
+            src_valid0_sync <= {src_valid0_sync[0], src_valid0};
+            src_valid1_sync <= {src_valid1_sync[0], src_valid1};
+        end
+    end
+
+    // Synchronize source data to destination domain
+    reg [WIDTH-1:0] src_reg0_sync;
+    reg [WIDTH-1:0] src_reg1_sync;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_reg0_sync <= {WIDTH{1'b0}};
+            src_reg1_sync <= {WIDTH{1'b0}};
+        end else begin
+            src_reg0_sync <= src_reg0;
+            src_reg1_sync <= src_reg1;
+        end
+    end
+
+    // Destination domain logic
+    wire dst_valid0 = dst_valid0_sync[1] || src_valid0_sync[1];
+    wire dst_valid1 = dst_valid1_sync[1] || src_valid1_sync[1];
+
+    assign dst_valid_o = dst_valid0 || dst_valid1;
+    assign dst_data_o  = dst_valid0 ? (dst_valid0_sync[1] ? dst_reg0 : src_reg0_sync) :
+                         (dst_valid1 ? (dst_valid1_sync[1] ? dst_reg1 : src_reg1_sync) : {WIDTH{1'b0}});
+
+    // Destination ready signals
+    wire dst_ready0 = !dst_valid0 || dst_ready_i;
+    wire dst_ready1 = !dst_valid1 || dst_ready_i;
+
+    // Synchronize destination ready to source domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_ready0_sync <= 2'b00;
+            dst_ready1_sync <= 2'b00;
+        end else begin
+            dst_ready0_sync <= {dst_ready0_sync[0], dst_ready0};
+            dst_ready1_sync <= {dst_ready1_sync[0], dst_ready1};
+        end
+    end
+
+    // Synchronize destination valid to source domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_valid0_sync <= 2'b00;
+            dst_valid1_sync <= 2'b00;
+        end else begin
+            dst_valid0_sync <= {dst_valid0_sync[0], dst_valid0};
+            dst_valid1_sync <= {dst_valid1_sync[0], dst_valid1};
+        end
+    end
+
+    // Destination domain registers for holding data
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_valid0 <= 1'b0;
+            dst_valid1 <= 1'b0;
+            dst_reg0   <= {WIDTH{1'b0}};
+            dst_reg1   <= {WIDTH{1'b0}};
+        end else begin
+            // Slot 0
+            if (src_valid0_sync[1] && !dst_valid0_sync[1] && dst_ready_i) begin
+                dst_valid0 <= 1'b0;
+            end else if (src_valid0_sync[1] && !dst_valid0_sync[1]) begin
+                dst_valid0 <= 1'b1;
+                dst_reg0   <= src_reg0_sync;
+            end else if (dst_valid0_sync[1] && dst_ready_i) begin
+                dst_valid0 <= 1'b0;
+            end
+
+            // Slot 1
+            if (src_valid1_sync[1] && !dst_valid1_sync[1] && dst_ready_i) begin
+                dst_valid1 <= 1'b0;
+            end else if (src_valid1_sync[1] && !dst_valid1_sync[1]) begin
+                dst_valid1 <= 1'b1;
+                dst_reg1   <= src_reg1_sync;
+            end else if (dst_valid1_sync[1] && dst_ready_i) begin
+                dst_valid1 <= 1'b0;
+            end
+        end
+    end
+
+endmodule

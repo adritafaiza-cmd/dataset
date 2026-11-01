@@ -1,0 +1,145 @@
+module wbxclk #(
+	parameter AW=32,
+	parameter DW=32,
+	parameter LGFIFO = 5
+) (
+	input	wire			i_wb_clk, i_reset,
+	input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+	input	wire	[(AW-1):0]	i_wb_addr,
+	input	wire	[(DW-1):0]	i_wb_data,
+	input	wire	[(DW/8-1):0]	i_wb_sel,
+	output	wire			o_wb_stall,
+	output	reg			o_wb_ack,
+	output	reg	[(DW-1):0]	o_wb_data,
+	output	reg			o_wb_err,
+	input	wire			i_xclk_clk,
+	output	reg			o_xclk_cyc,
+	output	reg			o_xclk_stb,
+	output	reg			o_xclk_we,
+	output	reg	[(AW-1):0]	o_xclk_addr,
+	output	reg	[(DW-1):0]	o_xclk_data,
+	output	reg	[(DW/8-1):0]	o_xclk_sel,
+	input	wire			i_xclk_stall,
+	input	wire			i_xclk_ack,
+	input	wire	[(DW-1):0]	i_xclk_data,
+	input	wire			i_xclk_err
+);
+
+	localparam FIFO_DEPTH = 1 << LGFIFO;
+	localparam FIFO_WIDTH = AW + DW + (DW/8) + 1; // addr + data + sel + we
+
+	// Request FIFO (wb -> xclk)
+	reg [FIFO_WIDTH-1:0] req_mem [0:FIFO_DEPTH-1];
+	reg [LGFIFO:0] req_wr_ptr, req_rd_ptr;
+	reg [LGFIFO:0] req_wr_ptr_sync1, req_wr_ptr_sync2;
+	reg [LGFIFO:0] req_rd_ptr_sync1, req_rd_ptr_sync2;
+
+	// Response FIFO (xclk -> wb)
+	reg [DW+1:0] rsp_mem [0:FIFO_DEPTH-1]; // data + err
+	reg [LGFIFO:0] rsp_wr_ptr, rsp_rd_ptr;
+	reg [LGFIFO:0] rsp_wr_ptr_sync1, rsp_wr_ptr_sync2;
+	reg [LGFIFO:0] rsp_rd_ptr_sync1, rsp_rd_ptr_sync2;
+
+	// Request FIFO write logic (wb domain)
+	wire req_full = (req_wr_ptr - req_rd_ptr_sync2) == FIFO_DEPTH;
+	wire req_empty = (req_wr_ptr_sync2 == req_rd_ptr_sync2);
+	wire req_can_write = i_wb_cyc && i_wb_stb && !req_full;
+
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset)
+			req_wr_ptr <= {LGFIFO+1{1'b0}};
+		else if (req_can_write)
+			req_wr_ptr <= req_wr_ptr + 1'b1;
+	end
+
+	always @(posedge i_wb_clk) begin
+		if (req_can_write) begin
+			req_mem[req_wr_ptr[LGFIFO-1:0]] <= {i_wb_we, i_wb_addr, i_wb_data, i_wb_sel};
+		end
+	end
+
+	// Request FIFO read logic (xclk domain)
+	always @(posedge i_xclk_clk) begin
+		req_wr_ptr_sync1 <= req_wr_ptr;
+		req_wr_ptr_sync2 <= req_wr_ptr_sync1;
+	end
+
+	wire req_xclk_empty = (req_wr_ptr_sync2 == req_rd_ptr);
+	wire req_xclk_can_read = !req_xclk_empty && !i_xclk_stall;
+
+	always @(posedge i_xclk_clk) begin
+		if (req_xclk_can_read)
+			req_rd_ptr <= req_rd_ptr + 1'b1;
+	end
+
+	// Drive xclk outputs
+	always @(posedge i_xclk_clk) begin
+		if (req_xclk_can_read) begin
+			o_xclk_cyc <= 1'b1;
+			o_xclk_stb <= 1'b1;
+			o_xclk_we <= req_mem[req_rd_ptr[LGFIFO-1:0]][FIFO_WIDTH-1];
+			o_xclk_addr <= req_mem[req_rd_ptr[LGFIFO-1:0]][FIFO_WIDTH-2:FIFO_WIDTH-1-AW];
+			o_xclk_data <= req_mem[req_rd_ptr[LGFIFO-1:0]][FIFO_WIDTH-2-AW:FIFO_WIDTH-2-AW-DW];
+			o_xclk_sel <= req_mem[req_rd_ptr[LGFIFO-1:0]][FIFO_WIDTH-2-AW-DW:FIFO_WIDTH-2-AW-DW-(DW/8)];
+		end else begin
+			o_xclk_cyc <= 1'b0;
+			o_xclk_stb <= 1'b0;
+			o_xclk_we <= 1'b0;
+			o_xclk_addr <= {AW{1'b0}};
+			o_xclk_data <= {DW{1'b0}};
+			o_xclk_sel <= {(DW/8){1'b0}};
+		end
+	end
+
+	// Response FIFO write logic (xclk domain)
+	wire rsp_full = (rsp_wr_ptr - rsp_rd_ptr_sync2) == FIFO_DEPTH;
+	wire rsp_can_write = i_xclk_ack && !rsp_full;
+
+	always @(posedge i_xclk_clk) begin
+		if (rsp_can_write)
+			rsp_wr_ptr <= rsp_wr_ptr + 1'b1;
+	end
+
+	always @(posedge i_xclk_clk) begin
+		if (rsp_can_write) begin
+			rsp_mem[rsp_wr_ptr[LGFIFO-1:0]] <= {i_xclk_err, i_xclk_data};
+		end
+	end
+
+	// Response FIFO read logic (wb domain)
+	always @(posedge i_wb_clk) begin
+		rsp_wr_ptr_sync1 <= rsp_wr_ptr;
+		rsp_wr_ptr_sync2 <= rsp_wr_ptr_sync1;
+	end
+
+	wire rsp_empty = (rsp_wr_ptr_sync2 == rsp_rd_ptr);
+	wire rsp_can_read = !rsp_empty;
+
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset)
+			rsp_rd_ptr <= {LGFIFO+1{1'b0}};
+		else if (rsp_can_read)
+			rsp_rd_ptr <= rsp_rd_ptr + 1'b1;
+	end
+
+	// Drive wb outputs
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			o_wb_ack <= 1'b0;
+			o_wb_data <= {DW{1'b0}};
+			o_wb_err <= 1'b0;
+		end else if (rsp_can_read) begin
+			o_wb_ack <= 1'b1;
+			o_wb_data <= rsp_mem[rsp_rd_ptr[LGFIFO-1:0]][DW:0];
+			o_wb_err <= rsp_mem[rsp_rd_ptr[LGFIFO-1:0]][DW+1];
+		end else begin
+			o_wb_ack <= 1'b0;
+			o_wb_data <= {DW{1'b0}};
+			o_wb_err <= 1'b0;
+		end
+	end
+
+	// Stall output: high when request FIFO is full
+	assign o_wb_stall = req_full;
+
+endmodule

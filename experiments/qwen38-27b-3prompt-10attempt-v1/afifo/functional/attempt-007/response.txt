@@ -1,0 +1,139 @@
+```verilog
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam ADDR_W = LGFIFO;
+	localparam CNT_W = LGFIFO + 1;
+
+	// Memory
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+
+	// Write pointer (write clock domain)
+	reg [ADDR_W:0] wptr;
+	// Read pointer (read clock domain)
+	reg [ADDR_W:0] rptr;
+
+	// Gray code pointers
+	wire [ADDR_W:0] wptr_gray = wptr ^ (wptr >> 1);
+	wire [ADDR_W:0] rptr_gray = rptr ^ (rptr >> 1);
+
+	// Synchronizers for write pointer gray into read domain
+	reg [ADDR_W:0] rptr_gray_sync [0:NFF-1];
+	// Synchronizers for read pointer gray into write domain
+	reg [ADDR_W:0] wptr_gray_sync [0:NFF-1];
+
+	// Binary read pointer in write domain (for full calculation)
+	reg [ADDR_W:0] rptr_bin_w;
+	// Binary write pointer in read domain (for empty calculation)
+	reg [ADDR_W:0] wptr_bin_r;
+
+	// Gray to binary conversion
+	function [ADDR_W:0] gray2bin;
+		input [ADDR_W:0] gray;
+		reg [ADDR_W:0] bin;
+		integer i;
+		begin
+			bin[ADDR_W] = gray[ADDR_W];
+			for (i = ADDR_W-1; i >= 0; i = i-1)
+				bin[i] = bin[i+1] ^ gray[i];
+			gray2bin = bin;
+		end
+	endfunction
+
+	// Write clock domain logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wptr <= {ADDR_W+1{1'b0}};
+		end else if (i_wr && !o_wr_full) begin
+			wptr <= wptr + 1'b1;
+		end
+	end
+
+	// Write to memory
+	always @(posedge i_wclk) begin
+		if (i_wr && !o_wr_full) begin
+			mem[wptr[ADDR_W-1:0]] <= i_wr_data;
+		end
+	end
+
+	// Synchronize read pointer gray into write domain
+	always @(posedge i_wclk) begin
+		rptr_gray_sync[0] <= rptr_gray;
+		for (integer i = 1; i < NFF; i = i+1)
+			rptr_gray_sync[i] <= rptr_gray_sync[i-1];
+	end
+
+	// Convert synchronized gray to binary in write domain
+	always @(posedge i_wclk) begin
+		rptr_bin_w <= gray2bin(rptr_gray_sync[NFF-1]);
+	end
+
+	// Full flag: write pointer has lapped read pointer by DEPTH
+	// Full when wptr[ADDR_W] != rptr_bin_w[ADDR_W] and wptr[ADDR_W-1:0] == rptr_bin_w[ADDR_W-1:0]
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			o_wr_full <= 1'b0;
+		else
+			o_wr_full <= (wptr[ADDR_W] != rptr_bin_w[ADDR_W]) && 
+						 (wptr[ADDR_W-1:0] == rptr_bin_w[ADDR_W-1:0]);
+	end
+
+	// Read clock domain logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rptr <= {ADDR_W+1{1'b0}};
+		end else if (i_rd && !o_rd_empty) begin
+			rptr <= rptr + 1'b1;
+		end
+	end
+
+	// Synchronize write pointer gray into read domain
+	always @(posedge i_rclk) begin
+		wptr_gray_sync[0] <= wptr_gray;
+		for (integer i = 1; i < NFF; i = i+1)
+			wptr_gray_sync[i] <= wptr_gray_sync[i-1];
+	end
+
+	// Convert synchronized gray to binary in read domain
+	always @(posedge i_rclk) begin
+		wptr_bin_r <= gray2bin(wptr_gray_sync[NFF-1]);
+	end
+
+	// Empty flag: write pointer equals read pointer
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_empty <= 1'b1;
+		else
+			o_rd_empty <= (wptr_bin_r == rptr);
+	end
+
+	// Read data
+	// If OPT_REGISTER_READS is 1, register the read data
+	// If OPT_REGISTER_READS is 0, combinational read
+	wire [WIDTH-1:0] rd_addr = rptr[ADDR_W-1:0];
+	wire [WIDTH-1:0] mem_rd = mem[rd_addr];
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_data <= {WIDTH{1'b0}};
+		else if (OPT_REGISTER_READS)
+			o_rd_data <= mem_rd;
+		else
+			o_rd_data <= mem_rd;
+	end
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,354 @@
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    localparam ACTIVE = RST_POL;
+    localparam INACTIVE = ~RST_POL;
+
+    reg [CHAINS-1:0] sync_reg;
+    reg sync_rst_o_reg;
+
+    // Initialize sync_reg to inactive state
+    // On reset, sync_reg should be inactive so that after reset release,
+    // the pipeline will eventually output inactive.
+    // But we need sync_rst_o to follow assertion immediately.
+
+    // The idea:
+    // - sync_rst_o = async_rst_i | (sync_reg[CHAINS-1] == ACTIVE)
+    //   Wait, that's not right. Let me think again.
+
+    // Actually, the standard approach:
+    // - sync_rst_o is active when async_rst_i is active OR when the synchronizer
+    //   chain indicates that reset was recently active.
+    // - The synchronizer chain samples async_rst_i on each clock edge.
+    // - When async_rst_i deasserts, the chain will take CHAINS cycles to
+    //   propagate the deassertion through.
+    // - sync_rst_o should be active if async_rst_i is active OR if any stage
+    //   of the chain is still active (meaning reset hasn't fully propagated through).
+
+    // Let me reconsider:
+    // - sync_rst_o must follow assertion of async_rst_i immediately.
+    // - sync_rst_o may release only after clk has observed a safe deassert.
+    // - CHAINS is the release-pipeline depth.
+
+    // So the synchronizer chain samples async_rst_i. The last stage of the chain
+    // represents the synchronized version. sync_rst_o should be active if:
+    //   async_rst_i is active (immediate assertion) OR
+    //   the last stage of the synchronizer chain is active (meaning reset was
+    //   recently active and hasn't fully cleared yet)
+
+    // Actually, a cleaner approach:
+    // - The synchronizer chain tracks the reset state.
+    // - sync_rst_o = async_rst_i | sync_reg[CHAINS-1]
+    //   This way, assertion is immediate (via async_rst_i), and release is
+    //   delayed by CHAINS cycles after async_rst_i deasserts (via the pipeline).
+
+    // But wait, if async_rst_i deasserts, sync_reg[CHAINS-1] will still be active
+    // for CHAINS-1 more cycles (since it takes CHAINS cycles to propagate through
+    // CHAINS stages). So sync_rst_o will remain active for CHAINS cycles after
+    // async_rst_i deasserts. That's the desired behavior.
+
+    // Let's verify:
+    // Cycle 0: async_rst_i = 1, sync_reg = 0 (initial)
+    //   sync_rst_o = 1 | 0 = 1 (active)
+    // Cycle 1: async_rst_i = 1, sync_reg[0] = 1 (sampled async_rst_i)
+    //   sync_rst_o = 1 | sync_reg[CHAINS-1]
+    //   If CHAINS=2, sync_reg[1] is still 0, so sync_rst_o = 1
+    // Cycle 2: async_rst_i = 1, sync_reg = 2'b11
+    //   sync_rst_o = 1 | 1 = 1
+    // Cycle 3: async_rst_i = 0, sync_reg[0] = 0 (sampled async_rst_i=0)
+    //   sync_rst_o = 0 | sync_reg[1] = 0 | 1 = 1 (still active)
+    // Cycle 4: async_rst_i = 0, sync_reg = 2'b01
+    //   sync_rst_o = 0 | 0 = 0 (released)
+
+    // So with CHAINS=2, it takes 2 cycles after deassertion to release. That's correct.
+
+    // For CHAINS=1:
+    // Cycle 0: async_rst_i = 1, sync_reg[0] = 0
+    //   sync_rst_o = 1 | 0 = 1
+    // Cycle 1: async_rst_i = 1, sync_reg[0] = 1
+    //   sync_rst_o = 1 | 1 = 1
+    // Cycle 2: async_rst_i = 0, sync_reg[0] = 0
+    //   sync_rst_o = 0 | 0 = 0
+    // So with CHAINS=1, it takes 1 cycle after deassertion to release. Correct.
+
+    // Now, what about the initial state? We need to initialize sync_reg to inactive.
+    // If RST_POL=1 (active-high), inactive is 0.
+    // If RST_POL=0 (active-low), inactive is 1.
+
+    // We can use async_rst_i to initialize the chain, but that would create a dependency.
+    // Instead, we can initialize sync_reg to INACTIVE on reset.
+
+    // But wait, if we use async_rst_i to reset sync_reg, then when async_rst_i is active,
+    // sync_reg is forced to INACTIVE, which would make sync_rst_o = async_rst_i | INACTIVE = async_rst_i.
+    // That's fine for assertion. But for release, we need the chain to propagate.
+
+    // Actually, let's not use async_rst_i to reset sync_reg. Instead, we just let the
+    // chain sample async_rst_i naturally. The initial value of sync_reg doesn't matter
+    // much because async_rst_i will drive it. But to be safe, we can initialize to INACTIVE.
+
+    // Let's use a simple approach:
+    // - sync_reg[0] samples async_rst_i on each clock edge.
+    // - sync_reg[i] samples sync_reg[i-1] on each clock edge.
+    // - sync_rst_o = async_rst_i | sync_reg[CHAINS-1]
+
+    // For the initial state, we can initialize sync_reg to INACTIVE.
+    // If RST_POL=1, INACTIVE=0, so sync_reg starts at 0.
+    // If RST_POL=0, INACTIVE=1, so sync_reg starts at 1.
+
+    // But if RST_POL=0 (active-low), async_rst_i is active when 0.
+    // sync_rst_o should be active when async_rst_i is 0.
+    // sync_rst_o = async_rst_i | sync_reg[CHAINS-1]
+    // If async_rst_i=0 (active), sync_rst_o = 0 | sync_reg[CHAINS-1]
+    // That's not right. We need sync_rst_o to be active (0) when async_rst_i is active (0).
+
+    // Let me reconsider for RST_POL=0:
+    // - async_rst_i is active-low, so active when 0.
+    // - sync_rst_o should be active-low, so active when 0.
+    // - sync_rst_o must follow assertion of async_rst_i immediately.
+    //   Assertion means async_rst_i goes to 0. sync_rst_o should go to 0 immediately.
+    // - sync_rst_o may release only after clk has observed a safe deassert.
+    //   Deassertion means async_rst_i goes to 1. sync_rst_o should go to 1 after CHAINS cycles.
+
+    // So for RST_POL=0:
+    //   sync_rst_o = async_rst_i & sync_reg[CHAINS-1]
+    //   Where sync_reg samples async_rst_i.
+    //   When async_rst_i=0 (active), sync_rst_o = 0 & sync_reg[CHAINS-1] = 0 (active). Good.
+    //   When async_rst_i=1 (inactive), sync_rst_o = 1 & sync_reg[CHAINS-1] = sync_reg[CHAINS-1].
+    //   The chain will propagate the 1 through, so sync_rst_o will become 1 after CHAINS cycles.
+
+    // For RST_POL=1:
+    //   sync_rst_o = async_rst_i | sync_reg[CHAINS-1]
+    //   When async_rst_i=1 (active), sync_rst_o = 1 | sync_reg[CHAINS-1] = 1 (active). Good.
+    //   When async_rst_i=0 (inactive), sync_rst_o = 0 | sync_reg[CHAINS-1] = sync_reg[CHAINS-1].
+    //   The chain will propagate the 0 through, so sync_rst_o will become 0 after CHAINS cycles.
+
+    // So the logic depends on RST_POL. Let's use a conditional.
+
+    // Actually, we can unify this:
+    //   sync_rst_o = (RST_POL) ? (async_rst_i | sync_reg[CHAINS-1]) : (async_rst_i & sync_reg[CHAINS-1])
+
+    // But we need to be careful with the initial value of sync_reg.
+    // For RST_POL=1, sync_reg should start at 0 (inactive).
+    // For RST_POL=0, sync_reg should start at 1 (inactive).
+
+    // We can initialize sync_reg to INACTIVE.
+
+    // Let's implement this.
+
+    // Initialize sync_reg to INACTIVE
+    // INACTIVE = ~RST_POL
+
+    // We'll use a for loop to initialize and update sync_reg.
+
+    // Actually, let's just write it out.
+
+    // For CHAINS=2:
+    //   sync_reg[0] <= async_rst_i;
+    //   sync_reg[1] <= sync_reg[0];
+
+    // For general CHAINS, we need a loop.
+
+    // Let's use a generate block or a for loop in the always block.
+
+    // In Verilog-2001, we can use a for loop in an always block.
+
+    // Let's write the code.
+
+    // First, let's define the initial value.
+    // We'll initialize sync_reg to INACTIVE on reset.
+    // But we don't have a separate reset for sync_reg. We can use async_rst_i.
+    // However, if we use async_rst_i to reset sync_reg, then when async_rst_i is active,
+    // sync_reg is forced to INACTIVE, which might interfere with the chain.
+
+    // Actually, let's not reset sync_reg with async_rst_i. Instead, we just let the
+    // chain sample async_rst_i. The initial value of sync_reg will be X in simulation,
+    // but in synthesis, it will be initialized to 0 by default. To be safe, we can
+    // initialize it to INACTIVE.
+
+    // Let's use a separate always block for initialization, or just initialize in the
+    // main always block.
+
+    // Actually, the simplest approach is to not explicitly initialize sync_reg and let
+    // the chain propagate. The first few cycles might have X values, but after CHAINS
+    // cycles, the chain will be stable. For a reset synchronizer, this is acceptable
+    // because the reset is typically asserted at power-up, and the chain will quickly
+    // stabilize.
+
+    // But to be safe, let's initialize sync_reg to INACTIVE.
+
+    // We can do this by using async_rst_i to reset sync_reg to INACTIVE.
+    // When async_rst_i is active, sync_reg is forced to INACTIVE.
+    // When async_rst_i is inactive, sync_reg samples the previous stage.
+
+    // For RST_POL=1:
+    //   async_rst_i active = 1
+    //   When async_rst_i=1, sync_reg <= 0 (INACTIVE)
+    //   When async_rst_i=0, sync_reg <= sync_reg[0] (for stage 1) or async_rst_i (for stage 0)
+
+    // Wait, that's not right. If we reset sync_reg to INACTIVE when async_rst_i is active,
+    // then the chain won't propagate the active state. Let me reconsider.
+
+    // Actually, the chain should sample async_rst_i regardless of its state. The reset
+    // of sync_reg should only happen at power-up or when we want to clear the chain.
+
+    // Let's just initialize sync_reg to INACTIVE at time 0 and let the chain sample
+    // async_rst_i on each clock edge. We don't need to reset sync_reg with async_rst_i.
+
+    // In Verilog, we can initialize registers in an always block with a reset condition.
+    // But we don't have a separate reset. We can use async_rst_i as the reset for
+    // initialization purposes only.
+
+    // Actually, let's just use a simple approach:
+    // - sync_reg[0] samples async_rst_i on each clock edge.
+    // - sync_reg[i] samples sync_reg[i-1] on each clock edge.
+    // - No explicit reset for sync_reg. The initial value will be X in simulation,
+    //   but in synthesis, it will be 0. For RST_POL=1, 0 is INACTIVE, which is fine.
+    //   For RST_POL=0, 0 is ACTIVE, which is not ideal. So we need to handle this.
+
+    // To handle RST_POL=0, we can initialize sync_reg to 1 (INACTIVE for active-low).
+    // We can do this by using a reset condition.
+
+    // Let's use async_rst_i to initialize sync_reg to INACTIVE.
+    // When async_rst_i is active, we force sync_reg to INACTIVE.
+    // When async_rst_i is inactive, we sample the previous stage.
+
+    // For RST_POL=1:
+    //   async_rst_i active = 1
+    //   When async_rst_i=1, sync_reg <= 0
+    //   When async_rst_i=0, sync_reg <= sync_reg[0] (for i>0) or async_rst_i (for i=0)
+
+    // But this means that when async_rst_i is active, sync_reg is forced to 0, which
+    // is INACTIVE. Then when async_rst_i deasserts, sync_reg[0] will sample 0, and
+    // the chain will propagate 0. So sync_rst_o = async_rst_i | sync_reg[CHAINS-1]
+    // will be 0 | 0 = 0 after CHAINS cycles. That's correct.
+
+    // But wait, when async_rst_i is active, sync_reg is forced to 0, so sync_reg[CHAINS-1]
+    // is 0. sync_rst_o = 1 | 0 = 1. Good.
+    // When async_rst_i deasserts, sync_reg[0] samples 0, and the chain propagates 0.
+    // After CHAINS cycles, sync_reg[CHAINS-1] is 0, so sync_rst_o = 0 | 0 = 0. Good.
+
+    // For RST_POL=0:
+    //   async_rst_i active = 0
+    //   When async_rst_i=0, sync_reg <= 1 (INACTIVE for active-low)
+    //   When async_rst_i=1, sync_reg <= sync_reg[0] (for i>0) or async_rst_i (for i=0)
+
+    // When async_rst_i is active (0), sync_reg is forced to 1. sync_rst_o = async_rst_i & sync_reg[CHAINS-1] = 0 & 1 = 0. Good.
+    // When async_rst_i deasserts (1), sync_reg[0] samples 1, and the chain propagates 1.
+    // After CHAINS cycles, sync_reg[CHAINS-1] is 1, so sync_rst_o = 1 & 1 = 1. Good.
+
+    // So the approach is:
+    // - Use async_rst_i to reset sync_reg to INACTIVE.
+    // - When async_rst_i is active, sync_reg is forced to INACTIVE.
+    // - When async_rst_i is inactive, sync_reg samples the previous stage.
+
+    // Let's implement this.
+
+    // INACTIVE = ~RST_POL
+
+    // For each stage i:
+    //   If async_rst_i is active, sync_reg[i] <= INACTIVE
+    //   Else, sync_reg[i] <= (i==0) ? async_rst_i : sync_reg[i-1]
+
+    // But we need to be careful with the condition. "async_rst_i is active" means:
+    //   RST_POL=1: async_rst_i == 1
+    //   RST_POL=0: async_rst_i == 0
+
+    // So the condition is: async_rst_i == RST_POL
+
+    // Let's write the code.
+
+    // Actually, I realize that using async_rst_i to reset sync_reg might cause issues
+    // because async_rst_i is asynchronous. The reset of sync_reg should be synchronous
+    // to avoid metastability. But since we're using async_rst_i as the reset, it's
+    // asynchronous. This might not be ideal.
+
+    // Let me reconsider. The standard approach for a reset synchronizer is:
+    // - The synchronizer chain samples the async reset signal.
+    // - The output is the OR (for active-high) or AND (for active-low) of the async
+    //   reset and the last stage of the chain.
+    // - The chain is not reset by the async reset; it just samples it.
+
+    // So let's go back to the simpler approach:
+    // - sync_reg[0] samples async_rst_i on each clock edge.
+    // - sync_reg[i] samples sync_reg[i-1] on each clock edge.
+    // - No reset for sync_reg.
+    // - sync_rst_o = (RST_POL) ? (async_rst_i | sync_reg[CHAINS-1]) : (async_rst_i & sync_reg[CHAINS-1])
+
+    // The initial value of sync_reg will be X in simulation, but in synthesis, it will
+    // be 0. For RST_POL=1, 0 is INACTIVE, which is fine. For RST_POL=0, 0 is ACTIVE,
+    // which is not ideal. But in practice, the reset is asserted at power-up, so the
+    // chain will quickly stabilize.
+
+    // To handle the initial value for RST_POL=0, we can initialize sync_reg to 1.
+    // We can do this by using a reset condition. But we don't have a separate reset.
+
+    // Let's just use the simple approach and accept that the initial value might be X
+    // in simulation. In synthesis, the initial value will be 0, which is fine for
+    // RST_POL=1. For RST_POL=0, the initial value will be 0 (ACTIVE), which means
+    // sync_rst_o will be active initially. But since the reset is typically asserted
+    // at power-up, this is acceptable.
+
+    // Actually, let's initialize sync_reg to INACTIVE using a reset condition.
+    // We can use async_rst_i as the reset, but make it synchronous.
+
+    // Wait, the problem says "async_rst_i: Reset reset." So it's an asynchronous reset.
+    // We can use it to reset sync_reg asynchronously.
+
+    // Let's use async_rst_i to reset sync_reg to INACTIVE asynchronously.
+    // This is safe because we're just initializing the chain, not using it for
+    // synchronization.
+
+    // For RST_POL=1:
+    //   async_rst_i active = 1
+    //   When async_rst_i=1, sync_reg <= 0
+    //   When async_rst_i=0, sync_reg <= sync_reg[0] (for i>0) or async_rst_i (for i=0)
+
+    // For RST_POL=0:
+    //   async_rst_i active = 0
+    //   When async_rst_i=0, sync_reg <= 1
+    //   When async_rst_i=1, sync_reg <= sync_reg[0] (for i>0) or async_rst_i (for i=0)
+
+    // This is the same as before. Let's implement it.
+
+    // Actually, I think the cleanest approach is to not reset sync_reg and just let
+    // the chain sample async_rst_i. The initial value doesn't matter much because
+    // the reset is asserted at power-up.
+
+    // Let's go with the simple approach:
+    // - sync_reg[0] samples async_rst_i on each clock edge.
+    // - sync_reg[i] samples sync_reg[i-1] on each clock edge.
+    // - sync_rst_o = (RST_POL) ? (async_rst_i | sync_reg[CHAINS-1]) : (async_rst_i & sync_reg[CHAINS-1])
+
+    // And we'll initialize sync_reg to INACTIVE using a reset condition with async_rst_i.
+
+    // Let's write the code.
+
+    // Define INACTIVE
+    localparam INACTIVE = ~RST_POL;
+
+    // Always block for sync_reg
+    always @(posedge clk or (RST_POL ? posedge async_rst_i : negedge async_rst_i)) begin
+        if (async_rst_i == RST_POL) begin
+            // Reset sync_reg to INACTIVE
+            for (integer i = 0; i < CHAINS; i = i + 1) begin
+                sync_reg[i] <= INACTIVE;
+            end
+        end else begin
+            // Sample the previous stage
+            sync_reg[0] <= async_rst_i;
+            for (integer i = 1; i < CHAINS; i = i + 1) begin
+                sync_reg[i] <= sync_reg[i-1];
+            end
+        end
+    end
+
+    // Output logic
+    assign sync_rst_o = (RST_POL) ? (async_rst_i | sync_reg[CHAINS-1]) : (async_rst_i & sync_reg[CHAINS-1]);
+
+endmodule

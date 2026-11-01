@@ -1,0 +1,643 @@
+```verilog
+module uart_top (
+    input  wire        wb_clk_i,
+    input  wire        wb_rst_i,
+    input  wire [7:0]  wb_adr_i,
+    input  wire [31:0] wb_dat_i,
+    output wire [31:0] wb_dat_o,
+    input  wire        wb_we_i,
+    input  wire        wb_stb_i,
+    input  wire        wb_cyc_i,
+    output wire        wb_ack_o,
+    input  wire [3:0]  wb_sel_i,
+    output wire        int_o,
+    output wire        stx_pad_o,
+    input  wire        srx_pad_i,
+    output wire        rts_pad_o,
+    input  wire        cts_pad_i,
+    output wire        dtr_pad_o,
+    input  wire        dsr_pad_i,
+    input  wire        ri_pad_i,
+    input  wire        dcd_pad_i
+);
+
+    // Wishbone address decoding
+    wire [7:0] wb_adr = wb_adr_i;
+    wire       wb_stb = wb_stb_i & wb_cyc_i;
+    wire       wb_we  = wb_we_i & wb_stb;
+
+    // Register addresses (byte addresses)
+    localparam ADDR_THR = 8'h00; // Transmitter Holding Register
+    localparam ADDR_RBR = 8'h00; // Receiver Buffer Register
+    localparam ADDR_DLL = 8'h00; // Divisor Latch Low
+    localparam ADDR_DLM = 8'h01; // Divisor Latch High
+    localparam ADDR_IER = 8'h01; // Interrupt Enable Register
+    localparam ADDR_IIR = 8'h02; // Interrupt Identification Register
+    localparam ADDR_FCR = 8'h02; // FIFO Control Register
+    localparam ADDR_LCR = 8'h03; // Line Control Register
+    localparam ADDR_MCR = 8'h04; // Modem Control Register
+    localparam ADDR_LSR = 8'h05; // Line Status Register
+    localparam ADDR_MSR = 8'h06; // Modem Status Register
+    localparam ADDR_SCR = 8'h07; // Scratch Register
+
+    // LCR bits
+    localparam LCR_DLAB = 7;
+    localparam LCR_FEN  = 4;
+    localparam LCR_SBC  = 5;
+    localparam LCR_EPS  = 6;
+    localparam LCR_SP   = 7;
+    localparam LCR_WLS  = 1:0; // Word length select
+
+    // IER bits
+    localparam IER_ERDI = 0; // Enable Receiver Data Available Interrupt
+    localparam IER_ETBEI = 1; // Enable Transmitter Holding Register Empty Interrupt
+    localparam IER_ELSI = 2; // Enable Receiver Line Status Interrupt
+    localparam IER_EDSI = 3; // Enable Modem Status Interrupt
+
+    // IIR values
+    localparam IIR_NO_INT    = 8'h01;
+    localparam IIR_THR_EMPTY = 8'h02;
+    localparam IIR_DATA_AVAIL = 8'h04;
+    localparam IIR_LINE_STAT = 8'h06;
+    localparam IIR_MODEM_STAT = 8'h08;
+
+    // LSR bits
+    localparam LSR_DR  = 0; // Data Ready
+    localparam LSR_OE  = 1; // Overrun Error
+    localparam LSR_PE  = 2; // Parity Error
+    localparam LSR_FE  = 3; // Framing Error
+    localparam LSR_BI  = 4; // Break Interrupt
+    localparam LSR_THRE = 5; // Transmitter Holding Register Empty
+    localparam LSR_TEMT = 6; // Transmitter Empty
+    localparam LSR_FE2  = 7; // FIFO Error
+
+    // MSR bits
+    localparam MSR_DCTS = 0; // Delta Clear To Send
+    localparam MSR_DDSR = 1; // Delta Data Set Ready
+    localparam MSR_TERI = 2; // Trailing Edge Ring Indicator
+    localparam MSR_DDCD = 3; // Delta Data Carrier Detect
+    localparam MSR_CTS  = 4; // Clear To Send
+    localparam MSR_DSR  = 5; // Data Set Ready
+    localparam MSR_RI   = 6; // Ring Indicator
+    localparam MSR_DCD  = 7; // Data Carrier Detect
+
+    // FCR bits
+    localparam FCR_FIFO_EN = 0;
+    localparam FCR_FIFO_RST_RX = 1;
+    localparam FCR_FIFO_RST_TX = 2;
+    localparam FCR_TRIGGER_LEVEL = 5:4;
+
+    // Registers
+    reg [7:0] dll_reg;
+    reg [7:0] dlm_reg;
+    reg [3:0] ier_reg;
+    reg [7:0] fcr_reg;
+    reg [7:0] lcr_reg;
+    reg [7:0] mcr_reg;
+    reg [7:0] scr_reg;
+
+    // FIFOs
+    localparam FIFO_DEPTH = 16;
+    localparam FIFO_ADDR_WIDTH = 4;
+
+    // RX FIFO
+    reg [7:0] rx_fifo [0:FIFO_DEPTH-1];
+    reg [FIFO_ADDR_WIDTH:0] rx_wr_ptr;
+    reg [FIFO_ADDR_WIDTH:0] rx_rd_ptr;
+    reg [FIFO_ADDR_WIDTH:0] rx_count;
+
+    // TX FIFO
+    reg [7:0] tx_fifo [0:FIFO_DEPTH-1];
+    reg [FIFO_ADDR_WIDTH:0] tx_wr_ptr;
+    reg [FIFO_ADDR_WIDTH:0] tx_rd_ptr;
+    reg [FIFO_ADDR_WIDTH:0] tx_count;
+
+    // UART core signals
+    reg [15:0] baud_divisor;
+    reg [15:0] baud_counter;
+    reg        baud_counter_en;
+    reg        tx_active;
+    reg [3:0]  tx_bit_count;
+    reg [7:0]  tx_data;
+    reg        tx_start_bit;
+    reg        tx_stop_bit;
+    reg        tx_parity_bit;
+    reg        tx_parity;
+    reg        tx_parity_calc;
+    reg        tx_parity_error;
+    reg        tx_parity_enable;
+    reg        tx_parity_even;
+    reg [1:0]  tx_word_length;
+    reg        tx_stop_bits;
+    reg        tx_break;
+
+    // RX signals
+    reg        rx_active;
+    reg [3:0]  rx_bit_count;
+    reg [7:0]  rx_data;
+    reg        rx_start_bit;
+    reg        rx_stop_bit;
+    reg        rx_parity_bit;
+    reg        rx_parity;
+    reg        rx_parity_calc;
+    reg        rx_parity_error;
+    reg        rx_parity_enable;
+    reg        rx_parity_even;
+    reg [1:0]  rx_word_length;
+    reg        rx_stop_bits;
+    reg        rx_break;
+    reg        rx_overrun;
+    reg        rx_framing_error;
+    reg        rx_parity_error_reg;
+    reg        rx_break_reg;
+    reg        rx_data_ready;
+
+    // Modem signals
+    reg        rts_reg;
+    reg        dtr_reg;
+    reg        loop_reg;
+    reg        out2_reg;
+    reg        out1_reg;
+
+    // Modem status change detection
+    reg        cts_prev;
+    reg        dsr_prev;
+    reg        ri_prev;
+    reg        dcd_prev;
+    reg        cts_change;
+    reg        dsr_change;
+    reg        ri_change;
+    reg        dcd_change;
+
+    // Interrupt signals
+    wire       int_data_avail;
+    wire       int_thr_empty;
+    wire       int_line_status;
+    wire       int_modem_status;
+    wire       int_pending;
+    wire [7:0] iir_value;
+
+    // Wishbone read data
+    reg [31:0] wb_dat_o_reg;
+
+    // Baud rate calculation
+    wire [15:0] baud_div = {dlm_reg, dll_reg};
+    wire [15:0] baud_div_eff = (baud_div == 16'd0) ? 16'd1 : baud_div;
+
+    // LCR decoded
+    wire dlab = lcr_reg[LCR_DLAB];
+    wire fen  = lcr_reg[LCR_FEN];
+    wire sbc  = lcr_reg[LCR_SBC];
+    wire eps  = lcr_reg[LCR_EPS];
+    wire sp   = lcr_reg[LCR_SP];
+    wire [1:0] wls = lcr_reg[LCR_WLS];
+
+    // Word length
+    wire [1:0] word_length = (wls == 2'b00) ? 2'b01 :
+                             (wls == 2'b01) ? 2'b10 :
+                             (wls == 2'b10) ? 2'b11 :
+                             2'b10; // 5,6,7,8 bits
+
+    // Stop bits
+    wire stop_bits = lcr_reg[2]; // 0: 1 stop bit, 1: 1.5 or 2 stop bits
+
+    // Parity
+    wire parity_enable = lcr_reg[3];
+    wire parity_even = lcr_reg[5];
+    wire parity_sticky = lcr_reg[7];
+
+    // FIFO enable
+    wire fifo_enable = fcr_reg[FCR_FIFO_EN];
+
+    // TX FIFO not empty
+    wire tx_fifo_not_empty = (tx_count != 0);
+
+    // RX FIFO not empty
+    wire rx_fifo_not_empty = (rx_count != 0);
+
+    // LSR bits
+    wire lsr_dr  = rx_data_ready;
+    wire lsr_oe  = rx_overrun;
+    wire lsr_pe  = rx_parity_error_reg;
+    wire lsr_fe  = rx_framing_error;
+    wire lsr_bi  = rx_break_reg;
+    wire lsr_thre = !tx_active && !tx_fifo_not_empty;
+    wire lsr_temt = !tx_active && !tx_fifo_not_empty;
+    wire lsr_fe2  = (rx_overrun | rx_parity_error_reg | rx_framing_error | rx_break_reg) & fifo_enable;
+
+    // MSR bits
+    wire msr_dcts = cts_change;
+    wire msr_ddsr = dsr_change;
+    wire msr_teri = ri_change;
+    wire msr_ddcd = dcd_change;
+    wire msr_cts  = cts_pad_i;
+    wire msr_dsr  = dsr_pad_i;
+    wire msr_ri   = ri_pad_i;
+    wire msr_dcd  = dcd_pad_i;
+
+    // Interrupt conditions
+    assign int_data_avail = rx_data_ready & ier_reg[IER_ERDI];
+    assign int_thr_empty  = lsr_thre & ier_reg[IER_ETBEI];
+    assign int_line_status = (rx_overrun | rx_parity_error_reg | rx_framing_error | rx_break_reg) & ier_reg[IER_ELSI];
+    assign int_modem_status = (cts_change | dsr_change | ri_change | dcd_change) & ier_reg[IER_EDSI];
+
+    assign int_pending = int_data_avail | int_thr_empty | int_line_status | int_modem_status;
+
+    // IIR value
+    assign iir_value = int_line_status ? IIR_LINE_STAT :
+                       int_data_avail  ? IIR_DATA_AVAIL :
+                       int_thr_empty   ? IIR_THR_EMPTY :
+                       int_modem_status? IIR_MODEM_STAT :
+                       IIR_NO_INT;
+
+    assign int_o = int_pending;
+
+    // Modem control outputs
+    assign rts_pad_o = mcr_reg[0];
+    assign dtr_pad_o = mcr_reg[1];
+
+    // Wishbone read data
+    always @(*) begin
+        case (wb_adr)
+            ADDR_THR: begin
+                if (dlab)
+                    wb_dat_o_reg = {24'h0, dll_reg};
+                else
+                    wb_dat_o_reg = {24'h0, 8'h0}; // THR is write-only
+            end
+            ADDR_RBR: begin
+                if (dlab)
+                    wb_dat_o_reg = {24'h0, dll_reg};
+                else
+                    wb_dat_o_reg = {24'h0, rx_fifo[rx_rd_ptr]};
+            end
+            ADDR_DLM: begin
+                if (dlab)
+                    wb_dat_o_reg = {24'h0, dlm_reg};
+                else
+                    wb_dat_o_reg = {24'h0, ier_reg};
+            end
+            ADDR_IER: begin
+                if (dlab)
+                    wb_dat_o_reg = {24'h0, dlm_reg};
+                else
+                    wb_dat_o_reg = {24'h0, ier_reg};
+            end
+            ADDR_IIR: begin
+                wb_dat_o_reg = {24'h0, iir_value};
+            end
+            ADDR_FCR: begin
+                wb_dat_o_reg = {24'h0, fcr_reg};
+            end
+            ADDR_LCR: begin
+                wb_dat_o_reg = {24'h0, lcr_reg};
+            end
+            ADDR_MCR: begin
+                wb_dat_o_reg = {24'h0, mcr_reg};
+            end
+            ADDR_LSR: begin
+                wb_dat_o_reg = {24'h0, {lsr_fe2, lsr_temt, lsr_thre, lsr_bi, lsr_fe, lsr_pe, lsr_oe, lsr_dr}};
+            end
+            ADDR_MSR: begin
+                wb_dat_o_reg = {24'h0, {msr_dcd, msr_ri, msr_dsr, msr_cts, msr_ddcd, msr_teri, msr_ddsr, msr_dcts}};
+            end
+            ADDR_SCR: begin
+                wb_dat_o_reg = {24'h0, scr_reg};
+            end
+            default: begin
+                wb_dat_o_reg = 32'h0;
+            end
+        endcase
+    end
+
+    assign wb_dat_o = wb_dat_o_reg;
+    assign wb_ack_o = wb_stb;
+
+    // Wishbone write
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            dll_reg <= 8'h0;
+            dlm_reg <= 8'h0;
+            ier_reg <= 4'h0;
+            fcr_reg <= 8'h0;
+            lcr_reg <= 8'h03; // 8N1
+            mcr_reg <= 8'h0;
+            scr_reg <= 8'h0;
+        end else if (wb_we) begin
+            case (wb_adr)
+                ADDR_THR: begin
+                    if (dlab)
+                        dll_reg <= wb_dat_i[7:0];
+                    else begin
+                        // Write to THR
+                        if (fifo_enable) begin
+                            tx_fifo[tx_wr_ptr] <= wb_dat_i[7:0];
+                            tx_wr_ptr <= tx_wr_ptr + 1'b1;
+                            tx_count <= tx_count + 1'b1;
+                        end else begin
+                            tx_data <= wb_dat_i[7:0];
+                            tx_active <= 1'b1;
+                            tx_bit_count <= 4'd0;
+                        end
+                    end
+                end
+                ADDR_DLM: begin
+                    if (dlab)
+                        dlm_reg <= wb_dat_i[7:0];
+                    else
+                        ier_reg <= wb_dat_i[3:0];
+                end
+                ADDR_IER: begin
+                    if (dlab)
+                        dlm_reg <= wb_dat_i[7:0];
+                    else
+                        ier_reg <= wb_dat_i[3:0];
+                end
+                ADDR_FCR: begin
+                    fcr_reg <= wb_dat_i[7:0];
+                    if (wb_dat_i[FCR_FIFO_RST_RX]) begin
+                        rx_wr_ptr <= 0;
+                        rx_rd_ptr <= 0;
+                        rx_count <= 0;
+                    end
+                    if (wb_dat_i[FCR_FIFO_RST_TX]) begin
+                        tx_wr_ptr <= 0;
+                        tx_rd_ptr <= 0;
+                        tx_count <= 0;
+                    end
+                end
+                ADDR_LCR: begin
+                    lcr_reg <= wb_dat_i[7:0];
+                end
+                ADDR_MCR: begin
+                    mcr_reg <= wb_dat_i[7:0];
+                end
+                ADDR_SCR: begin
+                    scr_reg <= wb_dat_i[7:0];
+                end
+                default: ;
+            endcase
+        end
+    end
+
+    // Baud rate counter
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            baud_counter <= 16'h0;
+        end else if (baud_counter_en) begin
+            if (baud_counter == baud_div_eff - 1)
+                baud_counter <= 16'h0;
+            else
+                baud_counter <= baud_counter + 1'b1;
+        end
+    end
+
+    // TX logic
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            tx_active <= 1'b0;
+            tx_bit_count <= 4'd0;
+            tx_data <= 8'h0;
+            tx_start_bit <= 1'b0;
+            tx_stop_bit <= 1'b0;
+            tx_parity_bit <= 1'b0;
+            tx_parity <= 1'b0;
+            tx_parity_calc <= 1'b0;
+            tx_parity_error <= 1'b0;
+            tx_parity_enable <= 1'b0;
+            tx_parity_even <= 1'b0;
+            tx_word_length <= 2'b10;
+            tx_stop_bits <= 1'b0;
+            tx_break <= 1'b0;
+            stx_pad_o <= 1'b1;
+        end else begin
+            if (!tx_active) begin
+                stx_pad_o <= 1'b1;
+                if (tx_fifo_not_empty) begin
+                    tx_data <= tx_fifo[tx_rd_ptr];
+                    tx_rd_ptr <= tx_rd_ptr + 1'b1;
+                    tx_count <= tx_count - 1'b1;
+                    tx_active <= 1'b1;
+                    tx_bit_count <= 4'd0;
+                    tx_parity_calc <= 1'b0;
+                    tx_parity_error <= 1'b0;
+                end
+            end else begin
+                if (baud_counter_en && baud_counter == baud_div_eff - 1) begin
+                    case (tx_bit_count)
+                        4'd0: begin
+                            // Start bit
+                            stx_pad_o <= 1'b0;
+                            tx_bit_count <= 4'd1;
+                        end
+                        default: begin
+                            if (tx_bit_count <= word_length) begin
+                                // Data bits
+                                stx_pad_o <= tx_data[tx_bit_count - 2];
+                                if (parity_enable)
+                                    tx_parity_calc <= tx_parity_calc ^ tx_data[tx_bit_count - 2];
+                                tx_bit_count <= tx_bit_count + 1'b1;
+                            end else if (parity_enable && tx_bit_count == word_length + 1) begin
+                                // Parity bit
+                                if (parity_even)
+                                    stx_pad_o <= ~tx_parity_calc;
+                                else
+                                    stx_pad_o <= tx_parity_calc;
+                                tx_bit_count <= tx_bit_count + 1'b1;
+                            end else if (tx_bit_count == word_length + (parity_enable ? 1 : 0)) begin
+                                // Stop bit(s)
+                                if (stop_bits) begin
+                                    stx_pad_o <= 1'b1;
+                                    tx_bit_count <= tx_bit_count + 1'b1;
+                                end else begin
+                                    stx_pad_o <= 1'b1;
+                                    tx_active <= 1'b0;
+                                    tx_bit_count <= 4'd0;
+                                end
+                            end else begin
+                                // Second stop bit
+                                stx_pad_o <= 1'b1;
+                                tx_active <= 1'b0;
+                                tx_bit_count <= 4'd0;
+                            end
+                        end
+                    endcase
+                end
+            end
+        end
+    end
+
+    // RX logic
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            rx_active <= 1'b0;
+            rx_bit_count <= 4'd0;
+            rx_data <= 8'h0;
+            rx_start_bit <= 1'b0;
+            rx_stop_bit <= 1'b0;
+            rx_parity_bit <= 1'b0;
+            rx_parity <= 1'b0;
+            rx_parity_calc <= 1'b0;
+            rx_parity_error <= 1'b0;
+            rx_parity_enable <= 1'b0;
+            rx_parity_even <= 1'b0;
+            rx_word_length <= 2'b10;
+            rx_stop_bits <= 1'b0;
+            rx_break <= 1'b0;
+            rx_overrun <= 1'b0;
+            rx_framing_error <= 1'b0;
+            rx_parity_error_reg <= 1'b0;
+            rx_break_reg <= 1'b0;
+            rx_data_ready <= 1'b0;
+        end else begin
+            if (!rx_active) begin
+                if (!srx_pad_i) begin
+                    rx_active <= 1'b1;
+                    rx_bit_count <= 4'd0;
+                    rx_parity_calc <= 1'b0;
+                    rx_parity_error <= 1'b0;
+                    rx_break <= 1'b0;
+                end
+            end else begin
+                if (baud_counter_en && baud_counter == baud_div_eff - 1) begin
+                    case (rx_bit_count)
+                        4'd0: begin
+                            // Start bit check
+                            if (!srx_pad_i) begin
+                                rx_bit_count <= 4'd1;
+                            end else begin
+                                rx_active <= 1'b0;
+                                rx_bit_count <= 4'd0;
+                            end
+                        end
+                        default: begin
+                            if (rx_bit_count <= word_length) begin
+                                // Data bits
+                                rx_data[rx_bit_count - 2] <= srx_pad_i;
+                                if (parity_enable)
+                                    rx_parity_calc <= rx_parity_calc ^ srx_pad_i;
+                                rx_bit_count <= rx_bit_count + 1'b1;
+                            end else if (parity_enable && rx_bit_count == word_length + 1) begin
+                                // Parity bit
+                                if (parity_even)
+                                    rx_parity_error <= (srx_pad_i != ~rx_parity_calc);
+                                else
+                                    rx_parity_error <= (srx_pad_i != rx_parity_calc);
+                                rx_bit_count <= rx_bit_count + 1'b1;
+                            end else if (rx_bit_count == word_length + (parity_enable ? 1 : 0)) begin
+                                // Stop bit(s)
+                                if (stop_bits) begin
+                                    if (srx_pad_i) begin
+                                        rx_bit_count <= rx_bit_count + 1'b1;
+                                    end else begin
+                                        rx_framing_error <= 1'b1;
+                                        rx_bit_count <= rx_bit_count + 1'b1;
+                                    end
+                                end else begin
+                                    if (srx_pad_i) begin
+                                        // Valid stop bit
+                                        if (fifo_enable) begin
+                                            if (rx_count == FIFO_DEPTH) begin
+                                                rx_overrun <= 1'b1;
+                                            end else begin
+                                                rx_fifo[rx_wr_ptr] <= rx_data;
+                                                rx_wr_ptr <= rx_wr_ptr + 1'b1;
+                                                rx_count <= rx_count + 1'b1;
+                                                rx_data_ready <= 1'b1;
+                                            end
+                                        end else begin
+                                            rx_data_ready <= 1'b1;
+                                        end
+                                        if (rx_parity_error)
+                                            rx_parity_error_reg <= 1'b1;
+                                        rx_active <= 1'b0;
+                                        rx_bit_count <= 4'd0;
+                                    end else begin
+                                        rx_framing_error <= 1'b1;
+                                        rx_active <= 1'b0;
+                                        rx_bit_count <= 4'd0;
+                                    end
+                                end
+                            end else begin
+                                // Second stop bit
+                                if (srx_pad_i) begin
+                                    if (fifo_enable) begin
+                                        if (rx_count == FIFO_DEPTH) begin
+                                            rx_overrun <= 1'b1;
+                                        end else begin
+                                            rx_fifo[rx_wr_ptr] <= rx_data;
+                                            rx_wr_ptr <= rx_wr_ptr + 1'b1;
+                                            rx_count <= rx_count + 1'b1;
+                                            rx_data_ready <= 1'b1;
+                                        end
+                                    end else begin
+                                        rx_data_ready <= 1'b1;
+                                    end
+                                    if (rx_parity_error)
+                                        rx_parity_error_reg <= 1'b1;
+                                    rx_active <= 1'b0;
+                                    rx_bit_count <= 4'd0;
+                                end else begin
+                                    rx_framing_error <= 1'b1;
+                                    rx_active <= 1'b0;
+                                    rx_bit_count <= 4'd0;
+                                end
+                            end
+                        end
+                    endcase
+                end
+            end
+        end
+    end
+
+    // Clear status bits on read
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            rx_overrun <= 1'b0;
+            rx_framing_error <= 1'b0;
+            rx_parity_error_reg <= 1'b0;
+            rx_break_reg <= 1'b0;
+            rx_data_ready <= 1'b0;
+        end else if (wb_stb && !wb_we && wb_adr == ADDR_LSR) begin
+            rx_overrun <= 1'b0;
+            rx_framing_error <= 1'b0;
+            rx_parity_error_reg <= 1'b0;
+            rx_break_reg <= 1'b0;
+            rx_data_ready <= 1'b0;
+            if (fifo_enable) begin
+                rx_rd_ptr <= rx_rd_ptr + 1'b1;
+                rx_count <= rx_count - 1'b1;
+            end
+        end else if (wb_stb && !wb_we && wb_adr == ADDR_MSR) begin
+            cts_change <= 1'b0;
+            dsr_change <= 1'b0;
+            ri_change <= 1'b0;
+            dcd_change <= 1'b0;
+        end
+    end
+
+    // Modem status change detection
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            cts_prev <= 1'b0;
+            dsr_prev <= 1'b0;
+            ri_prev <= 1'b0;
+            dcd_prev <= 1'b0;
+            cts_change <= 1'b0;
+            dsr_change <= 1'b0;
+            ri_change <= 1'b0;
+            dcd_change <= 1'b0;
+        end else begin
+            cts_prev <= cts_pad_i;
+            dsr_prev <= dsr_pad_i;
+            ri_prev <= ri_pad_i;
+            dcd_prev <= dcd_pad_i;
+            cts_change <= (cts_pad_i != cts_prev);
+            dsr_change <= (dsr_pad_i != dsr_prev);
+            ri_change <= (ri_pad_i != ri_prev);
+            dcd_change <= (dcd_pad_i != dcd_prev);
+        end
+    end
+
+endmodule
+```<|im_end|>

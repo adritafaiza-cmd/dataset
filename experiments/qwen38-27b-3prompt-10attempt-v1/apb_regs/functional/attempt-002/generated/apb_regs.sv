@@ -1,0 +1,121 @@
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Extract APB fields from req_t
+  // Assuming req_t has fields: psel, penable, pwrite, paddr, pwdata
+  // We need to access these fields. Since req_t is a type parameter,
+  // we assume it's a struct with standard APB fields.
+  
+  // For APB, the typical fields are:
+  // psel, penable, pwrite, paddr, pwdata, pready, pslverr, prdata
+  // But req_t is the request type, so it likely contains:
+  // psel, penable, pwrite, paddr, pwdata
+  
+  // Let's assume req_t is a struct with these fields:
+  // typedef struct packed {
+  //   logic psel;
+  //   logic penable;
+  //   logic pwrite;
+  //   apb_addr_t paddr;
+  //   logic [ApbDataWidth-1:0] pwdata;
+  // } req_t;
+  
+  // And resp_t is a struct with:
+  // typedef struct packed {
+  //   logic pready;
+  //   logic pslverr;
+  //   logic [ApbDataWidth-1:0] prdata;
+  // } resp_t;
+  
+  // We'll access fields directly.
+  
+  wire psel    = req_i.psel;
+  wire penable = req_i.penable;
+  wire pwrite  = req_i.pwrite;
+  wire [ApbAddrWidth-1:0] paddr = req_i.paddr;
+  wire [ApbDataWidth-1:0] pwdata = req_i.pwdata;
+  
+  // Calculate register index from address
+  // Address offset from base
+  wire [ApbAddrWidth-1:0] addr_offset = paddr - base_addr_i;
+  
+  // Convert byte offset to register index
+  // AddrOffset is in bytes, so divide by AddrOffset
+  // We need to handle the division carefully
+  wire [ApbAddrWidth-1:0] reg_index_raw = addr_offset / AddrOffset;
+  
+  // Check if address is valid (within range and aligned)
+  wire addr_aligned = (addr_offset % AddrOffset) == 0;
+  wire addr_in_range = (reg_index_raw < NoApbRegs) && addr_aligned;
+  
+  // Register index
+  wire [ApbAddrWidth-1:0] reg_index = reg_index_raw;
+  
+  // APB state machine
+  // APB has two phases: SETUP and ACCESS
+  // In SETUP: psel=1, penable=0
+  // In ACCESS: psel=1, penable=1
+  
+  // For simplicity, we'll handle the APB protocol:
+  // - When psel=1 and penable=0, we're in SETUP phase
+  // - When psel=1 and penable=1, we're in ACCESS phase
+  // - We can complete the transfer in the ACCESS phase
+  
+  // Read data
+  wire [RegDataWidth-1:0] read_data = reg_q_o[reg_index];
+  
+  // Write data
+  wire [RegDataWidth-1:0] write_data = pwdata[RegDataWidth-1:0];
+  
+  // Write enable
+  wire write_en = psel && penable && pwrite && addr_in_range;
+  
+  // Read enable
+  wire read_en = psel && penable && !pwrite && addr_in_range;
+  
+  // Register file
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        reg_q_o[i] <= reg_init_i[i];
+      end
+    end else begin
+      if (write_en) begin
+        // Only write to non-read-only bits
+        if (ReadOnly[reg_index]) begin
+          // Read-only register, ignore write
+        end else begin
+          reg_q_o[reg_index] <= write_data;
+        end
+      end
+    end
+  end
+  
+  // Response
+  // pready: ready to complete transfer
+  // pslverr: slave error (address out of range or misaligned)
+  // prdata: read data
+  
+  assign resp_o.pready = psel && penable;
+  assign resp_o.pslverr = psel && penable && !addr_in_range;
+  assign resp_o.prdata = read_data[ApbDataWidth-1:0];
+  
+endmodule

@@ -1,0 +1,541 @@
+module axi_dma #
+(
+    parameter AXI_DATA_WIDTH = 32,
+    parameter AXI_ADDR_WIDTH = 16,
+    parameter AXI_STRB_WIDTH = (AXI_DATA_WIDTH/8),
+    parameter AXI_ID_WIDTH = 8,
+    parameter AXI_MAX_BURST_LEN = 16,
+    parameter AXIS_DATA_WIDTH = AXI_DATA_WIDTH,
+    parameter AXIS_KEEP_ENABLE = (AXIS_DATA_WIDTH>8),
+    parameter AXIS_KEEP_WIDTH = (AXIS_DATA_WIDTH/8),
+    parameter AXIS_LAST_ENABLE = 1,
+    parameter AXIS_ID_ENABLE = 0,
+    parameter AXIS_ID_WIDTH = 8,
+    parameter AXIS_DEST_ENABLE = 0,
+    parameter AXIS_DEST_WIDTH = 8,
+    parameter AXIS_USER_ENABLE = 1,
+    parameter AXIS_USER_WIDTH = 1,
+    parameter LEN_WIDTH = 20,
+    parameter TAG_WIDTH = 8,
+    parameter ENABLE_SG = 0,
+    parameter ENABLE_UNALIGNED = 0
+)
+(
+    input  wire                       clk,
+    input  wire                       rst,
+    /*
+     * AXI read descriptor input
+     */
+    input  wire [AXI_ADDR_WIDTH-1:0]  s_axis_read_desc_addr,
+    input  wire [LEN_WIDTH-1:0]       s_axis_read_desc_len,
+    input  wire [TAG_WIDTH-1:0]       s_axis_read_desc_tag,
+    input  wire [AXIS_ID_WIDTH-1:0]   s_axis_read_desc_id,
+    input  wire [AXIS_DEST_WIDTH-1:0] s_axis_read_desc_dest,
+    input  wire [AXIS_USER_WIDTH-1:0] s_axis_read_desc_user,
+    input  wire                       s_axis_read_desc_valid,
+    output wire                       s_axis_read_desc_ready,
+    /*
+     * AXI read descriptor status output
+     */
+    output wire [TAG_WIDTH-1:0]       m_axis_read_desc_status_tag,
+    output wire [3:0]                 m_axis_read_desc_status_error,
+    output wire                       m_axis_read_desc_status_valid,
+    /*
+     * AXI stream read data output
+     */
+    output wire [AXIS_DATA_WIDTH-1:0] m_axis_read_data_tdata,
+    output wire [AXIS_KEEP_WIDTH-1:0] m_axis_read_data_tkeep,
+    output wire                       m_axis_read_data_tvalid,
+    input  wire                       m_axis_read_data_tready,
+    output wire                       m_axis_read_data_tlast,
+    output wire [AXIS_ID_WIDTH-1:0]   m_axis_read_data_tid,
+    output wire [AXIS_DEST_WIDTH-1:0] m_axis_read_data_tdest,
+    output wire [AXIS_USER_WIDTH-1:0] m_axis_read_data_tuser,
+    /*
+     * AXI write descriptor input
+     */
+    input  wire [AXI_ADDR_WIDTH-1:0]  s_axis_write_desc_addr,
+    input  wire [LEN_WIDTH-1:0]       s_axis_write_desc_len,
+    input  wire [TAG_WIDTH-1:0]       s_axis_write_desc_tag,
+    input  wire                       s_axis_write_desc_valid,
+    output wire                       s_axis_write_desc_ready,
+    /*
+     * AXI write descriptor status output
+     */
+    output wire [LEN_WIDTH-1:0]       m_axis_write_desc_status_len,
+    output wire [TAG_WIDTH-1:0]       m_axis_write_desc_status_tag,
+    output wire [AXIS_ID_WIDTH-1:0]   m_axis_write_desc_status_id,
+    output wire [AXIS_DEST_WIDTH-1:0] m_axis_write_desc_status_dest,
+    output wire [AXIS_USER_WIDTH-1:0] m_axis_write_desc_status_user,
+    output wire [3:0]                 m_axis_write_desc_status_error,
+    output wire                       m_axis_write_desc_status_valid,
+    /*
+     * AXI stream write data input
+     */
+    input  wire [AXIS_DATA_WIDTH-1:0] s_axis_write_data_tdata,
+    input  wire [AXIS_KEEP_WIDTH-1:0] s_axis_write_data_tkeep,
+    input  wire                       s_axis_write_data_tvalid,
+    output wire                       s_axis_write_data_tready,
+    input  wire                       s_axis_write_data_tlast,
+    input  wire [AXIS_ID_WIDTH-1:0]   s_axis_write_data_tid,
+    input  wire [AXIS_DEST_WIDTH-1:0] s_axis_write_data_tdest,
+    input  wire [AXIS_USER_WIDTH-1:0] s_axis_write_data_tuser,
+    /*
+     * AXI master interface
+     */
+    output wire [AXI_ID_WIDTH-1:0]    m_axi_awid,
+    output wire [AXI_ADDR_WIDTH-1:0]  m_axi_awaddr,
+    output wire [7:0]                 m_axi_awlen,
+    output wire [2:0]                 m_axi_awsize,
+    output wire [1:0]                 m_axi_awburst,
+    output wire                       m_axi_awlock,
+    output wire [3:0]                 m_axi_awcache,
+    output wire [2:0]                 m_axi_awprot,
+    output wire                       m_axi_awvalid,
+    input  wire                       m_axi_awready,
+    output wire [AXI_DATA_WIDTH-1:0]  m_axi_wdata,
+    output wire [AXI_STRB_WIDTH-1:0]  m_axi_wstrb,
+    output wire                       m_axi_wlast,
+    output wire                       m_axi_wvalid,
+    input  wire                       m_axi_wready,
+    input  wire [AXI_ID_WIDTH-1:0]    m_axi_bid,
+    input  wire [1:0]                 m_axi_bresp,
+    input  wire                       m_axi_bvalid,
+    output wire                       m_axi_bready,
+    output wire [AXI_ID_WIDTH-1:0]    m_axi_arid,
+    output wire [AXI_ADDR_WIDTH-1:0]  m_axi_araddr,
+    output wire [7:0]                 m_axi_arlen,
+    output wire [2:0]                 m_axi_arsize,
+    output wire [1:0]                 m_axi_arburst,
+    output wire                       m_axi_arlock,
+    output wire [3:0]                 m_axi_arcache,
+    output wire [2:0]                 m_axi_arprot,
+    output wire                       m_axi_arvalid,
+    input  wire                       m_axi_arready,
+    input  wire [AXI_ID_WIDTH-1:0]    m_axi_rid,
+    input  wire [AXI_DATA_WIDTH-1:0]  m_axi_rdata,
+    input  wire [1:0]                 m_axi_rresp,
+    input  wire                       m_axi_rlast,
+    input  wire                       m_axi_rvalid,
+    output wire                       m_axi_rready,
+    /*
+     * Configuration
+     */
+    input  wire                       read_enable,
+    input  wire                       write_enable,
+    input  wire                       write_abort
+);
+
+    // Local parameters
+    localparam AXI_DATA_BYTES = AXI_DATA_WIDTH / 8;
+    localparam AXI_BURST_LEN_WIDTH = 8;
+    localparam AXI_SIZE = $clog2(AXI_DATA_BYTES);
+    
+    // Read channel state
+    reg [AXI_ADDR_WIDTH-1:0] rd_addr;
+    reg [LEN_WIDTH-1:0] rd_len;
+    reg [TAG_WIDTH-1:0] rd_tag;
+    reg [AXIS_ID_WIDTH-1:0] rd_id;
+    reg [AXIS_DEST_WIDTH-1:0] rd_dest;
+    reg [AXIS_USER_WIDTH-1:0] rd_user;
+    reg [LEN_WIDTH-1:0] rd_bytes_remaining;
+    reg [LEN_WIDTH-1:0] rd_beats_remaining;
+    reg rd_active;
+    reg rd_burst_active;
+    reg [AXI_ADDR_WIDTH-1:0] rd_burst_addr;
+    reg [7:0] rd_burst_len;
+    reg [LEN_WIDTH-1:0] rd_burst_bytes;
+    reg [LEN_WIDTH-1:0] rd_burst_beats;
+    reg rd_burst_last_beat;
+    reg [3:0] rd_error;
+    reg rd_status_valid;
+    reg [TAG_WIDTH-1:0] rd_status_tag;
+    reg [3:0] rd_status_error;
+
+    // Write channel state
+    reg [AXI_ADDR_WIDTH-1:0] wr_addr;
+    reg [LEN_WIDTH-1:0] wr_len;
+    reg [TAG_WIDTH-1:0] wr_tag;
+    reg [LEN_WIDTH-1:0] wr_bytes_remaining;
+    reg [LEN_WIDTH-1:0] wr_beats_remaining;
+    reg wr_active;
+    reg wr_burst_active;
+    reg [AXI_ADDR_WIDTH-1:0] wr_burst_addr;
+    reg [7:0] wr_burst_len;
+    reg [LEN_WIDTH-1:0] wr_burst_bytes;
+    reg [LEN_WIDTH-1:0] wr_burst_beats;
+    reg wr_burst_last_beat;
+    reg [3:0] wr_error;
+    reg wr_status_valid;
+    reg [LEN_WIDTH-1:0] wr_status_len;
+    reg [TAG_WIDTH-1:0] wr_status_tag;
+    reg [3:0] wr_status_error;
+    reg [AXIS_ID_WIDTH-1:0] wr_status_id;
+    reg [AXIS_DEST_WIDTH-1:0] wr_status_dest;
+    reg [AXIS_USER_WIDTH-1:0] wr_status_user;
+
+    // Read data FIFO (simple register-based)
+    reg [AXIS_DATA_WIDTH-1:0] rd_data_fifo [0:AXI_MAX_BURST_LEN-1];
+    reg [AXIS_KEEP_WIDTH-1:0] rd_keep_fifo [0:AXI_MAX_BURST_LEN-1];
+    reg [AXIS_ID_WIDTH-1:0] rd_id_fifo [0:AXI_MAX_BURST_LEN-1];
+    reg [AXIS_DEST_WIDTH-1:0] rd_dest_fifo [0:AXI_MAX_BURST_LEN-1];
+    reg [AXIS_USER_WIDTH-1:0] rd_user_fifo [0:AXI_MAX_BURST_LEN-1];
+    reg rd_fifo_wr_ptr;
+    reg rd_fifo_rd_ptr;
+    reg [AXI_MAX_BURST_LEN_WIDTH-1:0] rd_fifo_count;
+    localparam AXI_MAX_BURST_LEN_WIDTH = $clog2(AXI_MAX_BURST_LEN) + 1;
+
+    // Write data FIFO
+    reg [AXIS_DATA_WIDTH-1:0] wr_data_fifo [0:AXI_MAX_BURST_LEN-1];
+    reg [AXIS_KEEP_WIDTH-1:0] wr_keep_fifo [0:AXI_MAX_BURST_LEN-1];
+    reg wr_fifo_wr_ptr;
+    reg wr_fifo_rd_ptr;
+    reg [AXI_MAX_BURST_LEN_WIDTH-1:0] wr_fifo_count;
+
+    // Helper functions
+    function [7:0] calc_burst_len;
+        input [LEN_WIDTH-1:0] bytes_remaining;
+        begin
+            if (bytes_remaining >= AXI_DATA_BYTES * AXI_MAX_BURST_LEN)
+                calc_burst_len = AXI_MAX_BURST_LEN - 1;
+            else
+                calc_burst_len = (bytes_remaining - 1) / AXI_DATA_BYTES;
+        end
+    endfunction
+
+    function [LEN_WIDTH-1:0] calc_burst_bytes;
+        input [7:0] burst_len;
+        begin
+            calc_burst_bytes = (burst_len + 1) * AXI_DATA_BYTES;
+        end
+    endfunction
+
+    // Read descriptor acceptance
+    wire rd_desc_accept = s_axis_read_desc_valid && s_axis_read_desc_ready && read_enable;
+    assign s_axis_read_desc_ready = !rd_active && read_enable;
+
+    // Write descriptor acceptance
+    wire wr_desc_accept = s_axis_write_desc_valid && s_axis_write_desc_ready && write_enable;
+    assign s_axis_write_desc_ready = !wr_active && write_enable;
+
+    // Read data output
+    assign m_axis_read_data_tvalid = (rd_fifo_count > 0);
+    assign m_axis_read_data_tdata = rd_data_fifo[rd_fifo_rd_ptr];
+    assign m_axis_read_data_tkeep = rd_keep_fifo[rd_fifo_rd_ptr];
+    assign m_axis_read_data_tid = rd_id_fifo[rd_fifo_rd_ptr];
+    assign m_axis_read_data_tdest = rd_dest_fifo[rd_fifo_rd_ptr];
+    assign m_axis_read_data_tuser = rd_user_fifo[rd_fifo_rd_ptr];
+    assign m_axis_read_data_tlast = (rd_fifo_count == 1) && rd_burst_last_beat;
+
+    // Write data input
+    assign s_axis_write_data_tready = (wr_fifo_count < AXI_MAX_BURST_LEN) && wr_active;
+
+    // Read status output
+    assign m_axis_read_desc_status_valid = rd_status_valid;
+    assign m_axis_read_desc_status_tag = rd_status_tag;
+    assign m_axis_read_desc_status_error = rd_status_error;
+
+    // Write status output
+    assign m_axis_write_desc_status_valid = wr_status_valid;
+    assign m_axis_write_desc_status_len = wr_status_len;
+    assign m_axis_write_desc_status_tag = wr_status_tag;
+    assign m_axis_write_desc_status_id = wr_status_id;
+    assign m_axis_write_desc_status_dest = wr_status_dest;
+    assign m_axis_write_desc_status_user = wr_status_user;
+    assign m_axis_write_desc_status_error = wr_status_error;
+
+    // AXI Read Address Channel
+    assign m_axi_arid = {AXI_ID_WIDTH{1'b0}};
+    assign m_axi_araddr = rd_burst_addr;
+    assign m_axi_arlen = rd_burst_len;
+    assign m_axi_arsize = AXI_SIZE;
+    assign m_axi_arburst = 2'b01; // INCR
+    assign m_axi_arlock = 1'b0;
+    assign m_axi_arcache = 4'b0011;
+    assign m_axi_arprot = 3'b000;
+    assign m_axi_arvalid = rd_burst_active;
+
+    // AXI Read Data Channel
+    assign m_axi_rready = (rd_fifo_count < AXI_MAX_BURST_LEN);
+
+    // AXI Write Address Channel
+    assign m_axi_awid = {AXI_ID_WIDTH{1'b0}};
+    assign m_axi_awaddr = wr_burst_addr;
+    assign m_axi_awlen = wr_burst_len;
+    assign m_axi_awsize = AXI_SIZE;
+    assign m_axi_awburst = 2'b01; // INCR
+    assign m_axi_awlock = 1'b0;
+    assign m_axi_awcache = 4'b0011;
+    assign m_axi_awprot = 3'b000;
+    assign m_axi_awvalid = wr_burst_active;
+
+    // AXI Write Data Channel
+    assign m_axi_wdata = wr_data_fifo[wr_fifo_rd_ptr];
+    assign m_axi_wstrb = wr_keep_fifo[wr_fifo_rd_ptr];
+    assign m_axi_wlast = (wr_fifo_count == 1) && wr_burst_last_beat;
+    assign m_axi_wvalid = (wr_fifo_count > 0);
+
+    // AXI Write Response Channel
+    assign m_axi_bready = wr_burst_active;
+
+    // Read FIFO write logic
+    wire rd_fifo_write = m_axi_rvalid && m_axi_rready;
+    wire rd_fifo_read = m_axis_read_data_tvalid && m_axis_read_data_tready;
+
+    // Write FIFO write logic
+    wire wr_fifo_write = s_axis_write_data_tvalid && s_axis_write_data_tready;
+    wire wr_fifo_read = m_axi_wvalid && m_axi_wready;
+
+    // Read FIFO pointer management
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rd_fifo_wr_ptr <= 0;
+            rd_fifo_rd_ptr <= 0;
+            rd_fifo_count <= 0;
+        end else begin
+            if (rd_fifo_write && rd_fifo_read) begin
+                // Both write and read, pointers stay same if count unchanged
+            end else if (rd_fifo_write) begin
+                rd_fifo_wr_ptr <= rd_fifo_wr_ptr + 1;
+                rd_fifo_count <= rd_fifo_count + 1;
+            end else if (rd_fifo_read) begin
+                rd_fifo_rd_ptr <= rd_fifo_rd_ptr + 1;
+                rd_fifo_count <= rd_fifo_count - 1;
+            end
+        end
+    end
+
+    // Write FIFO pointer management
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            wr_fifo_wr_ptr <= 0;
+            wr_fifo_rd_ptr <= 0;
+            wr_fifo_count <= 0;
+        end else begin
+            if (wr_fifo_write && wr_fifo_read) begin
+                // Both write and read, pointers stay same if count unchanged
+            end else if (wr_fifo_write) begin
+                wr_fifo_wr_ptr <= wr_fifo_wr_ptr + 1;
+                wr_fifo_count <= wr_fifo_count + 1;
+            end else if (wr_fifo_read) begin
+                wr_fifo_rd_ptr <= wr_fifo_rd_ptr + 1;
+                wr_fifo_count <= wr_fifo_count - 1;
+            end
+        end
+    end
+
+    // Read FIFO data storage
+    always @(posedge clk) begin
+        if (rd_fifo_write) begin
+            rd_data_fifo[rd_fifo_wr_ptr] <= m_axi_rdata;
+            rd_keep_fifo[rd_fifo_wr_ptr] <= {AXIS_KEEP_WIDTH{1'b1}};
+            rd_id_fifo[rd_fifo_wr_ptr] <= rd_id;
+            rd_dest_fifo[rd_fifo_wr_ptr] <= rd_dest;
+            rd_user_fifo[rd_fifo_wr_ptr] <= rd_user;
+        end
+    end
+
+    // Write FIFO data storage
+    always @(posedge clk) begin
+        if (wr_fifo_write) begin
+            wr_data_fifo[wr_fifo_wr_ptr] <= s_axis_write_data_tdata;
+            wr_keep_fifo[wr_fifo_wr_ptr] <= s_axis_write_data_tkeep;
+        end
+    end
+
+    // Read channel control
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rd_active <= 0;
+            rd_burst_active <= 0;
+            rd_addr <= 0;
+            rd_len <= 0;
+            rd_tag <= 0;
+            rd_id <= 0;
+            rd_dest <= 0;
+            rd_user <= 0;
+            rd_bytes_remaining <= 0;
+            rd_beats_remaining <= 0;
+            rd_burst_addr <= 0;
+            rd_burst_len <= 0;
+            rd_burst_bytes <= 0;
+            rd_burst_beats <= 0;
+            rd_burst_last_beat <= 0;
+            rd_error <= 0;
+            rd_status_valid <= 0;
+            rd_status_tag <= 0;
+            rd_status_error <= 0;
+        end else begin
+            // Accept new read descriptor
+            if (rd_desc_accept) begin
+                rd_active <= 1;
+                rd_addr <= s_axis_read_desc_addr;
+                rd_len <= s_axis_read_desc_len;
+                rd_tag <= s_axis_read_desc_tag;
+                rd_id <= s_axis_read_desc_id;
+                rd_dest <= s_axis_read_desc_dest;
+                rd_user <= s_axis_read_desc_user;
+                rd_bytes_remaining <= s_axis_read_desc_len;
+                rd_beats_remaining <= (s_axis_read_desc_len - 1) / AXI_DATA_BYTES + 1;
+                rd_error <= 0;
+                rd_status_valid <= 0;
+                
+                // Start first burst
+                rd_burst_active <= 1;
+                rd_burst_addr <= s_axis_read_desc_addr;
+                rd_burst_len <= calc_burst_len(s_axis_read_desc_len);
+                rd_burst_bytes <= calc_burst_bytes(calc_burst_len(s_axis_read_desc_len));
+                rd_burst_beats <= calc_burst_len(s_axis_read_desc_len) + 1;
+                rd_burst_last_beat <= (s_axis_read_desc_len <= (calc_burst_len(s_axis_read_desc_len) + 1) * AXI_DATA_BYTES);
+            end else if (rd_active) begin
+                // Handle AXI read address handshake
+                if (rd_burst_active && m_axi_arready) begin
+                    // Burst address accepted, wait for data
+                end
+                
+                // Handle read data completion
+                if (rd_fifo_write) begin
+                    if (m_axi_rlast) begin
+                        // Burst complete
+                        rd_burst_active <= 0;
+                        
+                        // Check if more data to read
+                        if (rd_bytes_remaining > rd_burst_bytes) begin
+                            // Start next burst
+                            rd_bytes_remaining <= rd_bytes_remaining - rd_burst_bytes;
+                            rd_beats_remaining <= rd_beats_remaining - rd_burst_beats;
+                            rd_burst_addr <= rd_burst_addr + rd_burst_bytes;
+                            rd_burst_len <= calc_burst_len(rd_bytes_remaining - rd_burst_bytes);
+                            rd_burst_bytes <= calc_burst_bytes(calc_burst_len(rd_bytes_remaining - rd_burst_bytes));
+                            rd_burst_beats <= calc_burst_len(rd_bytes_remaining - rd_burst_bytes) + 1;
+                            rd_burst_last_beat <= ((rd_bytes_remaining - rd_burst_bytes) <= (calc_burst_len(rd_bytes_remaining - rd_burst_bytes) + 1) * AXI_DATA_BYTES);
+                            rd_burst_active <= 1;
+                        end else begin
+                            // All data read, complete descriptor
+                            rd_active <= 0;
+                            rd_status_valid <= 1;
+                            rd_status_tag <= rd_tag;
+                            rd_status_error <= rd_error;
+                        end
+                    end
+                end
+                
+                // Check for read errors
+                if (m_axi_rvalid && m_axi_rresp != 2'b00) begin
+                    rd_error <= 4'b0001;
+                end
+            end
+            
+            // Clear status valid when consumed (assume immediate consumption)
+            if (rd_status_valid) begin
+                rd_status_valid <= 0;
+            end
+        end
+    end
+
+    // Write channel control
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            wr_active <= 0;
+            wr_burst_active <= 0;
+            wr_addr <= 0;
+            wr_len <= 0;
+            wr_tag <= 0;
+            wr_bytes_remaining <= 0;
+            wr_beats_remaining <= 0;
+            wr_burst_addr <= 0;
+            wr_burst_len <= 0;
+            wr_burst_bytes <= 0;
+            wr_burst_beats <= 0;
+            wr_burst_last_beat <= 0;
+            wr_error <= 0;
+            wr_status_valid <= 0;
+            wr_status_len <= 0;
+            wr_status_tag <= 0;
+            wr_status_error <= 0;
+            wr_status_id <= 0;
+            wr_status_dest <= 0;
+            wr_status_user <= 0;
+        end else begin
+            // Accept new write descriptor
+            if (wr_desc_accept) begin
+                wr_active <= 1;
+                wr_addr <= s_axis_write_desc_addr;
+                wr_len <= s_axis_write_desc_len;
+                wr_tag <= s_axis_write_desc_tag;
+                wr_bytes_remaining <= s_axis_write_desc_len;
+                wr_beats_remaining <= (s_axis_write_desc_len - 1) / AXI_DATA_BYTES + 1;
+                wr_error <= 0;
+                wr_status_valid <= 0;
+                wr_status_len <= s_axis_write_desc_len;
+                wr_status_tag <= s_axis_write_desc_tag;
+                wr_status_id <= 0;
+                wr_status_dest <= 0;
+                wr_status_user <= 0;
+                
+                // Start first burst
+                wr_burst_active <= 1;
+                wr_burst_addr <= s_axis_write_desc_addr;
+                wr_burst_len <= calc_burst_len(s_axis_write_desc_len);
+                wr_burst_bytes <= calc_burst_bytes(calc_burst_len(s_axis_write_desc_len));
+                wr_burst_beats <= calc_burst_len(s_axis_write_desc_len) + 1;
+                wr_burst_last_beat <= (s_axis_write_desc_len <= (calc_burst_len(s_axis_write_desc_len) + 1) * AXI_DATA_BYTES);
+            end else if (wr_active) begin
+                // Handle write abort
+                if (write_abort) begin
+                    wr_active <= 0;
+                    wr_burst_active <= 0;
+                    wr_status_valid <= 1;
+                    wr_status_error <= 4'b0010;
+                    wr_fifo_count <= 0;
+                    wr_fifo_wr_ptr <= 0;
+                    wr_fifo_rd_ptr <= 0;
+                end else begin
+                    // Handle AXI write address handshake
+                    if (wr_burst_active && m_axi_awready) begin
+                        // Burst address accepted, wait for data
+                    end
+                    
+                    // Handle write data completion
+                    if (wr_fifo_read) begin
+                        if (m_axi_wlast) begin
+                            // Burst complete
+                            wr_burst_active <= 0;
+                            
+                            // Check for write response
+                            if (m_axi_bvalid && m_axi_bready) begin
+                                if (m_axi_bresp != 2'b00) begin
+                                    wr_error <= 4'b0001;
+                                end
+                                
+                                // Check if more data to write
+                                if (wr_bytes_remaining > wr_burst_bytes) begin
+                                    // Start next burst
+                                    wr_bytes_remaining <= wr_bytes_remaining - wr_burst_bytes;
+                                    wr_beats_remaining <= wr_beats_remaining - wr_burst_beats;
+                                    wr_burst_addr <= wr_burst_addr + wr_burst_bytes;
+                                    wr_burst_len <= calc_burst_len(wr_bytes_remaining - wr_burst_bytes);
+                                    wr_burst_bytes <= calc_burst_bytes(calc_burst_len(wr_bytes_remaining - wr_burst_bytes));
+                                    wr_burst_beats <= calc_burst_len(wr_bytes_remaining - wr_burst_bytes) + 1;
+                                    wr_burst_last_beat <= ((wr_bytes_remaining - wr_burst_bytes) <= (calc_burst_len(wr_bytes_remaining - wr_burst_bytes) + 1) * AXI_DATA_BYTES);
+                                    wr_burst_active <= 1;
+                                end else begin
+                                    // All data written, complete descriptor
+                                    wr_active <= 0;
+                                    wr_status_valid <= 1;
+                                    wr_status_error <= wr_error;
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            
+            // Clear status valid when consumed (assume immediate consumption)
+            if (wr_status_valid) begin
+                wr_status_valid <= 0;
+            end
+        end
+    end
+
+endmodule

@@ -1,0 +1,343 @@
+```verilog
+module apbxclk #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	parameter [0:0]	OPT_REGISTERED = 1'b0,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH
+) (
+	input	wire			S_APB_PCLK, S_PRESETn,
+	input	wire			S_APB_PSEL,
+	input	wire			S_APB_PENABLE,
+	output	reg			S_APB_PREADY,
+	input	wire	[AW-1:0]	S_APB_PADDR,
+	input	wire			S_APB_PWRITE,
+	input	wire	[DW-1:0]	S_APB_PWDATA,
+	input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+	input	wire	[2:0]		S_APB_PPROT,
+	output	wire	[DW-1:0]	S_APB_PRDATA,
+	output	wire			S_APB_PSLVERR,
+	input	wire			M_APB_PCLK,
+	output	reg			M_PRESETn,
+	output	reg			M_APB_PSEL,
+	output	reg			M_APB_PENABLE,
+	input	wire			M_APB_PREADY,
+	output	wire	[AW-1:0]	M_APB_PADDR,
+	output	wire			M_APB_PWRITE,
+	output	wire	[DW-1:0]	M_APB_PWDATA,
+	output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+	output	wire	[2:0]		M_APB_PPROT,
+	input	wire	[DW-1:0]	M_APB_PRDATA,
+	input	wire			M_APB_PSLVERR
+);
+
+	// Slave-side state machine
+	// States: IDLE, SETUP, ACCESS
+	localparam S_IDLE   = 2'd0;
+	localparam S_SETUP  = 2'd1;
+	localparam S_ACCESS = 2'd2;
+
+	reg [1:0] s_state;
+	reg [1:0] s_state_next;
+
+	// Handshake signals
+	reg s_req;
+	reg s_ack;
+	reg s_ack_sync1;
+	reg s_ack_sync2;
+
+	// Master-side state machine
+	// States: IDLE, SETUP, ACCESS
+	localparam M_IDLE   = 2'd0;
+	localparam M_SETUP  = 2'd1;
+	localparam M_ACCESS = 2'd2;
+
+	reg [1:0] m_state;
+	reg [1:0] m_state_next;
+
+	// Master-side payload registers
+	reg [AW-1:0] m_addr;
+	reg          m_write;
+	reg [DW-1:0] m_wdata;
+	reg [DW/8-1:0] m_wstrb;
+	reg [2:0]    m_pprot;
+
+	// Response registers (master side)
+	reg [DW-1:0] m_rdata;
+	reg          m_rslverr;
+
+	// Slave-side response registers
+	reg [DW-1:0] s_rdata;
+	reg          s_rslverr;
+
+	// Synchronization of master ack to slave clock
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_ack_sync1 <= 1'b0;
+			s_ack_sync2 <= 1'b0;
+		end else begin
+			s_ack_sync1 <= s_ack;
+			s_ack_sync2 <= s_ack_sync1;
+		end
+	end
+
+	// Synchronization of slave req to master clock
+	reg s_req_sync1;
+	reg s_req_sync2;
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			s_req_sync1 <= 1'b0;
+			s_req_sync2 <= 1'b0;
+		end else begin
+			s_req_sync1 <= s_req;
+			s_req_sync2 <= s_req_sync1;
+		end
+	end
+
+	// Synchronization of master response valid to slave clock
+	reg m_resp_valid;
+	reg m_resp_valid_sync1;
+	reg m_resp_valid_sync2;
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_resp_valid_sync1 <= 1'b0;
+			m_resp_valid_sync2 <= 1'b0;
+		end else begin
+			m_resp_valid_sync1 <= m_resp_valid;
+			m_resp_valid_sync2 <= m_resp_valid_sync1;
+		end
+	end
+
+	// Synchronization of slave response valid to master clock
+	reg s_resp_valid;
+	reg s_resp_valid_sync1;
+	reg s_resp_valid_sync2;
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			s_resp_valid_sync1 <= 1'b0;
+			s_resp_valid_sync2 <= 1'b0;
+		end else begin
+			s_resp_valid_sync1 <= s_resp_valid;
+			s_resp_valid_sync2 <= s_resp_valid_sync1;
+		end
+	end
+
+	// Slave-side state machine
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_state <= S_IDLE;
+			S_APB_PREADY <= 1'b0;
+			s_req <= 1'b0;
+			s_rdata <= {DW{1'b0}};
+			s_rslverr <= 1'b0;
+			s_resp_valid <= 1'b0;
+		end else begin
+			s_state <= s_state_next;
+			case (s_state)
+				S_IDLE: begin
+					S_APB_PREADY <= 1'b0;
+					if (S_APB_PSEL) begin
+						s_req <= 1'b1;
+						S_APB_PREADY <= 1'b1;
+					end else begin
+						s_req <= 1'b0;
+					end
+				end
+				S_SETUP: begin
+					S_APB_PREADY <= 1'b0;
+					if (S_APB_PSEL && S_APB_PENABLE) begin
+						s_req <= 1'b1;
+						S_APB_PREADY <= 1'b1;
+					end else begin
+						s_req <= 1'b0;
+					end
+				end
+				S_ACCESS: begin
+					S_APB_PREADY <= 1'b0;
+					if (s_ack_sync2) begin
+						s_req <= 1'b0;
+						S_APB_PREADY <= 1'b1;
+						s_resp_valid <= 1'b1;
+					end else begin
+						s_req <= 1'b1;
+						S_APB_PREADY <= 1'b0;
+					end
+				end
+				default: begin
+					S_APB_PREADY <= 1'b0;
+					s_req <= 1'b0;
+				end
+			endcase
+		end
+	end
+
+	always @(*) begin
+		s_state_next = s_state;
+		case (s_state)
+			S_IDLE: begin
+				if (S_APB_PSEL)
+					s_state_next = S_SETUP;
+			end
+			S_SETUP: begin
+				if (S_APB_PSEL && S_APB_PENABLE)
+					s_state_next = S_ACCESS;
+				else if (!S_APB_PSEL)
+					s_state_next = S_IDLE;
+			end
+			S_ACCESS: begin
+				if (s_ack_sync2)
+					s_state_next = S_IDLE;
+			end
+			default: s_state_next = S_IDLE;
+		endcase
+	end
+
+	// Capture slave-side payload when entering ACCESS state
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			// No action
+		end else if (s_state == S_SETUP && S_APB_PSEL && S_APB_PENABLE) begin
+			// Payload is captured here, but we need to send it to master side
+			// We use a separate mechanism for this
+		end
+	end
+
+	// Master-side state machine
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_state <= M_IDLE;
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			M_PRESETn <= 1'b0;
+			m_addr <= {AW{1'b0}};
+			m_write <= 1'b0;
+			m_wdata <= {DW{1'b0}};
+			m_wstrb <= {(DW/8){1'b0}};
+			m_pprot <= 3'b0;
+			m_rdata <= {DW{1'b0}};
+			m_rslverr <= 1'b0;
+			m_resp_valid <= 1'b0;
+			s_ack <= 1'b0;
+		end else begin
+			M_PRESETn <= 1'b1;
+			m_state <= m_state_next;
+			case (m_state)
+				M_IDLE: begin
+					M_APB_PSEL <= 1'b0;
+					M_APB_PENABLE <= 1'b0;
+					s_ack <= 1'b0;
+					if (s_req_sync2) begin
+						M_APB_PSEL <= 1'b1;
+						M_APB_PENABLE <= 1'b0;
+					end
+				end
+				M_SETUP: begin
+					M_APB_PSEL <= 1'b1;
+					M_APB_PENABLE <= 1'b0;
+					s_ack <= 1'b0;
+					if (s_req_sync2) begin
+						M_APB_PENABLE <= 1'b1;
+					end else begin
+						M_APB_PSEL <= 1'b0;
+						M_APB_PENABLE <= 1'b0;
+					end
+				end
+				M_ACCESS: begin
+					M_APB_PSEL <= 1'b1;
+					M_APB_PENABLE <= 1'b1;
+					if (M_APB_PREADY) begin
+						s_ack <= 1'b1;
+						m_resp_valid <= 1'b1;
+					end else begin
+						s_ack <= 1'b0;
+					end
+				end
+				default: begin
+					M_APB_PSEL <= 1'b0;
+					M_APB_PENABLE <= 1'b0;
+					s_ack <= 1'b0;
+				end
+			endcase
+		end
+	end
+
+	always @(*) begin
+		m_state_next = m_state;
+		case (m_state)
+			M_IDLE: begin
+				if (s_req_sync2)
+					m_state_next = M_SETUP;
+			end
+			M_SETUP: begin
+				if (s_req_sync2)
+					m_state_next = M_ACCESS;
+				else
+					m_state_next = M_IDLE;
+			end
+			M_ACCESS: begin
+				if (M_APB_PREADY)
+					m_state_next = M_IDLE;
+			end
+			default: m_state_next = M_IDLE;
+		endcase
+	end
+
+	// Capture master-side payload when entering ACCESS state
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			// No action
+		end else if (m_state == M_SETUP && s_req_sync2) begin
+			m_addr <= S_APB_PADDR;
+			m_write <= S_APB_PWRITE;
+			m_wdata <= S_APB_PWDATA;
+			m_wstrb <= S_APB_PWSTRB;
+			m_pprot <= S_APB_PPROT;
+		end
+	end
+
+	// Capture master response
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			// No action
+		end else if (m_state == M_ACCESS && M_APB_PREADY) begin
+			m_rdata <= M_APB_PRDATA;
+			m_rslverr <= M_APB_PSLVERR;
+		end
+	end
+
+	// Synchronize master response to slave clock
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_rdata <= {DW{1'b0}};
+			s_rslverr <= 1'b0;
+		end else if (m_resp_valid_sync2) begin
+			s_rdata <= m_rdata;
+			s_rslverr <= m_rslverr;
+			s_resp_valid <= 1'b1;
+		end else begin
+			s_resp_valid <= 1'b0;
+		end
+	end
+
+	// Synchronize slave response valid to master clock (for clearing)
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_resp_valid <= 1'b0;
+		end else if (s_resp_valid_sync2) begin
+			m_resp_valid <= 1'b0;
+		end
+	end
+
+	// Slave-side output
+	assign S_APB_PRDATA = s_rdata;
+	assign S_APB_PSLVERR = s_rslverr;
+
+	// Master-side output
+	assign M_APB_PADDR = m_addr;
+	assign M_APB_PWRITE = m_write;
+	assign M_APB_PWDATA = m_wdata;
+	assign M_APB_PWSTRB = m_wstrb;
+	assign M_APB_PPROT = m_pprot;
+
+endmodule
+```<|im_end|>

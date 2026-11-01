@@ -1,0 +1,200 @@
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam NUM_PORTS = PORTS;
+    localparam ENC_WIDTH = $clog2(PORTS);
+
+    reg [NUM_PORTS-1:0] grant_reg;
+    reg                 grant_valid_reg;
+    reg [ENC_WIDTH-1:0] grant_encoded_reg;
+
+    // For round-robin: track the last granted port
+    reg [ENC_WIDTH-1:0] last_grant_reg;
+
+    // For blocking: track if a grant is currently blocked
+    reg                 blocked_reg;
+
+    // Helper function: find first set bit (LSB priority)
+    function [NUM_PORTS-1:0] find_first_set;
+        input [NUM_PORTS-1:0] mask;
+        integer i;
+        begin
+            find_first_set = {NUM_PORTS{1'b0}};
+            for (i = 0; i < NUM_PORTS; i = i + 1) begin
+                if (mask[i]) begin
+                    find_first_set[i] = 1'b1;
+                    disable find_first_set;
+                end
+            end
+        end
+    endfunction
+
+    // Helper function: find first set bit (MSB priority)
+    function [NUM_PORTS-1:0] find_last_set;
+        input [NUM_PORTS-1:0] mask;
+        integer i;
+        begin
+            find_last_set = {NUM_PORTS{1'b0}};
+            for (i = NUM_PORTS-1; i >= 0; i = i - 1) begin
+                if (mask[i]) begin
+                    find_last_set[i] = 1'b1;
+                    disable find_last_set;
+                end
+            end
+        end
+    endfunction
+
+    // Helper function: encode one-hot to binary
+    function [ENC_WIDTH-1:0] encode_onehot;
+        input [NUM_PORTS-1:0] onehot;
+        integer i;
+        begin
+            encode_onehot = {ENC_WIDTH{1'b0}};
+            for (i = 0; i < NUM_PORTS; i = i + 1) begin
+                if (onehot[i]) begin
+                    encode_onehot = i[ENC_WIDTH-1:0];
+                    disable encode_onehot;
+                end
+            end
+        end
+    endfunction
+
+    // Determine the next grant based on current state
+    reg [NUM_PORTS-1:0] next_grant;
+    reg                 next_grant_valid;
+    reg [ENC_WIDTH-1:0] next_grant_encoded;
+
+    always @* begin
+        next_grant = {NUM_PORTS{1'b0}};
+        next_grant_valid = 1'b0;
+        next_grant_encoded = {ENC_WIDTH{1'b0}};
+
+        if (rst) begin
+            next_grant = {NUM_PORTS{1'b0}};
+            next_grant_valid = 1'b0;
+            next_grant_encoded = {ENC_WIDTH{1'b0}};
+        end else if (ARB_BLOCK && blocked_reg) begin
+            // If blocked, hold the current grant
+            next_grant = grant_reg;
+            next_grant_valid = grant_valid_reg;
+            next_grant_encoded = grant_encoded_reg;
+        end else begin
+            // Determine priority order
+            if (ARB_TYPE_ROUND_ROBIN) begin
+                // Round-robin: rotate request so that the port after last_grant has highest priority
+                // Create a rotated request vector
+                reg [NUM_PORTS-1:0] rotated_request;
+                integer i;
+                integer offset;
+                offset = last_grant_reg + 1;
+                if (offset >= NUM_PORTS) offset = 0;
+                
+                // Rotate request: bit i in rotated corresponds to original bit (i + offset) % NUM_PORTS
+                // We want the port immediately after last_grant to be checked first
+                // So rotated_request[0] = request[offset], rotated_request[1] = request[(offset+1)%NUM_PORTS], etc.
+                // Then find first set in rotated, and map back to original index
+                
+                // Simpler approach: iterate from (last_grant+1) % NUM_PORTS to NUM_PORTS-1, then 0 to last_grant
+                begin : rr_search
+                    integer j;
+                    integer idx;
+                    reg found;
+                    found = 1'b0;
+                    
+                    // First pass: from (last_grant+1) to NUM_PORTS-1
+                    for (j = 0; j < NUM_PORTS; j = j + 1) begin
+                        idx = (last_grant_reg + 1 + j) % NUM_PORTS;
+                        if (!found && request[idx]) begin
+                            next_grant[idx] = 1'b1;
+                            next_grant_valid = 1'b1;
+                            next_grant_encoded = idx[ENC_WIDTH-1:0];
+                            found = 1'b1;
+                        end
+                    end
+                end
+            end else begin
+                // Fixed priority
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    // LSB has highest priority: find first set bit
+                    next_grant = find_first_set(request);
+                    if (|request) begin
+                        next_grant_valid = 1'b1;
+                        next_grant_encoded = encode_onehot(next_grant);
+                    end
+                end else begin
+                    // MSB has highest priority: find last set bit
+                    next_grant = find_last_set(request);
+                    if (|request) begin
+                        next_grant_valid = 1'b1;
+                        next_grant_encoded = encode_onehot(next_grant);
+                    end
+                end
+            end
+        end
+    end
+
+    // Sequential logic
+    always @(posedge clk) begin
+        if (rst) begin
+            grant_reg <= {NUM_PORTS{1'b0}};
+            grant_valid_reg <= 1'b0;
+            grant_encoded_reg <= {ENC_WIDTH{1'b0}};
+            last_grant_reg <= {ENC_WIDTH{1'b0}};
+            blocked_reg <= 1'b0;
+        end else begin
+            grant_reg <= next_grant;
+            grant_valid_reg <= next_grant_valid;
+            grant_encoded_reg <= next_grant_encoded;
+            
+            // Update last_grant for round-robin
+            if (next_grant_valid) begin
+                last_grant_reg <= next_grant_encoded;
+            end
+            
+            // Update blocked state
+            if (ARB_BLOCK) begin
+                if (next_grant_valid && !blocked_reg) begin
+                    // A new grant is being issued, check if it should be blocked
+                    // Block if acknowledge is not asserted for the granted port
+                    // The grant is blocked until acknowledge is received
+                    if (acknowledge[next_grant_encoded] == 1'b0) begin
+                        blocked_reg <= 1'b1;
+                    end else begin
+                        blocked_reg <= 1'b0;
+                    end
+                end else if (blocked_reg) begin
+                    // If currently blocked, check if acknowledge has been received
+                    if (acknowledge[grant_encoded_reg] == 1'b1) begin
+                        blocked_reg <= 1'b0;
+                    end else begin
+                        blocked_reg <= 1'b1;
+                    end
+                end else begin
+                    blocked_reg <= 1'b0;
+                end
+            end
+        end
+    end
+
+    assign grant = grant_reg;
+    assign grant_valid = grant_valid_reg;
+    assign grant_encoded = grant_encoded_reg;
+
+endmodule
+```<|im_end|>

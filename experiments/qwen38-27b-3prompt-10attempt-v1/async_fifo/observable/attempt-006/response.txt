@@ -1,0 +1,179 @@
+```verilog
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWIDTH = ASIZE + 1;
+    localparam AWIDTH_MINUS_1 = AWIDTH - 1;
+
+    // Write domain
+    reg [AWIDTH_MINUS_1:0] wptr;
+    reg [AWIDTH_MINUS_1:0] wptr_gray;
+    reg [AWIDTH_MINUS_1:0] wptr_gray_next;
+    reg [AWIDTH_MINUS_1:0] rptr_gray_w;
+    reg [AWIDTH_MINUS_1:0] rptr_gray_w_sync1;
+    reg [AWIDTH_MINUS_1:0] rptr_gray_w_sync2;
+
+    // Read domain
+    reg [AWIDTH_MINUS_1:0] rptr;
+    reg [AWIDTH_MINUS_1:0] rptr_gray;
+    reg [AWIDTH_MINUS_1:0] rptr_gray_next;
+    reg [AWIDTH_MINUS_1:0] wptr_gray_r;
+    reg [AWIDTH_MINUS_1:0] wptr_gray_r_sync1;
+    reg [AWIDTH_MINUS_1:0] wptr_gray_r_sync2;
+
+    // Memory
+    reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+    // Write enable
+    wire wfull_local;
+    wire awfull_local;
+    wire winc_valid;
+
+    // Read enable
+    wire rempty_local;
+    wire arempty_local;
+    wire rinc_valid;
+
+    // Gray code conversion
+    function [AWIDTH_MINUS_1:0] bin2gray;
+        input [AWIDTH_MINUS_1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    function [AWIDTH_MINUS_1:0] gray2bin;
+        input [AWIDTH_MINUS_1:0] gray;
+        reg [AWIDTH_MINUS_1:0] bin;
+        integer i;
+        begin
+            bin[AWIDTH_MINUS_1] = gray[AWIDTH_MINUS_1];
+            for (i = AWIDTH_MINUS_1 - 1; i >= 0; i = i - 1)
+                bin[i] = gray[i] ^ bin[i+1];
+            gray2bin = bin;
+        end
+    endfunction
+
+    // Write domain logic
+    assign wfull_local = (wptr_gray_next == rptr_gray_w_sync2) && (wptr[AWIDTH_MINUS_1] != rptr_gray_w_sync2[AWIDTH_MINUS_1]);
+    assign awfull_local = (wptr_gray_next == rptr_gray_w_sync2) || (wptr_gray_next == rptr_gray_w_sync2 ^ (1 << (AWIDTH_MINUS_1 - 1)));
+    
+    // Actually, let's use the standard approach:
+    // wfull: wptr_gray_next == rptr_gray_w_sync2 and MSB differs
+    // awfull: wptr_gray_next == rptr_gray_w_sync2 or wptr_gray_next == rptr_gray_w_sync2 with one bit different (almost full)
+    
+    // Let me recalculate:
+    // wptr_gray_next is the gray code of wptr + 1
+    // wfull when wptr_gray_next == rptr_gray_w_sync2 and the MSB of wptr differs from MSB of rptr_gray_w_sync2
+    // awfull when wptr_gray_next == rptr_gray_w_sync2 or wptr_gray_next == rptr_gray_w_sync2 ^ (1 << (AWIDTH_MINUS_1 - 1))
+    
+    // Actually, the standard CDC FIFO approach:
+    // wfull: wptr_gray_next == rptr_gray_w_sync2 && wptr[MSB] != rptr_gray_w_sync2[MSB]
+    // awfull: wptr_gray_next == rptr_gray_w_sync2 || wptr_gray_next == rptr_gray_w_sync2 ^ (1 << (AWIDTH_MINUS_1 - 1))
+    
+    // But we need to be careful. Let me use a cleaner approach.
+    
+    // Write pointer increment
+    wire winc_accepted = winc && !wfull_local;
+    
+    // Read pointer increment
+    wire rinc_accepted = rinc && !rempty_local;
+    
+    // Write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {AWIDTH{1'b0}};
+            wptr_gray <= {AWIDTH{1'b0}};
+            wptr_gray_next <= {AWIDTH{1'b0}};
+            rptr_gray_w_sync1 <= {AWIDTH{1'b0}};
+            rptr_gray_w_sync2 <= {AWIDTH{1'b0}};
+        end else begin
+            if (winc_accepted) begin
+                wptr <= wptr + 1'b1;
+            end
+            wptr_gray <= bin2gray(wptr);
+            wptr_gray_next <= bin2gray(wptr + 1'b1);
+            rptr_gray_w_sync1 <= rptr_gray_w_sync2;
+            rptr_gray_w_sync2 <= rptr_gray_r;
+        end
+    end
+    
+    // Read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= {AWIDTH{1'b0}};
+            rptr_gray <= {AWIDTH{1'b0}};
+            rptr_gray_next <= {AWIDTH{1'b0}};
+            wptr_gray_r_sync1 <= {AWIDTH{1'b0}};
+            wptr_gray_r_sync2 <= {AWIDTH{1'b0}};
+        end else begin
+            if (rinc_accepted) begin
+                rptr <= rptr + 1'b1;
+            end
+            rptr_gray <= bin2gray(rptr);
+            rptr_gray_next <= bin2gray(rptr + 1'b1);
+            wptr_gray_r_sync1 <= wptr_gray_r_sync2;
+            wptr_gray_r_sync2 <= wptr_gray_w;
+        end
+    end
+    
+    // Memory write
+    always @(posedge wclk) begin
+        if (winc_accepted) begin
+            mem[wptr[ASIZE-1:0]] <= wdata;
+        end
+    end
+    
+    // Memory read
+    reg [DSIZE-1:0] rdata_reg;
+    always @(posedge rclk) begin
+        if (rinc_accepted) begin
+            rdata_reg <= mem[rptr[ASIZE-1:0]];
+        end
+    end
+    
+    // Flags
+    assign wfull = wfull_local;
+    assign awfull = awfull_local;
+    assign rempty = rempty_local;
+    assign arempty = arempty_local;
+    assign rdata = rdata_reg;
+    
+    // Cross-domain pointer sync
+    assign wptr_gray_w = wptr_gray;
+    assign rptr_gray_r = rptr_gray;
+    
+    // Full/Empty detection
+    // wfull: wptr_gray_next == rptr_gray_w_sync2 and MSB differs
+    assign wfull_local = (wptr_gray_next == rptr_gray_w_sync2) && (wptr[AWIDTH_MINUS_1] != rptr_gray_w_sync2[AWIDTH_MINUS_1]);
+    
+    // awfull: almost full, one more write would make it full
+    // This is when wptr_gray_next == rptr_gray_w_sync2 ^ (1 << (AWIDTH_MINUS_1 - 1))
+    assign awfull_local = (wptr_gray_next == rptr_gray_w_sync2) || (wptr_gray_next == (rptr_gray_w_sync2 ^ (1 << (AWIDTH_MINUS_1 - 1))));
+    
+    // rempty: rptr_gray_next == wptr_gray_r_sync2
+    assign rempty_local = (rptr_gray_next == wptr_gray_r_sync2);
+    
+    // arempty: almost empty, one more read would make it empty
+    assign arempty_local = (rptr_gray_next == wptr_gray_r_sync2) || (rptr_gray_next == (wptr_gray_r_sync2 ^ (1 << (AWIDTH_MINUS_1 - 1))));
+
+endmodule
+```<|im_end|>

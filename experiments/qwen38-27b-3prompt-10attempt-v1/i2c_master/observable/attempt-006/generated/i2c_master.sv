@@ -1,0 +1,464 @@
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // State machine states
+    localparam S_IDLE = 4'd0;
+    localparam S_START = 4'd1;
+    localparam S_SEND_BIT = 4'd2;
+    localparam S_WAIT_ACK = 4'd3;
+    localparam S_READ_BIT = 4'd4;
+    localparam S_SEND_ACK = 4'd5;
+    localparam S_STOP = 4'd6;
+    localparam S_DONE = 4'd7;
+
+    reg [3:0] state;
+    reg [3:0] bit_count;
+    reg [7:0] tx_data;
+    reg [7:0] rx_data;
+    reg [6:0] addr_reg;
+    reg read_mode;
+    reg write_mode;
+    reg write_multiple;
+    reg stop_cmd;
+    reg start_cmd;
+    reg cmd_valid_reg;
+    reg [15:0] prescale_reg;
+    reg stop_on_idle_reg;
+    reg [15:0] counter;
+    reg counter_done;
+    reg scl_out;
+    reg sda_out;
+    reg scl_tri;
+    reg sda_tri;
+    reg busy_reg;
+    reg bus_control_reg;
+    reg bus_active_reg;
+    reg missed_ack_reg;
+    reg m_axis_data_tvalid_reg;
+    reg [7:0] m_axis_data_tdata_reg;
+    reg m_axis_data_tlast_reg;
+    reg s_axis_data_tready_reg;
+    reg s_axis_cmd_ready_reg;
+
+    // Pipeline registers for command
+    reg [6:0] addr_pipe;
+    reg read_pipe;
+    reg write_pipe;
+    reg write_multiple_pipe;
+    reg stop_pipe;
+    reg start_pipe;
+    reg cmd_valid_pipe;
+
+    // Pipeline registers for data
+    reg [7:0] data_pipe;
+    reg data_valid_pipe;
+    reg data_last_pipe;
+
+    // SDA/SCL control
+    assign scl_o = scl_out;
+    assign sda_o = sda_out;
+    assign scl_t = scl_tri;
+    assign sda_t = sda_tri;
+
+    assign busy = busy_reg;
+    assign bus_control = bus_control_reg;
+    assign bus_active = bus_active_reg;
+    assign missed_ack = missed_ack_reg;
+
+    assign m_axis_data_tdata = m_axis_data_tdata_reg;
+    assign m_axis_data_tvalid = m_axis_data_tvalid_reg;
+    assign m_axis_data_tlast = m_axis_data_tlast_reg;
+
+    assign s_axis_data_tready = s_axis_data_tready_reg;
+    assign s_axis_cmd_ready = s_axis_cmd_ready_reg;
+
+    // Pipeline command
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            addr_pipe <= 7'd0;
+            read_pipe <= 1'b0;
+            write_pipe <= 1'b0;
+            write_multiple_pipe <= 1'b0;
+            stop_pipe <= 1'b0;
+            start_pipe <= 1'b0;
+            cmd_valid_pipe <= 1'b0;
+        end else begin
+            addr_pipe <= s_axis_cmd_address;
+            read_pipe <= s_axis_cmd_read;
+            write_pipe <= s_axis_cmd_write;
+            write_multiple_pipe <= s_axis_cmd_write_multiple;
+            stop_pipe <= s_axis_cmd_stop;
+            start_pipe <= s_axis_cmd_start;
+            cmd_valid_pipe <= s_axis_cmd_valid;
+        end
+    end
+
+    // Pipeline data
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            data_pipe <= 8'd0;
+            data_valid_pipe <= 1'b0;
+            data_last_pipe <= 1'b0;
+        end else begin
+            data_pipe <= s_axis_data_tdata;
+            data_valid_pipe <= s_axis_data_tvalid;
+            data_last_pipe <= s_axis_data_tlast;
+        end
+    end
+
+    // Main state machine
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= S_IDLE;
+            bit_count <= 4'd0;
+            tx_data <= 8'd0;
+            rx_data <= 8'd0;
+            addr_reg <= 7'd0;
+            read_mode <= 1'b0;
+            write_mode <= 1'b0;
+            write_multiple <= 1'b0;
+            stop_cmd <= 1'b0;
+            start_cmd <= 1'b0;
+            cmd_valid_reg <= 1'b0;
+            prescale_reg <= 16'd0;
+            stop_on_idle_reg <= 1'b0;
+            counter <= 16'd0;
+            counter_done <= 1'b0;
+            scl_out <= 1'b1;
+            sda_out <= 1'b1;
+            scl_tri <= 1'b1;
+            sda_tri <= 1'b1;
+            busy_reg <= 1'b0;
+            bus_control_reg <= 1'b0;
+            bus_active_reg <= 1'b0;
+            missed_ack_reg <= 1'b0;
+            m_axis_data_tvalid_reg <= 1'b0;
+            m_axis_data_tdata_reg <= 8'd0;
+            m_axis_data_tlast_reg <= 1'b0;
+            s_axis_data_tready_reg <= 1'b0;
+            s_axis_cmd_ready_reg <= 1'b1;
+        end else begin
+            // Default assignments
+            counter_done <= 1'b0;
+            s_axis_cmd_ready_reg <= 1'b0;
+            s_axis_data_tready_reg <= 1'b0;
+            m_axis_data_tvalid_reg <= 1'b0;
+
+            case (state)
+                S_IDLE: begin
+                    s_axis_cmd_ready_reg <= 1'b1;
+                    busy_reg <= 1'b0;
+                    bus_control_reg <= 1'b0;
+                    bus_active_reg <= 1'b0;
+                    missed_ack_reg <= 1'b0;
+                    scl_out <= 1'b1;
+                    sda_out <= 1'b1;
+                    scl_tri <= 1'b1;
+                    sda_tri <= 1'b1;
+                    counter <= 16'd0;
+                    bit_count <= 4'd0;
+                    rx_data <= 8'd0;
+
+                    if (cmd_valid_pipe) begin
+                        cmd_valid_reg <= 1'b1;
+                        addr_reg <= addr_pipe;
+                        read_mode <= read_pipe;
+                        write_mode <= write_pipe;
+                        write_multiple <= write_multiple_pipe;
+                        stop_cmd <= stop_pipe;
+                        start_cmd <= start_pipe;
+                        prescale_reg <= prescale;
+                        stop_on_idle_reg <= stop_on_idle;
+                        busy_reg <= 1'b1;
+                        bus_control_reg <= 1'b1;
+                        bus_active_reg <= 1'b1;
+                        scl_tri <= 1'b0;
+                        sda_tri <= 1'b0;
+                        scl_out <= 1'b1;
+                        sda_out <= 1'b1;
+
+                        if (start_pipe) begin
+                            state <= S_START;
+                        end else if (stop_pipe) begin
+                            state <= S_STOP;
+                        end else if (read_pipe || write_pipe) begin
+                            // Prepare first byte: address + R/W bit
+                            tx_data <= {addr_pipe, read_pipe};
+                            bit_count <= 4'd7;
+                            state <= S_SEND_BIT;
+                        end else begin
+                            // No valid operation, go to done
+                            state <= S_DONE;
+                        end
+                    end
+                end
+
+                S_START: begin
+                    // Generate START condition: SDA high->low while SCL high
+                    if (counter == 16'd0) begin
+                        // First cycle: ensure SCL high, SDA high
+                        scl_out <= 1'b1;
+                        sda_out <= 1'b1;
+                        counter <= 16'd1;
+                    end else if (counter == 16'd1) begin
+                        // Second cycle: SDA goes low (START)
+                        sda_out <= 1'b0;
+                        counter <= 16'd2;
+                    end else if (counter == 16'd2) begin
+                        // Wait a bit
+                        counter <= 16'd3;
+                    end else if (counter == 16'd3) begin
+                        // START complete, prepare to send first bit
+                        // SCL should be high, SDA low
+                        scl_out <= 1'b1;
+                        sda_out <= 1'b0;
+                        counter <= 16'd0;
+                        state <= S_SEND_BIT;
+                    end else begin
+                        counter <= counter + 16'd1;
+                    end
+                end
+
+                S_SEND_BIT: begin
+                    // Send one bit: SDA changes while SCL low, then SCL goes high
+                    if (counter == 16'd0) begin
+                        // SCL low, set SDA to bit value
+                        scl_out <= 1'b0;
+                        sda_out <= tx_data[bit_count];
+                        counter <= 16'd1;
+                    end else if (counter == 16'd1) begin
+                        // SCL goes high
+                        scl_out <= 1'b1;
+                        counter <= 16'd2;
+                    end else if (counter == 16'd2) begin
+                        // SCL goes low
+                        scl_out <= 1'b0;
+                        counter <= 16'd3;
+                    end else if (counter == 16'd3) begin
+                        // Bit sent, move to next bit or ACK
+                        if (bit_count == 4'd0) begin
+                            // All 8 bits sent, wait for ACK
+                            state <= S_WAIT_ACK;
+                            counter <= 16'd0;
+                        end else begin
+                            bit_count <= bit_count - 4'd1;
+                            counter <= 16'd0;
+                        end
+                    end else begin
+                        counter <= counter + 16'd1;
+                    end
+                end
+
+                S_WAIT_ACK: begin
+                    // Wait for slave ACK: SCL high, read SDA
+                    if (counter == 16'd0) begin
+                        // SCL low, SDA released (tri-state)
+                        scl_out <= 1'b0;
+                        sda_tri <= 1'b1;
+                        counter <= 16'd1;
+                    end else if (counter == 16'd1) begin
+                        // SCL high, read SDA
+                        scl_out <= 1'b1;
+                        counter <= 16'd2;
+                    end else if (counter == 16'd2) begin
+                        // SCL low, check ACK
+                        scl_out <= 1'b0;
+                        sda_tri <= 1'b0;
+                        if (sda_i) begin
+                            // NACK
+                            missed_ack_reg <= 1'b1;
+                        end
+                        counter <= 16'd3;
+                    end else if (counter == 16'd3) begin
+                        // ACK complete, determine next action
+                        if (missed_ack_reg) begin
+                            // NACK received, stop
+                            state <= S_STOP;
+                            counter <= 16'd0;
+                        end else if (read_mode) begin
+                            // Read mode: send ACK/NACK after reading
+                            // For read, we need to read 8 bits first
+                            // But we just sent address, so now we read data
+                            // Actually, after address ACK in read mode, we start reading
+                            // Let's restructure: after address, if read, go to read bits
+                            state <= S_READ_BIT;
+                            bit_count <= 4'd7;
+                            counter <= 16'd0;
+                        end else if (write_mode) begin
+                            // Write mode: send next data byte
+                            if (write_multiple) begin
+                                // Multiple write: get next data byte
+                                if (data_valid_pipe) begin
+                                    tx_data <= data_pipe;
+                                    bit_count <= 4'd7;
+                                    state <= S_SEND_BIT;
+                                    counter <= 16'd0;
+                                end else begin
+                                    // Wait for data
+                                    s_axis_data_tready_reg <= 1'b1;
+                                    state <= S_WAIT_ACK; // Stay in wait state
+                                    counter <= 16'd0;
+                                end
+                            end else begin
+                                // Single write: done after address
+                                state <= S_STOP;
+                                counter <= 16'd0;
+                            end
+                        end else begin
+                            state <= S_STOP;
+                            counter <= 16'd0;
+                        end
+                    end else begin
+                        counter <= counter + 16'd1;
+                    end
+                end
+
+                S_READ_BIT: begin
+                    // Read one bit: SCL high, read SDA
+                    if (counter == 16'd0) begin
+                        // SCL low, SDA released
+                        scl_out <= 1'b0;
+                        sda_tri <= 1'b1;
+                        counter <= 16'd1;
+                    end else if (counter == 16'd1) begin
+                        // SCL high, read SDA
+                        scl_out <= 1'b1;
+                        rx_data[bit_count] <= sda_i;
+                        counter <= 16'd2;
+                    end else if (counter == 16'd2) begin
+                        // SCL low
+                        scl_out <= 1'b0;
+                        counter <= 16'd3;
+                    end else if (counter == 16'd3) begin
+                        // Bit read, move to next bit or send ACK
+                        if (bit_count == 4'd0) begin
+                            // All 8 bits read, send ACK/NACK
+                            state <= S_SEND_ACK;
+                            counter <= 16'd0;
+                        end else begin
+                            bit_count <= bit_count - 4'd1;
+                            counter <= 16'd0;
+                        end
+                    end else begin
+                        counter <= counter + 16'd1;
+                    end
+                end
+
+                S_SEND_ACK: begin
+                    // Send ACK (0) or NACK (1) after read
+                    if (counter == 16'd0) begin
+                        // SCL low, SDA = 0 (ACK)
+                        scl_out <= 1'b0;
+                        sda_tri <= 1'b0;
+                        sda_out <= 1'b0;
+                        counter <= 16'd1;
+                    end else if (counter == 16'd1) begin
+                        // SCL high
+                        scl_out <= 1'b1;
+                        counter <= 16'd2;
+                    end else if (counter == 16'd2) begin
+                        // SCL low
+                        scl_out <= 1'b0;
+                        counter <= 16'd3;
+                    end else if (counter == 16'd3) begin
+                        // ACK sent, output data
+                        m_axis_data_tdata_reg <= rx_data;
+                        m_axis_data_tvalid_reg <= 1'b1;
+                        m_axis_data_tlast_reg <= 1'b1;
+                        sda_tri <= 1'b1;
+                        state <= S_STOP;
+                        counter <= 16'd0;
+                    end else begin
+                        counter <= counter + 16'd1;
+                    end
+                end
+
+                S_STOP: begin
+                    // Generate STOP condition: SDA low->high while SCL high
+                    if (counter == 16'd0) begin
+                        // Ensure SCL high, SDA low
+                        scl_out <= 1'b1;
+                        sda_tri <= 1'b0;
+                        sda_out <= 1'b0;
+                        counter <= 16'd1;
+                    end else if (counter == 16'd1) begin
+                        // SDA goes high (STOP)
+                        sda_out <= 1'b1;
+                        counter <= 16'd2;
+                    end else if (counter == 16'd2) begin
+                        // Wait
+                        counter <= 16'd3;
+                    end else if (counter == 16'd3) begin
+                        // STOP complete
+                        scl_tri <= 1'b1;
+                        sda_tri <= 1'b1;
+                        scl_out <= 1'b1;
+                        sda_out <= 1'b1;
+                        state <= S_DONE;
+                        counter <= 16'd0;
+                    end else begin
+                        counter <= counter + 16'd1;
+                    end
+                end
+
+                S_DONE: begin
+                    busy_reg <= 1'b0;
+                    bus_control_reg <= 1'b0;
+                    bus_active_reg <= 1'b0;
+                    scl_tri <= 1'b1;
+                    sda_tri <= 1'b1;
+                    scl_out <= 1'b1;
+                    sda_out <= 1'b1;
+                    state <= S_IDLE;
+                end
+
+                default: begin
+                    state <= S_IDLE;
+                end
+            endcase
+        end
+    end
+
+endmodule

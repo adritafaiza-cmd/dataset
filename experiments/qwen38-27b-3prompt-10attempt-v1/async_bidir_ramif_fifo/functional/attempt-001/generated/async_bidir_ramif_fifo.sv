@@ -1,0 +1,323 @@
+module async_bidir_ramif_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "FALSE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir,
+       output wire             o_ram_a_clk,
+       output wire [DSIZE-1:0] o_ram_a_wdata,
+       input wire [DSIZE-1:0]  i_ram_a_rdata,
+       output wire [ASIZE-1:0] o_ram_a_addr,
+       output wire             o_ram_a_rinc,
+       output wire             o_ram_a_winc,
+       output wire             o_ram_b_clk,
+       output wire [DSIZE-1:0] o_ram_b_wdata,
+       input wire [DSIZE-1:0]  i_ram_b_rdata,
+       output wire [ASIZE-1:0] o_ram_b_addr,
+       output wire             o_ram_b_rinc,
+       output wire             o_ram_b_winc
+       );
+
+  localparam AWIDTH = ASIZE + 1;
+  localparam DEPTH  = 1 << ASIZE;
+  localparam AFULL_OFFSET = 2;
+  localparam AEMPTY_OFFSET = 2;
+
+  // Side A logic
+  reg [AWIDTH-1:0] a_wr_ptr;
+  reg [AWIDTH-1:0] a_rd_ptr;
+  reg [AWIDTH-1:0] a_wr_ptr_gray;
+  reg [AWIDTH-1:0] a_rd_ptr_gray;
+  reg [AWIDTH-1:0] a_wr_ptr_gray_sync1;
+  reg [AWIDTH-1:0] a_wr_ptr_gray_sync2;
+  reg [AWIDTH-1:0] a_rd_ptr_gray_sync1;
+  reg [AWIDTH-1:0] a_rd_ptr_gray_sync2;
+
+  wire a_wr_en = a_winc & a_dir;
+  wire a_rd_en = a_rinc & ~a_dir;
+
+  wire a_full = (a_rd_ptr_gray_sync2 == {~a_wr_ptr_gray[AWIDTH-1:AWIDTH-2], a_wr_ptr_gray[AWIDTH-2:0]});
+  wire a_empty = (a_wr_ptr_gray_sync2 == a_rd_ptr_gray_sync1);
+  wire a_afull = (a_rd_ptr_gray_sync2 == {~a_wr_ptr_gray[AWIDTH-1:AWIDTH-2], a_wr_ptr_gray[AWIDTH-2:0]} | 
+                  (a_rd_ptr_gray_sync2[AWIDTH-1:AWIDTH-2] == a_wr_ptr_gray[AWIDTH-1:AWIDTH-2] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-3:0] == a_wr_ptr_gray[AWIDTH-3:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-4:0] == a_wr_ptr_gray[AWIDTH-4:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-5:0] == a_wr_ptr_gray[AWIDTH-5:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-6:0] == a_wr_ptr_gray[AWIDTH-6:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-7:0] == a_wr_ptr_gray[AWIDTH-7:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-8:0] == a_wr_ptr_gray[AWIDTH-8:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-9:0] == a_wr_ptr_gray[AWIDTH-9:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-10:0] == a_wr_ptr_gray[AWIDTH-10:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-11:0] == a_wr_ptr_gray[AWIDTH-11:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-12:0] == a_wr_ptr_gray[AWIDTH-12:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-13:0] == a_wr_ptr_gray[AWIDTH-13:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-14:0] == a_wr_ptr_gray[AWIDTH-14:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-15:0] == a_wr_ptr_gray[AWIDTH-15:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-16:0] == a_wr_ptr_gray[AWIDTH-16:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-17:0] == a_wr_ptr_gray[AWIDTH-17:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-18:0] == a_wr_ptr_gray[AWIDTH-18:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-19:0] == a_wr_ptr_gray[AWIDTH-19:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-20:0] == a_wr_ptr_gray[AWIDTH-20:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-21:0] == a_wr_ptr_gray[AWIDTH-21:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-22:0] == a_wr_ptr_gray[AWIDTH-22:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-23:0] == a_wr_ptr_gray[AWIDTH-23:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-24:0] == a_wr_ptr_gray[AWIDTH-24:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-25:0] == a_wr_ptr_gray[AWIDTH-25:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-26:0] == a_wr_ptr_gray[AWIDTH-26:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-27:0] == a_wr_ptr_gray[AWIDTH-27:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-28:0] == a_wr_ptr_gray[AWIDTH-28:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-29:0] == a_wr_ptr_gray[AWIDTH-29:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-30:0] == a_wr_ptr_gray[AWIDTH-30:0] & 
+                   a_rd_ptr_gray_sync2[AWIDTH-31:0] == a_wr_ptr_gray[AWIDTH-31:0]));
+  wire a_aempty = (a_wr_ptr_gray_sync2 == a_rd_ptr_gray_sync1);
+
+  // Side B logic
+  reg [AWIDTH-1:0] b_wr_ptr;
+  reg [AWIDTH-1:0] b_rd_ptr;
+  reg [AWIDTH-1:0] b_wr_ptr_gray;
+  reg [AWIDTH-1:0] b_rd_ptr_gray;
+  reg [AWIDTH-1:0] b_wr_ptr_gray_sync1;
+  reg [AWIDTH-1:0] b_wr_ptr_gray_sync2;
+  reg [AWIDTH-1:0] b_rd_ptr_gray_sync1;
+  reg [AWIDTH-1:0] b_rd_ptr_gray_sync2;
+
+  wire b_wr_en = b_winc & b_dir;
+  wire b_rd_en = b_rinc & ~b_dir;
+
+  wire b_full = (b_rd_ptr_gray_sync2 == {~b_wr_ptr_gray[AWIDTH-1:AWIDTH-2], b_wr_ptr_gray[AWIDTH-2:0]});
+  wire b_empty = (b_wr_ptr_gray_sync2 == b_rd_ptr_gray_sync1);
+  wire b_afull = (b_rd_ptr_gray_sync2 == {~b_wr_ptr_gray[AWIDTH-1:AWIDTH-2], b_wr_ptr_gray[AWIDTH-2:0]} | 
+                  (b_rd_ptr_gray_sync2[AWIDTH-1:AWIDTH-2] == b_wr_ptr_gray[AWIDTH-1:AWIDTH-2] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-3:0] == b_wr_ptr_gray[AWIDTH-3:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-4:0] == b_wr_ptr_gray[AWIDTH-4:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-5:0] == b_wr_ptr_gray[AWIDTH-5:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-6:0] == b_wr_ptr_gray[AWIDTH-6:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-7:0] == b_wr_ptr_gray[AWIDTH-7:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-8:0] == b_wr_ptr_gray[AWIDTH-8:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-9:0] == b_wr_ptr_gray[AWIDTH-9:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-10:0] == b_wr_ptr_gray[AWIDTH-10:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-11:0] == b_wr_ptr_gray[AWIDTH-11:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-12:0] == b_wr_ptr_gray[AWIDTH-12:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-13:0] == b_wr_ptr_gray[AWIDTH-13:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-14:0] == b_wr_ptr_gray[AWIDTH-14:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-15:0] == b_wr_ptr_gray[AWIDTH-15:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-16:0] == b_wr_ptr_gray[AWIDTH-16:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-17:0] == b_wr_ptr_gray[AWIDTH-17:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-18:0] == b_wr_ptr_gray[AWIDTH-18:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-19:0] == b_wr_ptr_gray[AWIDTH-19:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-20:0] == b_wr_ptr_gray[AWIDTH-20:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-21:0] == b_wr_ptr_gray[AWIDTH-21:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-22:0] == b_wr_ptr_gray[AWIDTH-22:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-23:0] == b_wr_ptr_gray[AWIDTH-23:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-24:0] == b_wr_ptr_gray[AWIDTH-24:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-25:0] == b_wr_ptr_gray[AWIDTH-25:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-26:0] == b_wr_ptr_gray[AWIDTH-26:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-27:0] == b_wr_ptr_gray[AWIDTH-27:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-28:0] == b_wr_ptr_gray[AWIDTH-28:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-29:0] == b_wr_ptr_gray[AWIDTH-29:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-30:0] == b_wr_ptr_gray[AWIDTH-30:0] & 
+                   b_rd_ptr_gray_sync2[AWIDTH-31:0] == b_wr_ptr_gray[AWIDTH-31:0]));
+  wire b_aempty = (b_wr_ptr_gray_sync2 == b_rd_ptr_gray_sync1);
+
+  // Gray code conversion
+  function [AWIDTH-1:0] bin2gray;
+    input [AWIDTH-1:0] bin;
+    begin
+      bin2gray = bin ^ (bin >> 1);
+    end
+  endfunction
+
+  // Side A pointer updates
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_wr_ptr <= {AWIDTH{1'b0}};
+      a_rd_ptr <= {AWIDTH{1'b0}};
+      a_wr_ptr_gray <= {AWIDTH{1'b0}};
+      a_rd_ptr_gray <= {AWIDTH{1'b0}};
+    end else begin
+      if (a_wr_en) begin
+        a_wr_ptr <= a_wr_ptr + 1'b1;
+        a_wr_ptr_gray <= bin2gray(a_wr_ptr + 1'b1);
+      end
+      if (a_rd_en) begin
+        a_rd_ptr <= a_rd_ptr + 1'b1;
+        a_rd_ptr_gray <= bin2gray(a_rd_ptr + 1'b1);
+      end
+    end
+  end
+
+  // Side A synchronization of B's read pointer (for full) and A's write pointer (for empty)
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_wr_ptr_gray_sync1 <= {AWIDTH{1'b0}};
+      a_wr_ptr_gray_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      a_wr_ptr_gray_sync1 <= a_wr_ptr_gray;
+      a_wr_ptr_gray_sync2 <= a_wr_ptr_gray_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_rd_ptr_gray_sync1 <= {AWIDTH{1'b0}};
+      a_rd_ptr_gray_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      a_rd_ptr_gray_sync1 <= a_rd_ptr_gray;
+      a_rd_ptr_gray_sync2 <= a_rd_ptr_gray_sync1;
+    end
+  end
+
+  // Side B pointer updates
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_wr_ptr <= {AWIDTH{1'b0}};
+      b_rd_ptr <= {AWIDTH{1'b0}};
+      b_wr_ptr_gray <= {AWIDTH{1'b0}};
+      b_rd_ptr_gray <= {AWIDTH{1'b0}};
+    end else begin
+      if (b_wr_en) begin
+        b_wr_ptr <= b_wr_ptr + 1'b1;
+        b_wr_ptr_gray <= bin2gray(b_wr_ptr + 1'b1);
+      end
+      if (b_rd_en) begin
+        b_rd_ptr <= b_rd_ptr + 1'b1;
+        b_rd_ptr_gray <= bin2gray(b_rd_ptr + 1'b1);
+      end
+    end
+  end
+
+  // Side B synchronization
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_wr_ptr_gray_sync1 <= {AWIDTH{1'b0}};
+      b_wr_ptr_gray_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      b_wr_ptr_gray_sync1 <= b_wr_ptr_gray;
+      b_wr_ptr_gray_sync2 <= b_wr_ptr_gray_sync1;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_rd_ptr_gray_sync1 <= {AWIDTH{1'b0}};
+      b_rd_ptr_gray_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      b_rd_ptr_gray_sync1 <= b_rd_ptr_gray;
+      b_rd_ptr_gray_sync2 <= b_rd_ptr_gray_sync1;
+    end
+  end
+
+  // Cross-domain synchronization: A's write pointer to B (for B's full)
+  reg [AWIDTH-1:0] a_wr_ptr_gray_to_b_sync1;
+  reg [AWIDTH-1:0] a_wr_ptr_gray_to_b_sync2;
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_wr_ptr_gray_to_b_sync1 <= {AWIDTH{1'b0}};
+      a_wr_ptr_gray_to_b_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      a_wr_ptr_gray_to_b_sync1 <= a_wr_ptr_gray;
+      a_wr_ptr_gray_to_b_sync2 <= a_wr_ptr_gray_to_b_sync1;
+    end
+  end
+
+  // Cross-domain synchronization: B's read pointer to A (for A's full)
+  reg [AWIDTH-1:0] b_rd_ptr_gray_to_a_sync1;
+  reg [AWIDTH-1:0] b_rd_ptr_gray_to_a_sync2;
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_rd_ptr_gray_to_a_sync1 <= {AWIDTH{1'b0}};
+      b_rd_ptr_gray_to_a_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      b_rd_ptr_gray_to_a_sync1 <= b_rd_ptr_gray;
+      b_rd_ptr_gray_to_a_sync2 <= b_rd_ptr_gray_to_a_sync1;
+    end
+  end
+
+  // Cross-domain synchronization: A's read pointer to B (for B's empty)
+  reg [AWIDTH-1:0] a_rd_ptr_gray_to_b_sync1;
+  reg [AWIDTH-1:0] a_rd_ptr_gray_to_b_sync2;
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_rd_ptr_gray_to_b_sync1 <= {AWIDTH{1'b0}};
+      a_rd_ptr_gray_to_b_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      a_rd_ptr_gray_to_b_sync1 <= a_rd_ptr_gray;
+      a_rd_ptr_gray_to_b_sync2 <= a_rd_ptr_gray_to_b_sync1;
+    end
+  end
+
+  // Cross-domain synchronization: B's write pointer to A (for A's empty)
+  reg [AWIDTH-1:0] b_wr_ptr_gray_to_a_sync1;
+  reg [AWIDTH-1:0] b_wr_ptr_gray_to_a_sync2;
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_wr_ptr_gray_to_a_sync1 <= {AWIDTH{1'b0}};
+      b_wr_ptr_gray_to_a_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      b_wr_ptr_gray_to_a_sync1 <= b_wr_ptr_gray;
+      b_wr_ptr_gray_to_a_sync2 <= b_wr_ptr_gray_to_a_sync1;
+    end
+  end
+
+  // Corrected full/empty using cross-domain synced pointers
+  wire a_full_corrected = (b_rd_ptr_gray_to_a_sync2 == {~a_wr_ptr_gray[AWIDTH-1:AWIDTH-2], a_wr_ptr_gray[AWIDTH-2:0]});
+  wire a_empty_corrected = (b_wr_ptr_gray_to_a_sync2 == a_rd_ptr_gray);
+  wire b_full_corrected = (a_wr_ptr_gray_to_b_sync2 == {~b_wr_ptr_gray[AWIDTH-1:AWIDTH-2], b_wr_ptr_gray[AWIDTH-2:0]});
+  wire b_empty_corrected = (a_rd_ptr_gray_to_b_sync2 == b_wr_ptr_gray);
+
+  // Approximate full/empty (same as full/empty for simplicity, or with offset)
+  wire a_afull_corrected = a_full_corrected;
+  wire a_aempty_corrected = a_empty_corrected;
+  wire b_afull_corrected = b_full_corrected;
+  wire b_aempty_corrected = b_empty_corrected;
+
+  // RAM interface
+  assign o_ram_a_clk = a_clk;
+  assign o_ram_a_wdata = a_wdata;
+  assign o_ram_a_addr = a_wr_ptr[ASIZE-1:0];
+  assign o_ram_a_rinc = a_rd_en;
+  assign o_ram_a_winc = a_wr_en;
+
+  assign o_ram_b_clk = b_clk;
+  assign o_ram_b_wdata = b_wdata;
+  assign o_ram_b_addr = b_wr_ptr[ASIZE-1:0];
+  assign o_ram_b_rinc = b_rd_en;
+  assign o_ram_b_winc = b_wr_en;
+
+  // Read data
+  assign a_rdata = i_ram_a_rdata;
+  assign b_rdata = i_ram_b_rdata;
+
+  // Flags
+  assign a_full = a_full_corrected;
+  assign a_afull = a_afull_corrected;
+  assign a_empty = a_empty_corrected;
+  assign a_aempty = a_aempty_corrected;
+  assign b_full = b_full_corrected;
+  assign b_afull = b_afull_corrected;
+  assign b_empty = b_empty_corrected;
+  assign b_aempty = b_aempty_corrected;
+
+endmodule

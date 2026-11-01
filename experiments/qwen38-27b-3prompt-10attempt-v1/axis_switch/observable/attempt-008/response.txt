@@ -1,0 +1,426 @@
+```verilog
+module axis_switch #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter S_ID_WIDTH = 8,
+    parameter M_ID_WIDTH = S_ID_WIDTH+$clog2(S_COUNT),
+    parameter M_DEST_WIDTH = 1,
+    parameter S_DEST_WIDTH = M_DEST_WIDTH+$clog2(M_COUNT),
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter M_BASE = 0,
+    parameter M_TOP = 0,
+    parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
+    parameter UPDATE_TID = 0,
+    parameter S_REG_TYPE = 0,
+    parameter M_REG_TYPE = 2,
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 1
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    /*
+     * AXI Stream inputs
+     */
+    input  wire [S_COUNT*DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [S_COUNT*KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire [S_COUNT-1:0]               s_axis_tvalid,
+    output wire [S_COUNT-1:0]               s_axis_tready,
+    input  wire [S_COUNT-1:0]               s_axis_tlast,
+    input  wire [S_COUNT*S_ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [S_COUNT*USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI Stream outputs
+     */
+    output wire [M_COUNT*DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [M_COUNT*KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire [M_COUNT-1:0]               m_axis_tvalid,
+    input  wire [M_COUNT-1:0]               m_axis_tready,
+    output wire [M_COUNT-1:0]               m_axis_tlast,
+    output wire [M_COUNT*M_ID_WIDTH-1:0]    m_axis_tid,
+    output wire [M_COUNT*M_DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [M_COUNT*USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    // Internal signals
+    wire [S_COUNT-1:0] s_tvalid;
+    wire [S_COUNT-1:0] s_tready;
+    wire [S_COUNT-1:0] s_tlast;
+    wire [S_COUNT*DATA_WIDTH-1:0] s_tdata;
+    wire [S_COUNT*KEEP_WIDTH-1:0] s_tkeep;
+    wire [S_COUNT*S_ID_WIDTH-1:0] s_tid;
+    wire [S_COUNT*S_DEST_WIDTH-1:0] s_tdest;
+    wire [S_COUNT*USER_WIDTH-1:0] s_tuser;
+
+    // Source register stage
+    if (S_REG_TYPE != 0) begin
+        reg [S_COUNT-1:0] s_tvalid_r;
+        reg [S_COUNT-1:0] s_tlast_r;
+        reg [S_COUNT*DATA_WIDTH-1:0] s_tdata_r;
+        reg [S_COUNT*KEEP_WIDTH-1:0] s_tkeep_r;
+        reg [S_COUNT*S_ID_WIDTH-1:0] s_tid_r;
+        reg [S_COUNT*S_DEST_WIDTH-1:0] s_tdest_r;
+        reg [S_COUNT*USER_WIDTH-1:0] s_tuser_r;
+
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                s_tvalid_r <= {S_COUNT{1'b0}};
+                s_tlast_r <= {S_COUNT{1'b0}};
+                s_tdata_r <= {S_COUNT*DATA_WIDTH{1'b0}};
+                s_tkeep_r <= {S_COUNT*KEEP_WIDTH{1'b0}};
+                s_tid_r <= {S_COUNT*S_ID_WIDTH{1'b0}};
+                s_tdest_r <= {S_COUNT*S_DEST_WIDTH{1'b0}};
+                s_tuser_r <= {S_COUNT*USER_WIDTH{1'b0}};
+            end else begin
+                for (integer i = 0; i < S_COUNT; i = i + 1) begin
+                    if (s_axis_tvalid[i] && s_tready[i]) begin
+                        s_tvalid_r[i] <= 1'b1;
+                        s_tlast_r[i] <= s_axis_tlast[i];
+                        s_tdata_r[i*DATA_WIDTH +: DATA_WIDTH] <= s_axis_tdata[i*DATA_WIDTH +: DATA_WIDTH];
+                        s_tkeep_r[i*KEEP_WIDTH +: KEEP_WIDTH] <= s_axis_tkeep[i*KEEP_WIDTH +: KEEP_WIDTH];
+                        s_tid_r[i*S_ID_WIDTH +: S_ID_WIDTH] <= s_axis_tid[i*S_ID_WIDTH +: S_ID_WIDTH];
+                        s_tdest_r[i*S_DEST_WIDTH +: S_DEST_WIDTH] <= s_axis_tdest[i*S_DEST_WIDTH +: S_DEST_WIDTH];
+                        s_tuser_r[i*USER_WIDTH +: USER_WIDTH] <= s_axis_tuser[i*USER_WIDTH +: USER_WIDTH];
+                    end else if (s_tvalid_r[i] && s_tready[i]) begin
+                        s_tvalid_r[i] <= 1'b0;
+                    end
+                end
+            end
+        end
+
+        assign s_tvalid = s_tvalid_r;
+        assign s_tlast = s_tlast_r;
+        assign s_tdata = s_tdata_r;
+        assign s_tkeep = s_tkeep_r;
+        assign s_tid = s_tid_r;
+        assign s_tdest = s_tdest_r;
+        assign s_tuser = s_tuser_r;
+        assign s_axis_tready = s_tready;
+    end else begin
+        assign s_tvalid = s_axis_tvalid;
+        assign s_tlast = s_axis_tlast;
+        assign s_tdata = s_axis_tdata;
+        assign s_tkeep = s_axis_tkeep;
+        assign s_tid = s_axis_tid;
+        assign s_tdest = s_axis_tdest;
+        assign s_tuser = s_axis_tuser;
+        assign s_axis_tready = s_tready;
+    end
+
+    // Per-output arbitration and routing
+    // For each output m, determine which source is selected
+    // A source s can drive output m if:
+    //   1. M_CONNECT[m*S_COUNT + s] == 1
+    //   2. s_tdest[s] matches the destination for output m
+    //   3. s_tvalid[s] == 1
+    //   4. The source is not currently locked to another output (packet boundary)
+
+    // Track which source is currently active (mid-packet) for each output
+    reg [S_COUNT-1:0] active_src [0:M_COUNT-1];
+    reg [S_COUNT-1:0] src_active [0:S_COUNT-1]; // which output each source is locked to
+
+    // Initialize
+    integer i, m, s;
+
+    // Determine for each output which sources are eligible
+    wire [S_COUNT-1:0] eligible [0:M_COUNT-1];
+    wire [S_COUNT-1:0] ready_src [0:S_COUNT-1];
+
+    // A source is ready if it has valid data and is not locked to another output
+    // We need to track packet state per source
+
+    // Packet state: 0 = idle, 1 = active (mid-packet)
+    reg [S_COUNT-1:0] src_state; // 1 bit per source: 1 = active packet in progress
+
+    // For each source, track which output it's assigned to
+    reg [S_COUNT-1:0] src_assigned_out [0:S_COUNT-1];
+
+    // Eligibility for output m:
+    // - Source s must be connected to output m
+    // - Source s's destination must match output m's destination
+    // - Source s must have valid data
+    // - If source s is in active state, it must be assigned to output m
+    // - If source s is idle, it can be selected if no other output has it locked
+
+    // Destination matching: output m expects destination = m + M_BASE
+    // Source s has destination s_tdest[s]
+
+    // Let's compute eligibility
+    genvar gm, gs;
+    generate
+        for (gm = 0; gm < M_COUNT; gm = gm + 1) begin : gen_eligible
+            for (gs = 0; gs < S_COUNT; gs = gs + 1) begin : gen_eligible_s
+                wire connected = M_CONNECT[gm*S_COUNT + gs];
+                wire dest_match = (s_tdest[gs*S_DEST_WIDTH +: S_DEST_WIDTH] == (gm + M_BASE));
+                wire valid = s_tvalid[gs];
+                wire src_idle = ~src_state[gs];
+                wire src_assigned_here = (src_state[gs] && (src_assigned_out[gs] == gm));
+                wire eligible_bit = connected && dest_match && valid && (src_idle || src_assigned_here);
+                assign eligible[gm][gs] = eligible_bit;
+            end
+        end
+    endgenerate
+
+    // Arbitration per output
+    // For each output, select one source from eligible sources
+    // Use round-robin or LSB high priority based on ARB_TYPE_ROUND_ROBIN
+
+    // Round-robin pointer per output
+    reg [$clog2(S_COUNT)-1:0] rr_ptr [0:M_COUNT-1];
+
+    // For LSB high priority: lowest index wins
+    // For round-robin: rotate eligible mask by rr_ptr, then lowest set bit wins
+
+    wire [S_COUNT-1:0] arb_sel [0:M_COUNT-1];
+    wire [S_COUNT-1:0] arb_valid [0:M_COUNT-1];
+
+    generate
+        for (gm = 0; gm < M_COUNT; gm = gm + 1) begin : gen_arb
+            if (ARB_TYPE_ROUND_ROBIN) begin
+                // Rotate eligible mask
+                wire [S_COUNT-1:0] rotated;
+                assign rotated = {eligible[gm][rr_ptr[gm]-1:0], eligible[gm][S_COUNT-1:rr_ptr[gm]]};
+                // Find lowest set bit
+                wire [S_COUNT-1:0] lsb_mask;
+                assign lsb_mask = rotated & (~rotated + 1'b1);
+                // Reverse rotate to get original index
+                wire [S_COUNT-1:0] sel_rotated;
+                assign sel_rotated = lsb_mask;
+                wire [S_COUNT-1:0] sel;
+                assign sel = {sel_rotated[rr_ptr[gm]:0], sel_rotated[S_COUNT-1:rr_ptr[gm]+1]};
+                assign arb_sel[gm] = sel;
+                assign arb_valid[gm] = |eligible[gm];
+            end else begin
+                // LSB high priority: lowest index wins
+                wire [S_COUNT-1:0] lsb_mask;
+                assign lsb_mask = eligible[gm] & (~eligible[gm] + 1'b1);
+                assign arb_sel[gm] = lsb_mask;
+                assign arb_valid[gm] = |eligible[gm];
+            end
+        end
+    endgenerate
+
+    // Determine which source is selected for each output
+    // Only one output can select a given source at a time
+    // We need to resolve conflicts: if multiple outputs want the same source, only one gets it
+    // Priority: lower output index wins (or we can use a global arbitration)
+
+    // For simplicity, let's use output index priority: lower m wins
+    wire [S_COUNT-1:0] final_sel [0:M_COUNT-1];
+    wire [M_COUNT-1:0] out_valid;
+
+    // First, compute raw selection
+    // Then resolve conflicts
+    // For each source, find the lowest output that wants it
+    wire [M_COUNT-1:0] src_wanted_by [0:S_COUNT-1];
+
+    generate
+        for (gs = 0; gs < S_COUNT; gs = gs + 1) begin : gen_src_wanted
+            for (gm = 0; gm < M_COUNT; gm = gm + 1) begin : gen_src_wanted_m
+                assign src_wanted_by[gs][gm] = arb_valid[gm] && arb_sel[gm][gs];
+            end
+        end
+    endgenerate
+
+    // For each source, find the lowest output index that wants it
+    wire [M_COUNT-1:0] src_winner [0:S_COUNT-1];
+    wire [S_COUNT-1:0] src_has_winner;
+
+    generate
+        for (gs = 0; gs < S_COUNT; gs = gs + 1) begin : gen_src_winner
+            wire [M_COUNT-1:0] wanted = src_wanted_by[gs];
+            wire [M_COUNT-1:0] lsb_w;
+            assign lsb_w = wanted & (~wanted + 1'b1);
+            assign src_winner[gs] = lsb_w;
+            assign src_has_winner[gs] = |wanted;
+        end
+    endgenerate
+
+    // Now, for each output, check if its selected source actually won
+    generate
+        for (gm = 0; gm < M_COUNT; gm = gm + 1) begin : gen_final_sel
+            wire [S_COUNT-1:0] sel = arb_sel[gm];
+            wire valid = arb_valid[gm];
+            // Check if the selected source's winner is this output
+            wire [S_COUNT-1:0] winner_match;
+            for (gs = 0; gs < S_COUNT; gs = gs + 1) begin : gen_winner_match
+                assign winner_match[gs] = sel[gs] && (src_winner[gs][gm] == 1'b1);
+            end
+            wire final_valid = valid && |winner_match;
+            assign final_sel[gm] = winner_match;
+            assign out_valid[gm] = final_valid;
+        end
+    endgenerate
+
+    // Update round-robin pointers
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            for (i = 0; i < M_COUNT; i = i + 1) begin
+                rr_ptr[i] <= 0;
+            end
+        end else begin
+            for (i = 0; i < M_COUNT; i = i + 1) begin
+                if (out_valid[i] && m_axis_tready[i]) begin
+                    // Advance round-robin pointer
+                    rr_ptr[i] <= (rr_ptr[i] == S_COUNT-1) ? 0 : rr_ptr[i] + 1;
+                end
+            end
+        end
+    end
+
+    // Update source state and assignment
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            src_state <= {S_COUNT{1'b0}};
+            for (i = 0; i < S_COUNT; i = i + 1) begin
+                src_assigned_out[i] <= 0;
+            end
+        end else begin
+            for (i = 0; i < S_COUNT; i = i + 1) begin
+                // Check if this source is being transferred on any output
+                wire transferring = 1'b0;
+                wire [M_COUNT-1:0] transfer_out;
+                for (m = 0; m < M_COUNT; m = m + 1) begin
+                    transfer_out[m] = out_valid[m] && final_sel[m][i] && m_axis_tready[m];
+                end
+                transferring = |transfer_out;
+
+                if (transferring) begin
+                    // Find which output
+                    wire [M_COUNT-1:0] lsb_t;
+                    assign lsb_t = transfer_out & (~transfer_out + 1'b1);
+                    // Get the output index
+                    // For simplicity, find the lowest set bit
+                    reg [M_COUNT-1:0] out_idx;
+                    out_idx = 0;
+                    for (m = 0; m < M_COUNT; m = m + 1) begin
+                        if (transfer_out[m]) begin
+                            out_idx = m;
+                        end
+                    end
+
+                    if (s_tlast[i]) begin
+                        // End of packet, go idle
+                        src_state[i] <= 1'b0;
+                    end else begin
+                        // Continue packet, stay active
+                        src_state[i] <= 1'b1;
+                        src_assigned_out[i] <= out_idx;
+                    end
+                end else if (src_state[i]) begin
+                    // Source is active but not transferring this cycle
+                    // Stay active, keep assignment
+                    // src_state[i] and src_assigned_out[i] unchanged
+                end else begin
+                    // Source is idle
+                    // Check if it's being selected for a new packet
+                    wire new_packet = 1'b0;
+                    wire [M_COUNT-1:0] new_out;
+                    for (m = 0; m < M_COUNT; m = m + 1) begin
+                        new_out[m] = out_valid[m] && final_sel[m][i] && m_axis_tready[m];
+                    end
+                    new_packet = |new_out;
+
+                    if (new_packet) begin
+                        // Start new packet
+                        reg [M_COUNT-1:0] out_idx;
+                        out_idx = 0;
+                        for (m = 0; m < M_COUNT; m = m + 1) begin
+                            if (new_out[m]) begin
+                                out_idx = m;
+                            end
+                        end
+                        if (s_tlast[i]) begin
+                            // Single-beat packet, stay idle
+                            src_state[i] <= 1'b0;
+                        end else begin
+                            // Multi-beat packet, become active
+                            src_state[i] <= 1'b1;
+                            src_assigned_out[i] <= out_idx;
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    // Source ready: a source is ready if it's not locked to another output
+    // or if it's locked to an output that is ready
+    generate
+        for (gs = 0; gs < S_COUNT; gs = gs + 1) begin : gen_src_ready
+            if (src_state[gs]) begin
+                // Active: ready only if assigned output is ready
+                assign s_tready[gs] = m_axis_tready[src_assigned_out[gs]];
+            end else begin
+                // Idle: ready if any output that can accept it is ready
+                // For simplicity, ready if any output is ready and this source is eligible
+                wire any_ready = 1'b0;
+                for (m = 0; m < M_COUNT; m = m + 1) begin
+                    any_ready = any_ready | (m_axis_tready[m] && eligible[m][gs]);
+                end
+                assign s_tready[gs] = any_ready;
+            end
+        end
+    endgenerate
+
+    // Output muxing
+    generate
+        for (gm = 0; gm < M_COUNT; gm = gm + 1) begin : gen_out
+            // Select data from the winning source
+            wire [DATA_WIDTH-1:0] out_data;
+            wire [KEEP_WIDTH-1:0] out_keep;
+            wire out_last;
+            wire [S_ID_WIDTH-1:0] out_tid;
+            wire [S_DEST_WIDTH-1:0] out_tdest;
+            wire [USER_WIDTH-1:0] out_tuser;
+
+            for (gs = 0; gs < S_COUNT; gs = gs + 1) begin : gen_out_mux
+                wire sel = final_sel[gm][gs];
+                assign out_data = sel ? s_tdata[gs*DATA_WIDTH +: DATA_WIDTH] : out_data;
+                assign out_keep = sel ? s_tkeep[gs*KEEP_WIDTH +: KEEP_WIDTH] : out_keep;
+                assign out_last = sel ? s_tlast[gs] : out_last;
+                assign out_tid = sel ? s_tid[gs*S_ID_WIDTH +: S_ID_WIDTH] : out_tid;
+                assign out_tdest = sel ? s_tdest[gs*S_DEST_WIDTH +: S_DEST_WIDTH] : out_tdest;
+                assign out_tuser = sel ? s_tuser[gs*USER_WIDTH +: USER_WIDTH] : out_tuser;
+            end
+
+            // Initialize with zeros
+            assign out_data = 0;
+            assign out_keep = 0;
+            assign out_last = 1'b0;
+            assign out_tid = 0;
+            assign out_tdest = 0;
+            assign out_tuser = 0;
+
+            // Output valid
+            assign m_axis_tvalid[gm] = out_valid[gm];
+
+            // Output data
+            assign m_axis_tdata[gm*DATA_WIDTH +: DATA_WIDTH] = out_data;
+            assign m_axis_tkeep[gm*KEEP_WIDTH +: KEEP_WIDTH] = out_keep;
+            assign m_axis_tlast[gm] = out_last;
+
+            // Output ID: optionally update with source index
+            if (UPDATE_TID) begin
+                assign m_axis_tid[gm*M_ID_WIDTH +: M_ID_WIDTH] = {out_tid, gm};
+            end else begin
+                assign m_axis_tid[gm*M_ID_WIDTH +: M_ID_WIDTH] = {out_tid, {($clog2(S_COUNT)){1'b0}}};
+            end
+
+            // Output destination
+            assign m_axis_tdest[gm*M_DEST_WIDTH +: M_DEST_WIDTH] = out_tdest[M_DEST_WIDTH-1:0];
+
+            // Output user
+            assign m_axis_tuser[gm*USER_WIDTH +: USER_WIDTH] = out_tuser;
+        end
+    endgenerate
+
+endmodule
+```<|im_end|>

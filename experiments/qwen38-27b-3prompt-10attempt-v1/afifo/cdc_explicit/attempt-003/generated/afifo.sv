@@ -1,0 +1,150 @@
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam PTR_W = LGFIFO + 1;
+
+	// Write domain
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+	reg [PTR_W-1:0] wr_ptr;
+	reg [PTR_W-1:0] wr_ptr_gray;
+	reg [PTR_W-1:0] rd_ptr_gray_w;
+
+	// Read domain
+	reg [PTR_W-1:0] rd_ptr;
+	reg [PTR_W-1:0] rd_ptr_gray;
+	reg [PTR_W-1:0] wr_ptr_gray_r;
+	reg [WIDTH-1:0] rd_data_reg;
+
+	// Gray code conversion functions
+	function [PTR_W-1:0] bin2gray;
+		input [PTR_W-1:0] bin;
+		begin
+			bin2gray = bin ^ (bin >> 1);
+		end
+	endfunction
+
+	function [PTR_W-1:0] gray2bin;
+		input [PTR_W-1:0] gray;
+		reg [PTR_W-1:0] bin;
+		begin
+			bin[PTR_W-1] = gray[PTR_W-1];
+			for (integer i = PTR_W-2; i >= 0; i = i - 1)
+				bin[i] = gray[i] ^ bin[i+1];
+			gray2bin = bin;
+		end
+	endfunction
+
+	// Write clock domain logic
+	wire wr_en = i_wr & ~o_wr_full;
+
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_ptr <= {PTR_W{1'b0}};
+			wr_ptr_gray <= {PTR_W{1'b0}};
+		end else begin
+			if (wr_en) begin
+				wr_ptr <= wr_ptr + 1'b1;
+			end
+			wr_ptr_gray <= bin2gray(wr_ptr + (wr_en ? 1'b1 : 1'b0));
+		end
+	end
+
+	// Write memory
+	always @(posedge i_wclk) begin
+		if (wr_en) begin
+			mem[wr_ptr[LGFIFO-1:0]] <= i_wr_data;
+		end
+	end
+
+	// Synchronize read pointer gray into write domain
+	reg [PTR_W-1:0] rd_ptr_gray_w_sync [0:NFF-1];
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			for (integer i = 0; i < NFF; i = i + 1)
+				rd_ptr_gray_w_sync[i] <= {PTR_W{1'b0}};
+		end else begin
+			rd_ptr_gray_w_sync[0] <= rd_ptr_gray;
+			for (integer i = 1; i < NFF; i = i + 1)
+				rd_ptr_gray_w_sync[i] <= rd_ptr_gray_w_sync[i-1];
+		end
+	end
+	assign rd_ptr_gray_w = rd_ptr_gray_w_sync[NFF-1];
+
+	// Full flag in write domain
+	wire [PTR_W-1:0] rd_ptr_bin_w = gray2bin(rd_ptr_gray_w);
+	wire full_w = (wr_ptr[PTR_W-1] != rd_ptr_bin_w[PTR_W-1]) &&
+	              (wr_ptr[LGFIFO-1:0] == rd_ptr_bin_w[LGFIFO-1:0]);
+
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			o_wr_full <= 1'b0;
+		else
+			o_wr_full <= full_w;
+	end
+
+	// Read clock domain logic
+	wire rd_en = i_rd & ~o_rd_empty;
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_ptr <= {PTR_W{1'b0}};
+			rd_ptr_gray <= {PTR_W{1'b0}};
+			rd_data_reg <= {WIDTH{1'b0}};
+		end else begin
+			if (rd_en) begin
+				rd_ptr <= rd_ptr + 1'b1;
+				rd_data_reg <= mem[rd_ptr[LGFIFO-1:0]];
+			end
+			rd_ptr_gray <= bin2gray(rd_ptr + (rd_en ? 1'b1 : 1'b0));
+		end
+	end
+
+	// Synchronize write pointer gray into read domain
+	reg [PTR_W-1:0] wr_ptr_gray_r_sync [0:NFF-1];
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			for (integer i = 0; i < NFF; i = i + 1)
+				wr_ptr_gray_r_sync[i] <= {PTR_W{1'b0}};
+		end else begin
+			wr_ptr_gray_r_sync[0] <= wr_ptr_gray;
+			for (integer i = 1; i < NFF; i = i + 1)
+				wr_ptr_gray_r_sync[i] <= wr_ptr_gray_r_sync[i-1];
+		end
+	end
+	assign wr_ptr_gray_r = wr_ptr_gray_r_sync[NFF-1];
+
+	// Empty flag in read domain
+	wire [PTR_W-1:0] wr_ptr_bin_r = gray2bin(wr_ptr_gray_r);
+	wire empty_r = (rd_ptr == wr_ptr_bin_r);
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_empty <= 1'b1;
+		else
+			o_rd_empty <= empty_r;
+	end
+
+	// Output data
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_data <= {WIDTH{1'b0}};
+		else if (OPT_REGISTER_READS)
+			o_rd_data <= rd_data_reg;
+		else
+			o_rd_data <= mem[rd_ptr[LGFIFO-1:0]];
+	end
+
+endmodule

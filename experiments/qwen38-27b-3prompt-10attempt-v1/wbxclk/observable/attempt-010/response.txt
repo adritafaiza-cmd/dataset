@@ -1,0 +1,343 @@
+```verilog
+module wbxclk #(
+	parameter	AW=32,
+			DW=32,
+			LGFIFO = 5
+	) (
+	input	wire			i_wb_clk, i_reset,
+	input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+	input	wire	[(AW-1):0]	i_wb_addr,
+	input	wire	[(DW-1):0]	i_wb_data,
+	input	wire	[(DW/8-1):0]	i_wb_sel,
+	output	wire			o_wb_stall,
+	output	reg			o_wb_ack,
+	output	reg	[(DW/8-1):0]	o_wb_data,
+	output	reg			o_wb_err,
+	input	wire			i_xclk_clk,
+	output	reg			o_xclk_cyc,
+	output	reg			o_xclk_stb,
+	output	reg			o_xclk_we,
+	output	reg	[(AW-1):0]	o_xclk_addr,
+	output	reg	[(DW-1):0]	o_xclk_data,
+	output	reg	[(DW/8-1):0]	o_xclk_sel,
+	input	wire			i_xclk_stall,
+	input	wire			i_xclk_ack,
+	input	wire	[(DW-1):0]	i_xclk_data,
+	input	wire	[(DW/8-1):0]	i_xclk_err
+	);
+
+	// FIFO depth
+	localparam FIFO_DEPTH = 1 << LGFIFO;
+	localparam FIFO_ADDR_W = LGFIFO;
+
+	// Request FIFO (Wishbone side -> XCLK side)
+	// Store: cyc, stb, we, addr, data, sel
+	localparam REQ_W = 1 + 1 + 1 + AW + DW + DW/8;
+
+	reg [REQ_W-1:0] req_fifo_mem [0:FIFO_DEPTH-1];
+	reg [FIFO_ADDR_W:0] req_wr_ptr, req_rd_ptr;
+	reg [FIFO_ADDR_W:0] req_count;
+
+	// Response FIFO (XCLK side -> Wishbone side)
+	// Store: data, err
+	localparam RSP_W = DW + 1;
+
+	reg [RSP_W-1:0] rsp_fifo_mem [0:FIFO_DEPTH-1];
+	reg [FIFO_ADDR_W:0] rsp_wr_ptr, rsp_rd_ptr;
+	reg [FIFO_ADDR_W:0] rsp_count;
+
+	// Request FIFO full/empty
+	wire req_full = (req_count == FIFO_DEPTH);
+	wire req_empty = (req_count == 0);
+
+	// Response FIFO full/empty
+	wire rsp_full = (rsp_count == FIFO_DEPTH);
+	wire rsp_empty = (rsp_count == 0);
+
+	// o_wb_stall is the outstanding-request count
+	assign o_wb_stall = (req_count != 0);
+
+	// Wishbone side: accept request when not full
+	wire wb_accept = i_wb_cyc && i_wb_stb && !req_full;
+
+	// Write to request FIFO on wb_clk
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_wr_ptr <= 0;
+			req_rd_ptr <= 0;
+			req_count <= 0;
+		end else begin
+			if (wb_accept) begin
+				req_fifo_mem[req_wr_ptr[FIFO_ADDR_W-1:0]] <= {i_wb_cyc, i_wb_stb, i_wb_we, i_wb_addr, i_wb_data, i_wb_sel};
+				req_wr_ptr <= req_wr_ptr + 1;
+			end
+			if (!req_empty && !i_xclk_stall) begin
+				req_rd_ptr <= req_rd_ptr + 1;
+			end
+			if (wb_accept && (!req_empty || i_xclk_stall)) begin
+				// both write and read happen
+				if (!req_empty && !i_xclk_stall) begin
+					req_count <= req_count; // net zero
+				end else begin
+					req_count <= req_count + 1;
+				end
+			end else if (wb_accept) begin
+				req_count <= req_count + 1;
+			end else if (!req_empty && !i_xclk_stall) begin
+				req_count <= req_count - 1;
+			end
+		end
+	end
+
+	// XCLK side: read from request FIFO
+	// We need to synchronize the read pointer and data across clock domains.
+	// Use a simple approach: the XCLK side reads when it has capacity and the FIFO is not empty.
+	// We need to detect non-empty in XCLK domain. Use a Gray-coded pointer or a simple sync.
+
+	// For simplicity and correctness with independent clocks, use Gray-coded pointers for CDC.
+	// Let's redo with Gray-coded pointers.
+
+	// Actually, let's use a simpler approach: since this is a bridge, we can use a
+	// handshake-based FIFO with Gray-coded pointers for CDC.
+
+	// Let me restructure with proper Gray-coded FIFO pointers.
+
+	// Request FIFO with Gray-coded pointers
+	reg [FIFO_ADDR_W:0] req_wr_ptr_gray, req_rd_ptr_gray;
+	reg [FIFO_ADDR_W:0] req_wr_ptr_gray_sync1, req_wr_ptr_gray_sync2;
+	reg [FIFO_ADDR_W:0] req_rd_ptr_gray_sync1, req_rd_ptr_gray_sync2;
+
+	// Convert binary to Gray
+	function [FIFO_ADDR_W:0] bin2gray;
+		input [FIFO_ADDR_W:0] bin;
+		begin
+			bin2gray = bin ^ (bin >> 1);
+		end
+	endfunction
+
+	// Response FIFO with Gray-coded pointers
+	reg [FIFO_ADDR_W:0] rsp_wr_ptr_gray, rsp_rd_ptr_gray;
+	reg [FIFO_ADDR_W:0] rsp_wr_ptr_gray_sync1, rsp_wr_ptr_gray_sync2;
+	reg [FIFO_ADDR_W:0] rsp_rd_ptr_gray_sync1, rsp_rd_ptr_gray_sync2;
+
+	// Request FIFO: write side (wb_clk)
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_wr_ptr <= 0;
+			req_wr_ptr_gray <= 0;
+		end else if (wb_accept) begin
+			req_wr_ptr <= req_wr_ptr + 1;
+			req_wr_ptr_gray <= bin2gray(req_wr_ptr + 1);
+		end
+	end
+
+	// Request FIFO: read side (xclk_clk)
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_rd_ptr <= 0;
+			req_rd_ptr_gray <= 0;
+		end else if (!req_empty_xclk && !i_xclk_stall) begin
+			req_rd_ptr <= req_rd_ptr + 1;
+			req_rd_ptr_gray <= bin2gray(req_rd_ptr + 1);
+		end
+	end
+
+	// Synchronize req_wr_ptr_gray to xclk domain
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_wr_ptr_gray_sync1 <= 0;
+			req_wr_ptr_gray_sync2 <= 0;
+		end else begin
+			req_wr_ptr_gray_sync1 <= req_wr_ptr_gray;
+			req_wr_ptr_gray_sync2 <= req_wr_ptr_gray_sync1;
+		end
+	end
+
+	// Synchronize req_rd_ptr_gray to wb domain
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_rd_ptr_gray_sync1 <= 0;
+			req_rd_ptr_gray_sync2 <= 0;
+		end else begin
+			req_rd_ptr_gray_sync1 <= req_rd_ptr_gray;
+			req_rd_ptr_gray_sync2 <= req_rd_ptr_gray_sync1;
+		end
+	end
+
+	// Compute req_count in wb domain (for o_wb_stall)
+	wire [FIFO_ADDR_W:0] req_wr_ptr_bin_sync = req_wr_ptr; // local
+	wire [FIFO_ADDR_W:0] req_rd_ptr_bin_sync = req_rd_ptr_gray_sync2; // This is Gray, need to convert
+
+	// Actually, let's compute count differently. Use the Gray pointers to determine full/empty.
+	// For a FIFO with depth 2^N, full when wr_gray == rd_gray with MSB different (for 2^N depth)
+	// Empty when wr_gray == rd_gray
+
+	// Let's use a simpler approach: track count in each domain separately with careful CDC.
+
+	// I'll use a different strategy: use a simple 2-flop synchronizer for a "valid" signal
+	// and use a handshake protocol.
+
+	// Let me restart with a cleaner design using a standard async FIFO with Gray-coded pointers.
+
+	// Request FIFO
+	reg [FIFO_ADDR_W:0] req_wr_ptr_bin, req_rd_ptr_bin;
+	reg [FIFO_ADDR_W:0] req_wr_ptr_g, req_rd_ptr_g;
+
+	// Write side (wb_clk)
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_wr_ptr_bin <= 0;
+			req_wr_ptr_g <= 0;
+		end else if (wb_accept) begin
+			req_wr_ptr_bin <= req_wr_ptr_bin + 1;
+			req_wr_ptr_g <= bin2gray(req_wr_ptr_bin + 1);
+		end
+	end
+
+	// Read side (xclk_clk)
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_rd_ptr_bin <= 0;
+			req_rd_ptr_g <= 0;
+		end else if (!req_empty_xclk && !i_xclk_stall) begin
+			req_rd_ptr_bin <= req_rd_ptr_bin + 1;
+			req_rd_ptr_g <= bin2gray(req_rd_ptr_bin + 1);
+		end
+	end
+
+	// Sync wr_ptr_g to xclk
+	reg [FIFO_ADDR_W:0] req_wr_g_s1, req_wr_g_s2;
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_wr_g_s1 <= 0;
+			req_wr_g_s2 <= 0;
+		end else begin
+			req_wr_g_s1 <= req_wr_ptr_g;
+			req_wr_g_s2 <= req_wr_g_s1;
+		end
+	end
+
+	// Sync rd_ptr_g to wb
+	reg [FIFO_ADDR_W:0] req_rd_g_s1, req_rd_g_s2;
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_rd_g_s1 <= 0;
+			req_rd_g_s2 <= 0;
+		end else begin
+			req_rd_g_s1 <= req_rd_ptr_g;
+			req_rd_g_s2 <= req_rd_g_s1;
+		end
+	end
+
+	// Determine empty in xclk domain
+	wire req_empty_xclk = (req_wr_g_s2 == req_rd_ptr_g);
+
+	// Determine full in wb domain
+	// Full when wr_g and rd_g differ only in the top bit (for 2^N depth)
+	wire req_full_wb = (req_wr_ptr_g == {~req_rd_g_s2[FIFO_ADDR_W], req_rd_g_s2[FIFO_ADDR_W-1:0]});
+
+	// o_wb_stall: outstanding request count > 0
+	// We can use: not empty in wb domain
+	wire req_not_empty_wb = (req_wr_ptr_g != req_rd_g_s2);
+	assign o_wb_stall = req_not_empty_wb;
+
+	// Read data from request FIFO in xclk domain
+	wire [REQ_W-1:0] req_rd_data = req_fifo_mem[req_rd_ptr_bin[FIFO_ADDR_W-1:0]];
+
+	// XCLK side outputs
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			o_xclk_cyc <= 0;
+			o_xclk_stb <= 0;
+			o_xclk_we <= 0;
+			o_xclk_addr <= 0;
+			o_xclk_data <= 0;
+			o_xclk_sel <= 0;
+		end else if (!req_empty_xclk && !i_xclk_stall) begin
+			o_xclk_cyc <= req_rd_data[REQ_W-1];
+			o_xclk_stb <= req_rd_data[REQ_W-2];
+			o_xclk_we <= req_rd_data[REQ_W-3];
+			o_xclk_addr <= req_rd_data[REQ_W-3-1:AW];
+			o_xclk_data <= req_rd_data[AW-1:DW];
+			o_xclk_sel <= req_rd_data[DW-1:0];
+		end
+	end
+
+	// Response FIFO: write side (xclk_clk)
+	wire xclk_ack_valid = i_xclk_ack;
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rsp_wr_ptr_bin <= 0;
+			rsp_wr_ptr_g <= 0;
+		end else if (xclk_ack_valid && !rsp_full_xclk) begin
+			rsp_fifo_mem[rsp_wr_ptr_bin[FIFO_ADDR_W-1:0]] <= {i_xclk_data, i_xclk_err};
+			rsp_wr_ptr_bin <= rsp_wr_ptr_bin + 1;
+			rsp_wr_ptr_g <= bin2gray(rsp_wr_ptr_bin + 1);
+		end
+	end
+
+	// Response FIFO: read side (wb_clk)
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rsp_rd_ptr_bin <= 0;
+			rsp_rd_ptr_g <= 0;
+		end else if (!rsp_empty_wb) begin
+			rsp_rd_ptr_bin <= rsp_rd_ptr_bin + 1;
+			rsp_rd_ptr_g <= bin2gray(rsp_rd_ptr_bin + 1);
+		end
+	end
+
+	// Sync rsp_wr_ptr_g to wb
+	reg [FIFO_ADDR_W:0] rsp_wr_g_s1, rsp_wr_g_s2;
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rsp_wr_g_s1 <= 0;
+			rsp_wr_g_s2 <= 0;
+		end else begin
+			rsp_wr_g_s1 <= rsp_wr_ptr_g;
+			rsp_wr_g_s2 <= rsp_wr_g_s1;
+		end
+	end
+
+	// Sync rsp_rd_ptr_g to xclk
+	reg [FIFO_ADDR_W:0] rsp_rd_g_s1, rsp_rd_g_s2;
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rsp_rd_g_s1 <= 0;
+			rsp_rd_g_s2 <= 0;
+		end else begin
+			rsp_rd_g_s1 <= rsp_rd_ptr_g;
+			rsp_rd_g_s2 <= rsp_rd_g_s1;
+		end
+	end
+
+	// Determine empty in wb domain
+	wire rsp_empty_wb = (rsp_wr_g_s2 == rsp_rd_ptr_g);
+
+	// Determine full in xclk domain
+	wire rsp_full_xclk = (rsp_wr_ptr_g == {~rsp_rd_g_s2[FIFO_ADDR_W], rsp_rd_g_s2[FIFO_ADDR_W-1:0]});
+
+	// Read data from response FIFO in wb domain
+	wire [RSP_W-1:0] rsp_rd_data = rsp_fifo_mem[rsp_rd_ptr_bin[FIFO_ADDR_W-1:0]];
+
+	// Wishbone side outputs
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			o_wb_ack <= 0;
+			o_wb_data <= 0;
+			o_wb_err <= 0;
+		end else if (!rsp_empty_wb) begin
+			o_wb_ack <= 1;
+			o_wb_data <= rsp_rd_data[RSP_W-1:1];
+			o_wb_err <= rsp_rd_data[0];
+		end else begin
+			o_wb_ack <= 0;
+		end
+	end
+
+	// Declare the response FIFO pointers
+	reg [FIFO_ADDR_W:0] rsp_wr_ptr_bin, rsp_rd_ptr_bin;
+	reg [FIFO_ADDR_W:0] rsp_wr_ptr_g, rsp_rd_ptr_g;
+
+endmodule
+```<|im_end|>

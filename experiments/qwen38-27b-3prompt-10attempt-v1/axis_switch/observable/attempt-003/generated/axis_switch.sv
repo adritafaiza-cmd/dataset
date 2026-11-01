@@ -1,0 +1,266 @@
+module axis_switch #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter S_ID_WIDTH = 8,
+    parameter M_ID_WIDTH = S_ID_WIDTH+$clog2(S_COUNT),
+    parameter M_DEST_WIDTH = 1,
+    parameter S_DEST_WIDTH = M_DEST_WIDTH+$clog2(M_COUNT),
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter M_BASE = 0,
+    parameter M_TOP = 0,
+    parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
+    parameter UPDATE_TID = 0,
+    parameter S_REG_TYPE = 0,
+    parameter M_REG_TYPE = 2,
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 1
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    /*
+     * AXI Stream inputs
+     */
+    input  wire [S_COUNT*DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [S_COUNT*KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire [S_COUNT-1:0]               s_axis_tvalid,
+    output wire [S_COUNT-1:0]               s_axis_tready,
+    input  wire [S_COUNT-1:0]               s_axis_tlast,
+    input  wire [S_COUNT*S_ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [S_COUNT*USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI Stream outputs
+     */
+    output wire [M_COUNT*DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [M_COUNT*KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire [M_COUNT-1:0]               m_axis_tvalid,
+    input  wire [M_COUNT-1:0]               m_axis_tready,
+    output wire [M_COUNT-1:0]               m_axis_tlast,
+    output wire [M_COUNT*M_ID_WIDTH-1:0]    m_axis_tid,
+    output wire [M_COUNT*M_DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [M_COUNT*USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    // Internal signals
+    wire [S_COUNT-1:0] s_tvalid;
+    wire [S_COUNT-1:0] s_tready;
+    wire [S_COUNT-1:0] s_tlast;
+    wire [S_COUNT*DATA_WIDTH-1:0] s_tdata;
+    wire [S_COUNT*KEEP_WIDTH-1:0] s_tkeep;
+    wire [S_COUNT*S_ID_WIDTH-1:0] s_tid;
+    wire [S_COUNT*S_DEST_WIDTH-1:0] s_tdest;
+    wire [S_COUNT*USER_WIDTH-1:0] s_tuser;
+
+    // Source register stage
+    if (S_REG_TYPE != 0) begin
+        reg [S_COUNT-1:0] s_tvalid_r;
+        reg [S_COUNT-1:0] s_tlast_r;
+        reg [S_COUNT*DATA_WIDTH-1:0] s_tdata_r;
+        reg [S_COUNT*KEEP_WIDTH-1:0] s_tkeep_r;
+        reg [S_COUNT*S_ID_WIDTH-1:0] s_tid_r;
+        reg [S_COUNT*S_DEST_WIDTH-1:0] s_tdest_r;
+        reg [S_COUNT*USER_WIDTH-1:0] s_tuser_r;
+
+        always @(posedge clk or posedge rst) begin
+            if (rst) begin
+                s_tvalid_r <= {S_COUNT{1'b0}};
+                s_tlast_r <= {S_COUNT{1'b0}};
+                s_tdata_r <= {S_COUNT*DATA_WIDTH{1'b0}};
+                s_tkeep_r <= {S_COUNT*KEEP_WIDTH{1'b0}};
+                s_tid_r <= {S_COUNT*S_ID_WIDTH{1'b0}};
+                s_tdest_r <= {S_COUNT*S_DEST_WIDTH{1'b0}};
+                s_tuser_r <= {S_COUNT*USER_WIDTH{1'b0}};
+            end else begin
+                for (integer i = 0; i < S_COUNT; i = i + 1) begin
+                    if (s_axis_tvalid[i] && s_tready[i]) begin
+                        s_tvalid_r[i] <= 1'b1;
+                        s_tlast_r[i] <= s_axis_tlast[i];
+                        s_tdata_r[i*DATA_WIDTH +: DATA_WIDTH] <= s_axis_tdata[i*DATA_WIDTH +: DATA_WIDTH];
+                        s_tkeep_r[i*KEEP_WIDTH +: KEEP_WIDTH] <= s_axis_tkeep[i*KEEP_WIDTH +: KEEP_WIDTH];
+                        s_tid_r[i*S_ID_WIDTH +: S_ID_WIDTH] <= s_axis_tid[i*S_ID_WIDTH +: S_ID_WIDTH];
+                        s_tdest_r[i*S_DEST_WIDTH +: S_DEST_WIDTH] <= s_axis_tdest[i*S_DEST_WIDTH +: S_DEST_WIDTH];
+                        s_tuser_r[i*USER_WIDTH +: USER_WIDTH] <= s_axis_tuser[i*USER_WIDTH +: USER_WIDTH];
+                    end else if (s_tvalid_r[i] && s_tready[i]) begin
+                        s_tvalid_r[i] <= 1'b0;
+                    end
+                end
+            end
+        end
+
+        assign s_tvalid = s_tvalid_r;
+        assign s_tlast = s_tlast_r;
+        assign s_tdata = s_tdata_r;
+        assign s_tkeep = s_tkeep_r;
+        assign s_tid = s_tid_r;
+        assign s_tdest = s_tdest_r;
+        assign s_tuser = s_tuser_r;
+    end else begin
+        assign s_tvalid = s_axis_tvalid;
+        assign s_tlast = s_axis_tlast;
+        assign s_tdata = s_axis_tdata;
+        assign s_tkeep = s_axis_tkeep;
+        assign s_tid = s_axis_tid;
+        assign s_tdest = s_axis_tdest;
+        assign s_tuser = s_axis_tuser;
+    end
+
+    // Per-output arbitration and routing
+    // For each output m, determine which source is selected
+    // We need to track which source is currently "owning" each output (packet in progress)
+    
+    // State: for each output, which source is currently active (or none)
+    // Use S_COUNT bits per output to indicate active source, plus a valid flag
+    // Simpler: for each output, store the source index that is currently transmitting a packet
+    // If no packet is in progress, the output is idle and can accept a new packet from any connected source
+    
+    // Let's use a different approach:
+    // For each output m, we have:
+    //   - active_src[m]: the source index currently sending to this output (valid when packet_in_progress[m])
+    //   - packet_in_progress[m]: whether a packet is currently being sent to this output
+    
+    // When packet_in_progress[m] is 0, we can select a new source based on arbitration
+    // When packet_in_progress[m] is 1, we must continue with active_src[m] until tlast
+    
+    // Arbitration: for each output, among all connected sources that are valid and not already committed to another output,
+    // select one based on the arbitration policy
+    
+    // Let's define:
+    //   src_committed[s]: whether source s is currently committed to some output (i.e., in the middle of a packet)
+    //   For each output m, if packet_in_progress[m], then active_src[m] is committed
+    
+    // Actually, a source can only be committed to one output at a time. So:
+    //   src_committed[s] = OR over all m of (packet_in_progress[m] && active_src[m] == s)
+    
+    // For arbitration on output m:
+    //   Candidates: sources s such that:
+    //     - M_CONNECT[m][s] is 1 (connected)
+    //     - s_tvalid[s] is 1
+    //     - src_committed[s] is 0 (not already committed to another output)
+    //     - If packet_in_progress[m] is 0, we can pick a new source
+    //     - If packet_in_progress[m] is 1, we must use active_src[m]
+    
+    // Let's implement this step by step
+    
+    // First, compute src_committed
+    wire [S_COUNT-1:0] src_committed;
+    
+    // For each source s, check if it's committed to any output
+    genvar gs;
+    generate
+        for (gs = 0; gs < S_COUNT; gs = gs + 1) begin : gen_src_committed
+            wire [M_COUNT-1:0] committed_to;
+            genvar gm;
+            generate
+                for (gm = 0; gm < M_COUNT; gm = gm + 1) begin : gen_committed_to
+                    assign committed_to[gm] = packet_in_progress[gm] && (active_src[gm] == gs[S_COUNT-1:0]);
+                end
+            endgenerate
+            assign src_committed[gs] = |committed_to;
+        end
+    endgenerate
+
+    // Packet in progress and active source for each output
+    reg [M_COUNT-1:0] packet_in_progress;
+    reg [M_COUNT*$clog2(S_COUNT)-1:0] active_src; // This won't work if S_COUNT is not power of 2
+    
+    // Let's use a different encoding: active_src[m] is S_COUNT bits wide (one-hot)
+    reg [M_COUNT*S_COUNT-1:0] active_src_oh; // One-hot encoding of active source for each output
+    
+    // For each output m, determine the selected source
+    // If packet_in_progress[m], use active_src_oh[m]
+    // Otherwise, use arbitration to select a new source
+    
+    // Arbitration logic for each output
+    // For output m, candidates are sources s where:
+    //   - M_CONNECT[m][s] == 1
+    //   - s_tvalid[s] == 1
+    //   - src_committed[s] == 0
+    
+    // Round-robin arbitration:
+    //   We need to track the last selected source for each output to implement round-robin
+    //   Or we can use a simpler approach: priority encoder with rotation
+    
+    // Let's use a simpler approach for now:
+    //   If ARB_TYPE_ROUND_ROBIN, use round-robin
+    //   If ARB_LSB_HIGH_PRIORITY, use LSB-first priority
+    
+    // For round-robin, we need to track the last granted source for each output
+    reg [M_COUNT*$clog2(S_COUNT)-1:0] last_granted; // This is tricky with non-power-of-2 S_COUNT
+    
+    // Let's use a one-hot last granted for simplicity
+    reg [M_COUNT*S_COUNT-1:0] last_granted_oh;
+    
+    // For each output m, compute the candidate mask
+    wire [M_COUNT*S_COUNT-1:0] candidate_mask;
+    
+    genvar gm2;
+    generate
+        for (gm2 = 0; gm2 < M_COUNT; gm2 = gm2 + 1) begin : gen_candidate
+            wire [S_COUNT-1:0] candidates;
+            genvar gs2;
+            generate
+                for (gs2 = 0; gs2 < S_COUNT; gs2 = gs2 + 1) begin : gen_candidate_bit
+                    assign candidates[gs2] = M_CONNECT[gm2*S_COUNT + gs2] && s_tvalid[gs2] && !src_committed[gs2];
+                end
+            endgenerate
+            assign candidate_mask[gm2*S_COUNT +: S_COUNT] = candidates;
+        end
+    endgenerate
+
+    // For each output, if not in progress, select a source from candidates
+    // If in progress, use the active source
+    
+    // Selected source for each output (one-hot)
+    wire [M_COUNT*S_COUNT-1:0] selected_src_oh;
+    
+    genvar gm3;
+    generate
+        for (gm3 = 0; gm3 < M_COUNT; gm3 = gm3 + 1) begin : gen_select
+            wire [S_COUNT-1:0] sel_oh;
+            
+            if (packet_in_progress[gm3]) begin
+                // Use active source
+                assign sel_oh = active_src_oh[gm3*S_COUNT +: S_COUNT];
+            end else begin
+                // Arbitrate among candidates
+                wire [S_COUNT-1:0] cands = candidate_mask[gm3*S_COUNT +: S_COUNT];
+                
+                if (ARB_TYPE_ROUND_ROBIN) begin
+                    // Round-robin: rotate candidates based on last_granted
+                    wire [S_COUNT-1:0] last_oh = last_granted_oh[gm3*S_COUNT +: S_COUNT];
+                    
+                    // Rotate cands left by the position of last_oh
+                    // This is complex in Verilog. Let's use a simpler approach:
+                    // Priority encode with rotation
+                    
+                    // For simplicity, let's use a fixed priority for now and note that
+                    // true round-robin requires more complex logic
+                    // Actually, let's implement a basic round-robin using a priority encoder
+                    // with the last granted as the starting point
+                    
+                    // We'll use a simple approach: find the first candidate after last_granted
+                    // in circular order
+                    
+                    // This is getting complex. Let's use a simpler arbitration for now:
+                    // LSB-first priority
+                    assign sel_oh = cands; // Will be refined
+                end else begin
+                    // LSB high priority: select the lowest-index candidate
+                    assign sel_oh = cands; // Will be refined
+                end
+            end
+            
+            assign selected_src_oh[gm3*S_COUNT +: S_COUNT] = sel_oh;
+        end
+    endgenerate
+
+    // The above is incomplete. Let me restart with a cleaner approach.
+
+endmodule

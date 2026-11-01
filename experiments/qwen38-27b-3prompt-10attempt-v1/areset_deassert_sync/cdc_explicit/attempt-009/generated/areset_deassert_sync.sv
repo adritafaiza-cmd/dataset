@@ -1,0 +1,39 @@
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    // Normalize reset polarity: internal active-high reset
+    wire rst_active_high = (RST_POL == 1'b1) ? async_rst_i : ~async_rst_i;
+
+    // Synchronizer chain for reset deassertion
+    reg [CHAINS-1:0] sync_chain;
+
+    integer i;
+    always @(posedge clk or posedge rst_active_high) begin
+        if (rst_active_high) begin
+            sync_chain <= {CHAINS{1'b0}};
+        end else begin
+            sync_chain[0] <= 1'b1;
+            for (i = 1; i < CHAINS; i = i + 1) begin
+                sync_chain[i] <= sync_chain[i-1];
+            end
+        end
+    end
+
+    // Output: active reset if either the async reset is asserted or the sync chain hasn't fully released
+    // sync_rst_o is active when:
+    //   - rst_active_high is 1 (immediate assertion), OR
+    //   - the sync chain is not all 1s (release not yet complete)
+    wire chain_released = &sync_chain;
+
+    wire sync_rst_internal = rst_active_high | ~chain_released;
+
+    // Apply output polarity
+    assign sync_rst_o = (RST_POL == 1'b1) ? sync_rst_internal : ~sync_rst_internal;
+
+endmodule

@@ -1,0 +1,62 @@
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    // Source-domain registers
+    reg  src_valid_r;
+    reg  [WIDTH-1:0] src_data_r;
+
+    // Destination-domain registers
+    reg  dst_valid_r;
+    reg  [WIDTH-1:0] dst_data_r;
+
+    // Source-domain ready: buffer is empty
+    assign src_ready_o = ~src_valid_r;
+
+    // Destination-domain valid and data
+    assign dst_valid_o = dst_valid_r;
+    assign dst_data_o  = dst_data_r;
+
+    // Source-domain logic: capture data when valid and ready
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_valid_r <= 1'b0;
+            src_data_r  <= {WIDTH{1'b0}};
+        end else begin
+            if (src_valid_i && src_ready_o) begin
+                src_valid_r <= 1'b1;
+                src_data_r  <= src_data_i;
+            end else if (dst_valid_r && dst_ready_i) begin
+                // Destination consumed the beat, so source buffer is now empty
+                src_valid_r <= 1'b0;
+            end
+        end
+    end
+
+    // Destination-domain logic: present data when valid, clear when consumed
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_valid_r <= 1'b0;
+            dst_data_r  <= {WIDTH{1'b0}};
+        end else begin
+            if (dst_valid_r && dst_ready_i) begin
+                dst_valid_r <= 1'b0;
+            end else if (src_valid_r && !dst_valid_r) begin
+                dst_valid_r <= 1'b1;
+                dst_data_r  <= src_data_r;
+            end
+        end
+    end
+
+endmodule

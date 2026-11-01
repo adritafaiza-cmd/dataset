@@ -1,0 +1,229 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // SPI clock domain signals
+    reg [N-1:0] tx_shift_reg;
+    reg [N-1:0] rx_shift_reg;
+    reg [N-1:0] bit_counter;
+    reg         spi_active;
+    reg         spi_sck_int;
+    reg         spi_ssel_int;
+    reg         spi_mosi_int;
+    reg         spi_clk_div_cnt;
+    reg         spi_clk_phase;
+
+    // Parallel clock domain signals
+    reg         di_req_int;
+    reg         wr_ack_int;
+    reg         do_valid_int;
+    reg [N-1:0] do_int;
+    reg         wren_sync1;
+    reg         wren_sync2;
+    reg         wren_sync3;
+    reg         wren_pulse;
+    reg         di_req_sync1;
+    reg         di_req_sync2;
+    reg         di_req_pulse;
+    reg         wr_ack_sync1;
+    reg         wr_ack_sync2;
+    reg         wr_ack_pulse;
+    reg         do_valid_sync1;
+    reg         do_valid_sync2;
+    reg         do_valid_pulse;
+    reg [N-1:0] do_sync1;
+    reg [N-1:0] do_sync2;
+    reg [N-1:0] do_sync3;
+
+    // SPI clock generation
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_clk_div_cnt <= 0;
+            spi_clk_phase   <= 0;
+            spi_sck_int     <= 0;
+        end else begin
+            if (spi_active) begin
+                spi_clk_div_cnt <= spi_clk_div_cnt + 1;
+                if (spi_clk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                    spi_clk_div_cnt <= 0;
+                    spi_clk_phase   <= ~spi_clk_phase;
+                    spi_sck_int     <= spi_clk_phase;
+                end
+            end else begin
+                spi_clk_div_cnt <= 0;
+                spi_clk_phase   <= 0;
+                spi_sck_int     <= 0;
+            end
+        end
+    end
+
+    // SPI state machine
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_active    <= 0;
+            spi_ssel_int  <= 1;
+            spi_mosi_int  <= 0;
+            tx_shift_reg  <= 0;
+            rx_shift_reg  <= 0;
+            bit_counter   <= 0;
+        end else begin
+            if (spi_active) begin
+                // On rising edge of SPI clock, shift in MISO and shift out MOSI
+                if (spi_sck_int) begin
+                    // Shift in MISO
+                    rx_shift_reg <= {rx_shift_reg[N-2:0], spi_miso_i};
+                    // Shift out MOSI
+                    tx_shift_reg <= {tx_shift_reg[N-2:0], 1'b0};
+                    spi_mosi_int <= tx_shift_reg[N-1];
+                    
+                    if (bit_counter == N-1) begin
+                        spi_active   <= 0;
+                        spi_ssel_int <= 1;
+                        spi_mosi_int <= 0;
+                    end else begin
+                        bit_counter <= bit_counter + 1;
+                    end
+                end
+            end else begin
+                // Wait for new word from parallel domain
+                if (di_req_pulse) begin
+                    spi_active   <= 1;
+                    spi_ssel_int <= 0;
+                    tx_shift_reg <= di_i;
+                    spi_mosi_int <= di_i[N-1];
+                    rx_shift_reg <= 0;
+                    bit_counter  <= 0;
+                end
+            end
+        end
+    end
+
+    // Assign SPI outputs
+    assign spi_ssel_o = spi_ssel_int;
+    assign spi_sck_o  = spi_sck_int;
+    assign spi_mosi_o = spi_mosi_int;
+
+    // Parallel clock domain: synchronize SPI signals
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_sync1   <= 0;
+            di_req_sync2   <= 0;
+            di_req_pulse   <= 0;
+            wr_ack_sync1   <= 0;
+            wr_ack_sync2   <= 0;
+            wr_ack_pulse   <= 0;
+            do_valid_sync1 <= 0;
+            do_valid_sync2 <= 0;
+            do_valid_pulse <= 0;
+            do_sync1       <= 0;
+            do_sync2       <= 0;
+            do_sync3       <= 0;
+        end else begin
+            // Synchronize di_req from SPI domain
+            di_req_sync1 <= di_req_int;
+            di_req_sync2 <= di_req_sync1;
+            di_req_pulse <= di_req_sync1 & ~di_req_sync2;
+
+            // Synchronize wr_ack from SPI domain
+            wr_ack_sync1 <= wr_ack_int;
+            wr_ack_sync2 <= wr_ack_sync1;
+            wr_ack_pulse <= wr_ack_sync1 & ~wr_ack_sync2;
+
+            // Synchronize do_valid from SPI domain
+            do_valid_sync1 <= do_valid_int;
+            do_valid_sync2 <= do_valid_sync1;
+            do_valid_pulse <= do_valid_sync1 & ~do_valid_sync2;
+
+            // Synchronize do data
+            do_sync1 <= do_int;
+            do_sync2 <= do_sync1;
+            do_sync3 <= do_sync2;
+        end
+    end
+
+    // Parallel clock domain: control logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_int   <= 0;
+            wr_ack_int   <= 0;
+            do_valid_int <= 0;
+            do_int       <= 0;
+            di_req_o     <= 0;
+            wr_ack_o     <= 0;
+            do_valid_o   <= 0;
+            do_o         <= 0;
+        end else begin
+            // Generate di_req when wren is asserted and not currently transferring
+            if (wren_i && !spi_active) begin
+                di_req_int <= 1;
+            end else begin
+                di_req_int <= 0;
+            end
+
+            // Generate wr_ack when SPI transfer completes
+            if (do_valid_pulse) begin
+                wr_ack_int <= 1;
+            end else begin
+                wr_ack_int <= 0;
+            end
+
+            // Generate do_valid when SPI transfer completes
+            if (do_valid_pulse) begin
+                do_valid_int <= 1;
+            end else begin
+                do_valid_int <= 0;
+            end
+
+            // Capture received data
+            if (do_valid_pulse) begin
+                do_int <= rx_shift_reg;
+            end
+
+            // Drive outputs
+            di_req_o   <= di_req_int;
+            wr_ack_o   <= wr_ack_int;
+            do_valid_o <= do_valid_int;
+            do_o       <= do_sync3;
+        end
+    end
+
+    // SPI clock domain: generate signals for parallel domain
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_int   <= 0;
+            wr_ack_int   <= 0;
+            do_valid_int <= 0;
+            do_int       <= 0;
+        end else begin
+            // di_req is generated in parallel domain, but we need to acknowledge it
+            // Actually, di_req_int is driven by parallel domain, so we just use it
+            // For SPI domain, we need to generate wr_ack and do_valid when transfer completes
+            
+            if (spi_active && spi_sck_int && bit_counter == N-1) begin
+                // Transfer complete
+                wr_ack_int   <= 1;
+                do_valid_int <= 1;
+                do_int       <= rx_shift_reg;
+            end else begin
+                wr_ack_int   <= 0;
+                do_valid_int <= 0;
+            end
+        end
+    end
+
+endmodule

@@ -1,0 +1,205 @@
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire src_clear_req;
+  wire dst_clear_req;
+  wire src_clear_done;
+  wire dst_clear_done;
+
+  // Clear request generation
+  assign src_clear_req = src_clear_i || (CLEAR_ON_ASYNC_RESET && !src_rst_ni);
+  assign dst_clear_req = dst_clear_i || (CLEAR_ON_ASYNC_RESET && !dst_rst_ni);
+
+  // Source domain clear state machine
+  reg src_clear_active;
+  reg src_clear_done_reg;
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_clear_active <= 1'b0;
+      src_clear_done_reg <= 1'b0;
+    end else begin
+      if (src_clear_req) begin
+        src_clear_active <= 1'b1;
+        src_clear_done_reg <= 1'b0;
+      end else if (src_clear_active) begin
+        if (dst_clear_done) begin
+          src_clear_active <= 1'b0;
+          src_clear_done_reg <= 1'b1;
+        end
+      end else begin
+        src_clear_done_reg <= 1'b0;
+      end
+    end
+  end
+
+  assign src_clear_pending_o = src_clear_active;
+
+  // Destination domain clear state machine
+  reg dst_clear_active;
+  reg dst_clear_done_reg;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_clear_active <= 1'b0;
+      dst_clear_done_reg <= 1'b0;
+    end else begin
+      if (dst_clear_req) begin
+        dst_clear_active <= 1'b1;
+        dst_clear_done_reg <= 1'b0;
+      end else if (dst_clear_active) begin
+        if (src_clear_done) begin
+          dst_clear_active <= 1'b0;
+          dst_clear_done_reg <= 1'b1;
+        end
+      end else begin
+        dst_clear_done_reg <= 1'b0;
+      end
+    end
+  end
+
+  assign dst_clear_pending_o = dst_clear_active;
+
+  // Source domain: handshake and data capture
+  reg src_valid_reg;
+  reg [WIDTH-1:0] src_data_reg;
+  reg src_req;
+  reg src_ack;
+
+  // Destination domain: handshake and data output
+  reg dst_valid_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_req;
+  reg dst_ack;
+
+  // Synchronizers for src_req to dst domain
+  reg [SYNC_STAGES-1:0] src_req_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_req_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      src_req_sync <= {src_req_sync[SYNC_STAGES-2:0], src_req};
+    end
+  end
+  wire src_req_dst = src_req_sync[SYNC_STAGES-1];
+
+  // Synchronizers for dst_ack to src domain
+  reg [SYNC_STAGES-1:0] dst_ack_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      dst_ack_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      dst_ack_sync <= {dst_ack_sync[SYNC_STAGES-2:0], dst_ack};
+    end
+  end
+  wire dst_ack_src = dst_ack_sync[SYNC_STAGES-1];
+
+  // Synchronizers for dst_clear_done to src domain
+  reg [SYNC_STAGES-1:0] dst_clear_done_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      dst_clear_done_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      dst_clear_done_sync <= {dst_clear_done_sync[SYNC_STAGES-2:0], dst_clear_done_reg};
+    end
+  end
+  wire dst_clear_done = dst_clear_done_sync[SYNC_STAGES-1];
+
+  // Synchronizers for src_clear_done to dst domain
+  reg [SYNC_STAGES-1:0] src_clear_done_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_clear_done_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      src_clear_done_sync <= {src_clear_done_sync[SYNC_STAGES-2:0], src_clear_done_reg};
+    end
+  end
+  wire src_clear_done = src_clear_done_sync[SYNC_STAGES-1];
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_data_reg <= {WIDTH{1'b0}};
+      src_req <= 1'b0;
+      src_ack <= 1'b0;
+    end else begin
+      if (src_clear_active) begin
+        // During clear, isolate and drop
+        src_valid_reg <= 1'b0;
+        src_data_reg <= {WIDTH{1'b0}};
+        src_req <= 1'b0;
+        src_ack <= 1'b0;
+      end else begin
+        // Two-phase handshake: src_req toggles on accept, src_ack toggles on ack
+        if (src_valid_i && !src_req) begin
+          // Accept new data
+          src_valid_reg <= 1'b1;
+          src_data_reg <= src_data_i;
+          src_req <= 1'b1;
+        end else if (src_req && dst_ack_src) begin
+          // Ack received, toggle back
+          src_req <= 1'b0;
+          src_valid_reg <= 1'b0;
+        end
+      end
+    end
+  end
+
+  // Source ready: can accept new data when not in clear and not already requesting
+  assign src_ready_o = !src_clear_active && !src_req;
+
+  // Destination domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_data_reg <= {WIDTH{1'b0}};
+      dst_req <= 1'b0;
+      dst_ack <= 1'b0;
+    end else begin
+      if (dst_clear_active) begin
+        // During clear, isolate and drop
+        dst_valid_reg <= 1'b0;
+        dst_data_reg <= {WIDTH{1'b0}};
+        dst_req <= 1'b0;
+        dst_ack <= 1'b0;
+      end else begin
+        // Two-phase handshake: dst_ack toggles when src_req is seen
+        if (src_req_dst && !dst_ack) begin
+          // New request from source, capture data and ack
+          dst_valid_reg <= 1'b1;
+          dst_data_reg <= src_data_reg;
+          dst_ack <= 1'b1;
+        end else if (dst_ack && dst_ready_i) begin
+          // Destination consumed, toggle back
+          dst_ack <= 1'b0;
+          dst_valid_reg <= 1'b0;
+        end
+      end
+    end
+  end
+
+  // Destination outputs
+  assign dst_valid_o = dst_valid_reg;
+  assign dst_data_o = dst_data_reg;
+
+endmodule

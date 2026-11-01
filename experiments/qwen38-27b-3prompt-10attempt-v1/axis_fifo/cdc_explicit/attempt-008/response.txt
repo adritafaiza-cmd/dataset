@@ -1,0 +1,359 @@
+```verilog
+module axis_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   pause_req,
+    output wire                   pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] status_depth,
+    output wire [$clog2(DEPTH):0] status_depth_commit,
+    output wire                   status_overflow,
+    output wire                   status_bad_frame,
+    output wire                   status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam DEPTH_POW2 = (DEPTH == (1 << ADDR_WIDTH)) ? DEPTH : (1 << (ADDR_WIDTH + 1));
+    localparam PTR_WIDTH = (DEPTH == (1 << ADDR_WIDTH)) ? ADDR_WIDTH : (ADDR_WIDTH + 1);
+    localparam DEPTH_MASK = DEPTH_POW2 - 1;
+
+    // Total sideband width
+    localparam SIDE_WIDTH = (KEEP_ENABLE ? KEEP_WIDTH : 0) +
+                            (LAST_ENABLE ? 1 : 0) +
+                            (ID_ENABLE ? ID_WIDTH : 0) +
+                            (DEST_ENABLE ? DEST_WIDTH : 0) +
+                            (USER_ENABLE ? USER_WIDTH : 0);
+
+    // Build combined sideband vector
+    wire [SIDE_WIDTH-1:0] s_sideband;
+    wire [SIDE_WIDTH-1:0] m_sideband;
+
+    // Pack sidebands
+    generate
+        if (SIDE_WIDTH > 0) begin : gen_sideband_pack
+            reg [SIDE_WIDTH-1:0] s_sideband_reg;
+            reg [SIDE_WIDTH-1:0] m_sideband_reg;
+            integer i;
+            genvar k;
+            localparam SIDE_OFFSET_KEEP = 0;
+            localparam SIDE_OFFSET_LAST = (KEEP_ENABLE ? KEEP_WIDTH : 0);
+            localparam SIDE_OFFSET_ID   = SIDE_OFFSET_LAST + (LAST_ENABLE ? 1 : 0);
+            localparam SIDE_OFFSET_DEST = SIDE_OFFSET_ID + (ID_ENABLE ? ID_WIDTH : 0);
+            localparam SIDE_OFFSET_USER = SIDE_OFFSET_DEST + (DEST_ENABLE ? DEST_WIDTH : 0);
+
+            always @(*) begin
+                s_sideband_reg = {SIDE_WIDTH{1'b0}};
+                if (KEEP_ENABLE)
+                    s_sideband_reg[SIDE_OFFSET_KEEP +: KEEP_WIDTH] = s_axis_tkeep;
+                if (LAST_ENABLE)
+                    s_sideband_reg[SIDE_OFFSET_LAST] = s_axis_tlast;
+                if (ID_ENABLE)
+                    s_sideband_reg[SIDE_OFFSET_ID +: ID_WIDTH] = s_axis_tid;
+                if (DEST_ENABLE)
+                    s_sideband_reg[SIDE_OFFSET_DEST +: DEST_WIDTH] = s_axis_tdest;
+                if (USER_ENABLE)
+                    s_sideband_reg[SIDE_OFFSET_USER +: USER_WIDTH] = s_axis_tuser;
+            end
+            assign s_sideband = s_sideband_reg;
+
+            always @(*) begin
+                m_sideband_reg = {SIDE_WIDTH{1'b0}};
+                if (KEEP_ENABLE)
+                    m_sideband_reg[SIDE_OFFSET_KEEP +: KEEP_WIDTH] = m_axis_tkeep;
+                if (LAST_ENABLE)
+                    m_sideband_reg[SIDE_OFFSET_LAST] = m_axis_tlast;
+                if (ID_ENABLE)
+                    m_sideband_reg[SIDE_OFFSET_ID +: ID_WIDTH] = m_axis_tid;
+                if (DEST_ENABLE)
+                    m_sideband_reg[SIDE_OFFSET_DEST +: DEST_WIDTH] = m_axis_tdest;
+                if (USER_ENABLE)
+                    m_sideband_reg[SIDE_OFFSET_USER +: USER_WIDTH] = m_axis_tuser;
+            end
+        end
+        else begin : gen_sideband_empty
+            assign s_sideband = {SIDE_WIDTH{1'b0}};
+            assign m_sideband = {SIDE_WIDTH{1'b0}};
+        end
+    endgenerate
+
+    // Unpack sidebands from output
+    generate
+        if (SIDE_WIDTH > 0) begin : gen_sideband_unpack
+            localparam SIDE_OFFSET_KEEP = 0;
+            localparam SIDE_OFFSET_LAST = (KEEP_ENABLE ? KEEP_WIDTH : 0);
+            localparam SIDE_OFFSET_ID   = SIDE_OFFSET_LAST + (LAST_ENABLE ? 1 : 0);
+            localparam SIDE_OFFSET_DEST = SIDE_OFFSET_ID + (ID_ENABLE ? ID_WIDTH : 0);
+            localparam SIDE_OFFSET_USER = SIDE_OFFSET_DEST + (DEST_ENABLE ? DEST_WIDTH : 0);
+
+            assign m_axis_tkeep  = KEEP_ENABLE  ? m_sideband[SIDE_OFFSET_KEEP +: KEEP_WIDTH]  : {KEEP_WIDTH{1'b0}};
+            assign m_axis_tlast  = LAST_ENABLE  ? m_sideband[SIDE_OFFSET_LAST]                 : 1'b0;
+            assign m_axis_tid    = ID_ENABLE    ? m_sideband[SIDE_OFFSET_ID +: ID_WIDTH]       : {ID_WIDTH{1'b0}};
+            assign m_axis_tdest  = DEST_ENABLE  ? m_sideband[SIDE_OFFSET_DEST +: DEST_WIDTH]   : {DEST_WIDTH{1'b0}};
+            assign m_axis_tuser  = USER_ENABLE  ? m_sideband[SIDE_OFFSET_USER +: USER_WIDTH]   : {USER_WIDTH{1'b0}};
+        end
+        else begin : gen_sideband_unpack_empty
+            assign m_axis_tkeep  = {KEEP_WIDTH{1'b0}};
+            assign m_axis_tlast  = 1'b0;
+            assign m_axis_tid    = {ID_WIDTH{1'b0}};
+            assign m_axis_tdest  = {DEST_WIDTH{1'b0}};
+            assign m_axis_tuser  = {USER_WIDTH{1'b0}};
+        end
+    endgenerate
+
+    // RAM data width
+    localparam RAM_DATA_WIDTH = DATA_WIDTH + SIDE_WIDTH;
+
+    // Internal signals
+    wire [RAM_DATA_WIDTH-1:0] ram_wdata;
+    wire [RAM_DATA_WIDTH-1:0] ram_rdata;
+    wire [ADDR_WIDTH-1:0]     ram_waddr;
+    wire [ADDR_WIDTH-1:0]     ram_raddr;
+    wire                      ram_wen;
+    wire                      ram_ren;
+
+    // Write pointer
+    reg [PTR_WIDTH-1:0] wr_ptr;
+    // Read pointer
+    reg [PTR_WIDTH-1:0] rd_ptr;
+
+    // Frame tracking
+    reg in_frame;
+    reg frame_bad;
+    reg frame_oversize;
+
+    // Pause state
+    reg paused;
+    reg pause_pending;
+
+    // Status latches
+    reg status_overflow_r;
+    reg status_bad_frame_r;
+    reg status_good_frame_r;
+
+    // Handshake
+    wire wr_valid = s_axis_tvalid;
+    wire rd_valid = m_axis_tvalid;
+    wire rd_ready = m_axis_tready;
+
+    // FIFO full/empty
+    wire fifo_full  = (wr_ptr - rd_ptr == DEPTH);
+    wire fifo_empty = (wr_ptr == rd_ptr);
+
+    // Pause logic
+    wire pause_active = PAUSE_ENABLE ? (paused || pause_pending) : 1'b0;
+    wire frame_pause_active = (FRAME_PAUSE && in_frame) ? 1'b0 : pause_active;
+
+    // Write enable
+    wire wr_en = wr_valid && s_axis_tready && !frame_pause_active;
+
+    // Read enable
+    wire rd_en = rd_valid && rd_ready;
+
+    // Frame boundary detection
+    wire is_last = LAST_ENABLE ? s_axis_tlast : 1'b0;
+
+    // Bad frame detection
+    wire bad_frame_det = (USER_ENABLE && USER_BAD_FRAME_MASK != 0) ?
+                         ((s_axis_tuser & USER_BAD_FRAME_MASK) == USER_BAD_FRAME_VALUE) : 1'b0;
+
+    // Oversize detection: frame exceeds DEPTH
+    // We track frame length
+    reg [PTR_WIDTH-1:0] frame_len;
+
+    // Determine if we should drop
+    wire drop_frame = (DROP_OVERSIZE_FRAME && frame_oversize) ||
+                      (DROP_BAD_FRAME && frame_bad);
+
+    // When full behavior
+    wire drop_when_full = (DROP_WHEN_FULL && fifo_full);
+    wire mark_when_full = (MARK_WHEN_FULL && fifo_full);
+
+    // Effective write ready
+    wire s_axis_tready_internal = !fifo_full && !frame_pause_active;
+    assign s_axis_tready = s_axis_tready_internal;
+
+    // Effective read valid
+    assign m_axis_tvalid = !fifo_empty;
+
+    // Pause ack
+    assign pause_ack = PAUSE_ENABLE ? (paused || pause_pending) : 1'b0;
+
+    // Build write data
+    assign ram_wdata = {s_sideband, s_axis_tdata};
+
+    // RAM address
+    assign ram_waddr = wr_ptr[ADDR_WIDTH-1:0];
+    assign ram_raddr = rd_ptr[ADDR_WIDTH-1:0];
+
+    // RAM enable
+    assign ram_wen = wr_en;
+    assign ram_ren = rd_en;
+
+    // RAM read data
+    wire [RAM_DATA_WIDTH-1:0] ram_rdata_internal;
+    assign ram_rdata = ram_rdata_internal;
+
+    // Simple synchronous RAM
+    reg [RAM_DATA_WIDTH-1:0] ram_mem [0:DEPTH_POW2-1];
+
+    always @(posedge clk) begin
+        if (ram_wen)
+            ram_mem[ram_waddr] <= ram_wdata;
+    end
+
+    always @(posedge clk) begin
+        ram_rdata_internal <= ram_mem[ram_raddr];
+    end
+
+    // Output data
+    assign m_axis_tdata = ram_rdata[DATA_WIDTH-1:0];
+    assign m_sideband   = ram_rdata[DATA_WIDTH +: SIDE_WIDTH];
+
+    // Pointer updates
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            wr_ptr <= {PTR_WIDTH{1'b0}};
+            rd_ptr <= {PTR_WIDTH{1'b0}};
+            in_frame <= 1'b0;
+            frame_bad <= 1'b0;
+            frame_oversize <= 1'b0;
+            frame_len <= {PTR_WIDTH{1'b0}};
+            paused <= 1'b0;
+            pause_pending <= 1'b0;
+            status_overflow_r <= 1'b0;
+            status_bad_frame_r <= 1'b0;
+            status_good_frame_r <= 1'b0;
+        end else begin
+            // Write pointer
+            if (wr_en) begin
+                wr_ptr <= wr_ptr + 1'b1;
+            end
+
+            // Read pointer
+            if (rd_en) begin
+                rd_ptr <= rd_ptr + 1'b1;
+            end
+
+            // Frame tracking
+            if (wr_en) begin
+                if (!in_frame) begin
+                    // Start of new frame
+                    in_frame <= 1'b1;
+                    frame_bad <= bad_frame_det;
+                    frame_len <= 1'b1;
+                    frame_oversize <= 1'b0;
+                end else begin
+                    // Continue frame
+                    frame_len <= frame_len + 1'b1;
+                    if (frame_len + 1'b1 > DEPTH)
+                        frame_oversize <= 1'b1;
+                    if (bad_frame_det)
+                        frame_bad <= 1'b1;
+                end
+            end
+
+            if (rd_en) begin
+                // Check if this is the last beat of a frame
+                wire rd_is_last = LAST_ENABLE ? m_axis_tlast : 1'b0;
+                if (rd_is_last) begin
+                    in_frame <= 1'b0;
+                    frame_bad <= 1'b0;
+                    frame_oversize <= 1'b0;
+                    frame_len <= {PTR_WIDTH{1'b0}};
+                end
+            end
+
+            // Pause logic
+            if (PAUSE_ENABLE) begin
+                if (pause_req && !paused && !pause_pending) begin
+                    pause_pending <= 1'b1;
+                end
+                if (pause_pending && !in_frame) begin
+                    paused <= 1'b1;
+                    pause_pending <= 1'b0;
+                end
+                if (!pause_req && paused) begin
+                    paused <= 1'b0;
+                end
+            end
+
+            // Status
+            if (wr_en && fifo_full)
+                status_overflow_r <= 1'b1;
+
+            if (rd_en) begin
+                wire rd_is_last = LAST_ENABLE ? m_axis_tlast : 1'b0;
+                if (rd_is_last) begin
+                    if (frame_bad || frame_oversize)
+                        status_bad_frame_r <= 1'b1;
+                    else
+                        status_good_frame_r <= 1'b1;
+                end
+            end
+        end
+    end
+
+    // Status outputs
+    assign status_overflow   = status_overflow_r;
+    assign status_bad_frame  = status_bad_frame_r;
+    assign status_good_frame = status_good_frame_r;
+
+    // Depth calculation
+    wire [PTR_WIDTH:0] depth_raw = wr_ptr - rd_ptr;
+    assign status_depth = depth_raw[$clog2(DEPTH):0];
+    assign status_depth_commit = depth_raw[$clog2(DEPTH):0];
+
+endmodule
+```<|im_end|>

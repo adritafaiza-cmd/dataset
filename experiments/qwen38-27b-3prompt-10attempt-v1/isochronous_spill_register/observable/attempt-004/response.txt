@@ -1,0 +1,203 @@
+```verilog
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    // Source clock domain state
+    reg [WIDTH-1:0] src_buf0;
+    reg [WIDTH-1:0] src_buf1;
+    reg             src_buf0_valid;
+    reg             src_buf1_valid;
+
+    // Destination clock domain state
+    reg [WIDTH-1:0] dst_buf0;
+    reg [WIDTH-1:0] dst_buf1;
+    reg             dst_buf0_valid;
+    reg             dst_buf1_valid;
+
+    // Synchronization signals
+    // src_to_dst: source has data available (either buf0 or buf1 valid)
+    reg             src_has_data;
+    reg             src_has_data_sync1;
+    reg             src_has_data_sync2;
+
+    // dst_to_src: destination has space available (either buf0 or buf1 not valid)
+    reg             dst_has_space;
+    reg             dst_has_space_sync1;
+    reg             dst_has_space_sync2;
+
+    // Synchronize src_has_data to dst domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_has_data_sync1 <= 1'b0;
+            src_has_data_sync2 <= 1'b0;
+        end else begin
+            src_has_data_sync1 <= src_has_data;
+            src_has_data_sync2 <= src_has_data_sync1;
+        end
+    end
+
+    // Synchronize dst_has_space to src domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_has_space_sync1 <= 1'b0;
+            dst_has_space_sync2 <= 1'b0;
+        end else begin
+            dst_has_space_sync1 <= dst_has_space;
+            dst_has_space_sync2 <= dst_has_space_sync1;
+        end
+    end
+
+    // Compute src_has_data in source domain
+    assign src_has_data = src_buf0_valid | src_buf1_valid;
+
+    // Compute dst_has_space in destination domain
+    assign dst_has_space = ~(dst_buf0_valid & dst_buf1_valid);
+
+    // Source domain: accept data when there's space in destination
+    // We can accept if destination has space (synchronized)
+    wire src_can_accept = dst_has_space_sync2;
+
+    assign src_ready_o = src_can_accept;
+
+    // Source domain: write data into source buffers
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_buf0_valid <= 1'b0;
+            src_buf1_valid <= 1'b0;
+            src_buf0       <= {WIDTH{1'b0}};
+            src_buf1       <= {WIDTH{1'b0}};
+        end else begin
+            if (src_valid_i && src_ready_o) begin
+                if (!src_buf0_valid) begin
+                    src_buf0       <= src_data_i;
+                    src_buf0_valid <= 1'b1;
+                end else if (!src_buf1_valid) begin
+                    src_buf1       <= src_data_i;
+                    src_buf1_valid <= 1'b1;
+                end
+            end
+        end
+    end
+
+    // Destination domain: read from source buffers (synchronized)
+    // We need to synchronize the buffer contents and valid bits to dst domain
+    // Since the source buffers are written in src domain, we need to sync them to dst domain
+
+    // Synchronize src_buf0_valid
+    reg src_buf0_valid_sync1;
+    reg src_buf0_valid_sync2;
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_buf0_valid_sync1 <= 1'b0;
+            src_buf0_valid_sync2 <= 1'b0;
+        end else begin
+            src_buf0_valid_sync1 <= src_buf0_valid;
+            src_buf0_valid_sync2 <= src_buf0_valid_sync1;
+        end
+    end
+
+    // Synchronize src_buf1_valid
+    reg src_buf1_valid_sync1;
+    reg src_buf1_valid_sync2;
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_buf1_valid_sync1 <= 1'b0;
+            src_buf1_valid_sync2 <= 1'b0;
+        end else begin
+            src_buf1_valid_sync1 <= src_buf1_valid;
+            src_buf1_valid_sync2 <= src_buf1_valid_sync1;
+        end
+    end
+
+    // Synchronize src_buf0 data
+    reg [WIDTH-1:0] src_buf0_sync1;
+    reg [WIDTH-1:0] src_buf0_sync2;
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_buf0_sync1 <= {WIDTH{1'b0}};
+            src_buf0_sync2 <= {WIDTH{1'b0}};
+        end else begin
+            src_buf0_sync1 <= src_buf0;
+            src_buf0_sync2 <= src_buf0_sync1;
+        end
+    end
+
+    // Synchronize src_buf1 data
+    reg [WIDTH-1:0] src_buf1_sync1;
+    reg [WIDTH-1:0] src_buf1_sync2;
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_buf1_sync1 <= {WIDTH{1'b0}};
+            src_buf1_sync2 <= {WIDTH{1'b0}};
+        end else begin
+            src_buf1_sync1 <= src_buf1;
+            src_buf1_sync2 <= src_buf1_sync1;
+        end
+    end
+
+    // Destination domain: manage destination buffers
+    // When dst_ready, pop from dst buffers
+    // When src has data (synchronized), push into dst buffers
+
+    wire dst_can_push = src_has_data_sync2;
+    wire dst_can_pop  = dst_ready_i;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_buf0_valid <= 1'b0;
+            dst_buf1_valid <= 1'b0;
+            dst_buf0       <= {WIDTH{1'b0}};
+            dst_buf1       <= {WIDTH{1'b0}};
+        end else begin
+            // Pop logic
+            if (dst_can_pop) begin
+                if (dst_buf0_valid) begin
+                    dst_buf0_valid <= 1'b0;
+                    if (dst_buf1_valid) begin
+                        dst_buf0       <= dst_buf1;
+                        dst_buf1_valid <= 1'b0;
+                    end
+                end
+            end
+
+            // Push logic
+            if (dst_can_push) begin
+                if (!dst_buf0_valid) begin
+                    if (src_buf0_valid_sync2) begin
+                        dst_buf0       <= src_buf0_sync2;
+                        dst_buf0_valid <= 1'b1;
+                    end else if (src_buf1_valid_sync2) begin
+                        dst_buf0       <= src_buf1_sync2;
+                        dst_buf0_valid <= 1'b1;
+                    end
+                end else if (!dst_buf1_valid) begin
+                    if (src_buf0_valid_sync2) begin
+                        dst_buf1       <= src_buf0_sync2;
+                        dst_buf1_valid <= 1'b1;
+                    end else if (src_buf1_valid_sync2) begin
+                        dst_buf1       <= src_buf1_sync2;
+                        dst_buf1_valid <= 1'b1;
+                    end
+                end
+            end
+        end
+    end
+
+    // Destination output
+    assign dst_valid_o = dst_buf0_valid;
+    assign dst_data_o  = dst_buf0;
+
+endmodule
+```<|im_end|>

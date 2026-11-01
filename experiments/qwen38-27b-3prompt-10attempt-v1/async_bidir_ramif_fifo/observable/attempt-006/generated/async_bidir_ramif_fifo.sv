@@ -1,0 +1,342 @@
+module async_bidir_ramif_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "FALSE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir,
+       output wire             o_ram_a_clk,
+       output wire [DSIZE-1:0] o_ram_a_wdata,
+       input wire [DSIZE-1:0]  i_ram_a_rdata,
+       output wire [ASIZE-1:0] o_ram_a_addr,
+       output wire             o_ram_a_rinc,
+       output wire             o_ram_a_winc,
+       output wire             o_ram_b_clk,
+       output wire [DSIZE-1:0] o_ram_b_wdata,
+       input wire [DSIZE-1:0]  i_ram_b_rdata,
+       output wire [ASIZE-1:0] o_ram_b_addr,
+       output wire             o_ram_b_rinc,
+       output wire             o_ram_b_winc
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam PTR_W = ASIZE + 1;
+  localparam AFULL_THRESH = DEPTH - 2;
+  localparam AEMPTY_THRESH = 1;
+
+  // A-side state
+  reg [PTR_W-1:0] a_wr_ptr;
+  reg [PTR_W-1:0] a_rd_ptr;
+  reg [PTR_W-1:0] a_wr_ptr_sync;
+  reg [PTR_W-1:0] a_rd_ptr_sync;
+  reg [PTR_W-1:0] a_wr_ptr_sync2;
+  reg [PTR_W-1:0] a_rd_ptr_sync2;
+
+  // B-side state
+  reg [PTR_W-1:0] b_wr_ptr;
+  reg [PTR_W-1:0] b_rd_ptr;
+  reg [PTR_W-1:0] b_wr_ptr_sync;
+  reg [PTR_W-1:0] b_rd_ptr_sync;
+  reg [PTR_W-1:0] b_wr_ptr_sync2;
+  reg [PTR_W-1:0] b_rd_ptr_sync2;
+
+  // Direction registers
+  reg a_dir_r;
+  reg b_dir_r;
+
+  // A-side status
+  wire a_full;
+  wire a_afull;
+  wire a_empty;
+  wire a_aempty;
+
+  // B-side status
+  wire b_full;
+  wire b_afull;
+  wire b_empty;
+  wire b_aempty;
+
+  // A-side RAM control
+  wire a_ram_wen;
+  wire a_ram_ren;
+  wire [ASIZE-1:0] a_ram_addr;
+  wire [DSIZE-1:0] a_ram_wdata;
+
+  // B-side RAM control
+  wire b_ram_wen;
+  wire b_ram_ren;
+  wire [ASIZE-1:0] b_ram_addr;
+  wire [DSIZE-1:0] b_ram_wdata;
+
+  // A-side: when a_dir=0, A is source (writes to RAM), B is sink (reads from RAM)
+  // A-side: when a_dir=1, A is sink (reads from RAM), B is source (writes to RAM)
+  // So: a_dir=0 -> A writes, B reads
+  //     a_dir=1 -> A reads, B writes
+
+  // A-side RAM port:
+  // If a_dir=0: A is writing -> o_ram_a_winc=1, o_ram_a_rinc=0
+  // If a_dir=1: A is reading -> o_ram_a_winc=0, o_ram_a_rinc=1
+  assign a_ram_wen = a_winc & ~a_dir_r;
+  assign a_ram_ren = a_rinc & a_dir_r;
+  assign a_ram_addr = a_dir_r ? a_rd_ptr[ASIZE-1:0] : a_wr_ptr[ASIZE-1:0];
+  assign a_ram_wdata = a_wdata;
+
+  // B-side RAM port:
+  // If b_dir=0: B is writing -> o_ram_b_winc=1, o_ram_b_rinc=0
+  // If b_dir=1: B is reading -> o_ram_b_winc=0, o_ram_b_rinc=1
+  assign b_ram_wen = b_winc & ~b_dir_r;
+  assign b_ram_ren = b_rinc & b_dir_r;
+  assign b_ram_addr = b_dir_r ? b_rd_ptr[ASIZE-1:0] : b_wr_ptr[ASIZE-1:0];
+  assign b_ram_wdata = b_wdata;
+
+  // Output assignments
+  assign o_ram_a_clk = a_clk;
+  assign o_ram_a_wdata = a_ram_wdata;
+  assign o_ram_a_addr = a_ram_addr;
+  assign o_ram_a_rinc = a_ram_ren;
+  assign o_ram_a_winc = a_ram_wen;
+
+  assign o_ram_b_clk = b_clk;
+  assign o_ram_b_wdata = b_ram_wdata;
+  assign o_ram_b_addr = b_ram_addr;
+  assign o_ram_b_rinc = b_ram_ren;
+  assign o_ram_b_winc = b_ram_wen;
+
+  // Read data: fall-through logic
+  // For A-side: if a_dir=1 (A is reading), a_rdata comes from RAM or fall-through
+  // Fall-through: if FIFO is empty and a write is happening on the other side, pass through
+  // But since we use external RAM, fall-through means: if empty and a write occurs, 
+  // the read data should be the write data directly.
+  
+  // Actually, with external RAM, fall-through is tricky. Let's think:
+  // When a_dir=1, A reads from RAM. If the FIFO is empty (a_empty) and a write is 
+  // happening on B side (b_winc & ~b_dir_r), then the data being written to RAM 
+  // should be available immediately as a_rdata.
+  
+  // But the write to RAM happens in B's clock domain. The data is on b_wdata.
+  // We need to cross b_wdata to A's domain for fall-through.
+  
+  // Let's implement fall-through by synchronizing b_wdata to A domain when needed.
+  
+  // For simplicity and correctness, let's handle fall-through:
+  // a_rdata = (a_dir_r & a_empty & b_winc & ~b_dir_r_sync) ? b_wdata_sync : i_ram_a_rdata
+  
+  // We need to synchronize b_winc, b_dir_r, and b_wdata to A domain.
+  
+  // Let's add synchronization for fall-through signals.
+  
+  // Synchronize B-side write info to A domain
+  reg b_winc_sync;
+  reg b_winc_sync2;
+  reg b_dir_sync;
+  reg b_dir_sync2;
+  reg [DSIZE-1:0] b_wdata_sync;
+  reg [DSIZE-1:0] b_wdata_sync2;
+
+  // Synchronize A-side write info to B domain
+  reg a_winc_sync;
+  reg a_winc_sync2;
+  reg a_dir_sync;
+  reg a_dir_sync2;
+  reg [DSIZE-1:0] a_wdata_sync;
+  reg [DSIZE-1:0] a_wdata_sync2;
+
+  // A-side pointer updates
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_wr_ptr <= {PTR_W{1'b0}};
+      a_rd_ptr <= {PTR_W{1'b0}};
+      a_dir_r  <= 1'b0;
+    end else begin
+      a_dir_r <= a_dir;
+      if (a_winc & ~a_dir_r)
+        a_wr_ptr <= a_wr_ptr + 1'b1;
+      if (a_rinc & a_dir_r)
+        a_rd_ptr <= a_rd_ptr + 1'b1;
+    end
+  end
+
+  // B-side pointer updates
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_wr_ptr <= {PTR_W{1'b0}};
+      b_rd_ptr <= {PTR_W{1'b0}};
+      b_dir_r  <= 1'b0;
+    end else begin
+      b_dir_r <= b_dir;
+      if (b_winc & ~b_dir_r)
+        b_wr_ptr <= b_wr_ptr + 1'b1;
+      if (b_rinc & b_dir_r)
+        b_rd_ptr <= b_rd_ptr + 1'b1;
+    end
+  end
+
+  // Synchronize A pointers to B domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_wr_ptr_sync  <= {PTR_W{1'b0}};
+      a_rd_ptr_sync  <= {PTR_W{1'b0}};
+      a_wr_ptr_sync2 <= {PTR_W{1'b0}};
+      a_rd_ptr_sync2 <= {PTR_W{1'b0}};
+    end else begin
+      a_wr_ptr_sync  <= a_wr_ptr;
+      a_rd_ptr_sync  <= a_rd_ptr;
+      a_wr_ptr_sync2 <= a_wr_ptr_sync;
+      a_rd_ptr_sync2 <= a_rd_ptr_sync;
+    end
+  end
+
+  // Synchronize B pointers to A domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_wr_ptr_sync  <= {PTR_W{1'b0}};
+      b_rd_ptr_sync  <= {PTR_W{1'b0}};
+      b_wr_ptr_sync2 <= {PTR_W{1'b0}};
+      b_rd_ptr_sync2 <= {PTR_W{1'b0}};
+    end else begin
+      b_wr_ptr_sync  <= b_wr_ptr;
+      b_rd_ptr_sync  <= b_rd_ptr;
+      b_wr_ptr_sync2 <= b_wr_ptr_sync;
+      b_rd_ptr_sync2 <= b_rd_ptr_sync;
+    end
+  end
+
+  // Synchronize B write info to A domain for fall-through
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_winc_sync  <= 1'b0;
+      b_dir_sync   <= 1'b0;
+      b_wdata_sync <= {DSIZE{1'b0}};
+    end else begin
+      b_winc_sync  <= b_winc;
+      b_dir_sync   <= b_dir_r;
+      b_wdata_sync <= b_wdata;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_winc_sync2  <= 1'b0;
+      b_dir_sync2   <= 1'b0;
+      b_wdata_sync2 <= {DSIZE{1'b0}};
+    end else begin
+      b_winc_sync2  <= b_winc_sync;
+      b_dir_sync2   <= b_dir_sync;
+      b_wdata_sync2 <= b_wdata_sync;
+    end
+  end
+
+  // Synchronize A write info to B domain for fall-through
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_winc_sync  <= 1'b0;
+      a_dir_sync   <= 1'b0;
+      a_wdata_sync <= {DSIZE{1'b0}};
+    end else begin
+      a_winc_sync  <= a_winc;
+      a_dir_sync   <= a_dir_r;
+      a_wdata_sync <= a_wdata;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_winc_sync2  <= 1'b0;
+      a_dir_sync2   <= 1'b0;
+      a_wdata_sync2 <= {DSIZE{1'b0}};
+    end else begin
+      a_winc_sync2  <= a_winc_sync;
+      a_dir_sync2   <= a_dir_sync;
+      a_wdata_sync2 <= a_wdata_sync;
+    end
+  end
+
+  // A-side status: A is source when a_dir=0, sink when a_dir=1
+  // When A is source (a_dir=0): A writes to RAM. Full/empty relate to A's write pointer vs B's read pointer.
+  // When A is sink (a_dir=1): A reads from RAM. Full/empty relate to B's write pointer vs A's read pointer.
+  
+  // Let's define:
+  // a_full: A cannot write more. This happens when A is source (a_dir=0) and the FIFO is full.
+  //         The FIFO is full when (a_wr_ptr - b_rd_ptr_sync2) == DEPTH
+  // a_empty: A cannot read. This happens when A is sink (a_dir=1) and the FIFO is empty.
+  //          The FIFO is empty when (b_wr_ptr_sync2 - a_rd_ptr) == 0
+  
+  // But wait, the full/empty should be from the perspective of the port.
+  // a_full: indicates that A's write port is full (cannot accept more writes)
+  // a_empty: indicates that A's read port is empty (cannot read)
+  
+  // When a_dir=0: A is writing. a_full = (a_wr_ptr - b_rd_ptr_sync2) == DEPTH
+  //                a_empty = 0 (A is not reading, so empty is not relevant for write side, but we still output it)
+  //                Actually, a_empty should indicate if A can read. When a_dir=0, A is not reading, 
+  //                but the signal should still reflect the FIFO state.
+  
+  // Let me reconsider. The full/empty signals should reflect the FIFO occupancy from the 
+  // perspective of each port's operation.
+  
+  // a_full: 1 if A cannot write (FIFO full from A's write perspective)
+  // a_empty: 1 if A cannot read (FIFO empty from A's read perspective)
+  
+  // When a_dir=0 (A is source/writer):
+  //   a_full = (a_wr_ptr - b_rd_ptr_sync2) == DEPTH
+  //   a_empty = (b_wr_ptr_sync2 - a_rd_ptr) == 0  // but A is not reading, so this is less relevant
+  //   Actually, when a_dir=0, A is writing, so a_full is the important one.
+  //   a_empty should be 0 or reflect that there's nothing to read (but A isn't reading).
+  
+  // When a_dir=1 (A is sink/reader):
+  //   a_full = 0 (A is not writing)
+  //   a_empty = (b_wr_ptr_sync2 - a_rd_ptr) == 0
+  
+  // Let's compute the occupancy:
+  // When a_dir=0: occupancy = a_wr_ptr - b_rd_ptr_sync2
+  // When a_dir=1: occupancy = b_wr_ptr_sync2 - a_rd_ptr
+  
+  wire [PTR_W-1:0] a_occ;
+  assign a_occ = a_dir_r ? (b_wr_ptr_sync2 - a_rd_ptr) : (a_wr_ptr - b_rd_ptr_sync2);
+  
+  assign a_full  = a_dir_r ? 1'b0 : (a_occ == DEPTH);
+  assign a_empty = a_dir_r ? (a_occ == 0) : 1'b0;
+  
+  assign a_afull  = a_dir_r ? 1'b0 : (a_occ >= AFULL_THRESH);
+  assign a_aempty = a_dir_r ? (a_occ <= AEMPTY_THRESH) : 1'b0;
+
+  // B-side status
+  wire [PTR_W-1:0] b_occ;
+  assign b_occ = b_dir_r ? (a_wr_ptr_sync2 - b_rd_ptr) : (b_wr_ptr - a_rd_ptr_sync2);
+  
+  assign b_full  = b_dir_r ? 1'b0 : (b_occ == DEPTH);
+  assign b_empty = b_dir_r ? (b_occ == 0) : 1'b0;
+  
+  assign b_afull  = b_dir_r ? 1'b0 : (b_occ >= AFULL_THRESH);
+  assign b_aempty = b_dir_r ? (a_occ <= AEMPTY_THRESH) : 1'b0;
+
+  // Read data with fall-through
+  // A-side: when a_dir=1, A reads. If empty and B is writing, fall through.
+  wire a_fallthrough = (FALLTHROUGH == "TRUE") & a_dir_r & a_empty & b_winc_sync2 & ~b_dir_sync2;
+  assign a_rdata = a_fallthrough ? b_wdata_sync2 : i_ram_a_rdata;
+
+  // B-side: when b_dir=1, B reads. If empty and A is writing, fall through.
+  wire b_fallthrough = (FALLTHROUGH == "TRUE") & b_dir_r & b_empty & a_winc_sync2 & ~a_dir_sync2;
+  assign b_rdata = b_fallthrough ? a_wdata_sync2 : i_ram_b_rdata;
+
+endmodule

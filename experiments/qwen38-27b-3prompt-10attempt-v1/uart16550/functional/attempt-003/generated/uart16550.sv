@@ -1,0 +1,449 @@
+module uart_top (
+    wb_clk_i,
+    wb_rst_i, wb_adr_i, wb_dat_i, wb_dat_o, wb_we_i, wb_stb_i, wb_cyc_i, wb_ack_o, wb_sel_i,
+    int_o,
+    stx_pad_o, srx_pad_i,
+    rts_pad_o, cts_pad_i, dtr_pad_o, dsr_pad_i, ri_pad_i, dcd_pad_i
+);
+
+    // Wishbone signals
+    input  wb_clk_i;
+    input  wb_rst_i;
+    input  [7:0] wb_adr_i;
+    input  [7:0] wb_dat_i;
+    output [7:0] wb_dat_o;
+    input  wb_we_i;
+    input  wb_stb_i;
+    input  wb_cyc_i;
+    output wb_ack_o;
+    input  [3:0] wb_sel_i;
+
+    // Interrupt
+    output int_o;
+
+    // UART pins
+    output stx_pad_o;
+    input  srx_pad_i;
+
+    // Modem control pins
+    output rts_pad_o;
+    input  cts_pad_i;
+    output dtr_pad_o;
+    input  dsr_pad_i;
+    input  ri_pad_i;
+    input  dcd_pad_i;
+
+    // Internal signals
+    wire [7:0] reg_addr;
+    wire [7:0] reg_data;
+    wire       reg_we;
+    wire       reg_stb;
+    wire       reg_cyc;
+    wire       reg_ack;
+
+    // 16550 registers
+    reg [7:0] rbr_thr;      // 0x00: Receiver Buffer Register / Transmitter Holding Register
+    reg [7:0] ier;          // 0x01: Interrupt Enable Register
+    reg [7:0] iir;          // 0x02: Interrupt Identification Register
+    reg [7:0] lcr;          // 0x03: Line Control Register
+    reg [7:0] mcr;          // 0x04: Modem Control Register
+    reg [7:0] lsr;          // 0x05: Line Status Register
+    reg [7:0] msr;          // 0x06: Modem Status Register
+    reg [7:0] scr;          // 0x07: Scratch Register
+    reg [7:0] fcr;          // 0x02: FIFO Control Register (when DLAB=1)
+    reg [7:0] lcr_dlab;     // 0x03: Line Control Register (when DLAB=1)
+    reg [7:0] mcr_dlab;     // 0x04: Modem Control Register (when DLAB=1)
+    reg [7:0] lsr_dlab;     // 0x05: Line Status Register (when DLAB=1)
+    reg [7:0] msr_dlab;     // 0x06: Modem Status Register (when DLAB=1)
+    reg [7:0] scr_dlab;     // 0x07: Scratch Register (when DLAB=1)
+
+    // Baud rate divisor
+    reg [7:0] baud_divisor_lsb;
+    reg [7:0] baud_divisor_msb;
+
+    // FIFOs
+    reg [7:0] rx_fifo [0:14];
+    reg [3:0] rx_fifo_wr_ptr;
+    reg [3:0] rx_fifo_rd_ptr;
+    reg [3:0] rx_fifo_count;
+
+    reg [7:0] tx_fifo [0:14];
+    reg [3:0] tx_fifo_wr_ptr;
+    reg [3:0] tx_fifo_rd_ptr;
+    reg [3:0] tx_fifo_count;
+
+    // FIFO control
+    reg [7:0] fifo_enable;
+    reg [7:0] fifo_reset;
+    reg [7:0] fifo_trigger_level;
+
+    // UART state
+    reg [7:0] tx_shift_reg;
+    reg [7:0] tx_bit_count;
+    reg        tx_active;
+    reg [7:0] rx_shift_reg;
+    reg [7:0] rx_bit_count;
+    reg        rx_active;
+    reg [7:0] rx_byte;
+    reg        rx_byte_valid;
+
+    // Baud rate counter
+    reg [15:0] baud_counter;
+    reg        baud_tick;
+
+    // Interrupts
+    reg [7:0] interrupt_pending;
+    reg [7:0] interrupt_enable;
+
+    // Modem status
+    reg [7:0] modem_status;
+    reg [7:0] modem_status_prev;
+
+    // Line status
+    reg [7:0] line_status;
+
+    // Wishbone decode
+    assign reg_addr = wb_adr_i[2:0];
+    assign reg_stb  = wb_stb_i;
+    assign reg_cyc  = wb_cyc_i;
+    assign reg_we   = wb_we_i;
+
+    // DLAB bit
+    wire dlab = lcr[7];
+
+    // Register read mux
+    always @(*) begin
+        if (dlab) begin
+            case (reg_addr)
+                3'd0: reg_data = baud_divisor_lsb;
+                3'd1: reg_data = baud_divisor_msb;
+                3'd2: reg_data = fcr;
+                3'd3: reg_data = lcr;
+                3'd4: reg_data = mcr;
+                3'd5: reg_data = lsr;
+                3'd6: reg_data = msr;
+                3'd7: reg_data = scr;
+                default: reg_data = 8'h00;
+            endcase
+        end else begin
+            case (reg_addr)
+                3'd0: reg_data = rbr_thr;
+                3'd1: reg_data = ier;
+                3'd2: reg_data = iir;
+                3'd3: reg_data = lcr;
+                3'd4: reg_data = mcr;
+                3'd5: reg_data = lsr;
+                3'd6: reg_data = msr;
+                3'd7: reg_data = scr;
+                default: reg_data = 8'h00;
+            endcase
+        end
+    end
+
+    assign wb_dat_o = reg_data;
+
+    // Wishbone ACK
+    assign wb_ack_o = reg_stb & reg_cyc;
+
+    // Register write
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            rbr_thr <= 8'h00;
+            ier <= 8'h00;
+            lcr <= 8'h03;
+            mcr <= 8'h00;
+            scr <= 8'h00;
+            fcr <= 8'h00;
+            baud_divisor_lsb <= 8'h00;
+            baud_divisor_msb <= 8'h00;
+            fifo_enable <= 8'h00;
+            fifo_reset <= 8'h00;
+            fifo_trigger_level <= 8'h00;
+            rx_fifo_wr_ptr <= 4'd0;
+            rx_fifo_rd_ptr <= 4'd0;
+            rx_fifo_count <= 4'd0;
+            tx_fifo_wr_ptr <= 4'd0;
+            tx_fifo_rd_ptr <= 4'd0;
+            tx_fifo_count <= 4'd0;
+            tx_shift_reg <= 8'h00;
+            tx_bit_count <= 8'd0;
+            tx_active <= 1'b0;
+            rx_shift_reg <= 8'h00;
+            rx_bit_count <= 8'd0;
+            rx_active <= 1'b0;
+            rx_byte <= 8'h00;
+            rx_byte_valid <= 1'b0;
+            baud_counter <= 16'd0;
+            baud_tick <= 1'b0;
+            interrupt_pending <= 8'h00;
+            interrupt_enable <= 8'h00;
+            modem_status <= 8'h00;
+            modem_status_prev <= 8'h00;
+            line_status <= 8'h00;
+        end else if (reg_stb & reg_cyc & reg_we) begin
+            if (dlab) begin
+                case (reg_addr)
+                    3'd0: baud_divisor_lsb <= wb_dat_i;
+                    3'd1: baud_divisor_msb <= wb_dat_i;
+                    3'd2: begin
+                        fcr <= wb_dat_i;
+                        if (wb_dat_i[1]) begin
+                            rx_fifo_wr_ptr <= 4'd0;
+                            rx_fifo_rd_ptr <= 4'd0;
+                            rx_fifo_count <= 4'd0;
+                        end
+                        if (wb_dat_i[2]) begin
+                            tx_fifo_wr_ptr <= 4'd0;
+                            tx_fifo_rd_ptr <= 4'd0;
+                            tx_fifo_count <= 4'd0;
+                        end
+                        fifo_enable <= wb_dat_i[0];
+                        fifo_trigger_level <= wb_dat_i[3:2];
+                    end
+                    3'd3: lcr <= wb_dat_i;
+                    3'd4: mcr <= wb_dat_i;
+                    3'd5: ; // LSR is read-only
+                    3'd6: ; // MSR is read-only
+                    3'd7: scr <= wb_dat_i;
+                    default: ;
+                endcase
+            end else begin
+                case (reg_addr)
+                    3'd0: begin
+                        // Write to THR
+                        if (fifo_enable) begin
+                            tx_fifo[tx_fifo_wr_ptr] <= wb_dat_i;
+                            tx_fifo_wr_ptr <= tx_fifo_wr_ptr + 4'd1;
+                            tx_fifo_count <= tx_fifo_count + 4'd1;
+                        end else begin
+                            // Direct write to shift register
+                            tx_shift_reg <= wb_dat_i;
+                            tx_active <= 1'b1;
+                            tx_bit_count <= 8'd0;
+                        end
+                    end
+                    3'd1: ier <= wb_dat_i;
+                    3'd2: ; // IIR is read-only
+                    3'd3: lcr <= wb_dat_i;
+                    3'd4: mcr <= wb_dat_i;
+                    3'd5: ; // LSR is read-only
+                    3'd6: ; // MSR is read-only
+                    3'd7: scr <= wb_dat_i;
+                    default: ;
+                endcase
+            end
+        end
+    end
+
+    // Baud rate generator
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            baud_counter <= 16'd0;
+            baud_tick <= 1'b0;
+        end else begin
+            baud_tick <= 1'b0;
+            if (baud_counter == {baud_divisor_msb, baud_divisor_lsb}) begin
+                baud_counter <= 16'd0;
+                baud_tick <= 1'b1;
+            end else begin
+                baud_counter <= baud_counter + 16'd1;
+            end
+        end
+    end
+
+    // Transmitter
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            tx_shift_reg <= 8'h00;
+            tx_bit_count <= 8'd0;
+            tx_active <= 1'b0;
+        end else if (baud_tick) begin
+            if (tx_active) begin
+                if (tx_bit_count == 8'd10) begin
+                    // Transmission complete
+                    tx_active <= 1'b0;
+                    // Load next byte from FIFO if available
+                    if (fifo_enable && tx_fifo_count > 4'd0) begin
+                        tx_shift_reg <= tx_fifo[tx_fifo_rd_ptr];
+                        tx_fifo_rd_ptr <= tx_fifo_rd_ptr + 4'd1;
+                        tx_fifo_count <= tx_fifo_count - 4'd1;
+                        tx_bit_count <= 8'd0;
+                        tx_active <= 1'b1;
+                    end
+                end else begin
+                    tx_bit_count <= tx_bit_count + 8'd1;
+                end
+            end else if (fifo_enable && tx_fifo_count > 4'd0) begin
+                // Start transmission from FIFO
+                tx_shift_reg <= tx_fifo[tx_fifo_rd_ptr];
+                tx_fifo_rd_ptr <= tx_fifo_rd_ptr + 4'd1;
+                tx_fifo_count <= tx_fifo_count - 4'd1;
+                tx_bit_count <= 8'd0;
+                tx_active <= 1'b1;
+            end
+        end
+    end
+
+    // STX output
+    always @(*) begin
+        if (!tx_active) begin
+            stx_pad_o = 1'b1; // Idle high
+        end else begin
+            case (tx_bit_count)
+                8'd0: stx_pad_o = 1'b0; // Start bit
+                8'd1: stx_pad_o = tx_shift_reg[0];
+                8'd2: stx_pad_o = tx_shift_reg[1];
+                8'd3: stx_pad_o = tx_shift_reg[2];
+                8'd4: stx_pad_o = tx_shift_reg[3];
+                8'd5: stx_pad_o = tx_shift_reg[4];
+                8'd6: stx_pad_o = tx_shift_reg[5];
+                8'd7: stx_pad_o = tx_shift_reg[6];
+                8'd8: stx_pad_o = tx_shift_reg[7];
+                8'd9: stx_pad_o = 1'b1; // Stop bit
+                default: stx_pad_o = 1'b1;
+            endcase
+        end
+    end
+
+    // Receiver
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            rx_shift_reg <= 8'h00;
+            rx_bit_count <= 8'd0;
+            rx_active <= 1'b0;
+            rx_byte <= 8'h00;
+            rx_byte_valid <= 1'b0;
+        end else if (baud_tick) begin
+            if (!rx_active) begin
+                if (srx_pad_i == 1'b0) begin
+                    // Start bit detected
+                    rx_active <= 1'b1;
+                    rx_bit_count <= 8'd0;
+                end
+            end else begin
+                if (rx_bit_count == 8'd10) begin
+                    // Reception complete
+                    rx_active <= 1'b0;
+                    rx_byte <= rx_shift_reg;
+                    rx_byte_valid <= 1'b1;
+                    // Store in FIFO
+                    if (fifo_enable) begin
+                        rx_fifo[rx_fifo_wr_ptr] <= rx_shift_reg;
+                        rx_fifo_wr_ptr <= rx_fifo_wr_ptr + 4'd1;
+                        rx_fifo_count <= rx_fifo_count + 4'd1;
+                    end
+                end else begin
+                    rx_bit_count <= rx_bit_count + 8'd1;
+                    if (rx_bit_count >= 8'd1 && rx_bit_count <= 8'd8) begin
+                        rx_shift_reg[rx_bit_count - 8'd1] <= srx_pad_i;
+                    end
+                end
+            end
+        end
+    end
+
+    // RBR read
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            rbr_thr <= 8'h00;
+        end else if (reg_stb & reg_cyc & !reg_we & !dlab & reg_addr == 3'd0) begin
+            if (fifo_enable && rx_fifo_count > 4'd0) begin
+                rbr_thr <= rx_fifo[rx_fifo_rd_ptr];
+                rx_fifo_rd_ptr <= rx_fifo_rd_ptr + 4'd1;
+                rx_fifo_count <= rx_fifo_count - 4'd1;
+            end else begin
+                rbr_thr <= rx_byte;
+                rx_byte_valid <= 1'b0;
+            end
+        end
+    end
+
+    // Modem status
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            modem_status <= 8'h00;
+            modem_status_prev <= 8'h00;
+        end else begin
+            modem_status_prev <= modem_status;
+            modem_status[0] <= dcd_pad_i;
+            modem_status[1] <= dsr_pad_i;
+            modem_status[2] <= ~ri_pad_i;
+            modem_status[3] <= ~cts_pad_i;
+            modem_status[4] <= modem_status_prev[0] != dcd_pad_i;
+            modem_status[5] <= modem_status_prev[1] != dsr_pad_i;
+            modem_status[6] <= modem_status_prev[2] != ~ri_pad_i;
+            modem_status[7] <= modem_status_prev[3] != ~cts_pad_i;
+        end
+    end
+
+    // Line status
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            line_status <= 8'h00;
+        end else begin
+            line_status[0] <= (fifo_enable && rx_fifo_count > 4'd0) || rx_byte_valid;
+            line_status[1] <= 1'b0; // Parity error
+            line_status[2] <= 1'b0; // Framing error
+            line_status[3] <= 1'b0; // Break interrupt
+            line_status[4] <= (fifo_enable && tx_fifo_count == 4'd0) || !tx_active;
+            line_status[5] <= 1'b0; // Transmitter empty
+            line_status[6] <= 1'b0; // Error in RCVR FIFO
+            line_status[7] <= 1'b0; // Timeout indicator
+        end
+    end
+
+    // Interrupt pending
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            interrupt_pending <= 8'h00;
+        end else begin
+            interrupt_pending[0] <= 1'b0; // Modem status change
+            interrupt_pending[1] <= (fifo_enable && rx_fifo_count >= fifo_trigger_level) || rx_byte_valid;
+            interrupt_pending[2] <= 1'b0; // Receiver line status
+            interrupt_pending[3] <= (fifo_enable && tx_fifo_count == 4'd0) || !tx_active;
+            interrupt_pending[4] <= 1'b0; // Error
+            interrupt_pending[5] <= 1'b0;
+            interrupt_pending[6] <= 1'b0;
+            interrupt_pending[7] <= 1'b0;
+        end
+    end
+
+    // Interrupt enable
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            interrupt_enable <= 8'h00;
+        end else begin
+            interrupt_enable[0] <= ier[0]; // Modem status change
+            interrupt_enable[1] <= ier[1]; // Receiver line status
+            interrupt_enable[2] <= ier[2]; // Transmitter holding register empty
+            interrupt_enable[3] <= ier[3]; // Receiver data available
+            interrupt_enable[4] <= ier[4]; // Error
+            interrupt_enable[5] <= 1'b0;
+            interrupt_enable[6] <= 1'b0;
+            interrupt_enable[7] <= 1'b0;
+        end
+    end
+
+    // IIR
+    always @(*) begin
+        if (interrupt_pending[1] & interrupt_enable[1]) begin
+            iir = 8'h04; // Receiver data available
+        end else if (interrupt_pending[2] & interrupt_enable[2]) begin
+            iir = 8'h06; // Transmitter holding register empty
+        end else if (interrupt_pending[0] & interrupt_enable[0]) begin
+            iir = 8'h02; // Modem status change
+        end else if (interrupt_pending[3] & interrupt_enable[3]) begin
+            iir = 8'h04; // Receiver data available (duplicate)
+        end else begin
+            iir = 8'h01; // No interrupt pending
+        end
+    end
+
+    // Interrupt output
+    assign int_o = ~(interrupt_pending & interrupt_enable) == 8'h00;
+
+    // Modem control outputs
+    assign rts_pad_o = mcr[1];
+    assign dtr_pad_o = mcr[0];
+
+endmodule

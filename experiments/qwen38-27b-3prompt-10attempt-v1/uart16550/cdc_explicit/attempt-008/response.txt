@@ -1,0 +1,696 @@
+```verilog
+module uart_top (
+    wb_clk_i,
+    wb_rst_i, wb_adr_i, wb_dat_i, wb_dat_o, wb_we_i, wb_stb_i, wb_cyc_i, wb_ack_o, wb_sel_i,
+    int_o,
+    stx_pad_o, srx_pad_i,
+    rts_pad_o, cts_pad_i, dtr_pad_o, dsr_pad_i, ri_pad_i, dcd_pad_i
+);
+
+    // Wishbone signals
+    input  wire wb_clk_i;
+    input  wire wb_rst_i;
+    input  wire [7:0] wb_adr_i;
+    input  wire [7:0] wb_dat_i;
+    output wire [7:0] wb_dat_o;
+    input  wire wb_we_i;
+    input  wire wb_stb_i;
+    input  wire wb_cyc_i;
+    output wire wb_ack_o;
+    input  wire [3:0] wb_sel_i;
+
+    // Interrupt
+    output wire int_o;
+
+    // UART pins
+    output wire stx_pad_o;
+    input  wire srx_pad_i;
+
+    // Modem control
+    output wire rts_pad_o;
+    input  wire cts_pad_i;
+    output wire dtr_pad_o;
+    input  wire dsr_pad_i;
+    input  wire ri_pad_i;
+    input  wire dcd_pad_i;
+
+    // Internal signals
+    wire [7:0] reg_rbr_thr;
+    wire [7:0] reg_iir_fcr;
+    wire [7:0] reg_lcr;
+    wire [7:0] reg_mcr;
+    wire [7:0] reg_lsr;
+    wire [7:0] reg_msr;
+    wire [7:0] reg_scr;
+    wire [7:0] reg_dll;
+    wire [7:0] reg_dlh;
+
+    wire [7:0] tx_data;
+    wire tx_enable;
+    wire tx_done;
+    wire [7:0] rx_data;
+    wire rx_valid;
+    wire rx_empty;
+    wire rx_full;
+    wire [3:0] rx_count;
+
+    wire [7:0] baud_divisor;
+    wire [1:0] data_bits;
+    wire parity_enable;
+    wire parity_type;
+    wire [1:0] stop_bits;
+    wire break_ctl;
+    wire loopback;
+
+    wire tx_fifo_empty;
+    wire tx_fifo_full;
+    wire [7:0] tx_fifo_data;
+    wire tx_fifo_wr_en;
+    wire tx_fifo_rd_en;
+    wire tx_fifo_reset;
+
+    wire rx_fifo_empty;
+    wire rx_fifo_full;
+    wire [7:0] rx_fifo_data;
+    wire rx_fifo_wr_en;
+    wire rx_fifo_rd_en;
+    wire rx_fifo_reset;
+
+    wire [7:0] iir_value;
+    wire [7:0] fcr_value;
+    wire [7:0] lcr_value;
+    wire [7:0] mcr_value;
+    wire [7:0] lsr_value;
+    wire [7:0] msr_value;
+    wire [7:0] scr_value;
+    wire [7:0] dll_value;
+    wire [7:0] dlh_value;
+
+    wire [7:0] read_data;
+    wire [7:0] write_data;
+    wire write_enable;
+    wire read_enable;
+
+    // Register address decode
+    wire [2:0] reg_addr;
+    wire [1:0] addr_bits;
+    wire [7:0] addr_byte;
+
+    assign reg_addr = wb_adr_i[2:0];
+    assign addr_bits = wb_adr_i[1:0];
+    assign addr_byte = wb_adr_i[7:0];
+
+    // DLAB bit
+    wire dlab = lcr_value[5];
+
+    // Register select
+    wire sel_rbr_thr = (reg_addr == 3'd0) && !dlab;
+    wire sel_iir_fcr = (reg_addr == 3'd1) && !dlab;
+    wire sel_lcr     = (reg_addr == 3'd2) && !dlab;
+    wire sel_mcr     = (reg_addr == 3'd3) && !dlab;
+    wire sel_lsr     = (reg_addr == 3'd4) && !dlab;
+    wire sel_msr     = (reg_addr == 3'd5) && !dlab;
+    wire sel_scr     = (reg_addr == 3'd6) && !dlab;
+    wire sel_dll     = (reg_addr == 3'd0) && dlab;
+    wire sel_dlh     = (reg_addr == 3'd1) && dlab;
+
+    // Read data mux
+    assign read_data = sel_rbr_thr ? rx_fifo_data :
+                       sel_iir_fcr ? iir_value :
+                       sel_lcr     ? lcr_value :
+                       sel_mcr     ? mcr_value :
+                       sel_lsr     ? lsr_value :
+                       sel_msr     ? msr_value :
+                       sel_scr     ? scr_value :
+                       sel_dll     ? dll_value :
+                       sel_dlh     ? dlh_value :
+                       8'h00;
+
+    // Write data mux
+    assign write_data = wb_dat_i;
+
+    // Write enable
+    assign write_enable = wb_cyc_i && wb_stb_i && wb_we_i;
+
+    // Read enable
+    assign read_enable = wb_cyc_i && wb_stb_i && !wb_we_i;
+
+    // ACK
+    assign wb_ack_o = wb_cyc_i && wb_stb_i;
+
+    // Data out
+    assign wb_dat_o = read_data;
+
+    // LCR bits
+    assign data_bits = lcr_value[1:0];
+    assign parity_enable = lcr_value[4];
+    assign parity_type = lcr_value[3];
+    assign stop_bits = lcr_value[2];
+    assign break_ctl = lcr_value[6];
+    assign loopback = lcr_value[7];
+
+    // MCR bits
+    wire dtr = mcr_value[0];
+    wire rts = mcr_value[1];
+    wire out1 = mcr_value[2];
+    wire out2 = mcr_value[3];
+
+    // MSR bits
+    wire delta_dcd = mcr_value[4];
+    wire delta_rts = mcr_value[5];
+    wire delta_dsr = mcr_value[6];
+    wire delta_cts = mcr_value[7];
+
+    // LSR bits
+    wire thre = lsr_value[5];
+    wire temt = lsr_value[6];
+    wire bi = lsr_value[7];
+    wire fe = lsr_value[3];
+    wire pe = lsr_value[2];
+    wire oe = lsr_value[1];
+    wire dr = lsr_value[0];
+
+    // IIR bits
+    wire iir_pending = iir_value[0];
+    wire [3:0] iir_code = iir_value[3:0];
+
+    // FCR bits
+    wire fcr_reset_rx = fcr_value[0];
+    wire fcr_reset_tx = fcr_value[1];
+    wire [1:0] fcr_trigger_level = fcr_value[3:2];
+    wire fcr_enable = fcr_value[0];
+
+    // SCR
+    wire [7:0] scratch_reg = scr_value;
+
+    // DLL/DLH
+    wire [15:0] baud_divisor_full = {dlh_value, dll_value};
+    assign baud_divisor = baud_divisor_full[7:0];
+
+    // FIFO reset signals
+    assign rx_fifo_reset = fcr_reset_rx;
+    assign tx_fifo_reset = fcr_reset_tx;
+
+    // RX FIFO write
+    assign rx_fifo_wr_en = rx_valid;
+
+    // RX FIFO read
+    assign rx_fifo_rd_en = read_enable && sel_rbr_thr && !rx_fifo_empty;
+
+    // TX FIFO write
+    assign tx_fifo_wr_en = write_enable && sel_rbr_thr && !tx_fifo_full;
+
+    // TX FIFO read
+    assign tx_fifo_rd_en = tx_enable && !tx_fifo_empty;
+
+    // TX data
+    assign tx_data = tx_fifo_data;
+
+    // TX enable
+    assign tx_enable = !tx_fifo_empty && !tx_done;
+
+    // Interrupt generation
+    wire rx_timeout = 1'b0; // Simplified
+    wire rx_line_status = fe | pe | oe | bi;
+    wire modem_status = delta_dcd | delta_rts | delta_dsr | delta_cts;
+
+    wire int_rx_data = !rx_fifo_empty && (fcr_trigger_level == 2'd0 || rx_count >= 4'd1);
+    wire int_rx_timeout = rx_timeout;
+    wire int_line_status = rx_line_status;
+    wire int_modem = modem_status;
+    wire int_thre = thre;
+
+    // IIR value
+    assign iir_value = {4'b0000, iir_code, iir_pending};
+
+    // LSR value
+    assign lsr_value = {bi, temt, thre, 1'b0, fe, pe, oe, dr};
+
+    // MSR value
+    assign msr_value = {delta_cts, delta_dsr, delta_rts, delta_dcd, dcd_pad_i, dsr_pad_i, cts_pad_i, dtr_pad_i};
+
+    // SCR value
+    assign scr_value = scratch_reg;
+
+    // DLL/DLH values
+    assign dll_value = baud_divisor_full[7:0];
+    assign dlh_value = baud_divisor_full[15:8];
+
+    // IIR code
+    assign iir_code = int_rx_data ? 4'd0 :
+                      int_rx_timeout ? 4'd1 :
+                      int_line_status ? 4'd2 :
+                      int_modem ? 4'd3 :
+                      int_thre ? 4'd4 :
+                      4'd1;
+
+    // IIR pending
+    assign iir_pending = int_rx_data | int_rx_timeout | int_line_status | int_modem | int_thre;
+
+    // Interrupt output
+    assign int_o = iir_pending;
+
+    // Modem control outputs
+    assign dtr_pad_o = dtr;
+    assign rts_pad_o = rts;
+
+    // TX output
+    assign stx_pad_o = loopback ? srx_pad_i : tx_pad_internal;
+
+    // RX input
+    wire srx_internal = loopback ? stx_pad_o : srx_pad_i;
+
+    // Internal TX pad
+    wire tx_pad_internal;
+
+    // UART TX module
+    uart_tx #(
+        .BAUD_DIVISOR(16)
+    ) uart_tx_inst (
+        .clk(wb_clk_i),
+        .rst(wb_rst_i),
+        .data(tx_data),
+        .enable(tx_enable),
+        .done(tx_done),
+        .tx_pad(tx_pad_internal),
+        .baud_divisor(baud_divisor),
+        .data_bits(data_bits),
+        .parity_enable(parity_enable),
+        .parity_type(parity_type),
+        .stop_bits(stop_bits),
+        .break_ctl(break_ctl)
+    );
+
+    // UART RX module
+    uart_rx #(
+        .BAUD_DIVISOR(16)
+    ) uart_rx_inst (
+        .clk(wb_clk_i),
+        .rst(wb_rst_i),
+        .rx_pad(srx_internal),
+        .data(rx_data),
+        .valid(rx_valid),
+        .baud_divisor(baud_divisor),
+        .data_bits(data_bits),
+        .parity_enable(parity_enable),
+        .parity_type(parity_type),
+        .stop_bits(stop_bits),
+        .fe(fe),
+        .pe(pe),
+        .oe(oe),
+        .bi(bi)
+    );
+
+    // RX FIFO
+    fifo_8x16 rx_fifo_inst (
+        .clk(wb_clk_i),
+        .rst(wb_rst_i),
+        .wr_en(rx_fifo_wr_en),
+        .rd_en(rx_fifo_rd_en),
+        .reset(rx_fifo_reset),
+        .data_in(rx_data),
+        .data_out(rx_fifo_data),
+        .empty(rx_fifo_empty),
+        .full(rx_fifo_full),
+        .count(rx_count)
+    );
+
+    // TX FIFO
+    fifo_8x16 tx_fifo_inst (
+        .clk(wb_clk_i),
+        .rst(wb_rst_i),
+        .wr_en(tx_fifo_wr_en),
+        .rd_en(tx_fifo_rd_en),
+        .reset(tx_fifo_reset),
+        .data_in(write_data),
+        .data_out(tx_fifo_data),
+        .empty(tx_fifo_empty),
+        .full(tx_fifo_full),
+        .count()
+    );
+
+    // Register file
+    reg_file reg_file_inst (
+        .clk(wb_clk_i),
+        .rst(wb_rst_i),
+        .we(write_enable),
+        .addr(reg_addr),
+        .data_in(write_data),
+        .rbr_thr(reg_rbr_thr),
+        .iir_fcr(reg_iir_fcr),
+        .lcr(reg_lcr),
+        .mcr(reg_mcr),
+        .lsr(reg_lsr),
+        .msr(reg_msr),
+        .scr(reg_scr),
+        .dll(reg_dll),
+        .dlh(reg_dlh)
+    );
+
+    // Connect register file outputs
+    assign lcr_value = reg_lcr;
+    assign mcr_value = reg_mcr;
+    assign lsr_value = reg_lsr;
+    assign msr_value = reg_msr;
+    assign scr_value = reg_scr;
+    assign dll_value = reg_dll;
+    assign dlh_value = reg_dlh;
+    assign iir_value = reg_iir_fcr;
+    assign fcr_value = reg_iir_fcr;
+
+endmodule
+
+// UART TX module
+module uart_tx #(
+    parameter BAUD_DIVISOR = 16
+) (
+    input wire clk,
+    input wire rst,
+    input wire [7:0] data,
+    input wire enable,
+    output reg done,
+    output reg tx_pad,
+    input wire [15:0] baud_divisor,
+    input wire [1:0] data_bits,
+    input wire parity_enable,
+    input wire parity_type,
+    input wire [1:0] stop_bits,
+    input wire break_ctl
+);
+
+    localparam IDLE = 3'd0;
+    localparam START = 3'd1;
+    localparam DATA = 3'd2;
+    localparam PARITY = 3'd3;
+    localparam STOP = 3'd4;
+
+    reg [2:0] state;
+    reg [15:0] baud_counter;
+    reg [7:0] shift_reg;
+    reg [3:0] bit_count;
+    reg parity_bit;
+    reg [15:0] baud_div;
+
+    assign baud_div = baud_divisor == 0 ? 16'd1 : baud_divisor;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= IDLE;
+            baud_counter <= 16'd0;
+            shift_reg <= 8'd0;
+            bit_count <= 4'd0;
+            parity_bit <= 1'b0;
+            done <= 1'b0;
+            tx_pad <= 1'b1;
+        end else begin
+            case (state)
+                IDLE: begin
+                    tx_pad <= 1'b1;
+                    done <= 1'b0;
+                    if (enable) begin
+                        state <= START;
+                        baud_counter <= 16'd0;
+                        shift_reg <= data;
+                        bit_count <= 4'd0;
+                    end
+                end
+                START: begin
+                    tx_pad <= 1'b0;
+                    if (baud_counter == baud_div - 1) begin
+                        baud_counter <= 16'd0;
+                        state <= DATA;
+                        bit_count <= 4'd0;
+                    end else begin
+                        baud_counter <= baud_counter + 1;
+                    end
+                end
+                DATA: begin
+                    if (baud_counter == baud_div - 1) begin
+                        baud_counter <= 16'd0;
+                        tx_pad <= shift_reg[0];
+                        shift_reg <= {1'b0, shift_reg[7:1]};
+                        bit_count <= bit_count + 1;
+                        if (bit_count == data_bits - 1) begin
+                            state <= parity_enable ? PARITY : STOP;
+                        end
+                    end else begin
+                        baud_counter <= baud_counter + 1;
+                    end
+                end
+                PARITY: begin
+                    if (baud_counter == baud_div - 1) begin
+                        baud_counter <= 16'd0;
+                        tx_pad <= parity_bit;
+                        state <= STOP;
+                    end else begin
+                        baud_counter <= baud_counter + 1;
+                    end
+                end
+                STOP: begin
+                    if (baud_counter == baud_div - 1) begin
+                        baud_counter <= 16'd0;
+                        tx_pad <= 1'b1;
+                        done <= 1'b1;
+                        state <= IDLE;
+                    end else begin
+                        baud_counter <= baud_counter + 1;
+                    end
+                end
+                default: state <= IDLE;
+            end
+        end
+    end
+
+    always @(*) begin
+        parity_bit = 1'b0;
+        if (parity_enable) begin
+            case (parity_type)
+                1'b0: parity_bit = ^data; // Even
+                1'b1: parity_bit = ~(^data); // Odd
+            endcase
+        end
+    end
+
+endmodule
+
+// UART RX module
+module uart_rx #(
+    parameter BAUD_DIVISOR = 16
+) (
+    input wire clk,
+    input wire rst,
+    input wire rx_pad,
+    output reg [7:0] data,
+    output reg valid,
+    input wire [15:0] baud_divisor,
+    input wire [1:0] data_bits,
+    input wire parity_enable,
+    input wire parity_type,
+    input wire [1:0] stop_bits,
+    output reg fe,
+    output reg pe,
+    output reg oe,
+    output reg bi
+);
+
+    localparam IDLE = 3'd0;
+    localparam START = 3'd1;
+    localparam DATA = 3'd2;
+    localparam PARITY = 3'd3;
+    localparam STOP = 3'd4;
+
+    reg [2:0] state;
+    reg [15:0] baud_counter;
+    reg [7:0] shift_reg;
+    reg [3:0] bit_count;
+    reg rx_pad_sync1;
+    reg rx_pad_sync2;
+    reg rx_pad_sync3;
+    reg [15:0] baud_div;
+
+    assign baud_div = baud_divisor == 0 ? 16'd1 : baud_divisor;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rx_pad_sync1 <= 1'b1;
+            rx_pad_sync2 <= 1'b1;
+            rx_pad_sync3 <= 1'b1;
+        end else begin
+            rx_pad_sync1 <= rx_pad;
+            rx_pad_sync2 <= rx_pad_sync1;
+            rx_pad_sync3 <= rx_pad_sync2;
+        end
+    end
+
+    wire rx_pad_stable = rx_pad_sync2;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= IDLE;
+            baud_counter <= 16'd0;
+            shift_reg <= 8'd0;
+            bit_count <= 4'd0;
+            data <= 8'd0;
+            valid <= 1'b0;
+            fe <= 1'b0;
+            pe <= 1'b0;
+            oe <= 1'b0;
+            bi <= 1'b0;
+        end else begin
+            valid <= 1'b0;
+            case (state)
+                IDLE: begin
+                    if (rx_pad_stable == 1'b0) begin
+                        state <= START;
+                        baud_counter <= 16'd0;
+                    end
+                end
+                START: begin
+                    if (baud_counter == baud_div/2 - 1) begin
+                        baud_counter <= 16'd0;
+                        if (rx_pad_stable == 1'b0) begin
+                            state <= DATA;
+                            bit_count <= 4'd0;
+                            shift_reg <= 8'd0;
+                        end else begin
+                            state <= IDLE;
+                        end
+                    end else begin
+                        baud_counter <= baud_counter + 1;
+                    end
+                end
+                DATA: begin
+                    if (baud_counter == baud_div - 1) begin
+                        baud_counter <= 16'd0;
+                        shift_reg <= {rx_pad_stable, shift_reg[7:1]};
+                        bit_count <= bit_count + 1;
+                        if (bit_count == data_bits - 1) begin
+                            state <= parity_enable ? PARITY : STOP;
+                        end
+                    end else begin
+                        baud_counter <= baud_counter + 1;
+                    end
+                end
+                PARITY: begin
+                    if (baud_counter == baud_div - 1) begin
+                        baud_counter <= 16'd0;
+                        state <= STOP;
+                    end else begin
+                        baud_counter <= baud_counter + 1;
+                    end
+                end
+                STOP: begin
+                    if (baud_counter == baud_div - 1) begin
+                        baud_counter <= 16'd0;
+                        data <= shift_reg;
+                        valid <= 1'b1;
+                        state <= IDLE;
+                    end else begin
+                        baud_counter <= baud_counter + 1;
+                    end
+                end
+                default: state <= IDLE;
+            end
+        end
+    end
+
+endmodule
+
+// FIFO 8x16
+module fifo_8x16 (
+    input wire clk,
+    input wire rst,
+    input wire wr_en,
+    input wire rd_en,
+    input wire reset,
+    input wire [7:0] data_in,
+    output wire [7:0] data_out,
+    output wire empty,
+    output wire full,
+    output wire [3:0] count
+);
+
+    reg [7:0] mem [0:15];
+    reg [4:0] wr_ptr;
+    reg [4:0] rd_ptr;
+    reg [3:0] cnt;
+
+    assign data_out = mem[rd_ptr[3:0]];
+    assign empty = (cnt == 4'd0);
+    assign full = (cnt == 4'd16);
+    assign count = cnt;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst || reset) begin
+            wr_ptr <= 5'd0;
+            rd_ptr <= 5'd0;
+            cnt <= 4'd0;
+        end else begin
+            if (wr_en && !full) begin
+                mem[wr_ptr[3:0]] <= data_in;
+                wr_ptr <= wr_ptr + 1;
+            end
+            if (rd_en && !empty) begin
+                rd_ptr <= rd_ptr + 1;
+            end
+            if (wr_en && !full && rd_en && !empty) begin
+                cnt <= cnt;
+            end else if (wr_en && !full) begin
+                cnt <= cnt + 1;
+            end else if (rd_en && !empty) begin
+                cnt <= cnt - 1;
+            end
+        end
+    end
+
+endmodule
+
+// Register file
+module reg_file (
+    input wire clk,
+    input wire rst,
+    input wire we,
+    input wire [2:0] addr,
+    input wire [7:0] data_in,
+    output reg [7:0] rbr_thr,
+    output reg [7:0] iir_fcr,
+    output reg [7:0] lcr,
+    output reg [7:0] mcr,
+    output reg [7:0] lsr,
+    output reg [7:0] msr,
+    output reg [7:0] scr,
+    output reg [7:0] dll,
+    output reg [7:0] dlh
+);
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rbr_thr <= 8'd0;
+            iir_fcr <= 8'd1;
+            lcr <= 8'd0;
+            mcr <= 8'd0;
+            lsr <= 8'd0;
+            msr <= 8'd0;
+            scr <= 8'd0;
+            dll <= 8'd0;
+            dlh <= 8'd0;
+        end else if (we) begin
+            case (addr)
+                3'd0: begin
+                    if (lcr[5]) dll <= data_in;
+                    else rbr_thr <= data_in;
+                end
+                3'd1: begin
+                    if (lcr[5]) dlh <= data_in;
+                    else iir_fcr <= data_in;
+                end
+                3'd2: lcr <= data_in;
+                3'd3: mcr <= data_in;
+                3'd6: scr <= data_in;
+                default: ;
+            endcase
+        end
+    end
+
+endmodule
+```<|im_end|>

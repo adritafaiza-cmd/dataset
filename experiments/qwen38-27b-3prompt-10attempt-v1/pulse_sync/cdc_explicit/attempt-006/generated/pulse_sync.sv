@@ -1,0 +1,88 @@
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    // Domain A: level signal to be synchronized to domain B
+    reg level_a;
+    wire level_a_nxt;
+
+    // Domain B: synchronized level and edge detection
+    reg [STAGES-1:0] level_b_sync;
+    reg level_b_prev;
+    reg busy_b;
+
+    // Domain A: busy feedback synchronized back to domain A
+    reg [STAGES-1:0] busy_a_sync;
+    wire busy_a;
+
+    // Domain A logic: generate level_a when pulseA_i is received and not busy
+    assign level_a_nxt = pulseA_i & ~busy_a;
+
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a)
+            level_a <= 1'b0;
+        else
+            level_a <= level_a_nxt;
+    end
+
+    // Domain B: synchronize level_a into domain B
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b)
+            level_b_sync <= {STAGES{1'b0}};
+        else
+            level_b_sync <= {level_b_sync[STAGES-2:0], level_a};
+    end
+
+    // Domain B: edge detection on synchronized level
+    wire level_b = level_b_sync[STAGES-1];
+
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b)
+            level_b_prev <= 1'b0;
+        else
+            level_b_prev <= level_b;
+    end
+
+    // Domain B: busy_b is set when a rising edge is detected, cleared when level_b falls
+    // Actually, we need to generate a single pulse on pulseB_o and keep busy_o high until the pulse is consumed
+    // Let's use a different approach: 
+    // - When level_b rises, generate pulseB_o for one cycle and set busy_b
+    // - busy_b stays high until level_b falls (which indicates the sender has cleared level_a)
+    // But wait, the sender clears level_a immediately after one cycle (since level_a is just a register that gets set for one cycle)
+    // Actually, level_a is set for one cycle in domain A, then cleared. So level_b will be high for at least one cycle in domain B.
+    // We need to detect the rising edge to generate pulseB_o, and keep busy_o high until the falling edge.
+
+    wire level_b_rise = level_b & ~level_b_prev;
+    wire level_b_fall = ~level_b & level_b_prev;
+
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b)
+            busy_b <= 1'b0;
+        else if (level_b_rise)
+            busy_b <= 1'b1;
+        else if (level_b_fall)
+            busy_b <= 1'b0;
+    end
+
+    assign pulseB_o = level_b_rise;
+    assign busy_o = busy_b;
+
+    // Domain A: synchronize busy_b back to domain A
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a)
+            busy_a_sync <= {STAGES{1'b0}};
+        else
+            busy_a_sync <= {busy_a_sync[STAGES-2:0], busy_b};
+    end
+
+    assign busy_a = busy_a_sync[STAGES-1];
+
+endmodule

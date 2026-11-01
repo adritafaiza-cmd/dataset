@@ -1,0 +1,191 @@
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire src_req;
+  wire dst_ack;
+  wire dst_req;
+  wire src_ack;
+
+  // Source side: generate request
+  reg src_req_reg;
+  reg [WIDTH-1:0] src_data_reg;
+  reg src_valid_reg;
+
+  // Destination side: generate request
+  reg dst_req_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_valid_reg;
+
+  // Clear pending flags
+  reg src_clear_pending_reg;
+  reg dst_clear_pending_reg;
+
+  // Synchronizer for src_req to dst domain
+  reg [SYNC_STAGES-1:0] src_req_sync;
+  wire src_req_synced = src_req_sync[SYNC_STAGES-1];
+
+  // Synchronizer for dst_ack to src domain
+  reg [SYNC_STAGES-1:0] dst_ack_sync;
+  wire dst_ack_synced = dst_ack_sync[SYNC_STAGES-1];
+
+  // Synchronizer for dst_req to src domain
+  reg [SYNC_STAGES-1:0] dst_req_sync;
+  wire dst_req_synced = dst_req_sync[SYNC_STAGES-1];
+
+  // Synchronizer for src_ack to dst domain
+  reg [SYNC_STAGES-1:0] src_ack_sync;
+  wire src_ack_synced = src_ack_sync[SYNC_STAGES-1];
+
+  // Synchronizer for src_clear to dst domain
+  reg [SYNC_STAGES-1:0] src_clear_sync;
+  wire src_clear_synced = src_clear_sync[SYNC_STAGES-1];
+
+  // Synchronizer for dst_clear to src domain
+  reg [SYNC_STAGES-1:0] dst_clear_sync;
+  wire dst_clear_synced = dst_clear_sync[SYNC_STAGES-1];
+
+  // Synchronizer for src_clear_pending to dst domain
+  reg [SYNC_STAGES-1:0] src_clear_pending_sync;
+  wire src_clear_pending_synced = src_clear_pending_sync[SYNC_STAGES-1];
+
+  // Synchronizer for dst_clear_pending to src domain
+  reg [SYNC_STAGES-1:0] dst_clear_pending_sync;
+  wire dst_clear_pending_synced = dst_clear_pending_sync[SYNC_STAGES-1];
+
+  // Source clock domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_req_reg <= 1'b0;
+      src_data_reg <= {WIDTH{1'b0}};
+      src_valid_reg <= 1'b0;
+      src_clear_pending_reg <= 1'b0;
+      src_req_sync <= {SYNC_STAGES{1'b0}};
+      dst_ack_sync <= {SYNC_STAGES{1'b0}};
+      dst_req_sync <= {SYNC_STAGES{1'b0}};
+      src_ack_sync <= {SYNC_STAGES{1'b0}};
+      src_clear_sync <= {SYNC_STAGES{1'b0}};
+      dst_clear_sync <= {SYNC_STAGES{1'b0}};
+      src_clear_pending_sync <= {SYNC_STAGES{1'b0}};
+      dst_clear_pending_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      // Synchronizers
+      src_req_sync <= {src_req_sync[SYNC_STAGES-2:0], src_req_reg};
+      dst_ack_sync <= {dst_ack_sync[SYNC_STAGES-2:0], dst_ack};
+      dst_req_sync <= {dst_req_sync[SYNC_STAGES-2:0], dst_req};
+      src_ack_sync <= {src_ack_sync[SYNC_STAGES-2:0], src_ack};
+      src_clear_sync <= {src_clear_sync[SYNC_STAGES-2:0], src_clear_i};
+      dst_clear_sync <= {dst_clear_sync[SYNC_STAGES-2:0], dst_clear_i};
+      src_clear_pending_sync <= {src_clear_pending_sync[SYNC_STAGES-2:0], src_clear_pending_reg};
+      dst_clear_pending_sync <= {dst_clear_pending_sync[SYNC_STAGES-2:0], dst_clear_pending_reg};
+
+      // Clear handling
+      if (src_clear_i) begin
+        src_clear_pending_reg <= 1'b1;
+        src_req_reg <= 1'b0;
+        src_valid_reg <= 1'b0;
+      end else if (dst_clear_synced) begin
+        // Destination clear reached us, drop outstanding beat
+        src_req_reg <= 1'b0;
+        src_valid_reg <= 1'b0;
+        src_clear_pending_reg <= 1'b0;
+      end else begin
+        // Normal operation
+        if (src_valid_i && !src_req_reg) begin
+          // New beat from source
+          src_req_reg <= 1'b1;
+          src_data_reg <= src_data_i;
+          src_valid_reg <= 1'b1;
+        end else if (src_req_reg && dst_ack_synced) begin
+          // Acknowledged, clear request
+          src_req_reg <= 1'b0;
+          src_valid_reg <= 1'b0;
+        end
+      end
+    end
+  end
+
+  // Destination clock domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req_reg <= 1'b0;
+      dst_data_reg <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+      dst_clear_pending_reg <= 1'b0;
+      src_req_sync <= {SYNC_STAGES{1'b0}};
+      dst_ack_sync <= {SYNC_STAGES{1'b0}};
+      dst_req_sync <= {SYNC_STAGES{1'b0}};
+      src_ack_sync <= {SYNC_STAGES{1'b0}};
+      src_clear_sync <= {SYNC_STAGES{1'b0}};
+      dst_clear_sync <= {SYNC_STAGES{1'b0}};
+      src_clear_pending_sync <= {SYNC_STAGES{1'b0}};
+      dst_clear_pending_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      // Synchronizers
+      src_req_sync <= {src_req_sync[SYNC_STAGES-2:0], src_req};
+      dst_ack_sync <= {dst_ack_sync[SYNC_STAGES-2:0], dst_ack};
+      dst_req_sync <= {dst_req_sync[SYNC_STAGES-2:0], dst_req};
+      src_ack_sync <= {src_ack_sync[SYNC_STAGES-2:0], src_ack};
+      src_clear_sync <= {src_clear_sync[SYNC_STAGES-2:0], src_clear_i};
+      dst_clear_sync <= {dst_clear_sync[SYNC_STAGES-2:0], dst_clear_i};
+      src_clear_pending_sync <= {src_clear_pending_sync[SYNC_STAGES-2:0], src_clear_pending_reg};
+      dst_clear_pending_sync <= {dst_clear_pending_sync[SYNC_STAGES-2:0], dst_clear_pending_reg};
+
+      // Clear handling
+      if (dst_clear_i) begin
+        dst_clear_pending_reg <= 1'b1;
+        dst_req_reg <= 1'b0;
+        dst_valid_reg <= 1'b0;
+      end else if (src_clear_synced) begin
+        // Source clear reached us, drop outstanding beat
+        dst_req_reg <= 1'b0;
+        dst_valid_reg <= 1'b0;
+        dst_clear_pending_reg <= 1'b0;
+      end else begin
+        // Normal operation
+        if (src_req_synced && !dst_req_reg) begin
+          // New beat from source
+          dst_req_reg <= 1'b1;
+          dst_data_reg <= src_data_reg;
+          dst_valid_reg <= 1'b1;
+        end else if (dst_req_reg && src_ack_synced) begin
+          // Acknowledged, clear request
+          dst_req_reg <= 1'b0;
+          dst_valid_reg <= 1'b0;
+        end
+      end
+    end
+  end
+
+  // Assign outputs
+  assign src_ready_o = !src_req_reg;
+  assign src_clear_pending_o = src_clear_pending_reg;
+  assign dst_valid_o = dst_valid_reg;
+  assign dst_data_o = dst_data_reg;
+  assign dst_clear_pending_o = dst_clear_pending_reg;
+
+  // Two-phase handshake signals
+  assign src_req = src_req_reg;
+  assign dst_ack = dst_req_reg;
+  assign dst_req = dst_req_reg;
+  assign src_ack = src_req_reg;
+
+endmodule

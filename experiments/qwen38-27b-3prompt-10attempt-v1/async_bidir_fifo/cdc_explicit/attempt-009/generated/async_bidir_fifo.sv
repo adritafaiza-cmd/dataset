@@ -1,0 +1,203 @@
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam PTR_W = ASIZE + 1;
+  localparam AFULL_THRESH = DEPTH - 2;
+  localparam AEMPTY_THRESH = 1;
+
+  // Internal FIFO storage
+  reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+  // Side A: write pointer (when a_dir=1), read pointer (when a_dir=0)
+  // We need two independent FIFOs: A->B and B->A
+  // But the problem says "bidirectional" with direction select per side.
+  // a_dir=1 means A is writing to B. a_dir=0 means A is reading from B.
+  // b_dir=1 means B is writing to A. b_dir=0 means B is reading from A.
+  //
+  // So we have two separate async FIFOs:
+  // 1. FIFO_AB: writes from A (a_dir=1), reads from B (b_dir=0)
+  // 2. FIFO_BA: writes from B (b_dir=1), reads from A (a_dir=0)
+  //
+  // a_winc is valid when a_dir=1 (writing to FIFO_AB)
+  // a_rinc is valid when a_dir=0 (reading from FIFO_BA)
+  // b_winc is valid when b_dir=1 (writing to FIFO_BA)
+  // b_rinc is valid when b_dir=0 (reading from FIFO_AB)
+  //
+  // a_rdata comes from FIFO_BA (A reads from B)
+  // b_rdata comes from FIFO_AB (B reads from A)
+  //
+  // a_full: FIFO_AB is full (A cannot write)
+  // a_empty: FIFO_BA is empty (A cannot read)
+  // b_full: FIFO_BA is full (B cannot write)
+  // b_empty: FIFO_AB is empty (B cannot read)
+
+  // FIFO_AB: A writes, B reads
+  reg [PTR_W-1:0] ab_wr_ptr_a;  // write pointer in A domain
+  reg [PTR_W-1:0] ab_rd_ptr_b;  // read pointer in B domain
+
+  // FIFO_BA: B writes, A reads
+  reg [PTR_W-1:0] ba_wr_ptr_b;  // write pointer in B domain
+  reg [PTR_W-1:0] ba_rd_ptr_a;  // read pointer in A domain
+
+  // CDC synchronizers for FIFO_AB pointers
+  reg [PTR_W-1:0] ab_wr_ptr_b_sync1, ab_wr_ptr_b_sync2;
+  reg [PTR_W-1:0] ab_rd_ptr_a_sync1, ab_rd_ptr_a_sync2;
+
+  // CDC synchronizers for FIFO_BA pointers
+  reg [PTR_W-1:0] ba_wr_ptr_a_sync1, ba_wr_ptr_a_sync2;
+  reg [PTR_W-1:0] ba_rd_ptr_b_sync1, ba_rd_ptr_b_sync2;
+
+  // Synchronized pointer values
+  wire [PTR_W-1:0] ab_wr_ptr_b = ab_wr_ptr_b_sync2;
+  wire [PTR_W-1:0] ab_rd_ptr_a = ab_rd_ptr_a_sync2;
+  wire [PTR_W-1:0] ba_wr_ptr_a = ba_wr_ptr_a_sync2;
+  wire [PTR_W-1:0] ba_rd_ptr_b = ba_rd_ptr_b_sync2;
+
+  // Write enable signals
+  wire ab_wr_en = a_dir & a_winc & ~a_full;
+  wire ba_wr_en = b_dir & b_winc & ~b_full;
+
+  // Read enable signals
+  wire ab_rd_en = ~b_dir & b_rinc & ~b_empty;
+  wire ba_rd_en = ~a_dir & a_rinc & ~a_empty;
+
+  // Full/Empty flags
+  // FIFO_AB full: write pointer (A) - read pointer (B) == DEPTH
+  wire [PTR_W:0] ab_diff_a = {1'b0, ab_wr_ptr_a} - {1'b0, ab_rd_ptr_a};
+  wire a_full = (ab_diff_a == DEPTH);
+  wire a_afull = (ab_diff_a >= AFULL_THRESH);
+
+  // FIFO_AB empty: write pointer (B) - read pointer (B) == 0
+  wire [PTR_W:0] ab_diff_b = {1'b0, ab_wr_ptr_b} - {1'b0, ab_rd_ptr_b};
+  wire b_empty = (ab_diff_b == 0);
+  wire b_aempty = (ab_diff_b <= AEMPTY_THRESH);
+
+  // FIFO_BA full: write pointer (B) - read pointer (A) == DEPTH
+  wire [PTR_W:0] ba_diff_b = {1'b0, ba_wr_ptr_b} - {1'b0, ba_rd_ptr_b};
+  wire b_full = (ba_diff_b == DEPTH);
+  wire b_afull = (ba_diff_b >= AFULL_THRESH);
+
+  // FIFO_BA empty: write pointer (A) - read pointer (A) == 0
+  wire [PTR_W:0] ba_diff_a = {1'b0, ba_wr_ptr_a} - {1'b0, ba_rd_ptr_a};
+  wire a_empty = (ba_diff_a == 0);
+  wire a_aempty = (ba_diff_a <= AEMPTY_THRESH);
+
+  // Memory write
+  integer i;
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      ab_wr_ptr_a <= {PTR_W{1'b0}};
+      ba_rd_ptr_a <= {PTR_W{1'b0}};
+    end else begin
+      if (ab_wr_en) begin
+        mem[ab_wr_ptr_a[ASIZE-1:0]] <= a_wdata;
+        ab_wr_ptr_a <= ab_wr_ptr_a + 1'b1;
+      end
+      if (ba_rd_en) begin
+        ba_rd_ptr_a <= ba_rd_ptr_a + 1'b1;
+      end
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      ab_rd_ptr_b <= {PTR_W{1'b0}};
+      ba_wr_ptr_b <= {PTR_W{1'b0}};
+    end else begin
+      if (ab_rd_en) begin
+        ab_rd_ptr_b <= ab_rd_ptr_b + 1'b1;
+      end
+      if (ba_wr_en) begin
+        mem[ba_wr_ptr_b[ASIZE-1:0]] <= b_wdata;
+        ba_wr_ptr_b <= ba_wr_ptr_b + 1'b1;
+      end
+    end
+  end
+
+  // CDC synchronizers
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      ab_wr_ptr_b_sync1 <= {PTR_W{1'b0}};
+      ab_wr_ptr_b_sync2 <= {PTR_W{1'b0}};
+      ba_rd_ptr_b_sync1 <= {PTR_W{1'b0}};
+      ba_rd_ptr_b_sync2 <= {PTR_W{1'b0}};
+    end else begin
+      ab_wr_ptr_b_sync1 <= ab_wr_ptr_a;
+      ab_wr_ptr_b_sync2 <= ab_wr_ptr_b_sync1;
+      ba_rd_ptr_b_sync1 <= ba_rd_ptr_a;
+      ba_rd_ptr_b_sync2 <= ba_rd_ptr_b_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      ab_rd_ptr_a_sync1 <= {PTR_W{1'b0}};
+      ab_rd_ptr_a_sync2 <= {PTR_W{1'b0}};
+      ba_wr_ptr_a_sync1 <= {PTR_W{1'b0}};
+      ba_wr_ptr_a_sync2 <= {PTR_W{1'b0}};
+    end else begin
+      ab_rd_ptr_a_sync1 <= ab_rd_ptr_b;
+      ab_rd_ptr_a_sync2 <= ab_rd_ptr_a_sync1;
+      ba_wr_ptr_a_sync1 <= ba_wr_ptr_b;
+      ba_wr_ptr_a_sync2 <= ba_wr_ptr_a_sync1;
+    end
+  end
+
+  // Read data
+  // For FIFO_AB: B reads from mem[ab_rd_ptr_b[ASIZE-1:0]]
+  // For FIFO_BA: A reads from mem[ba_rd_ptr_a[ASIZE-1:0]]
+  //
+  // FALLTHROUGH: if TRUE, output is combinational read of current pointer
+  // if FALSE, output is registered read (one cycle delay)
+
+  reg [DSIZE-1:0] b_rdata_reg;
+  reg [DSIZE-1:0] a_rdata_reg;
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_rdata_reg <= {DSIZE{1'b0}};
+    end else begin
+      b_rdata_reg <= mem[ab_rd_ptr_b[ASIZE-1:0]];
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_rdata_reg <= {DSIZE{1'b0}};
+    end else begin
+      a_rdata_reg <= mem[ba_rd_ptr_a[ASIZE-1:0]];
+    end
+  end
+
+  assign b_rdata = (FALLTHROUGH == "TRUE") ? mem[ab_rd_ptr_b[ASIZE-1:0]] : b_rdata_reg;
+  assign a_rdata = (FALLTHROUGH == "TRUE") ? mem[ba_rd_ptr_a[ASIZE-1:0]] : a_rdata_reg;
+
+endmodule

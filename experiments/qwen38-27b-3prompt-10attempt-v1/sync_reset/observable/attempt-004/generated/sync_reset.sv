@@ -1,0 +1,40 @@
+module sync_reset #
+(
+    parameter N = 2
+)
+(
+    input  wire clk,
+    input  wire rst,
+    output wire out
+);
+
+    localparam WIDTH = (N > 0) ? N : 1;
+
+    reg [WIDTH-1:0] sync_reg;
+    reg             rst_active;
+
+    // Synchronize rst into clk domain
+    always @(posedge clk) begin
+        sync_reg <= {sync_reg[WIDTH-2:0], rst};
+    end
+
+    // Detect rising edge of synchronized reset
+    wire rst_sync = sync_reg[WIDTH-1];
+    wire rst_sync_prev = sync_reg[WIDTH-2];
+    wire rst_rise = rst_sync & ~rst_sync_prev;
+
+    // Counter to hold reset for N clock cycles after release
+    reg [WIDTH-1:0] counter;
+
+    always @(posedge clk) begin
+        if (rst_rise) begin
+            counter <= {WIDTH{1'b1}};
+        end else if (counter != 0) begin
+            counter <= counter - 1'b1;
+        end
+    end
+
+    // Output is active-high reset: asserted when rst is high or counter is non-zero
+    assign out = rst_sync | (counter != 0);
+
+endmodule

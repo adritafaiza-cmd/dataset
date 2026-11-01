@@ -1,0 +1,41 @@
+module sync_reset #
+(
+    parameter N = 2
+)
+(
+    input  wire clk,
+    input  wire rst,
+    output wire out
+);
+
+    localparam WIDTH = (N > 0) ? N : 1;
+
+    reg [WIDTH-1:0] sync_reg;
+    reg             out_reg;
+
+    // Synchronize the reset input into the clk domain
+    always @(posedge clk) begin
+        sync_reg <= {sync_reg[WIDTH-2:0], rst};
+    end
+
+    // Count down from N after reset is deasserted
+    reg [WIDTH-1:0] counter;
+
+    always @(posedge clk) begin
+        if (sync_reg[WIDTH-1]) begin
+            // Reset is asserted in the synchronized domain
+            counter <= {WIDTH{1'b1}};
+            out_reg <= 1'b1;
+        end
+        else if (counter != 0) begin
+            counter <= counter - 1'b1;
+            out_reg <= 1'b1;
+        end
+        else begin
+            out_reg <= 1'b0;
+        end
+    end
+
+    assign out = out_reg;
+
+endmodule

@@ -1,0 +1,220 @@
+module async_bidir_ramif_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "FALSE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir,
+       output wire             o_ram_a_clk,
+       output wire [DSIZE-1:0] o_ram_a_wdata,
+       input wire [DSIZE-1:0]  i_ram_a_rdata,
+       output wire [ASIZE-1:0] o_ram_a_addr,
+       output wire             o_ram_a_rinc,
+       output wire             o_ram_a_winc,
+       output wire             o_ram_b_clk,
+       output wire [DSIZE-1:0] o_ram_b_wdata,
+       input wire [DSIZE-1:0]  i_ram_b_rdata,
+       output wire [ASIZE-1:0] o_ram_b_addr,
+       output wire             o_ram_b_rinc,
+       output wire             o_ram_b_winc
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam AWIDTH = ASIZE + 1;
+  localparam FALLTHROUGH_EN = (FALLTHROUGH == "TRUE");
+
+  // Side A
+  reg [AWIDTH-1:0] a_wr_ptr;
+  reg [AWIDTH-1:0] a_rd_ptr;
+  reg [AWIDTH-1:0] a_wr_ptr_gray;
+  reg [AWIDTH-1:0] a_rd_ptr_gray;
+  reg [AWIDTH-1:0] a_wr_ptr_gray_sync1;
+  reg [AWIDTH-1:0] a_wr_ptr_gray_sync2;
+  reg [AWIDTH-1:0] a_rd_ptr_gray_sync1;
+  reg [AWIDTH-1:0] a_rd_ptr_gray_sync2;
+
+  // Side B
+  reg [AWIDTH-1:0] b_wr_ptr;
+  reg [AWIDTH-1:0] b_rd_ptr;
+  reg [AWIDTH-1:0] b_wr_ptr_gray;
+  reg [AWIDTH-1:0] b_rd_ptr_gray;
+  reg [AWIDTH-1:0] b_wr_ptr_gray_sync1;
+  reg [AWIDTH-1:0] b_wr_ptr_gray_sync2;
+  reg [AWIDTH-1:0] b_rd_ptr_gray_sync1;
+  reg [AWIDTH-1:0] b_rd_ptr_gray_sync2;
+
+  // Gray code conversion
+  function [AWIDTH-1:0] bin2gray;
+    input [AWIDTH-1:0] bin;
+    begin
+      bin2gray = bin ^ (bin >> 1);
+    end
+  endfunction
+
+  // Side A logic
+  wire a_wr_en = a_winc & ~a_full;
+  wire a_rd_en = a_rinc & ~a_empty;
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_wr_ptr <= {AWIDTH{1'b0}};
+      a_rd_ptr <= {AWIDTH{1'b0}};
+      a_wr_ptr_gray <= {AWIDTH{1'b0}};
+      a_rd_ptr_gray <= {AWIDTH{1'b0}};
+    end else begin
+      if (a_wr_en) begin
+        a_wr_ptr <= a_wr_ptr + 1'b1;
+        a_wr_ptr_gray <= bin2gray(a_wr_ptr + 1'b1);
+      end
+      if (a_rd_en) begin
+        a_rd_ptr <= a_rd_ptr + 1'b1;
+        a_rd_ptr_gray <= bin2gray(a_rd_ptr + 1'b1);
+      end
+    end
+  end
+
+  // Synchronize A's write pointer gray to B domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_wr_ptr_gray_sync1 <= {AWIDTH{1'b0}};
+      a_wr_ptr_gray_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      a_wr_ptr_gray_sync1 <= a_wr_ptr_gray;
+      a_wr_ptr_gray_sync2 <= a_wr_ptr_gray_sync1;
+    end
+  end
+
+  // Synchronize A's read pointer gray to B domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_rd_ptr_gray_sync1 <= {AWIDTH{1'b0}};
+      a_rd_ptr_gray_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      a_rd_ptr_gray_sync1 <= a_rd_ptr_gray;
+      a_rd_ptr_gray_sync2 <= a_rd_ptr_gray_sync1;
+    end
+  end
+
+  // Synchronize B's write pointer gray to A domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_wr_ptr_gray_sync1 <= {AWIDTH{1'b0}};
+      b_wr_ptr_gray_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      b_wr_ptr_gray_sync1 <= b_wr_ptr_gray;
+      b_wr_ptr_gray_sync2 <= b_wr_ptr_gray_sync1;
+    end
+  end
+
+  // Synchronize B's read pointer gray to A domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_rd_ptr_gray_sync1 <= {AWIDTH{1'b0}};
+      b_rd_ptr_gray_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      b_rd_ptr_gray_sync1 <= b_rd_ptr_gray;
+      b_rd_ptr_gray_sync2 <= b_rd_ptr_gray_sync1;
+    end
+  end
+
+  // Side B logic
+  wire b_wr_en = b_winc & ~b_full;
+  wire b_rd_en = b_rinc & ~b_empty;
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_wr_ptr <= {AWIDTH{1'b0}};
+      b_rd_ptr <= {AWIDTH{1'b0}};
+      b_wr_ptr_gray <= {AWIDTH{1'b0}};
+      b_rd_ptr_gray <= {AWIDTH{1'b0}};
+    end else begin
+      if (b_wr_en) begin
+        b_wr_ptr <= b_wr_ptr + 1'b1;
+        b_wr_ptr_gray <= bin2gray(b_wr_ptr + 1'b1);
+      end
+      if (b_rd_en) begin
+        b_rd_ptr <= b_rd_ptr + 1'b1;
+        b_rd_ptr_gray <= bin2gray(b_rd_ptr + 1'b1);
+      end
+    end
+  end
+
+  // Full/Empty flags
+  // A side:
+  // a_full: A's write pointer has caught up to B's read pointer (in A's view)
+  // a_empty: A's read pointer equals A's write pointer
+  wire [AWIDTH-1:0] a_wr_ptr_gray_sync2_b = a_wr_ptr_gray_sync2;
+  wire [AWIDTH-1:0] a_rd_ptr_gray_sync2_b = a_rd_ptr_gray_sync2;
+  wire [AWIDTH-1:0] b_wr_ptr_gray_sync2_a = b_wr_ptr_gray_sync2;
+  wire [AWIDTH-1:0] b_rd_ptr_gray_sync2_a = b_rd_ptr_gray_sync2;
+
+  // For A side:
+  // a_full: a_wr_ptr_gray == b_rd_ptr_gray_sync2_a (A's write pointer equals B's read pointer as seen from A)
+  // a_empty: a_rd_ptr_gray == a_wr_ptr_gray
+  assign a_full  = (a_wr_ptr_gray == b_rd_ptr_gray_sync2_a);
+  assign a_empty = (a_rd_ptr_gray == a_wr_ptr_gray);
+
+  // For B side:
+  // b_full: b_wr_ptr_gray == a_rd_ptr_gray_sync2_b (B's write pointer equals A's read pointer as seen from B)
+  // b_empty: b_rd_ptr_gray == b_wr_ptr_gray
+  assign b_full  = (b_wr_ptr_gray == a_rd_ptr_gray_sync2_b);
+  assign b_empty = (b_rd_ptr_gray == b_wr_ptr_gray);
+
+  // Almost full/empty (threshold = 1)
+  assign a_afull  = a_full | (a_wr_ptr_gray == (b_rd_ptr_gray_sync2_a - 1'b1));
+  assign a_aempty = a_empty | (a_rd_ptr_gray == (a_wr_ptr_gray - 1'b1));
+  assign b_afull  = b_full | (b_wr_ptr_gray == (a_rd_ptr_gray_sync2_b - 1'b1));
+  assign b_aempty = b_empty | (b_rd_ptr_gray == (b_wr_ptr_gray - 1'b1));
+
+  // RAM interface
+  // o_ram_a_clk is just a_clk
+  assign o_ram_a_clk = a_clk;
+  assign o_ram_b_clk = b_clk;
+
+  // A side RAM:
+  // Write when a_wr_en, address = a_wr_ptr[ASIZE-1:0]
+  // Read when a_rd_en, address = a_rd_ptr[ASIZE-1:0]
+  assign o_ram_a_wdata = a_wdata;
+  assign o_ram_a_addr  = a_wr_ptr[ASIZE-1:0];
+  assign o_ram_a_winc  = a_wr_en;
+  assign o_ram_a_rinc  = a_rd_en;
+
+  // B side RAM:
+  // Write when b_wr_en, address = b_wr_ptr[ASIZE-1:0]
+  // Read when b_rd_en, address = b_rd_ptr[ASIZE-1:0]
+  assign o_ram_b_wdata = b_wdata;
+  assign o_ram_b_addr  = b_wr_ptr[ASIZE-1:0];
+  assign o_ram_b_winc  = b_wr_en;
+  assign o_ram_b_rinc  = b_rd_en;
+
+  // Read data output
+  // With fall-through, if empty and write is happening, output the write data directly
+  // Otherwise, output the RAM read data
+  wire a_fallthrough = FALLTHROUGH_EN & a_empty & a_wr_en;
+  wire b_fallthrough = FALLTHROUGH_EN & b_empty & b_wr_en;
+
+  assign a_rdata = a_fallthrough ? a_wdata : i_ram_a_rdata;
+  assign b_rdata = b_fallthrough ? b_wdata : i_ram_b_rdata;
+
+endmodule

@@ -1,0 +1,328 @@
+```verilog
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_WIDTH = LOG_DEPTH;
+
+    // Request FIFO (src -> dst)
+    reg [DATA_WIDTH-1:0] req_fifo [0:DEPTH-1];
+    reg [ADDR_WIDTH-1:0] req_addr_fifo [0:DEPTH-1];
+    reg [DATA_WIDTH/8-1:0] req_strb_fifo [0:DEPTH-1];
+    reg [2:0] req_prot_fifo [0:DEPTH-1];
+    reg req_write_fifo [0:DEPTH-1];
+
+    reg [PTR_WIDTH-1:0] req_wr_ptr;
+    reg [PTR_WIDTH-1:0] req_rd_ptr;
+
+    // Response FIFO (dst -> src)
+    reg [DATA_WIDTH-1:0] rsp_data_fifo [0:DEPTH-1];
+    reg rsp_err_fifo [0:DEPTH-1];
+
+    reg [PTR_WIDTH-1:0] rsp_wr_ptr;
+    reg [PTR_WIDTH-1:0] rsp_rd_ptr;
+
+    // Gray code pointers for CDC
+    reg [PTR_WIDTH:0] req_wr_ptr_gray;
+    reg [PTR_WIDTH:0] req_rd_ptr_gray;
+    reg [PTR_WIDTH:0] rsp_wr_ptr_gray;
+    reg [PTR_WIDTH:0] rsp_rd_ptr_gray;
+
+    // Synchronized pointers
+    reg [PTR_WIDTH:0] req_wr_ptr_gray_dst;
+    reg [PTR_WIDTH:0] req_wr_ptr_gray_dst_d;
+    reg [PTR_WIDTH:0] req_rd_ptr_gray_src;
+    reg [PTR_WIDTH:0] req_rd_ptr_gray_src_d;
+    reg [PTR_WIDTH:0] rsp_wr_ptr_gray_src;
+    reg [PTR_WIDTH:0] rsp_wr_ptr_gray_src_d;
+    reg [PTR_WIDTH:0] rsp_rd_ptr_gray_dst;
+    reg [PTR_WIDTH:0] rsp_rd_ptr_gray_dst_d;
+
+    // Convert binary to gray
+    function [PTR_WIDTH:0] bin2gray;
+        input [PTR_WIDTH:0] bin;
+        begin
+            bin2gray = (bin >> 1) ^ bin;
+        end
+    endfunction
+
+    // Convert gray to binary
+    function [PTR_WIDTH:0] gray2bin;
+        input [PTR_WIDTH:0] gray;
+        reg [PTR_WIDTH:0] bin;
+        integer i;
+        begin
+            bin[PTR_WIDTH] = gray[PTR_WIDTH];
+            for (i = PTR_WIDTH-1; i >= 0; i = i - 1)
+                bin[i] = gray[i] ^ bin[i+1];
+            gray2bin = bin;
+        end
+    endfunction
+
+    // FIFO full/empty checks
+    wire req_full;
+    wire req_empty;
+    wire rsp_full;
+    wire rsp_empty;
+
+    wire [PTR_WIDTH:0] req_wr_ptr_gray_dst_sync;
+    wire [PTR_WIDTH:0] req_rd_ptr_gray_src_sync;
+    wire [PTR_WIDTH:0] rsp_wr_ptr_gray_src_sync;
+    wire [PTR_WIDTH:0] rsp_rd_ptr_gray_dst_sync;
+
+    assign req_wr_ptr_gray_dst_sync = req_wr_ptr_gray_dst;
+    assign req_rd_ptr_gray_src_sync = req_rd_ptr_gray_src;
+    assign rsp_wr_ptr_gray_src_sync = rsp_wr_ptr_gray_src;
+    assign rsp_rd_ptr_gray_dst_sync = rsp_rd_ptr_gray_dst;
+
+    // In src domain: check if req FIFO is full
+    // Full when gray write pointer equals gray read pointer with MSB different
+    wire [PTR_WIDTH:0] req_rd_ptr_gray_src_bin;
+    wire [PTR_WIDTH:0] req_wr_ptr_gray_src_bin;
+    assign req_rd_ptr_gray_src_bin = gray2bin(req_rd_ptr_gray_src);
+    assign req_wr_ptr_gray_src_bin = gray2bin(req_wr_ptr_gray);
+
+    // Full condition: write pointer has lapped read pointer
+    // In gray code, full when upper bit differs and lower bits are same
+    wire req_full_src;
+    assign req_full_src = (req_wr_ptr_gray[PTR_WIDTH] != req_rd_ptr_gray_src[PTR_WIDTH]) &&
+                          (req_wr_ptr_gray[PTR_WIDTH-1:0] == req_rd_ptr_gray_src[PTR_WIDTH-1:0]);
+
+    // In dst domain: check if req FIFO is empty
+    wire [PTR_WIDTH:0] req_wr_ptr_gray_dst_bin;
+    wire [PTR_WIDTH:0] req_rd_ptr_gray_dst_bin;
+    assign req_wr_ptr_gray_dst_bin = gray2bin(req_wr_ptr_gray_dst);
+    assign req_rd_ptr_gray_dst_bin = gray2bin(req_rd_ptr_gray);
+
+    wire req_empty_dst;
+    assign req_empty_dst = (req_wr_ptr_gray_dst == req_rd_ptr_gray);
+
+    // In dst domain: check if rsp FIFO is full
+    wire rsp_full_dst;
+    assign rsp_full_dst = (rsp_wr_ptr_gray[PTR_WIDTH] != rsp_rd_ptr_gray_dst[PTR_WIDTH]) &&
+                          (rsp_wr_ptr_gray[PTR_WIDTH-1:0] == rsp_rd_ptr_gray_dst[PTR_WIDTH-1:0]);
+
+    // In src domain: check if rsp FIFO is empty
+    wire rsp_empty_src;
+    assign rsp_empty_src = (rsp_wr_ptr_gray_src == rsp_rd_ptr_gray);
+
+    // Synchronize gray pointers
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            req_wr_ptr_gray_dst <= 0;
+            req_wr_ptr_gray_dst_d <= 0;
+            rsp_rd_ptr_gray_dst <= 0;
+            rsp_rd_ptr_gray_dst_d <= 0;
+        end else begin
+            req_wr_ptr_gray_dst <= req_wr_ptr_gray;
+            req_wr_ptr_gray_dst_d <= req_wr_ptr_gray_dst;
+            rsp_rd_ptr_gray_dst <= rsp_rd_ptr_gray;
+            rsp_rd_ptr_gray_dst_d <= rsp_rd_ptr_gray_dst;
+        end
+    end
+
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            req_rd_ptr_gray_src <= 0;
+            req_rd_ptr_gray_src_d <= 0;
+            rsp_wr_ptr_gray_src <= 0;
+            rsp_wr_ptr_gray_src_d <= 0;
+        end else begin
+            req_rd_ptr_gray_src <= req_rd_ptr_gray;
+            req_rd_ptr_gray_src_d <= req_rd_ptr_gray_src;
+            rsp_wr_ptr_gray_src <= rsp_wr_ptr_gray;
+            rsp_wr_ptr_gray_src_d <= rsp_wr_ptr_gray_src;
+        end
+    end
+
+    // Use the second stage of synchronization for stability
+    wire req_full = req_full_src;
+    wire req_empty = req_empty_dst;
+    wire rsp_full = rsp_full_dst;
+    wire rsp_empty = rsp_empty_src;
+
+    // Source side: APB slave interface
+    reg src_pready_r;
+    reg [DATA_WIDTH-1:0] src_prdata_r;
+    reg src_pslverr_r;
+
+    assign src_pready_o = src_pready_r;
+    assign src_prdata_o = src_prdata_r;
+    assign src_pslverr_o = src_pslverr_r;
+
+    // Detect setup phase: PSEL high, PENABLE low
+    wire src_setup = src_psel_i && !src_penable_i;
+    // Detect access phase: PSEL high, PENABLE high
+    wire src_access = src_psel_i && src_penable_i;
+
+    // Write request to FIFO during setup phase if not full
+    wire src_req_valid = src_setup && !req_full;
+
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            req_wr_ptr <= 0;
+            req_wr_ptr_gray <= 0;
+            rsp_rd_ptr <= 0;
+            rsp_rd_ptr_gray <= 0;
+            src_pready_r <= 1'b0;
+            src_prdata_r <= 0;
+            src_pslverr_r <= 1'b0;
+        end else begin
+            // Write request to FIFO
+            if (src_req_valid) begin
+                req_fifo[req_wr_ptr[PTR_WIDTH-1:0]] <= src_pwdata_i;
+                req_addr_fifo[req_wr_ptr[PTR_WIDTH-1:0]] <= src_paddr_i;
+                req_strb_fifo[req_wr_ptr[PTR_WIDTH-1:0]] <= src_pstrb_i;
+                req_prot_fifo[req_wr_ptr[PTR_WIDTH-1:0]] <= src_pprot_i;
+                req_write_fifo[req_wr_ptr[PTR_WIDTH-1:0]] <= src_pwrite_i;
+                req_wr_ptr <= req_wr_ptr + 1'b1;
+                req_wr_ptr_gray <= bin2gray(req_wr_ptr + 1'b1);
+            end
+
+            // Read response from FIFO
+            if (!rsp_empty) begin
+                src_prdata_r <= rsp_data_fifo[rsp_rd_ptr[PTR_WIDTH-1:0]];
+                src_pslverr_r <= rsp_err_fifo[rsp_rd_ptr[PTR_WIDTH-1:0]];
+                rsp_rd_ptr <= rsp_rd_ptr + 1'b1;
+                rsp_rd_ptr_gray <= bin2gray(rsp_rd_ptr + 1'b1);
+            end
+
+            // Pready logic:
+            // During setup: pready = 1 if FIFO not full (can accept new request)
+            // During access: pready = 1 if response is available
+            if (src_setup) begin
+                src_pready_r <= !req_full;
+            end else if (src_access) begin
+                src_pready_r <= !rsp_empty;
+            end else begin
+                src_pready_r <= 1'b0;
+            end
+        end
+    end
+
+    // Destination side: APB master interface
+    reg dst_psel_r;
+    reg dst_penable_r;
+    reg dst_pwrite_r;
+    reg [ADDR_WIDTH-1:0] dst_paddr_r;
+    reg [DATA_WIDTH-1:0] dst_pwdata_r;
+    reg [DATA_WIDTH/8-1:0] dst_pstrb_r;
+    reg [2:0] dst_pprot_r;
+
+    assign dst_psel_o = dst_psel_r;
+    assign dst_penable_o = dst_penable_r;
+    assign dst_pwrite_o = dst_pwrite_r;
+    assign dst_paddr_o = dst_paddr_r;
+    assign dst_pwdata_o = dst_pwdata_r;
+    assign dst_pstrb_o = dst_pstrb_r;
+    assign dst_pprot_o = dst_pprot_r;
+
+    // Detect when request FIFO has data
+    wire dst_req_valid = !req_empty;
+
+    // Detect when response FIFO has space
+    wire dst_rsp_space = !rsp_full;
+
+    // APB master state machine
+    // State 0: Idle (no transaction)
+    // State 1: Setup (PSEL=1, PENABLE=0)
+    // State 2: Access (PSEL=1, PENABLE=1)
+
+    reg [1:0] dst_state;
+    localparam DST_IDLE = 2'b00;
+    localparam DST_SETUP = 2'b01;
+    localparam DST_ACCESS = 2'b10;
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            req_rd_ptr <= 0;
+            req_rd_ptr_gray <= 0;
+            rsp_wr_ptr <= 0;
+            rsp_wr_ptr_gray <= 0;
+            dst_psel_r <= 1'b0;
+            dst_penable_r <= 1'b0;
+            dst_pwrite_r <= 1'b0;
+            dst_paddr_r <= 0;
+            dst_pwdata_r <= 0;
+            dst_pstrb_r <= 0;
+            dst_pprot_r <= 0;
+            dst_state <= DST_IDLE;
+        end else begin
+            case (dst_state)
+                DST_IDLE: begin
+                    dst_psel_r <= 1'b0;
+                    dst_penable_r <= 1'b0;
+                    if (dst_req_valid) begin
+                        // Load request from FIFO
+                        dst_pwrite_r <= req_write_fifo[req_rd_ptr[PTR_WIDTH-1:0]];
+                        dst_paddr_r <= req_addr_fifo[req_rd_ptr[PTR_WIDTH-1:0]];
+                        dst_pwdata_r <= req_fifo[req_rd_ptr[PTR_WIDTH-1:0]];
+                        dst_pstrb_r <= req_strb_fifo[req_rd_ptr[PTR_WIDTH-1:0]];
+                        dst_pprot_r <= req_prot_fifo[req_rd_ptr[PTR_WIDTH-1:0]];
+                        dst_psel_r <= 1'b1;
+                        dst_penable_r <= 1'b0;
+                        dst_state <= DST_SETUP;
+                    end
+                end
+
+                DST_SETUP: begin
+                    dst_psel_r <= 1'b1;
+                    dst_penable_r <= 1'b1;
+                    dst_state <= DST_ACCESS;
+                end
+
+                DST_ACCESS: begin
+                    dst_psel_r <= 1'b1;
+                    dst_penable_r <= 1'b1;
+                    if (dst_pready_i) begin
+                        // Write response to FIFO
+                        if (dst_rsp_space) begin
+                            rsp_data_fifo[rsp_wr_ptr[PTR_WIDTH-1:0]] <= dst_prdata_i;
+                            rsp_err_fifo[rsp_wr_ptr[PTR_WIDTH-1:0]] <= dst_pslverr_i;
+                            rsp_wr_ptr <= rsp_wr_ptr + 1'b1;
+                            rsp_wr_ptr_gray <= bin2gray(rsp_wr_ptr + 1'b1);
+                        end
+                        // Advance read pointer
+                        req_rd_ptr <= req_rd_ptr + 1'b1;
+                        req_rd_ptr_gray <= bin2gray(req_rd_ptr + 1'b1);
+                        dst_state <= DST_IDLE;
+                    end
+                end
+
+                default: begin
+                    dst_state <= DST_IDLE;
+                end
+            endcase
+        end
+    end
+
+endmodule
+```<|im_end|>

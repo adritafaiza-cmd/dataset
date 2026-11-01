@@ -1,0 +1,102 @@
+module apbslave #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH,
+		localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+	) (
+		input	wire			PCLK, PRESETn,
+		input	wire			PSEL,
+		input	wire			PENABLE,
+		output	reg			PREADY,
+		input	wire	[AW-1:0]	PADDR,
+		input	wire			PWRITE,
+		input	wire	[DW-1:0]	PWDATA,
+		input	wire	[DW/8-1:0]	PWSTRB,
+		input	wire	[2:0]		PPROT,
+		output	reg	[DW-1:0]	PRDATA,
+		output	wire			PSLVERR
+	);
+
+	// Internal registers
+	reg [DW-1:0] mem [0:2**AW-1];
+	reg [DW-1:0] rdata_reg;
+	reg          rvalid;
+
+	// PSLVERR is always low for in-range accesses
+	assign PSLVERR = 1'b0;
+
+	// State machine
+	// APB states: IDLE, SETUP, ACCESS
+	// We can simplify since PREADY is always high (single cycle slave)
+	// But we need to handle the handshake properly.
+	
+	// For a simple single-cycle slave:
+	// - PREADY is always high
+	// - During SETUP phase (PSEL=1, PENABLE=0), we prepare for the access
+	// - During ACCESS phase (PSEL=1, PENABLE=1), we complete the access
+	
+	// Since PREADY is always high, the transfer completes in one cycle after setup.
+	// We need to capture the address and data during setup, and respond during access.
+	
+	// Let's use a simple approach:
+	// - On rising edge of PCLK, if PSEL and not PENABLE (setup phase), capture address
+	// - If PSEL and PENABLE (access phase), perform the read/write
+	
+	// For reads:
+	// - During setup, we can start the read (but since it's a simple memory, we can do it in access phase)
+	// - During access, output the data
+	
+	// For writes:
+	// - During access, write to memory
+	
+	// Let's implement a simple memory-based slave.
+	
+	// Address decoding
+	wire [AW-1:0] addr = PADDR;
+	
+	// Write enable
+	wire wren = PSEL & PENABLE & PWRITE;
+	
+	// Read enable
+	wire ren = PSEL & PENABLE & ~PWRITE;
+	
+	// Memory write
+	integer i;
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			PREADY <= 1'b1;
+			PRDATA <= {DW{1'b0}};
+			rdata_reg <= {DW{1'b0}};
+			rvalid <= 1'b0;
+		end else begin
+			// PREADY is always high for this simple slave
+			PREADY <= 1'b1;
+			
+			// Handle write
+			if (wren) begin
+				// Write to memory with byte strobes
+				for (i = 0; i < DW/8; i = i + 1) begin
+					if (PWSTRB[i]) begin
+						mem[addr][i*8 +: 8] <= PWDATA[i*8 +: 8];
+					end
+				end
+			end
+			
+			// Handle read
+			if (ren) begin
+				// Read from memory
+				rdata_reg <= mem[addr];
+				rvalid <= 1'b1;
+			end else begin
+				rvalid <= 1'b0;
+			end
+			
+			// Output data
+			if (rvalid) begin
+				PRDATA <= rdata_reg;
+			end
+		end
+	end
+
+endmodule

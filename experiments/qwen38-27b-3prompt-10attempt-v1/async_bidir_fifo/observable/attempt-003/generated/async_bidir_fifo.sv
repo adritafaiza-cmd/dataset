@@ -1,0 +1,289 @@
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam AWIDTH = ASIZE;
+  localparam DEPTH  = 1 << AWIDTH;
+  localparam AFULL_OFFSET = 2;
+  localparam AEMPTY_OFFSET = 2;
+
+  // Memory
+  reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+  // Clock domain A
+  reg [AWIDTH:0] a_wr_ptr;
+  reg [AWIDTH:0] a_rd_ptr;
+  reg [AWIDTH:0] a_wr_ptr_gray;
+  reg [AWIDTH:0] a_rd_ptr_gray;
+
+  // Clock domain B
+  reg [AWIDTH:0] b_wr_ptr;
+  reg [AWIDTH:0] b_rd_ptr;
+  reg [AWIDTH:0] b_wr_ptr_gray;
+  reg [AWIDTH:0] b_rd_ptr_gray;
+
+  // Synchronizers for A's pointers into B domain
+  reg [AWIDTH:0] a_wr_ptr_gray_b_sync1;
+  reg [AWIDTH:0] a_wr_ptr_gray_b_sync2;
+  reg [AWIDTH:0] a_rd_ptr_gray_b_sync1;
+  reg [AWIDTH:0] a_rd_ptr_gray_b_sync2;
+
+  // Synchronizers for B's pointers into A domain
+  reg [AWIDTH:0] b_wr_ptr_gray_a_sync1;
+  reg [AWIDTH:0] b_wr_ptr_gray_a_sync2;
+  reg [AWIDTH:0] b_rd_ptr_gray_a_sync1;
+  reg [AWIDTH:0] b_rd_ptr_gray_a_sync2;
+
+  // Gray code conversion functions
+  function [AWIDTH:0] bin2gray;
+    input [AWIDTH:0] bin;
+    begin
+      bin2gray = bin ^ (bin >> 1);
+    end
+  endfunction
+
+  // Clock domain A: write pointer
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_wr_ptr <= {1'b0, {AWIDTH{1'b0}}};
+      a_wr_ptr_gray <= {1'b0, {AWIDTH{1'b0}}};
+    end else if (a_winc && !a_full) begin
+      a_wr_ptr <= a_wr_ptr + 1'b1;
+      a_wr_ptr_gray <= bin2gray(a_wr_ptr + 1'b1);
+    end
+  end
+
+  // Clock domain A: read pointer
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_rd_ptr <= {1'b0, {AWIDTH{1'b0}}};
+      a_rd_ptr_gray <= {1'b0, {AWIDTH{1'b0}}};
+    end else if (a_rinc && !a_empty) begin
+      a_rd_ptr <= a_rd_ptr + 1'b1;
+      a_rd_ptr_gray <= bin2gray(a_rd_ptr + 1'b1);
+    end
+  end
+
+  // Clock domain B: write pointer
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_wr_ptr <= {1'b0, {AWIDTH{1'b0}}};
+      b_wr_ptr_gray <= {1'b0, {AWIDTH{1'b0}}};
+    end else if (b_winc && !b_full) begin
+      b_wr_ptr <= b_wr_ptr + 1'b1;
+      b_wr_ptr_gray <= bin2gray(b_wr_ptr + 1'b1);
+    end
+  end
+
+  // Clock domain B: read pointer
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_rd_ptr <= {1'b0, {AWIDTH{1'b0}}};
+      b_rd_ptr_gray <= {1'b0, {AWIDTH{1'b0}}};
+    end else if (b_rinc && !b_empty) begin
+      b_rd_ptr <= b_rd_ptr + 1'b1;
+      b_rd_ptr_gray <= bin2gray(b_rd_ptr + 1'b1);
+    end
+  end
+
+  // Synchronizers: A's write pointer gray into B domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_wr_ptr_gray_b_sync1 <= {1'b0, {AWIDTH{1'b0}}};
+      a_wr_ptr_gray_b_sync2 <= {1'b0, {AWIDTH{1'b0}}};
+    end else begin
+      a_wr_ptr_gray_b_sync1 <= a_wr_ptr_gray;
+      a_wr_ptr_gray_b_sync2 <= a_wr_ptr_gray_b_sync1;
+    end
+  end
+
+  // Synchronizers: A's read pointer gray into B domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_rd_ptr_gray_b_sync1 <= {1'b0, {AWIDTH{1'b0}}};
+      a_rd_ptr_gray_b_sync2 <= {1'b0, {AWIDTH{1'b0}}};
+    end else begin
+      a_rd_ptr_gray_b_sync1 <= a_rd_ptr_gray;
+      a_rd_ptr_gray_b_sync2 <= a_rd_ptr_gray_b_sync1;
+    end
+  end
+
+  // Synchronizers: B's write pointer gray into A domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_wr_ptr_gray_a_sync1 <= {1'b0, {AWIDTH{1'b0}}};
+      b_wr_ptr_gray_a_sync2 <= {1'b0, {AWIDTH{1'b0}}};
+    end else begin
+      b_wr_ptr_gray_a_sync1 <= b_wr_ptr_gray;
+      b_wr_ptr_gray_a_sync2 <= b_wr_ptr_gray_a_sync1;
+    end
+  end
+
+  // Synchronizers: B's read pointer gray into A domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_rd_ptr_gray_a_sync1 <= {1'b0, {AWIDTH{1'b0}}};
+      b_rd_ptr_gray_a_sync2 <= {1'b0, {AWIDTH{1'b0}}};
+    end else begin
+      b_rd_ptr_gray_a_sync1 <= b_rd_ptr_gray;
+      b_rd_ptr_gray_a_sync2 <= b_rd_ptr_gray_a_sync1;
+    end
+  end
+
+  // Convert synchronized gray codes back to binary
+  wire [AWIDTH:0] a_wr_ptr_gray_b_bin;
+  wire [AWIDTH:0] a_rd_ptr_gray_b_bin;
+  wire [AWIDTH:0] b_wr_ptr_gray_a_bin;
+  wire [AWIDTH:0] b_rd_ptr_gray_a_bin;
+
+  assign a_wr_ptr_gray_b_bin = gray2bin(a_wr_ptr_gray_b_sync2);
+  assign a_rd_ptr_gray_b_bin = gray2bin(a_rd_ptr_gray_b_sync2);
+  assign b_wr_ptr_gray_a_bin = gray2bin(b_wr_ptr_gray_a_sync2);
+  assign b_rd_ptr_gray_a_bin = gray2bin(b_rd_ptr_gray_a_sync2);
+
+  function [AWIDTH:0] gray2bin;
+    input [AWIDTH:0] gray;
+    reg [AWIDTH:0] bin;
+    integer i;
+    begin
+      bin[AWIDTH] = gray[AWIDTH];
+      for (i = AWIDTH-1; i >= 0; i = i - 1)
+        bin[i] = bin[i+1] ^ gray[i];
+      gray2bin = bin;
+    end
+  endfunction
+
+  // Direction signals: determine which side is writing to which side
+  // a_dir: if 1, A is writing to B (A is source, B is destination)
+  // b_dir: if 1, B is writing to A (B is source, A is destination)
+  // For the FIFO to work bidirectionally, we need to handle both directions.
+  // The memory is shared. When a_dir=1, A writes and B reads.
+  // When b_dir=1, B writes and A reads.
+  // We assume that a_dir and b_dir are complementary or that only one direction is active at a time.
+  // Let's define:
+  // - A writes to memory when a_winc is high and a_dir indicates A is the writer.
+  // - B writes to memory when b_winc is high and b_dir indicates B is the writer.
+  // - A reads from memory when a_rinc is high and a_dir indicates A is the reader.
+  // - B reads from memory when b_rinc is high and b_dir indicates B is the reader.
+
+  // Let's interpret a_dir: 1 means A is the source (writing), 0 means A is the destination (reading)
+  // Let's interpret b_dir: 1 means B is the source (writing), 0 means B is the destination (reading)
+
+  // Write to memory from A
+  wire a_write_en = a_winc && a_dir;
+  // Write to memory from B
+  wire b_write_en = b_winc && b_dir;
+
+  // Read from memory to A
+  wire a_read_en = a_rinc && !a_dir;
+  // Read from memory to B
+  wire b_read_en = b_rinc && !b_dir;
+
+  // Memory write
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      // No specific reset for memory, but we can leave it uninitialized
+    end else if (a_write_en && !a_full) begin
+      mem[a_wr_ptr[AWIDTH-1:0]] <= a_wdata;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      // No specific reset for memory
+    end else if (b_write_en && !b_full) begin
+      mem[b_wr_ptr[AWIDTH-1:0]] <= b_wdata;
+    end
+  end
+
+  // Read data
+  reg [DSIZE-1:0] a_rdata_reg;
+  reg [DSIZE-1:0] b_rdata_reg;
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_rdata_reg <= {DSIZE{1'b0}};
+    end else if (a_read_en && !a_empty) begin
+      a_rdata_reg <= mem[a_rd_ptr[AWIDTH-1:0]];
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_rdata_reg <= {DSIZE{1'b0}};
+    end else if (b_read_en && !b_empty) begin
+      b_rdata_reg <= mem[b_rd_ptr[AWIDTH-1:0]];
+    end
+  end
+
+  // Full/Empty status
+  // For A:
+  // A is full when A's write pointer has caught up with B's read pointer (in the direction A->B)
+  // A is empty when A's read pointer has caught up with B's write pointer (in the direction B->A)
+  
+  // When a_dir=1 (A writes to B):
+  //   A full: a_wr_ptr == b_rd_ptr (synchronized)
+  //   A empty: not applicable in this direction, but A can still read if b_dir=1
+  // When a_dir=0 (A reads from B):
+  //   A empty: a_rd_ptr == b_wr_ptr (synchronized)
+  //   A full: not applicable in this direction
+
+  // Let's compute full/empty based on the direction
+  // A full: A is writing, so check if A's write pointer has caught up with B's read pointer
+  wire a_full_internal = (a_wr_ptr == b_rd_ptr_gray_a_bin);
+  // A empty: A is reading, so check if A's read pointer has caught up with B's write pointer
+  wire a_empty_internal = (a_rd_ptr == b_wr_ptr_gray_a_bin);
+
+  // B full: B is writing, so check if B's write pointer has caught up with A's read pointer
+  wire b_full_internal = (b_wr_ptr == a_rd_ptr_gray_b_bin);
+  // B empty: B is reading, so check if B's read pointer has caught up with A's write pointer
+  wire b_empty_internal = (b_rd_ptr == a_wr_ptr_gray_b_bin);
+
+  // Assign full/empty based on direction
+  assign a_full = a_dir ? a_full_internal : 1'b0;
+  assign a_empty = !a_dir ? a_empty_internal : 1'b0;
+  assign b_full = b_dir ? b_full_internal : 1'b0;
+  assign b_empty = !b_dir ? b_empty_internal : 1'b0;
+
+  // Almost full/empty
+  assign a_afull = a_dir ? (a_wr_ptr - b_rd_ptr_gray_a_bin == AFULL_OFFSET) : 1'b0;
+  assign a_aempty = !a_dir ? (b_wr_ptr_gray_a_bin - a_rd_ptr == AEMPTY_OFFSET) : 1'b0;
+  assign b_afull = b_dir ? (b_wr_ptr - a_rd_ptr_gray_b_bin == AFULL_OFFSET) : 1'b0;
+  assign b_aempty = !b_dir ? (a_wr_ptr_gray_b_bin - b_rd_ptr == AEMPTY_OFFSET) : 1'b0;
+
+  // Fall-through
+  if (FALLTHROUGH == "TRUE") begin
+    assign a_rdata = (a_read_en && !a_empty) ? mem[a_rd_ptr[AWIDTH-1:0]] : a_rdata_reg;
+    assign b_rdata = (b_read_en && !b_empty) ? mem[b_rd_ptr[AWIDTH-1:0]] : b_rdata_reg;
+  end else begin
+    assign a_rdata = a_rdata_reg;
+    assign b_rdata = b_rdata_reg;
+  end
+
+endmodule

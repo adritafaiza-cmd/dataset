@@ -1,0 +1,139 @@
+module cdc_fifo_2phase #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3
+)(
+    input                  src_rst_ni,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam ADDR_WIDTH = LOG_DEPTH;
+    localparam PTR_WIDTH = LOG_DEPTH + 1;
+
+    // Source domain
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg [ADDR_WIDTH-1:0] wr_ptr;
+    reg [PTR_WIDTH-1:0] wr_ptr_full;
+    reg [PTR_WIDTH-1:0] rd_ptr_src;
+
+    wire src_wr_en = src_valid_i & src_ready_o;
+    wire src_full = (wr_ptr_full == rd_ptr_src);
+    assign src_ready_o = ~src_full;
+
+    // Destination domain
+    reg [WIDTH-1:0] rd_data_reg;
+    reg [ADDR_WIDTH-1:0] rd_ptr;
+    reg [PTR_WIDTH-1:0] rd_ptr_full;
+    reg [PTR_WIDTH-1:0] wr_ptr_dst;
+    reg dst_valid_reg;
+
+    wire dst_rd_en = dst_valid_o & dst_ready_i;
+    wire dst_empty = (rd_ptr_full == wr_ptr_dst);
+    assign dst_valid_o = dst_valid_reg;
+
+    // Gray code conversion functions
+    function [PTR_WIDTH-1:0] bin2gray;
+        input [PTR_WIDTH-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    function [PTR_WIDTH-1:0] gray2bin;
+        input [PTR_WIDTH-1:0] gray;
+        reg [PTR_WIDTH-1:0] bin;
+        integer i;
+        begin
+            bin[PTR_WIDTH-1] = gray[PTR_WIDTH-1];
+            for (i = PTR_WIDTH-2; i >= 0; i = i - 1)
+                bin[i] = bin[i+1] ^ gray[i];
+            gray2bin = bin;
+        end
+    endfunction
+
+    // Gray code pointers
+    wire [PTR_WIDTH-1:0] wr_ptr_gray_src = bin2gray(wr_ptr_full);
+    wire [PTR_WIDTH-1:0] rd_ptr_gray_dst = bin2gray(rd_ptr_full);
+
+    // Synchronizers: source domain sees destination read pointer
+    reg [PTR_WIDTH-1:0] rd_ptr_gray_dst_sync1;
+    reg [PTR_WIDTH-1:0] rd_ptr_gray_dst_sync2;
+    reg [PTR_WIDTH-1:0] rd_ptr_gray_dst_sync3;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            rd_ptr_gray_dst_sync1 <= {PTR_WIDTH{1'b0}};
+            rd_ptr_gray_dst_sync2 <= {PTR_WIDTH{1'b0}};
+            rd_ptr_gray_dst_sync3 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            rd_ptr_gray_dst_sync1 <= rd_ptr_gray_dst;
+            rd_ptr_gray_dst_sync2 <= rd_ptr_gray_dst_sync1;
+            rd_ptr_gray_dst_sync3 <= rd_ptr_gray_dst_sync2;
+        end
+    end
+
+    assign rd_ptr_src = gray2bin(rd_ptr_gray_dst_sync3);
+
+    // Synchronizers: destination domain sees source write pointer
+    reg [PTR_WIDTH-1:0] wr_ptr_gray_src_sync1;
+    reg [PTR_WIDTH-1:0] wr_ptr_gray_src_sync2;
+    reg [PTR_WIDTH-1:0] wr_ptr_gray_src_sync3;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            wr_ptr_gray_src_sync1 <= {PTR_WIDTH{1'b0}};
+            wr_ptr_gray_src_sync2 <= {PTR_WIDTH{1'b0}};
+            wr_ptr_gray_src_sync3 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            wr_ptr_gray_src_sync1 <= wr_ptr_gray_src;
+            wr_ptr_gray_src_sync2 <= wr_ptr_gray_src_sync1;
+            wr_ptr_gray_src_sync3 <= wr_ptr_gray_src_sync2;
+        end
+    end
+
+    assign wr_ptr_dst = gray2bin(wr_ptr_gray_src_sync3);
+
+    // Source domain write logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            wr_ptr <= {ADDR_WIDTH{1'b0}};
+            wr_ptr_full <= {PTR_WIDTH{1'b0}};
+        end else if (src_wr_en) begin
+            mem[wr_ptr] <= src_data_i;
+            wr_ptr <= wr_ptr + 1'b1;
+            wr_ptr_full <= wr_ptr_full + 1'b1;
+        end
+    end
+
+    // Destination domain read logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            rd_ptr <= {ADDR_WIDTH{1'b0}};
+            rd_ptr_full <= {PTR_WIDTH{1'b0}};
+            rd_data_reg <= {WIDTH{1'b0}};
+            dst_valid_reg <= 1'b0;
+        end else begin
+            if (dst_rd_en) begin
+                dst_valid_reg <= ~dst_empty;
+            end else if (dst_empty && (wr_ptr_dst != rd_ptr_full)) begin
+                dst_valid_reg <= 1'b1;
+            end
+
+            if (dst_rd_en) begin
+                rd_data_reg <= mem[rd_ptr];
+                rd_ptr <= rd_ptr + 1'b1;
+                rd_ptr_full <= rd_ptr_full + 1'b1;
+            end
+        end
+    end
+
+    assign dst_data_o = rd_data_reg;
+
+endmodule

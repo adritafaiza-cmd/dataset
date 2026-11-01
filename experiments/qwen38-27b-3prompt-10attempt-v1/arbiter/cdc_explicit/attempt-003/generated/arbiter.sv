@@ -1,0 +1,214 @@
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    localparam ENC_WIDTH = $clog2(PORTS);
+
+    // Internal signals
+    wire [PORTS-1:0] grant_comb;
+    wire             grant_valid_comb;
+    wire [ENC_WIDTH-1:0] grant_encoded_comb;
+
+    // State for round-robin and blocking
+    reg [PORTS-1:0] rr_mask;
+    reg [PORTS-1:0] blocked_grant;
+    reg             blocked_valid;
+
+    // Combinational grant logic
+    always @* begin
+        grant_comb = {PORTS{1'b0}};
+        grant_valid_comb = 1'b0;
+        grant_encoded_comb = {ENC_WIDTH{1'b0}};
+
+        if (ARB_BLOCK && blocked_valid) begin
+            // In blocking mode, hold the previous grant
+            grant_comb = blocked_grant;
+            grant_valid_comb = 1'b1;
+            // Encode the blocked grant
+            case (blocked_grant)
+                1'b1: grant_encoded_comb = 0;
+                default: begin
+                    grant_encoded_comb = {ENC_WIDTH{1'b0}};
+                    for (integer i = 0; i < PORTS; i = i + 1) begin
+                        if (blocked_grant[i]) begin
+                            grant_encoded_comb = i[ENC_WIDTH-1:0];
+                        end
+                    end
+                end
+            endcase
+        end else begin
+            // Normal arbitration
+            if (ARB_TYPE_ROUND_ROBIN) begin
+                // Round-robin arbitration
+                // Use rr_mask to determine priority
+                // If rr_mask is all zeros, treat as all ones (no mask)
+                if (rr_mask == {PORTS{1'b0}}) begin
+                    // No mask, use fixed priority
+                    if (ARB_LSB_HIGH_PRIORITY) begin
+                        // LSB has highest priority
+                        for (integer i = 0; i < PORTS; i = i + 1) begin
+                            if (request[i]) begin
+                                grant_comb[i] = 1'b1;
+                                grant_valid_comb = 1'b1;
+                                grant_encoded_comb = i[ENC_WIDTH-1:0];
+                                break;
+                            end
+                        end
+                    end else begin
+                        // MSB has highest priority
+                        for (integer i = PORTS-1; i >= 0; i = i - 1) begin
+                            if (request[i]) begin
+                                grant_comb[i] = 1'b1;
+                                grant_valid_comb = 1'b1;
+                                grant_encoded_comb = i[ENC_WIDTH-1:0];
+                                break;
+                            end
+                        end
+                    end
+                end else begin
+                    // With mask, rotate priority
+                    // First try requests above the mask (higher priority in round-robin)
+                    // Then try requests below the mask
+                    // The mask indicates which ports have been granted since last reset
+                    // Ports with mask=1 have lower priority than ports with mask=0
+                    
+                    // Try ports with mask=0 first (they have higher priority)
+                    if (ARB_LSB_HIGH_PRIORITY) begin
+                        // LSB high priority among unmasked
+                        for (integer i = 0; i < PORTS; i = i + 1) begin
+                            if (request[i] && !rr_mask[i]) begin
+                                grant_comb[i] = 1'b1;
+                                grant_valid_comb = 1'b1;
+                                grant_encoded_comb = i[ENC_WIDTH-1:0];
+                                break;
+                            end
+                        end
+                        // If no unmasked request, try masked requests
+                        if (!grant_valid_comb) begin
+                            for (integer i = 0; i < PORTS; i = i + 1) begin
+                                if (request[i] && rr_mask[i]) begin
+                                    grant_comb[i] = 1'b1;
+                                    grant_valid_comb = 1'b1;
+                                    grant_encoded_comb = i[ENC_WIDTH-1:0];
+                                    break;
+                                end
+                            end
+                        end
+                    end else begin
+                        // MSB high priority among unmasked
+                        for (integer i = PORTS-1; i >= 0; i = i - 1) begin
+                            if (request[i] && !rr_mask[i]) begin
+                                grant_comb[i] = 1'b1;
+                                grant_valid_comb = 1'b1;
+                                grant_encoded_comb = i[ENC_WIDTH-1:0];
+                                break;
+                            end
+                        end
+                        // If no unmasked request, try masked requests
+                        if (!grant_valid_comb) begin
+                            for (integer i = PORTS-1; i >= 0; i = i - 1) begin
+                                if (request[i] && rr_mask[i]) begin
+                                    grant_comb[i] = 1'b1;
+                                    grant_valid_comb = 1'b1;
+                                    grant_encoded_comb = i[ENC_WIDTH-1:0];
+                                    break;
+                                end
+                            end
+                        end
+                    end
+                end
+            end else begin
+                // Fixed priority arbitration
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    // LSB has highest priority
+                    for (integer i = 0; i < PORTS; i = i + 1) begin
+                        if (request[i]) begin
+                            grant_comb[i] = 1'b1;
+                            grant_valid_comb = 1'b1;
+                            grant_encoded_comb = i[ENC_WIDTH-1:0];
+                            break;
+                        end
+                    end
+                end else begin
+                    // MSB has highest priority
+                    for (integer i = PORTS-1; i >= 0; i = i - 1) begin
+                        if (request[i]) begin
+                            grant_comb[i] = 1'b1;
+                            grant_valid_comb = 1'b1;
+                            grant_encoded_comb = i[ENC_WIDTH-1:0];
+                            break;
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    // Sequential logic for state updates
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rr_mask <= {PORTS{1'b0}};
+            blocked_grant <= {PORTS{1'b0}};
+            blocked_valid <= 1'b0;
+        end else begin
+            if (ARB_BLOCK) begin
+                if (blocked_valid) begin
+                    // Currently blocking
+                    if (ARB_BLOCK_ACK) begin
+                        // Block until acknowledge
+                        if (acknowledge & blocked_grant) begin
+                            // Acknowledge received, release block
+                            blocked_valid <= 1'b0;
+                            blocked_grant <= {PORTS{1'b0}};
+                        end
+                    end else begin
+                        // Block until request drops
+                        if (!(request & blocked_grant)) begin
+                            // Request dropped, release block
+                            blocked_valid <= 1'b0;
+                            blocked_grant <= {PORTS{1'b0}};
+                        end
+                    end
+                end else begin
+                    // Not blocking, check if we should start blocking
+                    if (grant_valid_comb) begin
+                        blocked_valid <= 1'b1;
+                        blocked_grant <= grant_comb;
+                    end
+                end
+            end else begin
+                // No blocking
+                blocked_valid <= 1'b0;
+                blocked_grant <= {PORTS{1'b0}};
+            end
+
+            // Update round-robin mask
+            if (ARB_TYPE_ROUND_ROBIN) begin
+                if (grant_valid_comb) begin
+                    // Set the bit for the granted port in the mask
+                    rr_mask <= rr_mask | grant_comb;
+                end
+            end
+        end
+    end
+
+    // Output assignments
+    assign grant = grant_comb;
+    assign grant_valid = grant_valid_comb;
+    assign grant_encoded = grant_encoded_comb;
+
+endmodule

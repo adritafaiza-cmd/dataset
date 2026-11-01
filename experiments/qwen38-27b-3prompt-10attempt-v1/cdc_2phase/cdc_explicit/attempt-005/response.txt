@@ -1,0 +1,141 @@
+```systemverilog
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain: handshake state
+  // We use a simple 2-phase handshake with a single outstanding item.
+  // The source holds the data and asserts a "req" signal that is synchronized
+  // to the destination domain. The destination acknowledges with "ack" which
+  // is synchronized back to the source domain.
+
+  // Source domain registers
+  reg [WIDTH-1:0] src_data_reg;
+  reg             src_req;       // Request to destination (source domain)
+  reg             src_ack_sync;  // Acknowledgment from destination (synchronized to source)
+  reg             src_ack_d1;    // First stage of ack synchronization
+  reg             src_ack_d2;    // Second stage of ack synchronization
+
+  // Destination domain registers
+  reg [WIDTH-1:0] dst_data_reg;
+  reg             dst_ack;       // Acknowledgment to source (destination domain)
+  reg             dst_req_sync;  // Request from source (synchronized to destination)
+  reg             dst_req_d1;    // First stage of req synchronization
+  reg             dst_req_d2;    // Second stage of req synchronization
+  reg             dst_valid;     // Valid in destination domain
+
+  // Synchronize src_ack to source domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_ack_d1 <= 1'b0;
+      src_ack_d2 <= 1'b0;
+    end else begin
+      src_ack_d1 <= dst_ack;
+      src_ack_d2 <= src_ack_d1;
+    end
+  end
+  assign src_ack_sync = src_ack_d2;
+
+  // Synchronize src_req to destination domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req_d1 <= 1'b0;
+      dst_req_d2 <= 1'b0;
+    end else begin
+      dst_req_d1 <= src_req;
+      dst_req_d2 <= dst_req_d1;
+    end
+  end
+  assign dst_req_sync = dst_req_d2;
+
+  // Source domain logic
+  // src_ready_o is high when we can accept a new item.
+  // We can accept a new item when:
+  //   - We are not currently holding an item (src_req is low), OR
+  //   - We have received an acknowledgment for the current item (src_ack_sync is high)
+  // Actually, let's think more carefully.
+  //
+  // State machine in source domain:
+  //   IDLE: src_req = 0, waiting for valid input
+  //   WAIT_ACK: src_req = 1, waiting for ack
+  //
+  // When in IDLE and src_valid_i is high, we capture data and set src_req = 1.
+  // When in WAIT_ACK and src_ack_sync becomes high, we go back to IDLE.
+  //
+  // src_ready_o should be high when we are in IDLE state (can accept new data).
+
+  reg src_state_idle;  // 1 when idle, 0 when waiting for ack
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_reg <= {WIDTH{1'b0}};
+      src_req      <= 1'b0;
+      src_state_idle <= 1'b1;
+    end else begin
+      if (src_state_idle) begin
+        if (src_valid_i) begin
+          src_data_reg   <= src_data_i;
+          src_req        <= 1'b1;
+          src_state_idle <= 1'b0;
+        end
+      end else begin
+        // Waiting for ack
+        if (src_ack_sync) begin
+          src_req        <= 1'b0;
+          src_state_idle <= 1'b1;
+        end
+      end
+    end
+  end
+
+  assign src_ready_o = src_state_idle;
+
+  // Destination domain logic
+  // When dst_req_sync transitions from 0 to 1, we capture the data and assert dst_valid.
+  // When dst_valid and dst_ready_i are both high, we deassert dst_valid and assert dst_ack.
+  // dst_ack is held until dst_req_sync goes back to 0 (which happens after source sees ack).
+
+  reg dst_ack_pending;  // Internal flag to track if we need to send ack
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_reg  <= {WIDTH{1'b0}};
+      dst_ack       <= 1'b0;
+      dst_valid     <= 1'b0;
+      dst_ack_pending <= 1'b0;
+    end else begin
+      if (!dst_valid) begin
+        // Not currently valid, check for new request
+        if (dst_req_sync) begin
+          dst_data_reg  <= src_data_reg;  // Capture data (safe because src_data_reg is stable while src_req is high)
+          dst_valid     <= 1'b1;
+          dst_ack       <= 1'b1;
+          dst_ack_pending <= 1'b1;
+        end
+      end else begin
+        // Currently valid
+        if (dst_ready_i) begin
+          dst_valid     <= 1'b0;
+          dst_ack       <= 1'b0;
+          dst_ack_pending <= 1'b0;
+        end
+      end
+    end
+  end
+
+  assign dst_data_o  = dst_data_reg;
+  assign dst_valid_o = dst_valid;
+
+endmodule
+```<|im_end|>

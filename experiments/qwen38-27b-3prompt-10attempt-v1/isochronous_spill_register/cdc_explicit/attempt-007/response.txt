@@ -1,0 +1,128 @@
+```verilog
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    // Synchronizers for reset signals
+    reg [1:0] src_rst_ni_sync;
+    reg [1:0] dst_rst_ni_sync;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_rst_ni_sync <= 2'b00;
+        else
+            src_rst_ni_sync <= {src_rst_ni_sync[0], src_rst_ni};
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_rst_ni_sync <= 2'b00;
+        else
+            dst_rst_ni_sync <= {dst_rst_ni_sync[0], dst_rst_ni};
+    end
+
+    // Synchronized reset signals
+    wire src_rst_ni_synced = src_rst_ni_sync[1];
+    wire dst_rst_ni_synced = dst_rst_ni_sync[1];
+
+    // Synchronizers for valid/ready handshake signals
+    // src_valid_i needs to be synchronized to dst domain
+    reg [1:0] src_valid_sync;
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_valid_sync <= 2'b00;
+        else
+            src_valid_sync <= {src_valid_sync[0], src_valid_i};
+    end
+    wire src_valid_synced = src_valid_sync[1];
+
+    // dst_ready_i needs to be synchronized to src domain
+    reg [1:0] dst_ready_sync;
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ready_sync <= 2'b00;
+        else
+            dst_ready_sync <= {dst_ready_sync[0], dst_ready_i};
+    end
+    wire dst_ready_synced = dst_ready_sync[1];
+
+    // Synchronizers for data
+    // Data is only valid when src_valid is asserted, so we synchronize data
+    // along with a valid indicator to ensure coherence
+    reg [WIDTH-1:0] src_data_sync;
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_data_sync <= {WIDTH{1'b0}};
+        else
+            src_data_sync <= src_data_i;
+    end
+
+    // Buffer state in destination domain
+    reg [WIDTH-1:0] buf_data;
+    reg             buf_valid;
+
+    // Destination domain logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            buf_valid <= 1'b0;
+            buf_data  <= {WIDTH{1'b0}};
+        end else begin
+            if (dst_ready_i && buf_valid) begin
+                // Destination consumed the data
+                if (src_valid_synced) begin
+                    // New data available from source
+                    buf_data  <= src_data_sync;
+                    buf_valid <= 1'b1;
+                end else begin
+                    // No new data
+                    buf_valid <= 1'b0;
+                end
+            end else if (!buf_valid && src_valid_synced) begin
+                // Buffer empty, new data available
+                buf_data  <= src_data_sync;
+                buf_valid <= 1'b1;
+            end
+        end
+    end
+
+    // Source domain logic
+    // src_ready_o indicates that the source can send data
+    // The source can send if the buffer is not full (i.e., destination can accept)
+    // Since we have a 1-deep buffer, src_ready is high when the buffer is empty
+    // or when the destination is ready to accept the current data
+
+    // We need to track whether the buffer has data in the source domain
+    // Synchronize buf_valid to source domain
+    reg [1:0] buf_valid_sync;
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            buf_valid_sync <= 2'b00;
+        else
+            buf_valid_sync <= {buf_valid_sync[0], buf_valid};
+    end
+    wire buf_valid_synced = buf_valid_sync[1];
+
+    // src_ready_o: source can send if buffer is empty or destination is ready
+    // To be safe, we only allow source to send when buffer is empty
+    // This ensures no data loss
+    assign src_ready_o = !buf_valid_synced;
+
+    // dst_valid_o: destination has valid data
+    assign dst_valid_o = buf_valid;
+
+    // dst_data_o: destination data
+    assign dst_data_o = buf_data;
+
+endmodule
+```<|im_end|>

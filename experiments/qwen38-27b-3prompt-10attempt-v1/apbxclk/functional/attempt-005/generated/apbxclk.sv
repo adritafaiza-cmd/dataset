@@ -1,0 +1,166 @@
+module apbxclk #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	parameter [0:0]	OPT_REGISTERED = 1'b0,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH
+) (
+	input	wire			S_APB_PCLK, S_PRESETn,
+	input	wire			S_APB_PSEL,
+	input	wire			S_APB_PENABLE,
+	output	reg			S_APB_PREADY,
+	input	wire	[AW-1:0]	S_APB_PADDR,
+	input	wire			S_APB_PWRITE,
+	input	wire	[DW-1:0]	S_APB_PWDATA,
+	input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+	input	wire	[2:0]		S_APB_PPROT,
+	output	wire	[DW-1:0]	S_APB_PRDATA,
+	output	wire			S_APB_PSLVERR,
+	input	wire			M_APB_PCLK,
+	output	reg			M_PRESETn,
+	output	reg			M_APB_PSEL,
+	output	reg			M_APB_PENABLE,
+	input	wire			M_APB_PREADY,
+	output	wire	[AW-1:0]	M_APB_PADDR,
+	output	wire			M_APB_PWRITE,
+	output	wire	[DW-1:0]	M_APB_PWDATA,
+	output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+	output	wire	[2:0]		M_APB_PPROT,
+	input	wire	[DW-1:0]	M_APB_PRDATA,
+	input	wire			M_APB_PSLVERR
+);
+
+	// Synchronization signals
+	reg [2:0] s2m_sync;
+	reg [2:0] m2s_sync;
+	reg s2m_req;
+	reg m2s_ack;
+	reg m2s_done;
+
+	// M domain state
+	reg m_busy;
+	reg m_sel;
+	reg m_enable;
+	reg [AW-1:0] m_addr;
+	reg m_write;
+	reg [DW-1:0] m_wdata;
+	reg [DW/8-1:0] m_wstrb;
+	reg [2:0] m_pprot;
+	reg m_rdata_valid;
+	reg [DW-1:0] m_rdata;
+	reg m_pslverr;
+
+	// S domain state
+	reg s_busy;
+	reg [DW-1:0] s_rdata;
+	reg s_pslverr;
+
+	// Synchronization logic
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s2m_sync <= 3'b000;
+			s2m_req <= 1'b0;
+		end else begin
+			s2m_sync <= {s2m_sync[1:0], m2s_ack};
+			s2m_req <= m2s_ack;
+		end
+	end
+
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m2s_sync <= 3'b000;
+			m2s_ack <= 1'b0;
+			m2s_done <= 1'b0;
+		end else begin
+			m2s_sync <= {m2s_sync[1:0], s2m_req};
+			m2s_ack <= s2m_req;
+			m2s_done <= s2m_req;
+		end
+	end
+
+	// M domain control
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			M_PRESETn <= 1'b0;
+			m_busy <= 1'b0;
+			m_sel <= 1'b0;
+			m_enable <= 1'b0;
+			m_addr <= {AW{1'b0}};
+			m_write <= 1'b0;
+			m_wdata <= {DW{1'b0}};
+			m_wstrb <= {(DW/8){1'b0}};
+			m_pprot <= 3'b000;
+			m_rdata_valid <= 1'b0;
+			m_rdata <= {DW{1'b0}};
+			m_pslverr <= 1'b0;
+		end else begin
+			M_PRESETn <= 1'b1;
+			
+			if (m2s_ack && !m_busy) begin
+				// Start new transaction
+				m_busy <= 1'b1;
+				m_sel <= 1'b1;
+				m_enable <= 1'b0;
+				m_addr <= S_APB_PADDR;
+				m_write <= S_APB_PWRITE;
+				m_wdata <= S_APB_PWDATA;
+				m_wstrb <= S_APB_PWSTRB;
+				m_pprot <= S_APB_PPROT;
+				m_rdata_valid <= 1'b0;
+			end else if (m_busy) begin
+				if (!m_enable) begin
+					// Setup phase complete, move to access
+					m_enable <= 1'b1;
+				end else if (M_APB_PREADY) begin
+					// Access phase complete
+					m_busy <= 1'b0;
+					m_sel <= 1'b0;
+					m_enable <= 1'b0;
+					m_rdata_valid <= 1'b1;
+					m_rdata <= M_APB_PRDATA;
+					m_pslverr <= M_APB_PSLVERR;
+				end
+			end
+		end
+	end
+
+	// M domain outputs
+	assign M_APB_PSEL = m_sel;
+	assign M_APB_PENABLE = m_enable;
+	assign M_APB_PADDR = m_addr;
+	assign M_APB_PWRITE = m_write;
+	assign M_APB_PWDATA = m_wdata;
+	assign M_APB_PWSTRB = m_wstrb;
+	assign M_APB_PPROT = m_pprot;
+
+	// S domain control
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			S_APB_PREADY <= 1'b0;
+			s_busy <= 1'b0;
+			s_rdata <= {DW{1'b0}};
+			s_pslverr <= 1'b0;
+		end else begin
+			if (s2m_sync[2] && !s_busy) begin
+				// New transaction request from M domain
+				s_busy <= 1'b1;
+				S_APB_PREADY <= 1'b0;
+			end else if (s_busy) begin
+				if (s2m_sync[2] && m2s_done) begin
+					// Transaction complete
+					s_busy <= 1'b0;
+					S_APB_PREADY <= 1'b1;
+					s_rdata <= m_rdata;
+					s_pslverr <= m_pslverr;
+				end
+			end else begin
+				S_APB_PREADY <= 1'b1;
+			end
+		end
+	end
+
+	// S domain outputs
+	assign S_APB_PRDATA = s_rdata;
+	assign S_APB_PSLVERR = s_pslverr;
+
+endmodule

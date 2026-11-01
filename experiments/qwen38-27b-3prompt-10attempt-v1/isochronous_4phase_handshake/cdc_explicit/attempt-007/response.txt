@@ -1,0 +1,138 @@
+```verilog
+module isochronous_4phase_handshake (
+    input  src_clk_i,
+    input  src_rst_ni,
+    input  src_valid_i,
+    output src_ready_o,
+    input  dst_clk_i,
+    input  dst_rst_ni,
+    output dst_valid_o,
+    input  dst_ready_i
+);
+
+    // Source domain state
+    reg src_valid_reg;
+    reg src_ack_reg;
+
+    // Destination domain state
+    reg dst_valid_reg;
+    reg dst_ack_reg;
+
+    // Synchronizers for crossing signals
+    // src_valid crosses to dst domain
+    reg [1:0] src_valid_sync;
+    // src_ack crosses to dst domain
+    reg [1:0] src_ack_sync;
+    // dst_valid crosses to src domain
+    reg [1:0] dst_valid_sync;
+    // dst_ack crosses to src domain
+    reg [1:0] dst_ack_sync;
+
+    // Synchronize src_valid into dst domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_valid_sync <= 2'b00;
+        else
+            src_valid_sync <= {src_valid_sync[0], src_valid_reg};
+    end
+
+    // Synchronize src_ack into dst domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            src_ack_sync <= 2'b00;
+        else
+            src_ack_sync <= {src_ack_sync[0], src_ack_reg};
+    end
+
+    // Synchronize dst_valid into src domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_valid_sync <= 2'b00;
+        else
+            dst_valid_sync <= {dst_valid_sync[0], dst_valid_reg};
+    end
+
+    // Synchronize dst_ack into src domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            dst_ack_sync <= 2'b00;
+        else
+            dst_ack_sync <= {dst_ack_sync[0], dst_ack_reg};
+    end
+
+    // Source domain logic
+    // src_ready_o is high when source is not waiting for ack or when ack is received
+    // Four-phase handshake:
+    //   Idle: valid=0, ready=1
+    //   Request: valid=1, ready=1
+    //   Ack: valid=1, ready=0
+    //   Deassert: valid=0, ready=0
+    //   Back to Idle: valid=0, ready=1
+
+    // src_ready_o: ready to accept new valid
+    // In four-phase, ready goes low after valid is asserted and stays low until ack is received
+    // Then ready goes high, and valid goes low
+
+    assign src_ready_o = ~src_valid_reg | dst_ack_sync[1];
+
+    // Source valid register: assert when src_valid_i is high and ready, deassert when ack received
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_valid_reg <= 1'b0;
+        else begin
+            if (src_valid_i && src_ready_o)
+                src_valid_reg <= 1'b1;
+            else if (dst_ack_sync[1])
+                src_valid_reg <= 1'b0;
+        end
+    end
+
+    // Source ack register: assert when dst_valid is seen, deassert when src_valid is deasserted
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_ack_reg <= 1'b0;
+        else begin
+            if (dst_valid_sync[1])
+                src_ack_reg <= 1'b1;
+            else if (!src_valid_reg)
+                src_ack_reg <= 1'b0;
+        end
+    end
+
+    // Destination domain logic
+    // dst_valid_o: valid signal to destination
+    // Four-phase handshake on destination side:
+    //   Idle: valid=0, ready=1
+    //   Request: valid=1, ready=1
+    //   Ack: valid=1, ready=0
+    //   Deassert: valid=0, ready=0
+    //   Back to Idle: valid=0, ready=1
+
+    assign dst_valid_o = dst_valid_reg;
+
+    // Destination valid register: assert when src_valid is seen, deassert when dst_ready is high and ack is sent
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_valid_reg <= 1'b0;
+        else begin
+            if (src_valid_sync[1])
+                dst_valid_reg <= 1'b1;
+            else if (dst_ready_i && dst_ack_reg)
+                dst_valid_reg <= 1'b0;
+        end
+    end
+
+    // Destination ack register: assert when dst_valid is high and dst_ready is high, deassert when src_valid is deasserted
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_ack_reg <= 1'b0;
+        else begin
+            if (dst_valid_reg && dst_ready_i)
+                dst_ack_reg <= 1'b1;
+            else if (!src_valid_sync[1])
+                dst_ack_reg <= 1'b0;
+        end
+    end
+
+endmodule
+```<|im_end|>

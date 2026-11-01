@@ -1,0 +1,101 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain state
+  reg src_valid_reg;
+  reg [WIDTH-1:0] src_data_reg;
+
+  // Destination domain state
+  reg dst_valid_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+
+  // Cross-domain signals
+  wire src_to_dst_valid;
+  wire [WIDTH-1:0] src_to_dst_data;
+  wire dst_to_src_ready;
+
+  // Source domain logic
+  assign src_ready_o = ~src_valid_reg;
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_data_reg  <= {WIDTH{1'b0}};
+    end else begin
+      if (src_valid_i && src_ready_o) begin
+        src_valid_reg <= 1'b1;
+        src_data_reg  <= src_data_i;
+      end else if (dst_to_src_ready) begin
+        src_valid_reg <= 1'b0;
+      end
+    end
+  end
+
+  // Destination domain logic
+  assign dst_valid_o = dst_valid_reg;
+  assign dst_data_o  = dst_data_reg;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_data_reg  <= {WIDTH{1'b0}};
+    end else begin
+      if (dst_valid_reg && dst_ready_i) begin
+        dst_valid_reg <= 1'b0;
+      end else if (!dst_valid_reg && src_to_dst_valid) begin
+        dst_valid_reg <= 1'b1;
+        dst_data_reg  <= src_to_dst_data;
+      end
+    end
+  end
+
+  // Cross-domain synchronization
+  // src_to_dst_valid: synchronized from source to destination
+  reg [1:0] src_valid_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_valid_sync <= 2'b00;
+    end else begin
+      src_valid_sync <= {src_valid_sync[0], src_valid_reg};
+    end
+  end
+  assign src_to_dst_valid = src_valid_sync[1];
+
+  // src_to_dst_data: synchronized from source to destination
+  // Data is stable when src_valid_reg is high, so we can synchronize it
+  reg [WIDTH-1:0] src_data_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_data_sync <= {WIDTH{1'b0}};
+    end else begin
+      src_data_sync <= src_data_reg;
+    end
+  end
+  assign src_to_dst_data = src_data_sync;
+
+  // dst_to_src_ready: synchronized from destination to source
+  // dst_to_src_ready is high when destination is ready to accept new data
+  // i.e., when dst_valid_reg is low
+  reg [1:0] dst_ready_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      dst_ready_sync <= 2'b00;
+    end else begin
+      dst_ready_sync <= {dst_ready_sync[0], ~dst_valid_reg};
+    end
+  end
+  assign dst_to_src_ready = dst_ready_sync[1];
+
+endmodule

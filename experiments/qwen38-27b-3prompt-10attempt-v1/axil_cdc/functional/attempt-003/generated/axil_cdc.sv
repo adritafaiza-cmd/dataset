@@ -1,0 +1,224 @@
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // Internal signals for write channel
+    wire s_aw_handshake;
+    wire s_w_handshake;
+    wire m_aw_handshake;
+    wire m_w_handshake;
+    wire m_b_handshake;
+    wire s_b_handshake;
+
+    // Internal signals for read channel
+    wire s_ar_handshake;
+    wire m_ar_handshake;
+    wire m_r_handshake;
+    wire s_r_handshake;
+
+    // Write address channel CDC
+    reg [ADDR_WIDTH-1:0] awaddr_reg;
+    reg [2:0] awprot_reg;
+    reg awvalid_reg;
+    reg awready_reg;
+
+    // Write data channel CDC
+    reg [DATA_WIDTH-1:0] wdata_reg;
+    reg [STRB_WIDTH-1:0] wstrb_reg;
+    reg wvalid_reg;
+    reg wready_reg;
+
+    // Write response channel CDC
+    reg [1:0] bresp_reg;
+    reg bvalid_reg;
+    reg bready_reg;
+
+    // Read address channel CDC
+    reg [ADDR_WIDTH-1:0] araddr_reg;
+    reg [2:0] arprot_reg;
+    reg arvalid_reg;
+    reg arready_reg;
+
+    // Read data channel CDC
+    reg [DATA_WIDTH-1:0] rdata_reg;
+    reg [1:0] rresp_reg;
+    reg rvalid_reg;
+    reg rready_reg;
+
+    // Handshake signals
+    assign s_aw_handshake = s_axil_awvalid & s_axil_awready;
+    assign s_w_handshake = s_axil_wvalid & s_axil_wready;
+    assign m_aw_handshake = m_axil_awvalid & m_axil_awready;
+    assign m_w_handshake = m_axil_wvalid & m_axil_wready;
+    assign m_b_handshake = m_axil_bvalid & m_axil_bready;
+    assign s_b_handshake = s_axil_bvalid & s_axil_bready;
+
+    assign s_ar_handshake = s_axil_arvalid & s_axil_arready;
+    assign m_ar_handshake = m_axil_arvalid & m_axil_arready;
+    assign m_r_handshake = m_axil_rvalid & m_axil_rready;
+    assign s_r_handshake = s_axil_rvalid & s_axil_rready;
+
+    // Slave side outputs
+    assign s_axil_awready = awready_reg;
+    assign s_axil_wready = wready_reg;
+    assign s_axil_bresp = bresp_reg;
+    assign s_axil_bvalid = bvalid_reg;
+    assign s_axil_arready = arready_reg;
+    assign s_axil_rdata = rdata_reg;
+    assign s_axil_rresp = rresp_reg;
+    assign s_axil_rvalid = rvalid_reg;
+
+    // Master side outputs
+    assign m_axil_awaddr = awaddr_reg;
+    assign m_axil_awprot = awprot_reg;
+    assign m_axil_awvalid = awvalid_reg;
+    assign m_axil_wdata = wdata_reg;
+    assign m_axil_wstrb = wstrb_reg;
+    assign m_axil_wvalid = wvalid_reg;
+    assign m_axil_bready = bready_reg;
+    assign m_axil_araddr = araddr_reg;
+    assign m_axil_arprot = arprot_reg;
+    assign m_axil_arvalid = arvalid_reg;
+    assign m_axil_rready = rready_reg;
+
+    // Master side inputs
+    assign awready_reg = m_axil_awready;
+    assign wready_reg = m_axil_wready;
+    assign bresp_reg = m_axil_bresp;
+    assign bvalid_reg = m_axil_bvalid;
+    assign arready_reg = m_axil_arready;
+    assign rdata_reg = m_axil_rdata;
+    assign rresp_reg = m_axil_rresp;
+    assign rvalid_reg = m_axil_rvalid;
+
+    // Slave side inputs
+    assign bready_reg = s_axil_bready;
+    assign rready_reg = s_axil_rready;
+
+    // Write address channel: capture on slave side, forward to master
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            awaddr_reg <= {ADDR_WIDTH{1'b0}};
+            awprot_reg <= 3'b000;
+            awvalid_reg <= 1'b0;
+        end else if (s_aw_handshake) begin
+            awaddr_reg <= s_axil_awaddr;
+            awprot_reg <= s_axil_awprot;
+            awvalid_reg <= 1'b1;
+        end else if (m_aw_handshake) begin
+            awvalid_reg <= 1'b0;
+        end
+    end
+
+    // Write data channel: capture on slave side, forward to master
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            wdata_reg <= {DATA_WIDTH{1'b0}};
+            wstrb_reg <= {STRB_WIDTH{1'b0}};
+            wvalid_reg <= 1'b0;
+        end else if (s_w_handshake) begin
+            wdata_reg <= s_axil_wdata;
+            wstrb_reg <= s_axil_wstrb;
+            wvalid_reg <= 1'b1;
+        end else if (m_w_handshake) begin
+            wvalid_reg <= 1'b0;
+        end
+    end
+
+    // Write response channel: capture on master side, forward to slave
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            bresp_reg <= 2'b00;
+            bvalid_reg <= 1'b0;
+        end else if (m_b_handshake) begin
+            bresp_reg <= m_axil_bresp;
+            bvalid_reg <= 1'b1;
+        end else if (s_b_handshake) begin
+            bvalid_reg <= 1'b0;
+        end
+    end
+
+    // Read address channel: capture on slave side, forward to master
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            araddr_reg <= {ADDR_WIDTH{1'b0}};
+            arprot_reg <= 3'b000;
+            arvalid_reg <= 1'b0;
+        end else if (s_ar_handshake) begin
+            araddr_reg <= s_axil_araddr;
+            arprot_reg <= s_axil_arprot;
+            arvalid_reg <= 1'b1;
+        end else if (m_ar_handshake) begin
+            arvalid_reg <= 1'b0;
+        end
+    end
+
+    // Read data channel: capture on master side, forward to slave
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            rdata_reg <= {DATA_WIDTH{1'b0}};
+            rresp_reg <= 2'b00;
+            rvalid_reg <= 1'b0;
+        end else if (m_r_handshake) begin
+            rdata_reg <= m_axil_rdata;
+            rresp_reg <= m_axil_rresp;
+            rvalid_reg <= 1'b1;
+        end else if (s_r_handshake) begin
+            rvalid_reg <= 1'b0;
+        end
+    end
+
+endmodule

@@ -1,0 +1,172 @@
+```verilog
+module wbxclk #(
+		parameter	AW=32,
+				DW=32,
+				LGFIFO = 5
+	) (
+		input	wire			i_wb_clk, i_reset,
+		input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+		input	wire	[(AW-1):0]	i_wb_addr,
+		input	wire	[(DW-1):0]	i_wb_data,
+		input	wire	[(DW/8-1):0]	i_wb_sel,
+		output	wire			o_wb_stall,
+		output	reg			o_wb_ack,
+		output	reg	[(DW-1):0]	o_wb_data,
+		output	reg			o_wb_err,
+		input	wire			i_xclk_clk,
+		output	reg			o_xclk_cyc,
+		output	reg			o_xclk_stb,
+		output	reg			o_xclk_we,
+		output	reg	[(AW-1):0]	o_xclk_addr,
+		output	reg	[(DW-1):0]	o_xclk_data,
+		output	reg	[(DW/8-1):0]	o_xclk_sel,
+		input	wire			i_xclk_stall,
+		input	wire			i_xclk_ack,
+		input	wire	[(DW-1):0]	i_xclk_data,
+		input	wire			i_xclk_err
+	);
+
+	localparam FIFO_DEPTH = 1 << LGFIFO;
+	localparam FIFO_ADDR_WIDTH = LGFIFO;
+
+	// Request FIFO (wb -> xclk)
+	reg [DW-1:0] req_fifo_data [0:FIFO_DEPTH-1];
+	reg [AW-1:0] req_fifo_addr [0:FIFO_DEPTH-1];
+	reg [DW/8-1:0] req_fifo_sel [0:FIFO_DEPTH-1];
+	reg req_fifo_we [0:FIFO_DEPTH-1];
+	reg [FIFO_ADDR_WIDTH-1:0] req_wr_ptr, req_rd_ptr;
+	reg [FIFO_ADDR_WIDTH:0] req_count;
+
+	// Response FIFO (xclk -> wb)
+	reg [DW-1:0] rsp_fifo_data [0:FIFO_DEPTH-1];
+	reg rsp_fifo_err [0:FIFO_DEPTH-1];
+	reg [FIFO_ADDR_WIDTH-1:0] rsp_wr_ptr, rsp_rd_ptr;
+	reg [FIFO_ADDR_WIDTH:0] rsp_count;
+
+	// Handshake signals
+	reg req_wr_en, req_rd_en;
+	reg rsp_wr_en, rsp_rd_en;
+
+	// Synchronizers for request FIFO full/empty
+	reg [2:0] req_full_sync, req_empty_sync;
+	reg req_full, req_empty;
+
+	// Synchronizers for response FIFO full/empty
+	reg [2:0] rsp_full_sync, rsp_empty_sync;
+	reg rsp_full, rsp_empty;
+
+	// Request FIFO write logic (wb_clk domain)
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_wr_ptr <= 0;
+			req_count <= 0;
+			req_wr_en <= 0;
+		end else begin
+			req_wr_en <= i_wb_cyc && i_wb_stb && !req_full;
+			if (req_wr_en) begin
+				req_fifo_data[req_wr_ptr] <= i_wb_data;
+				req_fifo_addr[req_wr_ptr] <= i_wb_addr;
+				req_fifo_sel[req_wr_ptr] <= i_wb_sel;
+				req_fifo_we[req_wr_ptr] <= i_wb_we;
+				req_wr_ptr <= req_wr_ptr + 1;
+			end
+			if (req_wr_en && !req_rd_en)
+				req_count <= req_count + 1;
+			else if (!req_wr_en && req_rd_en)
+				req_count <= req_count - 1;
+		end
+	end
+
+	// Request FIFO read logic (xclk_clk domain)
+	always @(posedge i_xclk_clk) begin
+		req_rd_en <= !req_empty && !i_xclk_stall;
+		if (req_rd_en) begin
+			req_rd_ptr <= req_rd_ptr + 1;
+		end
+	end
+
+	// Response FIFO write logic (xclk_clk domain)
+	always @(posedge i_xclk_clk) begin
+		rsp_wr_en <= i_xclk_ack && !rsp_full;
+		if (rsp_wr_en) begin
+			rsp_fifo_data[rsp_wr_ptr] <= i_xclk_data;
+			rsp_fifo_err[rsp_wr_ptr] <= i_xclk_err;
+			rsp_wr_ptr <= rsp_wr_ptr + 1;
+		end
+		if (rsp_wr_en && !rsp_rd_en)
+			rsp_count <= rsp_count + 1;
+		else if (!rsp_wr_en && rsp_rd_en)
+			rsp_count <= rsp_count - 1;
+	end
+
+	// Response FIFO read logic (wb_clk domain)
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rsp_rd_ptr <= 0;
+			rsp_rd_en <= 0;
+			o_wb_ack <= 0;
+			o_wb_data <= 0;
+			o_wb_err <= 0;
+		end else begin
+			rsp_rd_en <= !rsp_empty;
+			if (rsp_rd_en) begin
+				o_wb_ack <= 1;
+				o_wb_data <= rsp_fifo_data[rsp_rd_ptr];
+				o_wb_err <= rsp_fifo_err[rsp_rd_ptr];
+				rsp_rd_ptr <= rsp_rd_ptr + 1;
+			end else begin
+				o_wb_ack <= 0;
+			end
+		end
+	end
+
+	// Output xclk signals
+	always @(posedge i_xclk_clk) begin
+		if (req_rd_en) begin
+			o_xclk_cyc <= 1;
+			o_xclk_stb <= 1;
+			o_xclk_we <= req_fifo_we[req_rd_ptr];
+			o_xclk_addr <= req_fifo_addr[req_rd_ptr];
+			o_xclk_data <= req_fifo_data[req_rd_ptr];
+			o_xclk_sel <= req_fifo_sel[req_rd_ptr];
+		end else begin
+			o_xclk_cyc <= 0;
+			o_xclk_stb <= 0;
+			o_xclk_we <= 0;
+			o_xclk_addr <= 0;
+			o_xclk_data <= 0;
+			o_xclk_sel <= 0;
+		end
+	end
+
+	// Synchronizers
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_full_sync <= 0;
+			req_empty_sync <= 0;
+			rsp_full_sync <= 0;
+			rsp_empty_sync <= 0;
+		end else begin
+			req_full_sync <= {req_full_sync[1:0], (req_count == FIFO_DEPTH)};
+			req_empty_sync <= {req_empty_sync[1:0], (req_count == 0)};
+			rsp_full_sync <= {rsp_full_sync[1:0], (rsp_count == FIFO_DEPTH)};
+			rsp_empty_sync <= {rsp_empty_sync[1:0], (rsp_count == 0)};
+		end
+	end
+
+	always @(posedge i_xclk_clk) begin
+		req_full_sync <= {req_full_sync[1:0], (req_count == FIFO_DEPTH)};
+		req_empty_sync <= {req_empty_sync[1:0], (req_count == 0)};
+		rsp_full_sync <= {rsp_full_sync[1:0], (rsp_count == FIFO_DEPTH)};
+		rsp_empty_sync <= {rsp_empty_sync[1:0], (rsp_count == 0)};
+	end
+
+	assign req_full = req_full_sync[2];
+	assign req_empty = req_empty_sync[2];
+	assign rsp_full = rsp_full_sync[2];
+	assign rsp_empty = rsp_empty_sync[2];
+
+	assign o_wb_stall = req_full;
+
+endmodule
+```<|im_end|>

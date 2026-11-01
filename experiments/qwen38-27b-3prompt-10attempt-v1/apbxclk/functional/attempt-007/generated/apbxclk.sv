@@ -1,0 +1,209 @@
+module apbxclk #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		parameter [0:0]	OPT_REGISTERED = 1'b0,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH
+	) (
+		input	wire			S_APB_PCLK, S_PRESETn,
+		input	wire			S_APB_PSEL,
+		input	wire			S_APB_PENABLE,
+		output	reg			S_APB_PREADY,
+		input	wire	[AW-1:0]	S_APB_PADDR,
+		input	wire			S_APB_PWRITE,
+		input	wire	[DW-1:0]	S_APB_PWDATA,
+		input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+		input	wire	[2:0]		S_APB_PPROT,
+		output	wire	[DW-1:0]	S_APB_PRDATA,
+		output	wire			S_APB_PSLVERR,
+		input	wire			M_APB_PCLK,
+		output	reg			M_PRESETn,
+		output	reg			M_APB_PSEL,
+		output	reg			M_APB_PENABLE,
+		input	wire			M_APB_PREADY,
+		output	wire	[AW-1:0]	M_APB_PADDR,
+		output	wire			M_APB_PWRITE,
+		output	wire	[DW-1:0]	M_APB_PWDATA,
+		output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+		output	wire	[2:0]		M_APB_PPROT,
+		input	wire	[DW-1:0]	M_APB_PRDATA,
+		input	wire			M_APB_PSLVERR
+	);
+
+	// Synchronization signals
+	reg [1:0] s_req_sync;
+	reg [1:0] m_done_sync;
+	reg [1:0] m_pready_sync;
+
+	// M-side state
+	reg m_req_valid;
+	reg m_phase; // 0: setup, 1: access
+
+	// S-side state
+	reg s_busy;
+
+	// Payload registers (M-side)
+	reg [AW-1:0] m_addr_reg;
+	reg m_write_reg;
+	reg [DW-1:0] m_wdata_reg;
+	reg [DW/8-1:0] m_wstrb_reg;
+	reg [2:0] m_pprot_reg;
+
+	// Response registers (S-side)
+	reg [DW-1:0] s_rdata_reg;
+	reg s_pslverr_reg;
+
+	// M-side reset
+	reg m_reset_n;
+
+	// Synchronization of S_APB_PSEL & S_APB_PENABLE to M domain
+	// We use a simple handshake: when S side sees a new setup phase, it pulses a request
+	// to the M side. The M side processes it and pulses a done back.
+
+	// S-side: detect new transaction start (setup phase)
+	// A new transaction starts when PSEL is high and PENABLE is low, and we are not busy.
+	wire s_new_trans = S_APB_PSEL & ~S_APB_PENABLE & ~s_busy;
+
+	// S-side: detect end of access phase (PSEL & PENABLE & PREADY)
+	wire s_trans_done = S_APB_PSEL & S_APB_PENABLE & S_APB_PREADY;
+
+	// M-side: detect end of access phase
+	wire m_trans_done = M_APB_PSEL & M_APB_PENABLE & M_APB_PREADY;
+
+	// Synchronization of s_new_trans to M domain
+	always @(posedge M_APB_PCLK or negedge m_reset_n) begin
+		if (!m_reset_n) begin
+			s_req_sync <= 2'b00;
+		end else begin
+			s_req_sync <= {s_req_sync[0], s_new_trans};
+		end
+	end
+
+	// Synchronization of m_trans_done to S domain
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_done_sync <= 2'b00;
+		end else begin
+			m_done_sync <= {m_done_sync[0], m_trans_done};
+		end
+	end
+
+	// Synchronization of M_APB_PREADY to S domain (for response capture)
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_pready_sync <= 2'b00;
+		end else begin
+			m_pready_sync <= {m_pready_sync[0], M_APB_PREADY};
+		end
+	end
+
+	// M-side reset generation
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_reset_n <= 1'b0;
+		end else begin
+			m_reset_n <= 1'b1;
+		end
+	end
+
+	assign M_PRESETn = m_reset_n;
+
+	// M-side state machine
+	always @(posedge M_APB_PCLK or negedge m_reset_n) begin
+		if (!m_reset_n) begin
+			m_req_valid <= 1'b0;
+			m_phase <= 1'b0;
+			m_addr_reg <= {AW{1'b0}};
+			m_write_reg <= 1'b0;
+			m_wdata_reg <= {DW{1'b0}};
+			m_wstrb_reg <= {(DW/8){1'b0}};
+			m_pprot_reg <= 3'b000;
+		end else begin
+			if (s_req_sync[1] & ~s_req_sync[0]) begin
+				// New request from S side
+				m_req_valid <= 1'b1;
+				m_phase <= 1'b0;
+				m_addr_reg <= S_APB_PADDR;
+				m_write_reg <= S_APB_PWRITE;
+				m_wdata_reg <= S_APB_PWDATA;
+				m_wstrb_reg <= S_APB_PWSTRB;
+				m_pprot_reg <= S_APB_PPROT;
+			end else if (m_req_valid) begin
+				if (m_phase == 1'b0) begin
+					// Setup phase complete, move to access
+					m_phase <= 1'b1;
+				end else begin
+					// Access phase complete
+					if (M_APB_PREADY) begin
+						m_req_valid <= 1'b0;
+						m_phase <= 1'b0;
+					end
+				end
+			end
+		end
+	end
+
+	// M-side APB outputs
+	always @(*) begin
+		if (!m_reset_n) begin
+			M_APB_PSEL = 1'b0;
+			M_APB_PENABLE = 1'b0;
+			M_APB_PADDR = {AW{1'b0}};
+			M_APB_PWRITE = 1'b0;
+			M_APB_PWDATA = {DW{1'b0}};
+			M_APB_PWSTRB = {(DW/8){1'b0}};
+			M_APB_PPROT = 3'b000;
+		end else if (m_req_valid) begin
+			M_APB_PSEL = 1'b1;
+			M_APB_PENABLE = m_phase;
+			M_APB_PADDR = m_addr_reg;
+			M_APB_PWRITE = m_write_reg;
+			M_APB_PWDATA = m_wdata_reg;
+			M_APB_PWSTRB = m_wstrb_reg;
+			M_APB_PPROT = m_pprot_reg;
+		end else begin
+			M_APB_PSEL = 1'b0;
+			M_APB_PENABLE = 1'b0;
+			M_APB_PADDR = {AW{1'b0}};
+			M_APB_PWRITE = 1'b0;
+			M_APB_PWDATA = {DW{1'b0}};
+			M_APB_PWSTRB = {(DW/8){1'b0}};
+			M_APB_PPROT = 3'b000;
+		end
+	end
+
+	// S-side state machine
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_busy <= 1'b0;
+			S_APB_PREADY <= 1'b0;
+			s_rdata_reg <= {DW{1'b0}};
+			s_pslverr_reg <= 1'b0;
+		end else begin
+			if (s_new_trans) begin
+				// Start new transaction
+				s_busy <= 1'b1;
+				S_APB_PREADY <= 1'b0;
+			end else if (s_busy) begin
+				// Wait for M side to complete
+				if (m_done_sync[1] & ~m_done_sync[0]) begin
+					// M side completed
+					s_busy <= 1'b0;
+					S_APB_PREADY <= 1'b1;
+					s_rdata_reg <= M_APB_PRDATA;
+					s_pslverr_reg <= M_APB_PSLVERR;
+				end else if (S_APB_PSEL & S_APB_PENABLE) begin
+					// In access phase, wait for done
+					S_APB_PREADY <= 1'b0;
+				end
+			end else begin
+				S_APB_PREADY <= 1'b0;
+			end
+		end
+	end
+
+	// S-side response outputs
+	assign S_APB_PRDATA = s_rdata_reg;
+	assign S_APB_PSLVERR = s_pslverr_reg;
+
+endmodule

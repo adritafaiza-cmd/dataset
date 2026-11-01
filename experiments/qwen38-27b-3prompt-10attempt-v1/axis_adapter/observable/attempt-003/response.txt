@@ -1,0 +1,366 @@
+```verilog
+module axis_adapter #
+(
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    /*
+     * AXI input
+     */
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    // Internal parameters
+    localparam S_BYTES = (S_DATA_WIDTH + 7) / 8;
+    localparam M_BYTES = (M_DATA_WIDTH + 7) / 8;
+    localparam S_BITS  = S_DATA_WIDTH;
+    localparam M_BITS  = M_DATA_WIDTH;
+
+    // State machine states
+    localparam ST_IDLE = 2'd0;
+    localparam ST_PROC = 2'd1;
+    localparam ST_DONE = 2'd2;
+
+    // Registers
+    reg [1:0] state;
+    reg [S_BITS-1:0] s_data_reg;
+    reg [S_KEEP_WIDTH-1:0] s_keep_reg;
+    reg s_last_reg;
+    reg [ID_WIDTH-1:0] s_tid_reg;
+    reg [DEST_WIDTH-1:0] s_tdest_reg;
+    reg [USER_WIDTH-1:0] s_tuser_reg;
+
+    // Output registers
+    reg [M_BITS-1:0] m_data_reg;
+    reg [M_KEEP_WIDTH-1:0] m_keep_reg;
+    reg m_last_reg;
+    reg [ID_WIDTH-1:0] m_tid_reg;
+    reg [DEST_WIDTH-1:0] m_tdest_reg;
+    reg [USER_WIDTH-1:0] m_tuser_reg;
+    reg m_valid_reg;
+
+    // Byte offset tracking
+    // For S_DATA_WIDTH > M_DATA_WIDTH: we need to track which byte of the source we're at
+    // For S_DATA_WIDTH < M_DATA_WIDTH: we need to accumulate bytes
+    // For equal widths: direct pass-through
+
+    // Let's use a general approach with byte-level FIFO-like buffer
+    // We'll track the number of valid bytes in the current source beat and the byte offset
+
+    // Number of valid bytes in current source beat
+    reg [3:0] s_valid_bytes;
+    // Byte offset within current source beat (0 to S_BYTES-1)
+    reg [3:0] s_byte_offset;
+    // For accumulation when M > S: number of bytes accumulated in output buffer
+    reg [3:0] m_accum_bytes;
+    // Output buffer for accumulation
+    reg [M_BITS-1:0] m_accum_data;
+    reg [M_KEEP_WIDTH-1:0] m_accum_keep;
+
+    // Helper: count valid bytes from tkeep
+    function [3:0] count_bytes;
+        input [S_KEEP_WIDTH-1:0] keep;
+        integer i;
+        begin
+            count_bytes = 0;
+            for (i = 0; i < S_KEEP_WIDTH; i = i + 1) begin
+                count_bytes = count_bytes + keep[i];
+            end
+        end
+    endfunction
+
+    // Helper: extract byte from source data
+    function [7:0] get_s_byte;
+        input [S_BITS-1:0] data;
+        input [3:0] byte_idx;
+        begin
+            get_s_byte = data[byte_idx*8 +: 8];
+        end
+    endfunction
+
+    // Helper: set byte in output data
+    function [M_BITS-1:0] set_m_byte;
+        input [M_BITS-1:0] data;
+        input [3:0] byte_idx;
+        input [7:0] byte_val;
+        begin
+            set_m_byte = data;
+            set_m_byte[byte_idx*8 +: 8] = byte_val;
+        end
+    endfunction
+
+    // Helper: set keep bit
+    function [M_KEEP_WIDTH-1:0] set_m_keep;
+        input [M_KEEP_WIDTH-1:0] keep;
+        input [3:0] byte_idx;
+        input enable;
+        begin
+            set_m_keep = keep;
+            if (enable)
+                set_m_keep[byte_idx] = 1'b1;
+            else
+                set_m_keep[byte_idx] = 1'b0;
+        end
+    endfunction
+
+    // Determine if we can accept new source data
+    wire s_ready = (state == ST_IDLE) && !m_valid_reg;
+
+    // Determine if we can output
+    wire m_fire = m_valid_reg && m_axis_tready;
+
+    // Determine if we're done with current source beat
+    wire s_beat_done = (s_byte_offset >= s_valid_bytes - 1);
+
+    // Determine if we need to accumulate (M > S case)
+    wire need_accumulate = (M_BYTES > S_BYTES);
+    // Determine if we need to split (S > M case)
+    wire need_split = (S_BYTES > M_BYTES);
+    // Equal width
+    wire equal_width = (S_BYTES == M_BYTES);
+
+    // For equal width, direct mapping
+    // For S > M: split source into multiple output beats
+    // For S < M: accumulate multiple source beats into one output beat
+
+    // Let's use a simpler approach:
+    // Maintain a byte-level buffer. On each cycle, if we can accept source data,
+    // load it. Then try to output as many bytes as fit in M_DATA_WIDTH.
+
+    // Actually, let's use a different approach with explicit state handling.
+
+    // For simplicity and correctness, let's handle the three cases:
+    // 1. Equal width: direct pass-through
+    // 2. S > M: split
+    // 3. S < M: accumulate
+
+    // Let's use a unified approach with a byte buffer.
+
+    // Buffer: stores up to max(S_BYTES, M_BYTES) bytes
+    localparam BUF_BYTES = (S_BYTES > M_BYTES) ? S_BYTES : M_BYTES;
+    localparam BUF_BITS = BUF_BYTES * 8;
+
+    reg [BUF_BITS-1:0] buf_data;
+    reg [BUF_BYTES-1:0] buf_valid;
+    reg [3:0] buf_count; // number of valid bytes in buffer
+    reg [3:0] buf_offset; // next byte to read from buffer
+
+    // Sideband for current packet
+    reg [ID_WIDTH-1:0] pkt_tid;
+    reg [DEST_WIDTH-1:0] pkt_tdest;
+    reg [USER_WIDTH-1:0] pkt_tuser;
+    reg pkt_last_pending;
+    reg pkt_last_byte_idx; // which byte index in the source beat has tlast
+
+    // State
+    reg [1:0] fsm_state;
+    localparam FSM_IDLE = 2'd0;
+    localparam FSM_LOAD = 2'd1;
+    localparam FSM_EMIT = 2'd2;
+
+    // Output
+    assign s_axis_tready = (fsm_state == FSM_IDLE) && !m_valid_reg;
+    assign m_axis_tvalid = m_valid_reg;
+    assign m_axis_tdata = m_data_reg;
+    assign m_axis_tkeep = m_keep_reg;
+    assign m_axis_tlast = m_last_reg;
+    assign m_axis_tid = m_tid_reg;
+    assign m_axis_tdest = m_tdest_reg;
+    assign m_axis_tuser = m_tuser_reg;
+
+    // Count valid bytes in source beat
+    wire [3:0] s_valid_bytes_wire = count_bytes(s_axis_tkeep);
+
+    // Determine if tlast byte is the last valid byte
+    // tlast indicates the last beat of a packet, not necessarily the last byte
+    // We need to track when we've emitted all bytes of the beat with tlast
+
+    // Let's simplify: we'll process byte by byte.
+    // When we load a source beat, we store all valid bytes in the buffer.
+    // We also store which byte index corresponds to tlast (if any).
+    // When emitting, we check if the current byte is the tlast byte.
+
+    // For tlast: it applies to the beat, so the last valid byte of that beat is the tlast byte.
+    // Actually, tlast is a per-beat signal. The beat with tlast=1 is the last beat of the packet.
+    // All bytes in that beat are part of the packet, and the beat is the last one.
+    // So when we emit the last byte of the tlast beat, we set m_axis_tlast.
+
+    // Let's track: is the current source beat a tlast beat?
+    reg s_is_tlast_beat;
+    reg [3:0] s_tlast_beat_valid_bytes;
+
+    // FSM
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            fsm_state <= FSM_IDLE;
+            m_valid_reg <= 1'b0;
+            m_data_reg <= {M_BITS{1'b0}};
+            m_keep_reg <= {M_KEEP_WIDTH{1'b0}};
+            m_last_reg <= 1'b0;
+            m_tid_reg <= {ID_WIDTH{1'b0}};
+            m_tdest_reg <= {DEST_WIDTH{1'b0}};
+            m_tuser_reg <= {USER_WIDTH{1'b0}};
+            buf_data <= {BUF_BITS{1'b0}};
+            buf_valid <= {BUF_BYTES{1'b0}};
+            buf_count <= 4'd0;
+            buf_offset <= 4'd0;
+            pkt_tid <= {ID_WIDTH{1'b0}};
+            pkt_tdest <= {DEST_WIDTH{1'b0}};
+            pkt_tuser <= {USER_WIDTH{1'b0}};
+            s_is_tlast_beat <= 1'b0;
+            s_tlast_beat_valid_bytes <= 4'd0;
+        end else begin
+            case (fsm_state)
+                FSM_IDLE: begin
+                    if (s_axis_tvalid && s_axis_tready) begin
+                        // Load source beat into buffer
+                        buf_count <= s_valid_bytes_wire;
+                        buf_offset <= 4'd0;
+                        s_is_tlast_beat <= s_axis_tlast;
+                        s_tlast_beat_valid_bytes <= s_valid_bytes_wire;
+                        pkt_tid <= s_axis_tid;
+                        pkt_tdest <= s_axis_tdest;
+                        pkt_tuser <= s_axis_tuser;
+
+                        // Load valid bytes into buffer
+                        for (integer i = 0; i < S_KEEP_WIDTH; i = i + 1) begin
+                            if (s_axis_tkeep[i]) begin
+                                buf_data[i*8 +: 8] <= s_axis_tdata[i*8 +: 8];
+                                buf_valid[i] <= 1'b1;
+                            end else begin
+                                buf_valid[i] <= 1'b0;
+                            end
+                        end
+                        // Clear remaining buffer bytes
+                        for (integer i = S_KEEP_WIDTH; i < BUF_BYTES; i = i + 1) begin
+                            buf_valid[i] <= 1'b0;
+                        end
+
+                        fsm_state <= FSM_EMIT;
+                    end
+                end
+
+                FSM_EMIT: begin
+                    if (m_valid_reg && m_axis_tready) begin
+                        // Output accepted, clear valid
+                        m_valid_reg <= 1'b0;
+
+                        // Check if we've emitted all bytes of current beat
+                        if (buf_offset >= buf_count - 1) begin
+                            // Done with this beat
+                            if (s_is_tlast_beat) begin
+                                // Packet complete, go to idle
+                                fsm_state <= FSM_IDLE;
+                            end else begin
+                                // More beats may come
+                                fsm_state <= FSM_IDLE;
+                            end
+                        end else begin
+                            // More bytes to emit from this beat
+                            buf_offset <= buf_offset + 1;
+                            // Prepare next output
+                            emit_next_byte;
+                        end
+                    end else if (!m_valid_reg) begin
+                        // No output pending, prepare next
+                        if (buf_offset < buf_count) begin
+                            emit_next_byte;
+                            m_valid_reg <= 1'b1;
+                        end else begin
+                            // Should not happen if logic is correct
+                            fsm_state <= FSM_IDLE;
+                        end
+                    end
+                end
+
+                default: begin
+                    fsm_state <= FSM_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Task to prepare next output byte
+    task emit_next_byte;
+        integer i;
+        reg [3:0] next_offset;
+        reg [7:0] byte_val;
+        reg [M_BITS-1:0] next_data;
+        reg [M_KEEP_WIDTH-1:0] next_keep;
+        reg next_last;
+        begin
+            next_offset = buf_offset;
+            next_data = {M_BITS{1'b0}};
+            next_keep = {M_KEEP_WIDTH{1'b0}};
+            next_last = 1'b0;
+
+            // Fill output with as many bytes as possible
+            for (i = 0; i < M_BYTES; i = i + 1) begin
+                if (next_offset + i < buf_count) begin
+                    byte_val = buf_data[(next_offset + i)*8 +: 8];
+                    next_data = set_m_byte(next_data, i, byte_val);
+                    next_keep = set_m_keep(next_keep, i, 1'b1);
+                end else begin
+                    next_keep = set_m_keep(next_keep, i, 1'b0);
+                end
+            end
+
+            // Check if last byte of this output is the tlast byte
+            // The tlast byte is the last valid byte of the tlast beat
+            // If s_is_tlast_beat and we're emitting the last byte of the beat
+            if (s_is_tlast_beat && (next_offset + M_BYTES - 1 >= buf_count - 1)) begin
+                // We're emitting the last byte of the tlast beat
+                // But only if the last byte we're emitting is actually the last byte of the beat
+                // The last byte of the beat is at index buf_count - 1
+                // We're emitting bytes from next_offset to next_offset + M_BYTES - 1
+                // If next_offset + M_BYTES - 1 >= buf_count - 1, we include the last byte
+                // But we need to check if the last byte we emit is the tlast byte
+                // The tlast byte is the last valid byte, which is at buf_count - 1
+                // If we're emitting buf_count - 1 in this output, then this output has tlast
+                if (next_offset + M_BYTES - 1 >= buf_count - 1) begin
+                    next_last = 1'b1;
+                end
+            end
+
+            m_data_reg <= next_data;
+            m_keep_reg <= next_keep;
+            m_last_reg <= next_last;
+            m_tid_reg <= pkt_tid;
+            m_tdest_reg <= pkt_tdest;
+            m_tuser_reg <= pkt_tuser;
+        end
+    endtask
+
+endmodule
+```<|im_end|>

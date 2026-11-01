@@ -1,0 +1,148 @@
+```systemverilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Extract fields from APB request
+  // Assuming standard APB3/4 structure:
+  // req_i.psel, req_i.penable, req_i.pwrite, req_i.paddr, req_i.pwdata, req_i.pstrb
+  // But since req_t is a type parameter, we need to access fields generically.
+  // However, the problem states "req_i / resp_o use the APB request and response types supplied by the testbench."
+  // This implies req_t and resp_t are structured types with known fields.
+  // Common APB fields: psel, penable, pwrite, paddr, pwdata, pstrb
+  // For response: pready, pslverr, prdata
+
+  // Since we don't know the exact structure, we'll assume standard APB field names.
+  // Let's define local signals to extract what we need.
+
+  // APB phases:
+  // Setup phase: psel=1, penable=0
+  // Access phase: psel=1, penable=1
+
+  // We need to detect when a valid APB transaction is in the access phase
+  // and determine if it's a read or write.
+
+  // Let's assume req_t has fields: psel, penable, pwrite, paddr, pwdata, pstrb
+  // And resp_t has fields: pready, pslverr, prdata
+
+  // For simplicity and to match typical APB register file implementations,
+  // we'll assume the following field names in the types:
+  // req_i.psel, req_i.penable, req_i.pwrite, req_i.paddr, req_i.pwdata, req_i.pstrb
+  // resp_o.pready, resp_o.pslverr, resp_o.prdata
+
+  // However, since these are type parameters, we need to be careful.
+  // Let's use direct field access assuming standard naming.
+
+  // Detect access phase
+  wire access_phase = req_i.psel & req_i.penable;
+
+  // Determine register index from address
+  // Address offset from base
+  apb_addr_t addr_offset;
+  assign addr_offset = req_i.paddr - base_addr_i;
+
+  // Convert byte offset to register index
+  // Each register is AddrOffset bytes apart
+  // Register index = addr_offset / AddrOffset
+  // We need to handle the division. Since AddrOffset is a parameter, we can use a shift if it's a power of 2,
+  // but for generality, we'll use a simple approach.
+
+  // Let's compute the register index
+  logic [ApbAddrWidth-1:0] reg_index_raw;
+  assign reg_index_raw = addr_offset / AddrOffset;
+
+  // Check if the address is valid (within range and aligned)
+  wire addr_valid = (reg_index_raw < NoApbRegs) && 
+                    (addr_offset % AddrOffset == 0);
+
+  // Register index as integer
+  int unsigned reg_idx;
+  assign reg_idx = int'(reg_index_raw);
+
+  // Write enable for each register
+  wire [NoApbRegs-1:0] write_en;
+  for (genvar i = 0; i < NoApbRegs; i++) begin : gen_write_en
+    assign write_en[i] = access_phase & req_i.pwrite & addr_valid & (reg_idx == i) & ~ReadOnly[i];
+  end
+
+  // Read data
+  reg_data_t read_data;
+  assign read_data = reg_q_o[reg_idx];
+
+  // Response
+  // pready: always ready (no wait states)
+  // pslverr: error if address is invalid
+  // prdata: read data
+
+  // We need to assign to resp_o fields
+  // Assuming resp_t has fields: pready, pslverr, prdata
+
+  // For the response, we'll assign based on the access phase
+  // In APB, the response is valid during the access phase
+
+  // Let's assign the response fields
+  // Since resp_o is an output of type resp_t, we need to assign to its fields
+
+  // We'll use a continuous assignment for each field
+
+  // pready: always 1 (no wait states)
+  // pslverr: 1 if address is invalid during access phase
+  // prdata: the read data
+
+  // However, we need to be careful about when to drive these.
+  // In APB, the slave should drive pready, pslverr, and prdata during the access phase.
+
+  // Let's use a combinational block to assign the response
+
+  always_comb begin
+    // Default values
+    resp_o.pready = 1'b1;
+    resp_o.pslverr = 1'b0;
+    resp_o.prdata = '0;
+
+    if (access_phase) begin
+      if (addr_valid) begin
+        resp_o.pslverr = 1'b0;
+        if (!req_i.pwrite) begin
+          resp_o.prdata = read_data;
+        end
+      end else begin
+        resp_o.pslverr = 1'b1;
+      end
+    end
+  end
+
+  // Register file
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        reg_q_o[i] <= reg_init_i[i];
+      end
+    end else begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        if (write_en[i]) begin
+          reg_q_o[i] <= req_i.pwdata;
+        end
+      end
+    end
+  end
+
+endmodule
+```<|im_end|>

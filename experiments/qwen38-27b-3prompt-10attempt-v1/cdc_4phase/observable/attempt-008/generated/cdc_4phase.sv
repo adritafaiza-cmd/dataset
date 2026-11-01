@@ -1,0 +1,293 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals for the 4-phase handshake
+  // req: source -> destination (data valid)
+  // ack: destination -> source (data accepted)
+  wire req;
+  wire ack;
+
+  // Source side: generate req, receive ack
+  // Destination side: receive req, generate ack
+
+  // Source side logic
+  reg [WIDTH-1:0] src_data_reg;
+  reg src_valid_reg;
+  reg src_ready_reg;
+  reg req_reg;
+  reg ack_reg;
+
+  // Destination side logic
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_valid_reg;
+  reg dst_ready_reg;
+  reg req_reg_dst;
+  reg ack_reg_dst;
+
+  // Synchronizers for req (src -> dst)
+  reg [1:0] req_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      req_sync <= 2'b00;
+    else
+      req_sync <= {req_sync[0], req};
+  end
+
+  // Synchronizers for ack (dst -> src)
+  reg [1:0] ack_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      ack_sync <= 2'b00;
+    else
+      ack_sync <= {ack_sync[0], ack};
+  end
+
+  // Source side: 4-phase handshake state machine
+  // States: IDLE, WAIT_ACK
+  // In IDLE: if src_valid_i and src_ready_o, capture data, assert req
+  // In WAIT_ACK: wait for ack to deassert (4-phase: req stays high until ack goes high then req goes low)
+  
+  // Actually, let's think about 4-phase handshake more carefully.
+  // 4-phase: 
+  //   1. Sender asserts req
+  //   2. Receiver asserts ack
+  //   3. Sender deasserts req
+  //   4. Receiver deasserts ack
+  //   Back to idle.
+  
+  // So req is a pulse-like signal that goes high, stays high until ack goes high, then req goes low, then ack goes low.
+  
+  // Let's use a state machine on the source side:
+  // IDLE: req=0, ack=0
+  //   If src_valid_i: capture data, go to REQ_HIGH
+  // REQ_HIGH: req=1
+  //   If ack_sync[1] (ack is high): go to REQ_LOW
+  // REQ_LOW: req=0
+  //   If !ack_sync[1] (ack is low): go to IDLE
+
+  typedef enum logic [1:0] {
+    SRC_IDLE,
+    SRC_REQ_HIGH,
+    SRC_REQ_LOW
+  } src_state_t;
+
+  src_state_t src_state, src_state_next;
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_state <= SRC_IDLE;
+      req_reg <= 1'b0;
+      ack_reg <= 1'b0;
+      src_data_reg <= {WIDTH{1'b0}};
+      src_valid_reg <= 1'b0;
+      src_ready_reg <= 1'b1;
+    end else begin
+      src_state <= src_state_next;
+      req_reg <= (src_state_next == SRC_REQ_HIGH) ? 1'b1 : 1'b0;
+      ack_reg <= ack_sync[1];
+      
+      case (src_state)
+        SRC_IDLE: begin
+          if (src_valid_i) begin
+            src_data_reg <= src_data_i;
+            src_valid_reg <= 1'b1;
+            src_ready_reg <= 1'b0;
+          end else begin
+            src_ready_reg <= 1'b1;
+          end
+        end
+        SRC_REQ_HIGH: begin
+          // Wait for ack to go high
+          if (ack_sync[1]) begin
+            src_ready_reg <= 1'b1;
+          end
+        end
+        SRC_REQ_LOW: begin
+          // Wait for ack to go low
+          if (!ack_sync[1]) begin
+            src_valid_reg <= 1'b0;
+          end
+        end
+        default: ;
+      endcase
+    end
+  end
+
+  always @(*) begin
+    src_state_next = src_state;
+    case (src_state)
+      SRC_IDLE: begin
+        if (src_valid_i)
+          src_state_next = SRC_REQ_HIGH;
+      end
+      SRC_REQ_HIGH: begin
+        if (ack_sync[1])
+          src_state_next = SRC_REQ_LOW;
+      end
+      SRC_REQ_LOW: begin
+        if (!ack_sync[1])
+          src_state_next = SRC_IDLE;
+      end
+      default: src_state_next = SRC_IDLE;
+    endcase
+  end
+
+  assign req = req_reg;
+  assign src_ready_o = src_ready_reg;
+
+  // Destination side: 4-phase handshake state machine
+  // IDLE: req=0, ack=0
+  //   If req_sync[1] (req is high): capture data, assert ack, go to ACK_HIGH
+  // ACK_HIGH: ack=1
+  //   If !req_sync[1] (req is low): go to ACK_LOW
+  // ACK_LOW: ack=0
+  //   If !req_sync[1] (req is low): go to IDLE
+
+  typedef enum logic [1:0] {
+    DST_IDLE,
+    DST_ACK_HIGH,
+    DST_ACK_LOW
+  } dst_state_t;
+
+  dst_state_t dst_state, dst_state_next;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_state <= DST_IDLE;
+      ack_reg_dst <= 1'b0;
+      req_reg_dst <= 1'b0;
+      dst_data_reg <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+      dst_ready_reg <= 1'b1;
+    end else begin
+      dst_state <= dst_state_next;
+      ack_reg_dst <= (dst_state_next == DST_ACK_HIGH) ? 1'b1 : 1'b0;
+      req_reg_dst <= req_sync[1];
+      
+      case (dst_state)
+        DST_IDLE: begin
+          if (req_sync[1]) begin
+            dst_data_reg <= req_sync[1] ? src_data_reg : {WIDTH{1'b0}};
+            dst_valid_reg <= 1'b1;
+            dst_ready_reg <= 1'b0;
+          end else begin
+            dst_ready_reg <= 1'b1;
+          end
+        end
+        DST_ACK_HIGH: begin
+          // Wait for req to go low
+          if (!req_sync[1]) begin
+            dst_ready_reg <= 1'b1;
+          end
+        end
+        DST_ACK_LOW: begin
+          // Wait for req to go low (already low)
+          if (!req_sync[1]) begin
+            dst_valid_reg <= 1'b0;
+          end
+        end
+        default: ;
+      endcase
+    end
+  end
+
+  always @(*) begin
+    dst_state_next = dst_state;
+    case (dst_state)
+      DST_IDLE: begin
+        if (req_sync[1])
+          dst_state_next = DST_ACK_HIGH;
+      end
+      DST_ACK_HIGH: begin
+        if (!req_sync[1])
+          dst_state_next = DST_ACK_LOW;
+      end
+      DST_ACK_LOW: begin
+        if (!req_sync[1])
+          dst_state_next = DST_IDLE;
+      end
+      default: dst_state_next = DST_IDLE;
+    endcase
+  end
+
+  assign ack = ack_reg_dst;
+  assign dst_valid_o = dst_valid_reg;
+
+  // Data output: need to handle the case where data is captured
+  // The data should be stable while dst_valid_o is high
+  // We need to latch the data when req is detected
+
+  // Actually, the data needs to be captured on the destination side when req goes high.
+  // But src_data_reg is in the source clock domain. We need to synchronize the data.
+  // For 4-phase handshake, the data is stable while req is high, so we can use a
+  // multi-bit synchronizer or a handshake-based data transfer.
+
+  // Let's use a proper data synchronizer: when req goes from 0 to 1, capture the data.
+  // Since req is synchronized, we can detect the rising edge of req_sync[1] and capture data.
+
+  // But src_data_reg is in src_clk domain. We need to synchronize it.
+  // One approach: use a 2-flop synchronizer for each bit, but that's not safe for multi-bit.
+  // Better: use the handshake to ensure data is stable, then use a clock-domain-crossing
+  // for the data using the req signal as a strobe.
+
+  // Actually, for 4-phase handshake, the standard approach is:
+  // - Data is stable while req is high
+  // - Use a multi-bit synchronizer with the req signal as a qualifier
+  // - Or use a FIFO-based approach
+
+  // Let's use a simpler approach: since we have a 4-phase handshake, the data is stable
+  // for at least one dst_clk cycle while req is high. We can use a 2-flop synchronizer
+  // for each bit, but we need to ensure the data is stable long enough.
+
+  // A better approach: use a handshake-based data transfer where we synchronize the data
+  // using the req signal. When req goes high, we start synchronizing the data.
+
+  // For simplicity and correctness, let's use a 2-flop synchronizer for each bit of data,
+  // and only use the synchronized data when req is high.
+
+  reg [WIDTH-1:0] data_sync1, data_sync2;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      data_sync1 <= {WIDTH{1'b0}};
+      data_sync2 <= {WIDTH{1'b0}};
+    end else begin
+      data_sync1 <= src_data_reg;
+      data_sync2 <= data_sync1;
+    end
+  end
+
+  // Use data_sync2 as the data when req is high
+  // But we need to capture it at the right time. Let's capture it when req goes from 0 to 1.
+
+  reg [WIDTH-1:0] dst_data_latch;
+  reg req_prev;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      req_prev <= 1'b0;
+      dst_data_latch <= {WIDTH{1'b0}};
+    end else begin
+      req_prev <= req_sync[1];
+      if (req_sync[1] && !req_prev) begin
+        dst_data_latch <= data_sync2;
+      end
+    end
+  end
+
+  assign dst_data_o = dst_data_latch;
+
+endmodule

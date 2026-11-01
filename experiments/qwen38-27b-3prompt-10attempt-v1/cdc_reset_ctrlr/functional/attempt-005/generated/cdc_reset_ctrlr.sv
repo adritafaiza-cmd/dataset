@@ -1,0 +1,172 @@
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  a_clk_i,
+    input  a_rst_ni,
+    input  a_clear_i,
+    output a_clear_o,
+    input  a_clear_ack_i,
+    output a_isolate_o,
+    input  a_isolate_ack_i,
+    input  b_clk_i,
+    input  b_rst_ni,
+    input  b_clear_i,
+    output b_clear_o,
+    input  b_clear_ack_i,
+    output b_isolate_o,
+    input  b_isolate_ack_i
+);
+
+    // State encoding
+    localparam S_IDLE    = 2'd0;
+    localparam S_ISOLATE = 2'd1;
+    localparam S_CLEAR   = 2'd2;
+
+    // A-domain state
+    reg [1:0] a_state;
+    // B-domain state
+    reg [1:0] b_state;
+
+    // Synchronizers for A -> B
+    reg [SYNC_STAGES-1:0] a_isolate_sync;
+    reg [SYNC_STAGES-1:0] a_clear_sync;
+
+    // Synchronizers for B -> A
+    reg [SYNC_STAGES-1:0] b_isolate_sync;
+    reg [SYNC_STAGES-1:0] b_clear_sync;
+
+    // Synchronizers for A -> B (clear ack)
+    reg [SYNC_STAGES-1:0] a_clear_ack_sync;
+
+    // Synchronizers for B -> A (clear ack)
+    reg [SYNC_STAGES-1:0] b_clear_ack_sync;
+
+    // Synchronizers for A -> B (isolate ack)
+    reg [SYNC_STAGES-1:0] a_isolate_ack_sync;
+
+    // Synchronizers for B -> A (isolate ack)
+    reg [SYNC_STAGES-1:0] b_isolate_ack_sync;
+
+    // A-domain outputs
+    assign a_isolate_o = (a_state == S_ISOLATE) || (a_state == S_CLEAR);
+    assign a_clear_o   = (a_state == S_CLEAR);
+
+    // B-domain outputs
+    assign b_isolate_o = (b_state == S_ISOLATE) || (b_state == S_CLEAR);
+    assign b_clear_o   = (b_state == S_CLEAR);
+
+    // Synchronizer: A isolate -> B
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            a_isolate_sync <= {SYNC_STAGES{1'b0}};
+        else
+            a_isolate_sync <= {a_isolate_sync[SYNC_STAGES-2:0], a_isolate_o};
+    end
+
+    // Synchronizer: A clear -> B
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            a_clear_sync <= {SYNC_STAGES{1'b0}};
+        else
+            a_clear_sync <= {a_clear_sync[SYNC_STAGES-2:0], a_clear_o};
+    end
+
+    // Synchronizer: A clear ack -> B
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            a_clear_ack_sync <= {SYNC_STAGES{1'b0}};
+        else
+            a_clear_ack_sync <= {a_clear_ack_sync[SYNC_STAGES-2:0], a_clear_ack_i};
+    end
+
+    // Synchronizer: A isolate ack -> B
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            a_isolate_ack_sync <= {SYNC_STAGES{1'b0}};
+        else
+            a_isolate_ack_sync <= {a_isolate_ack_sync[SYNC_STAGES-2:0], a_isolate_ack_i};
+    end
+
+    // Synchronizer: B isolate -> A
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            b_isolate_sync <= {SYNC_STAGES{1'b0}};
+        else
+            b_isolate_sync <= {b_isolate_sync[SYNC_STAGES-2:0], b_isolate_o};
+    end
+
+    // Synchronizer: B clear -> A
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            b_clear_sync <= {SYNC_STAGES{1'b0}};
+        else
+            b_clear_sync <= {b_clear_sync[SYNC_STAGES-2:0], b_clear_o};
+    end
+
+    // Synchronizer: B clear ack -> A
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            b_clear_ack_sync <= {SYNC_STAGES{1'b0}};
+        else
+            b_clear_ack_sync <= {b_clear_ack_sync[SYNC_STAGES-2:0], b_clear_ack_i};
+    end
+
+    // Synchronizer: B isolate ack -> A
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            b_isolate_ack_sync <= {SYNC_STAGES{1'b0}};
+        else
+            b_isolate_ack_sync <= {b_isolate_ack_sync[SYNC_STAGES-2:0], b_isolate_ack_i};
+    end
+
+    // A-domain state machine
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni)
+            a_state <= S_IDLE;
+        else begin
+            case (a_state)
+                S_IDLE: begin
+                    if (a_clear_i || b_clear_sync[SYNC_STAGES-1])
+                        a_state <= S_ISOLATE;
+                end
+                S_ISOLATE: begin
+                    // Wait for both isolate acks
+                    if (a_isolate_ack_i && b_isolate_ack_sync[SYNC_STAGES-1])
+                        a_state <= S_CLEAR;
+                end
+                S_CLEAR: begin
+                    // Wait for both clear acks
+                    if (a_clear_ack_i && b_clear_ack_sync[SYNC_STAGES-1])
+                        a_state <= S_IDLE;
+                end
+                default: a_state <= S_IDLE;
+            endcase
+        end
+    end
+
+    // B-domain state machine
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni)
+            b_state <= S_IDLE;
+        else begin
+            case (b_state)
+                S_IDLE: begin
+                    if (b_clear_i || a_clear_sync[SYNC_STAGES-1])
+                        b_state <= S_ISOLATE;
+                end
+                S_ISOLATE: begin
+                    // Wait for both isolate acks
+                    if (b_isolate_ack_i && a_isolate_ack_sync[SYNC_STAGES-1])
+                        b_state <= S_CLEAR;
+                end
+                S_CLEAR: begin
+                    // Wait for both clear acks
+                    if (b_clear_ack_i && a_clear_ack_sync[SYNC_STAGES-1])
+                        b_state <= S_IDLE;
+                end
+                default: b_state <= S_IDLE;
+            endcase
+        end
+    end
+
+endmodule

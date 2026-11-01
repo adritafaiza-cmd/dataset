@@ -1,0 +1,185 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire [WIDTH-1:0] src_data_reg;
+  wire src_valid_reg;
+  wire src_ready_int;
+  wire dst_valid_int;
+  wire [WIDTH-1:0] dst_data_int;
+  wire dst_ready_int;
+
+  // Source domain: register data and valid when handshake occurs
+  // Destination domain: register data and valid when handshake occurs
+
+  // We use a 4-phase handshake:
+  // Phase 1: src_valid=1, src_ready=0 -> src_ready goes to 1
+  // Phase 2: src_valid=1, src_ready=1 -> data transferred, src_valid goes to 0
+  // Phase 3: src_valid=0, src_ready=1 -> src_ready goes to 0
+  // Phase 4: src_valid=0, src_ready=0 -> idle
+
+  // For CDC, we need to synchronize the handshake signals.
+  // The standard approach is to use a 2-phase or 4-phase handshake with proper synchronization.
+
+  // Let's implement a proper 4-phase handshake with CDC.
+  // Source side:
+  // - src_valid_i is the input valid
+  // - src_ready_o is the output ready
+  // - When both are high, data is accepted
+
+  // Destination side:
+  // - dst_valid_o is the output valid
+  // - dst_ready_i is the input ready
+  // - When both are high, data is consumed
+
+  // For CDC, we'll use a simple approach:
+  // 1. Source registers data and valid
+  // 2. Destination registers data and valid
+  // 3. Use synchronized handshake signals
+
+  // Let's use a different approach: a simple FIFO-like structure with handshake.
+
+  // Actually, let's implement a proper 4-phase handshake with CDC using
+  // synchronized request and acknowledge signals.
+
+  // Source domain signals
+  reg [WIDTH-1:0] src_data_r;
+  reg src_valid_r;
+  reg src_ready_r;
+
+  // Destination domain signals
+  reg [WIDTH-1:0] dst_data_r;
+  reg dst_valid_r;
+  reg dst_ready_r;
+
+  // Synchronization signals
+  // req: source to destination
+  // ack: destination to source
+
+  reg req_src;
+  reg ack_dst;
+
+  // Synchronized versions
+  reg [1:0] req_sync;
+  reg [1:0] ack_sync;
+
+  // Source domain: generate req when valid and ready
+  // Destination domain: generate ack when valid and ready
+
+  // Let's think about this more carefully.
+
+  // A simpler approach: use a 2-stage synchronizer for each direction.
+  // Source sends data and a "send" signal.
+  // Destination receives data and a "send" signal, then sends back an "ack".
+  // Source waits for ack before accepting new data.
+
+  // For DECOUPLED=1, we can pipeline this.
+
+  // Let's implement a basic version first.
+
+  // Source domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_r <= {WIDTH{1'b0}};
+      src_valid_r <= 1'b0;
+      src_ready_r <= 1'b0;
+      req_src <= 1'b0;
+    end else begin
+      // If not valid and ready is low, we can accept new data
+      if (!src_valid_r && !src_ready_r) begin
+        // Idle state
+        if (src_valid_i) begin
+          src_data_r <= src_data_i;
+          src_valid_r <= 1'b1;
+          req_src <= 1'b1;
+        end
+      end else if (src_valid_r && !src_ready_r) begin
+        // Waiting for ready
+        if (ack_sync[1]) begin
+          src_ready_r <= 1'b1;
+        end
+      end else if (src_valid_r && src_ready_r) begin
+        // Handshake complete, clear valid
+        src_valid_r <= 1'b0;
+        req_src <= 1'b0;
+        src_ready_r <= 1'b0;
+      end else if (!src_valid_r && src_ready_r) begin
+        // Clear ready
+        src_ready_r <= 1'b0;
+      end
+    end
+  end
+
+  // Synchronize req to destination domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      req_sync <= 2'b00;
+    end else begin
+      req_sync <= {req_sync[0], req_src};
+    end
+  end
+
+  // Synchronize ack to source domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      ack_sync <= 2'b00;
+    end else begin
+      ack_sync <= {ack_sync[0], ack_dst};
+    end
+  end
+
+  // Destination domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_r <= {WIDTH{1'b0}};
+      dst_valid_r <= 1'b0;
+      dst_ready_r <= 1'b0;
+      ack_dst <= 1'b0;
+    end else begin
+      if (!dst_valid_r && !dst_ready_r) begin
+        // Idle state
+        if (req_sync[1]) begin
+          dst_data_r <= src_data_r;
+          dst_valid_r <= 1'b1;
+          ack_dst <= 1'b1;
+        end
+      end else if (dst_valid_r && !dst_ready_r) begin
+        // Waiting for ready
+        if (dst_ready_i) begin
+          dst_ready_r <= 1'b1;
+        end
+      end else if (dst_valid_r && dst_ready_r) begin
+        // Handshake complete, clear valid
+        dst_valid_r <= 1'b0;
+        ack_dst <= 1'b0;
+        dst_ready_r <= 1'b0;
+      end else if (!dst_valid_r && dst_ready_r) begin
+        // Clear ready
+        dst_ready_r <= 1'b0;
+      end
+    end
+  end
+
+  // Outputs
+  assign src_ready_o = src_ready_r;
+  assign dst_data_o = dst_data_r;
+  assign dst_valid_o = dst_valid_r;
+
+endmodule
+```<|im_end|>

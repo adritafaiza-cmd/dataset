@@ -1,0 +1,257 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // ========================================================================
+    // Reset Synchronization (RDC safe)
+    // ========================================================================
+    // Sclk domain reset
+    reg [2:0] sclk_rst_sync;
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i)
+            sclk_rst_sync <= 3'b000;
+        else
+            sclk_rst_sync <= {sclk_rst_sync[1:0], 1'b0};
+    end
+    wire sclk_rst = ~sclk_rst_sync[2];
+
+    // Pclk domain reset
+    reg [2:0] pclk_rst_sync;
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i)
+            pclk_rst_sync <= 3'b000;
+        else
+            pclk_rst_sync <= {pclk_rst_sync[1:0], 1'b0};
+    end
+    wire pclk_rst = ~pclk_rst_sync[2];
+
+    // ========================================================================
+    // Pclk Domain: Parallel Interface & Handshake
+    // ========================================================================
+    // State machine for parallel side
+    // IDLE: Wait for wren_i
+    // WRITE: Accept data, generate wr_ack_o
+    // REQ: Request next word via di_req_o
+    // DONE: Wait for SPI completion, then present do_o with do_valid_o
+
+    localparam S_IDLE  = 2'd0;
+    localparam S_WRITE = 2'd1;
+    localparam S_REQ   = 2'd2;
+    localparam S_DONE  = 2'd3;
+
+    reg [1:0] p_state;
+    reg [N-1:0] p_tx_data;
+    reg p_tx_valid;
+    reg p_rx_valid;
+    reg [N-1:0] p_rx_data;
+
+    // Handshake signals to sclk domain
+    reg p_tx_req;
+    reg p_rx_ack;
+
+    // From sclk domain (synchronized)
+    reg [2:0] sclk_tx_ack_sync;
+    reg [2:0] sclk_rx_valid_sync;
+    reg [N+2:0] sclk_rx_data_sync;
+
+    always @(posedge pclk_i or posedge pclk_rst) begin
+        if (pclk_rst) begin
+            p_state <= S_IDLE;
+            p_tx_data <= {N{1'b0}};
+            p_tx_valid <= 1'b0;
+            p_rx_valid <= 1'b0;
+            p_rx_data <= {N{1'b0}};
+            p_tx_req <= 1'b0;
+            p_rx_ack <= 1'b0;
+            wr_ack_o <= 1'b0;
+            di_req_o <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o <= {N{1'b0}};
+        end else begin
+            case (p_state)
+                S_IDLE: begin
+                    wr_ack_o <= 1'b0;
+                    di_req_o <= 1'b0;
+                    do_valid_o <= 1'b0;
+                    if (wren_i) begin
+                        p_state <= S_WRITE;
+                        p_tx_data <= di_i;
+                        p_tx_valid <= 1'b1;
+                        wr_ack_o <= 1'b1;
+                    end
+                end
+                S_WRITE: begin
+                    wr_ack_o <= 1'b0;
+                    if (p_tx_valid) begin
+                        p_state <= S_REQ;
+                        p_tx_req <= 1'b1;
+                    end
+                end
+                S_REQ: begin
+                    di_req_o <= 1'b1;
+                    if (p_tx_req && sclk_tx_ack_sync[2]) begin
+                        p_tx_req <= 1'b0;
+                        p_tx_valid <= 1'b0;
+                        di_req_o <= 1'b0;
+                        p_state <= S_DONE;
+                    end
+                end
+                S_DONE: begin
+                    if (sclk_rx_valid_sync[2]) begin
+                        p_rx_valid <= 1'b1;
+                        p_rx_data <= sclk_rx_data_sync[N-1:0];
+                        do_valid_o <= 1'b1;
+                        do_o <= sclk_rx_data_sync[N-1:0];
+                        p_state <= S_IDLE;
+                    end
+                end
+                default: p_state <= S_IDLE;
+            endcase
+        end
+    end
+
+    // Synchronize sclk domain signals to pclk domain
+    always @(posedge pclk_i) begin
+        sclk_tx_ack_sync <= {sclk_tx_ack_sync[1:0], sclk_tx_ack};
+        sclk_rx_valid_sync <= {sclk_rx_valid_sync[1:0], sclk_rx_valid};
+        sclk_rx_data_sync <= {sclk_rx_data_sync[N+1:0], sclk_rx_data};
+    end
+
+    // ========================================================================
+    // Sclk Domain: SPI Master Logic
+    // ========================================================================
+    // SPI state machine
+    localparam SPI_IDLE  = 3'd0;
+    localparam SPI_START = 3'd1;
+    localparam SPI_SHIFT = 3'd2;
+    localparam SPI_END   = 3'd3;
+
+    reg [2:0] spi_state;
+    reg [N-1:0] spi_tx_shift;
+    reg [N-1:0] spi_rx_shift;
+    reg [3:0] spi_bit_cnt;
+    reg [3:0] spi_clk_div_cnt;
+    reg spi_clk_edge;
+    reg spi_ssel_int;
+    reg spi_sck_int;
+    reg spi_mosi_int;
+
+    // Handshake signals from pclk domain (synchronized)
+    reg [2:0] pclk_tx_req_sync;
+    reg [2:0] pclk_tx_valid_sync;
+    reg [N+2:0] pclk_tx_data_sync;
+
+    // To pclk domain
+    reg sclk_tx_ack;
+    reg sclk_rx_valid;
+    reg [N-1:0] sclk_rx_data;
+
+    // Synchronize pclk domain signals to sclk domain
+    always @(posedge sclk_i) begin
+        pclk_tx_req_sync <= {pclk_tx_req_sync[1:0], p_tx_req};
+        pclk_tx_valid_sync <= {pclk_tx_valid_sync[1:0], p_tx_valid};
+        pclk_tx_data_sync <= {pclk_tx_data_sync[N+1:0], p_tx_data};
+    end
+
+    always @(posedge sclk_i or posedge sclk_rst) begin
+        if (sclk_rst) begin
+            spi_state <= SPI_IDLE;
+            spi_tx_shift <= {N{1'b0}};
+            spi_rx_shift <= {N{1'b0}};
+            spi_bit_cnt <= 4'd0;
+            spi_clk_div_cnt <= 4'd0;
+            spi_clk_edge <= 1'b0;
+            spi_ssel_int <= 1'b0;
+            spi_sck_int <= 1'b0;
+            spi_mosi_int <= 1'b0;
+            sclk_tx_ack <= 1'b0;
+            sclk_rx_valid <= 1'b0;
+            sclk_rx_data <= {N{1'b0}};
+            spi_ssel_o <= 1'b0;
+            spi_sck_o <= 1'b0;
+        end else begin
+            case (spi_state)
+                SPI_IDLE: begin
+                    spi_ssel_int <= 1'b0;
+                    spi_sck_int <= 1'b0;
+                    spi_mosi_int <= 1'b0;
+                    sclk_tx_ack <= 1'b0;
+                    sclk_rx_valid <= 1'b0;
+                    if (pclk_tx_req_sync[2] && pclk_tx_valid_sync[2]) begin
+                        spi_state <= SPI_START;
+                        spi_tx_shift <= pclk_tx_data_sync[N-1:0];
+                        spi_rx_shift <= {N{1'b0}};
+                        spi_bit_cnt <= 4'd0;
+                        spi_clk_div_cnt <= 4'd0;
+                        sclk_tx_ack <= 1'b1;
+                    end
+                end
+                SPI_START: begin
+                    spi_ssel_int <= 1'b1;
+                    spi_sck_int <= 1'b0;
+                    spi_mosi_int <= spi_tx_shift[N-1];
+                    spi_state <= SPI_SHIFT;
+                    spi_bit_cnt <= 4'd0;
+                    spi_clk_div_cnt <= 4'd0;
+                end
+                SPI_SHIFT: begin
+                    // Clock divider
+                    if (spi_clk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                        spi_clk_div_cnt <= 4'd0;
+                        spi_clk_edge <= ~spi_clk_edge;
+                    end else begin
+                        spi_clk_div_cnt <= spi_clk_div_cnt + 4'd1;
+                    end
+
+                    // On rising edge of spi_clk_edge, shift data
+                    if (spi_clk_edge) begin
+                        // Capture MISO on rising edge
+                        spi_rx_shift <= {spi_rx_shift[N-2:0], spi_miso_i};
+                        // Shift MOSI
+                        spi_tx_shift <= {spi_tx_shift[N-2:0], 1'b0};
+                        spi_mosi_int <= spi_tx_shift[N-2];
+                        spi_bit_cnt <= spi_bit_cnt + 4'd1;
+
+                        if (spi_bit_cnt == N - 1) begin
+                            spi_state <= SPI_END;
+                            sclk_rx_valid <= 1'b1;
+                            sclk_rx_data <= spi_rx_shift;
+                        end
+                    end else begin
+                        // On falling edge, update MOSI for next bit
+                        spi_mosi_int <= spi_tx_shift[N-1];
+                    end
+                end
+                SPI_END: begin
+                    spi_ssel_int <= 1'b0;
+                    spi_sck_int <= 1'b0;
+                    spi_mosi_int <= 1'b0;
+                    sclk_rx_valid <= 1'b0;
+                    spi_state <= SPI_IDLE;
+                end
+                default: spi_state <= SPI_IDLE;
+            endcase
+        end
+    end
+
+    // Drive SPI outputs
+    assign spi_ssel_o = spi_ssel_int;
+    assign spi_sck_o = spi_sck_int;
+    assign spi_mosi_o = spi_mosi_int;
+
+endmodule

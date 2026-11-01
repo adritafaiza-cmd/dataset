@@ -1,0 +1,55 @@
+```verilog
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    // Normalize the reset polarity so that internally we work with an
+    // active-high asynchronous reset signal.
+    wire async_rst_norm = RST_POL ? async_rst_i : ~async_rst_i;
+
+    // Synchronizer chain for the deassertion (release) of the reset.
+    // The chain is reset asynchronously by the normalized reset, so that
+    // when the reset is asserted, the chain is forced to 0 (inactive).
+    // When the reset deasserts, the chain will asynchronously clear to 0,
+    // and then on subsequent clock edges it will synchronously propagate
+    // the deasserted state (1) through the chain.
+    //
+    // After CHAINS clock cycles following the deassertion of async_rst_i,
+    // the last stage of the chain will be 1, indicating a safe release.
+    //
+    // sync_rst_o is active when the reset is asserted OR when the release
+    // has not yet completed (i.e., the last stage of the chain is 0).
+
+    reg [CHAINS-1:0] sync_chain;
+
+    integer i;
+    always @(posedge clk or posedge async_rst_norm) begin
+        if (async_rst_norm)
+            sync_chain <= {CHAINS{1'b0}};
+        else
+            for (i = 0; i < CHAINS; i = i + 1) begin
+                if (i == 0)
+                    sync_chain[i] <= 1'b1;
+                else
+                    sync_chain[i] <= sync_chain[i-1];
+            end
+    end
+
+    // The output is active (reset asserted) if:
+    // 1. The asynchronous reset is currently asserted, OR
+    // 2. The release pipeline has not yet completed (last stage is 0).
+    //
+    // When async_rst_norm is 1, sync_rst_o is 1 (active).
+    // When async_rst_norm is 0, sync_rst_o follows ~sync_chain[CHAINS-1],
+    // which is 1 until the chain has fully propagated the deassertion.
+
+    assign sync_rst_o = RST_POL ? (async_rst_norm | ~sync_chain[CHAINS-1])
+                                : (async_rst_norm | ~sync_chain[CHAINS-1]);
+
+endmodule
+```<|im_end|>

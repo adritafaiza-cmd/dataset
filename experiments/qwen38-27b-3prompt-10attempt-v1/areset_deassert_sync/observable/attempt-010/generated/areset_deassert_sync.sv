@@ -1,0 +1,67 @@
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    localparam DEPTH = (CHAINS > 0) ? CHAINS : 1;
+
+    reg [DEPTH-1:0] sync_reg;
+
+    // Determine the active reset level based on polarity
+    // If RST_POL is 1, active reset is high; if 0, active reset is low
+    wire active_rst = (RST_POL == 1'b1) ? async_rst_i : ~async_rst_i;
+
+    // Synchronize the active reset signal
+    // We want to assert reset promptly (asynchronously) but release cleanly (synchronously)
+    // Strategy: 
+    //   - The output should be the active reset level when reset is active
+    //   - When reset is inactive, we synchronize the deassertion
+    //
+    // A common approach for "async assert, sync deassert" is:
+    //   - Use a synchronizer chain on the reset signal
+    //   - The output is the OR of the async reset and the synchronized reset
+    //   - But we need to handle polarity correctly
+    //
+    // Let's think about this more carefully:
+    //   - We want sync_rst_o to be in the active state when async_rst_i is in the active state
+    //   - When async_rst_i goes to inactive, we want sync_rst_o to follow after CHAINS clock cycles
+    //   - When async_rst_i goes to active, we want sync_rst_o to go active immediately (async assert)
+    //
+    // For RST_POL = 1 (active high):
+    //   - async_rst_i = 1 means reset active
+    //   - We want sync_rst_o = 1 when async_rst_i = 1 (immediately)
+    //   - When async_rst_i = 0, we want sync_rst_o to become 0 after CHAINS cycles
+    //   - So: sync_rst_o = async_rst_i | sync_reg[DEPTH-1]
+    //   - Where sync_reg is a shift register that shifts in async_rst_i
+    //
+    // For RST_POL = 0 (active low):
+    //   - async_rst_i = 0 means reset active
+    //   - We want sync_rst_o = 0 when async_rst_i = 0 (immediately)
+    //   - When async_rst_i = 1, we want sync_rst_o to become 1 after CHAINS cycles
+    //   - So: sync_rst_o = async_rst_i & sync_reg[DEPTH-1]
+    //   - Where sync_reg is a shift register that shifts in async_rst_i
+
+    integer i;
+    always @(posedge clk) begin
+        sync_reg[0] <= async_rst_i;
+        for (i = 1; i < DEPTH; i = i + 1) begin
+            sync_reg[i] <= sync_reg[i-1];
+        end
+    end
+
+    // Combine async assert with synchronized deassert
+    // For active-high reset: output is high if async is high OR if the synchronized value is high
+    // For active-low reset: output is low if async is low OR if the synchronized value is low
+    // 
+    // More precisely:
+    // Active-high: sync_rst_o = async_rst_i | sync_reg[DEPTH-1]
+    // Active-low:  sync_rst_o = async_rst_i & sync_reg[DEPTH-1]
+
+    assign sync_rst_o = (RST_POL == 1'b1) ? (async_rst_i | sync_reg[DEPTH-1])
+                                           : (async_rst_i & sync_reg[DEPTH-1]);
+
+endmodule

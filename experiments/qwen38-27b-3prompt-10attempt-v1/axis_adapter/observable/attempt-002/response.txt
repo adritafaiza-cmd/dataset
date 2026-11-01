@@ -1,0 +1,245 @@
+```verilog
+module axis_adapter #
+(
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    /*
+     * AXI input
+     */
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    // Internal parameters
+    localparam S_BYTES = (S_DATA_WIDTH + 7) / 8;
+    localparam M_BYTES = (M_DATA_WIDTH + 7) / 8;
+    localparam S_KEEP_W = (S_DATA_WIDTH > 8) ? S_KEEP_WIDTH : 1;
+    localparam M_KEEP_W = (M_DATA_WIDTH > 8) ? M_KEEP_WIDTH : 1;
+
+    // State machine states
+    localparam ST_IDLE = 2'd0;
+    localparam ST_SEND = 2'd1;
+    localparam ST_WAIT = 2'd2;
+
+    // Registers
+    reg [1:0] state;
+    reg [S_DATA_WIDTH-1:0] data_buf;
+    reg [S_KEEP_W-1:0] keep_buf;
+    reg s_axis_tlast_buf;
+    reg [ID_WIDTH-1:0] tid_buf;
+    reg [DEST_WIDTH-1:0] tdest_buf;
+    reg [USER_WIDTH-1:0] tuser_buf;
+
+    // Byte counter for output
+    reg [3:0] byte_count;
+    reg [3:0] total_bytes;
+
+    // Output registers
+    reg [M_DATA_WIDTH-1:0] m_axis_tdata_reg;
+    reg [M_KEEP_W-1:0] m_axis_tkeep_reg;
+    reg m_axis_tvalid_reg;
+    reg m_axis_tlast_reg;
+    reg [ID_WIDTH-1:0] m_axis_tid_reg;
+    reg [DEST_WIDTH-1:0] m_axis_tdest_reg;
+    reg [USER_WIDTH-1:0] m_axis_tuser_reg;
+
+    // Helper: count valid bytes in keep signal
+    function [3:0] count_bytes;
+        input [S_KEEP_W-1:0] keep;
+        integer i;
+        begin
+            count_bytes = 0;
+            for (i = 0; i < S_KEEP_W; i = i + 1) begin
+                count_bytes = count_bytes + keep[i];
+            end
+        end
+    endfunction
+
+    // Helper: extract byte from data based on keep
+    function [7:0] get_byte;
+        input [S_DATA_WIDTH-1:0] data;
+        input [S_KEEP_W-1:0] keep;
+        input [3:0] byte_idx;
+        integer i;
+        integer cnt;
+        begin
+            get_byte = 8'h00;
+            cnt = 0;
+            for (i = 0; i < S_KEEP_W; i = i + 1) begin
+                if (keep[i]) begin
+                    if (cnt == byte_idx) begin
+                        get_byte = data[i*8 +: 8];
+                    end
+                    cnt = cnt + 1;
+                end
+            end
+        end
+    endfunction
+
+    // Helper: build output data from input bytes
+    function [M_DATA_WIDTH-1:0] build_m_data;
+        input [S_DATA_WIDTH-1:0] data;
+        input [S_KEEP_W-1:0] keep;
+        input [3:0] start_byte;
+        integer i;
+        integer cnt;
+        integer m_byte_idx;
+        begin
+            build_m_data = {M_DATA_WIDTH{1'b0}};
+            m_byte_idx = 0;
+            cnt = 0;
+            for (i = 0; i < S_KEEP_W; i = i + 1) begin
+                if (keep[i]) begin
+                    if (cnt >= start_byte && m_byte_idx < M_BYTES) begin
+                        build_m_data[m_byte_idx*8 +: 8] = data[i*8 +: 8];
+                        m_byte_idx = m_byte_idx + 1;
+                    end
+                    cnt = cnt + 1;
+                end
+            end
+        end
+    endfunction
+
+    // Helper: build output keep from input keep
+    function [M_KEEP_W-1:0] build_m_keep;
+        input [S_KEEP_W-1:0] keep;
+        input [3:0] start_byte;
+        input [3:0] num_bytes;
+        integer i;
+        integer cnt;
+        integer m_byte_idx;
+        begin
+            build_m_keep = {M_KEEP_W{1'b0}};
+            m_byte_idx = 0;
+            cnt = 0;
+            for (i = 0; i < S_KEEP_W; i = i + 1) begin
+                if (keep[i]) begin
+                    if (cnt >= start_byte && m_byte_idx < M_BYTES && m_byte_idx < num_bytes) begin
+                        build_m_keep[m_byte_idx] = 1'b1;
+                        m_byte_idx = m_byte_idx + 1;
+                    end
+                    cnt = cnt + 1;
+                end
+            end
+        end
+    endfunction
+
+    // Determine how many bytes to send in current output beat
+    wire [3:0] bytes_to_send = (total_bytes - byte_count) < M_BYTES ? (total_bytes - byte_count) : M_BYTES;
+
+    // Output data and keep generation
+    wire [M_DATA_WIDTH-1:0] m_data_next = build_m_data(data_buf, keep_buf, byte_count);
+    wire [M_KEEP_W-1:0] m_keep_next = build_m_keep(keep_buf, byte_count, bytes_to_send);
+
+    // Determine if this is the last beat
+    wire is_last_beat = (byte_count + bytes_to_send) >= total_bytes;
+
+    // State machine
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= ST_IDLE;
+            data_buf <= {S_DATA_WIDTH{1'b0}};
+            keep_buf <= {S_KEEP_W{1'b0}};
+            s_axis_tlast_buf <= 1'b0;
+            tid_buf <= {ID_WIDTH{1'b0}};
+            tdest_buf <= {DEST_WIDTH{1'b0}};
+            tuser_buf <= {USER_WIDTH{1'b0}};
+            byte_count <= 4'd0;
+            total_bytes <= 4'd0;
+            m_axis_tdata_reg <= {M_DATA_WIDTH{1'b0}};
+            m_axis_tkeep_reg <= {M_KEEP_W{1'b0}};
+            m_axis_tvalid_reg <= 1'b0;
+            m_axis_tlast_reg <= 1'b0;
+            m_axis_tid_reg <= {ID_WIDTH{1'b0}};
+            m_axis_tdest_reg <= {DEST_WIDTH{1'b0}};
+            m_axis_tuser_reg <= {USER_WIDTH{1'b0}};
+        end else begin
+            case (state)
+                ST_IDLE: begin
+                    m_axis_tvalid_reg <= 1'b0;
+                    if (s_axis_tvalid) begin
+                        data_buf <= s_axis_tdata;
+                        keep_buf <= s_axis_tkeep;
+                        s_axis_tlast_buf <= s_axis_tlast;
+                        tid_buf <= s_axis_tid;
+                        tdest_buf <= s_axis_tdest;
+                        tuser_buf <= s_axis_tuser;
+                        total_bytes <= count_bytes(s_axis_tkeep);
+                        byte_count <= 4'd0;
+                        state <= ST_SEND;
+                    end
+                end
+
+                ST_SEND: begin
+                    // Prepare output
+                    m_axis_tdata_reg <= m_data_next;
+                    m_axis_tkeep_reg <= m_keep_next;
+                    m_axis_tvalid_reg <= 1'b1;
+                    m_axis_tlast_reg <= is_last_beat & s_axis_tlast_buf;
+                    m_axis_tid_reg <= tid_buf;
+                    m_axis_tdest_reg <= tdest_buf;
+                    m_axis_tuser_reg <= tuser_buf;
+
+                    if (m_axis_tready) begin
+                        if (is_last_beat) begin
+                            state <= ST_IDLE;
+                            m_axis_tvalid_reg <= 1'b0;
+                        end else begin
+                            byte_count <= byte_count + bytes_to_send;
+                            state <= ST_SEND;
+                        end
+                    end
+                end
+
+                default: begin
+                    state <= ST_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Output assignments
+    assign m_axis_tdata = m_axis_tdata_reg;
+    assign m_axis_tkeep = m_axis_tkeep_reg;
+    assign m_axis_tvalid = m_axis_tvalid_reg;
+    assign m_axis_tlast = m_axis_tlast_reg;
+    assign m_axis_tid = m_axis_tid_reg;
+    assign m_axis_tdest = m_axis_tdest_reg;
+    assign m_axis_tuser = m_axis_tuser_reg;
+
+    // Input ready
+    assign s_axis_tready = (state == ST_IDLE);
+
+endmodule
+```<|im_end|>
