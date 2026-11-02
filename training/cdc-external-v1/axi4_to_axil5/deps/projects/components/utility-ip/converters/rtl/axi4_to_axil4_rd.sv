@@ -1,0 +1,311 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2024-2025 RTL Design Sherpa
+//
+// Module: axi4_to_axil4_rd
+// Purpose: AXI4 Full to AXI4-Lite Protocol Converter (READ-ONLY)
+//
+// Description:
+//   Converts AXI4 full protocol to AXI4-Lite for READ path only by:
+//   - Decomposing read bursts (ARLEN > 0) into multiple single transactions
+//   - Dropping AXI4-specific signals (ID, USER, REGION, QOS)
+//   - Converting full handshaking to simplified AXI4-Lite
+//   - Maintaining data integrity and response propagation
+//
+//   Standalone read-only implementation. For write conversion, use
+//   axi4_to_axil4_wr.sv.
+//
+//   Key Features:
+//   - Read-only: AR, R channels only
+//   - Burst decomposition: Multi-beat bursts → multiple single transactions
+//   - Response aggregation: Collects responses and returns with original ID
+//   - Protocol compliant: Full AXI4 slave, AXI4-Lite master
+//
+// Parameters:
+//   AXI_ID_WIDTH: Transaction ID width on AXI4 side (1-16)
+//   AXI_ADDR_WIDTH: Address bus width (12-64)
+//   AXI_DATA_WIDTH: Data bus width - must match (32, 64, 128, 256)
+//   AXI_USER_WIDTH: User signal width on AXI4 side (0-1024)
+//
+// Limitations:
+//   - Data widths must match (no data width conversion)
+//   - Burst types: FIXED, INCR, WRAP all converted to single beats
+//   - Read-only: No write path support
+//
+// Author: RTL Design Sherpa
+// Created: 2025-11-05
+
+`timescale 1ns / 1ps
+
+`include "reset_defs.svh"
+
+module axi4_to_axil4_rd #(
+    // Width Configuration
+    parameter int AXI_ID_WIDTH      = 8,
+    parameter int AXI_ADDR_WIDTH    = 32,
+    parameter int AXI_DATA_WIDTH    = 32,
+    parameter int AXI_USER_WIDTH    = 1
+) (
+    // Clock and Reset
+    input  logic                        aclk,
+    input  logic                        aresetn,
+
+    //==========================================================================
+    // Slave AXI4 Read Interface (Input - Full Protocol)
+    //==========================================================================
+
+    // Read Address Channel
+    input  logic [AXI_ID_WIDTH-1:0]     s_axi_arid,
+    input  logic [AXI_ADDR_WIDTH-1:0]   s_axi_araddr,
+    input  logic [7:0]                  s_axi_arlen,
+    input  logic [2:0]                  s_axi_arsize,
+    input  logic [1:0]                  s_axi_arburst,
+    input  logic                        s_axi_arlock,
+    input  logic [3:0]                  s_axi_arcache,
+    input  logic [2:0]                  s_axi_arprot,
+    input  logic [3:0]                  s_axi_arqos,
+    input  logic [3:0]                  s_axi_arregion,
+    input  logic [AXI_USER_WIDTH-1:0]   s_axi_aruser,
+    input  logic                        s_axi_arvalid,
+    output logic                        s_axi_arready,
+
+    // Read Data Channel
+    output logic [AXI_ID_WIDTH-1:0]     s_axi_rid,
+    output logic [AXI_DATA_WIDTH-1:0]   s_axi_rdata,
+    output logic [1:0]                  s_axi_rresp,
+    output logic                        s_axi_rlast,
+    output logic [AXI_USER_WIDTH-1:0]   s_axi_ruser,
+    output logic                        s_axi_rvalid,
+    input  logic                        s_axi_rready,
+
+    //==========================================================================
+    // Master AXI4-Lite Read Interface (Output - Simplified Protocol)
+    //==========================================================================
+
+    // Read Address Channel
+    output logic [AXI_ADDR_WIDTH-1:0]   m_axil_araddr,
+    output logic [2:0]                  m_axil_arprot,
+    output logic                        m_axil_arvalid,
+    input  logic                        m_axil_arready,
+
+    // Read Data Channel
+    input  logic [AXI_DATA_WIDTH-1:0]   m_axil_rdata,
+    input  logic [1:0]                  m_axil_rresp,
+    input  logic                        m_axil_rvalid,
+    output logic                        m_axil_rready
+);
+
+    //==========================================================================
+    // Read Path: Burst Decomposition
+    //==========================================================================
+
+    // Read burst tracker
+    logic [AXI_ID_WIDTH-1:0]     r_ar_id;
+    logic [AXI_ADDR_WIDTH-1:0]   r_ar_addr;
+    logic [7:0]                  r_ar_len;
+    logic [7:0]                  r_ar_beat_count;
+    logic [2:0]                  r_ar_size;
+    logic [1:0]                  r_ar_burst;
+    logic [2:0]                  r_ar_prot;
+    logic                        r_ar_active;
+
+    // Address increment calculation
+    logic [AXI_ADDR_WIDTH-1:0] w_ar_addr_incr;
+    assign w_ar_addr_incr = (1 << r_ar_size);  // Byte increment per beat
+
+    // WRAP wraps inside an aligned (len+1) * (1 << size) byte window: the
+    // low bits advance and carry back to the window base instead of running
+    // past it. Used for cache-line fills, where the requested word comes
+    // first and the rest of the line follows round the boundary.
+    logic [AXI_ADDR_WIDTH-1:0] w_ar_wrap_mask;
+    logic [AXI_ADDR_WIDTH-1:0] w_ar_next_addr;
+    assign w_ar_wrap_mask = (({{(AXI_ADDR_WIDTH-8){1'b0}}, r_ar_len} + 1)
+                             << r_ar_size) - 1;
+    assign w_ar_next_addr =
+        (r_ar_burst == 2'b10)
+            ? ((r_ar_addr & ~w_ar_wrap_mask) |
+               ((r_ar_addr + w_ar_addr_incr) & w_ar_wrap_mask))
+            : ((r_ar_addr & ~(w_ar_addr_incr - 1)) + w_ar_addr_incr);
+    // INCR steps from the aligned address: only the first beat of a burst
+    // may be unaligned (AXI A3.4.1, bridge BUG-019). A WRAP start is aligned
+    // by rule, so its arm needs no mask.
+
+    // Read state machine
+    typedef enum logic [1:0] {
+        RD_IDLE       = 2'b00,
+        RD_BURST      = 2'b01,
+        RD_LAST_BEAT  = 2'b10
+    } rd_state_t;
+
+    rd_state_t r_rd_state, w_rd_next_state;
+
+    `ALWAYS_FF_RST(aclk, aresetn,
+        if (`RST_ASSERTED(aresetn)) begin
+            r_rd_state <= RD_IDLE;
+        end else begin
+            r_rd_state <= w_rd_next_state;
+        end
+    )
+
+    // Read next state logic
+    always_comb begin
+        w_rd_next_state = r_rd_state;
+        case (r_rd_state)
+            RD_IDLE: begin
+                if (s_axi_arvalid && s_axi_arready) begin
+                    if (s_axi_arlen == 0)
+                        w_rd_next_state = RD_IDLE;  // Single beat, stay idle
+                    else
+                        w_rd_next_state = RD_BURST;  // Start burst decomposition
+                end
+            end
+            RD_BURST: begin
+                if (m_axil_arvalid && m_axil_arready) begin
+                    if (r_ar_beat_count == r_ar_len - 1)
+                        w_rd_next_state = RD_LAST_BEAT;
+                end
+            end
+            RD_LAST_BEAT: begin
+                if (m_axil_arvalid && m_axil_arready)
+                    w_rd_next_state = RD_IDLE;
+            end
+            default: w_rd_next_state = RD_IDLE;
+        endcase
+    end
+
+    // Read burst tracking registers
+    `ALWAYS_FF_RST(aclk, aresetn,
+        if (`RST_ASSERTED(aresetn)) begin
+            r_ar_id <= '0;
+            r_ar_addr <= '0;
+            r_ar_len <= '0;
+            r_ar_beat_count <= '0;
+            r_ar_size <= '0;
+            r_ar_burst <= '0;
+            r_ar_prot <= '0;
+            r_ar_active <= 1'b0;
+        end else begin
+            case (r_rd_state)
+                RD_IDLE: begin
+                    if (s_axi_arvalid && s_axi_arready) begin
+                        r_ar_id <= s_axi_arid;
+                        r_ar_addr <= s_axi_araddr;
+                        r_ar_len <= s_axi_arlen;
+                        r_ar_beat_count <= 8'd0;
+                        r_ar_size <= s_axi_arsize;
+                        r_ar_burst <= s_axi_arburst;
+                        r_ar_prot <= s_axi_arprot;
+                        r_ar_active <= (s_axi_arlen > 0);
+                    end
+                end
+                // RD_BURST and RD_LAST_BEAT -- `default` for the same macro
+                // reason as the write path. RD_IDLE has its own arm above and
+                // the old `default` was an explicit no-op, so the reachable
+                // behaviour is unchanged.
+                default: begin
+                    if (m_axil_arvalid && m_axil_arready) begin
+                        r_ar_beat_count <= r_ar_beat_count + 1'b1;
+                        // FIXED holds the address; INCR advances; WRAP
+                        // advances and folds back at the window boundary.
+                        if (r_ar_burst != 2'b00)  // Not FIXED
+                            r_ar_addr <= w_ar_next_addr;
+                        if (r_rd_state == RD_LAST_BEAT)
+                            r_ar_active <= 1'b0;
+                    end
+                end
+            endcase
+        end
+    )
+
+    // AXI4-Lite AR channel assignment
+    // One AXI read burst may be in flight at a time: set on AR acceptance,
+    // cleared when its final beat is handed to the master. arready is low
+    // while this is set, so the set and clear cannot collide. Guard the set
+    // against simultaneous clear: an AXIL slave that responds combinationally
+    // can accept AR and return R in the same cycle, and priority to set would
+    // leave outstanding stuck high forever.
+    logic r_rd_outstanding;
+    `ALWAYS_FF_RST(aclk, aresetn,
+        if (`RST_ASSERTED(aresetn)) begin
+            r_rd_outstanding <= 1'b0;
+        end else if (s_axi_rvalid && s_axi_rready && s_axi_rlast) begin
+            r_rd_outstanding <= 1'b0;
+        end else if (s_axi_arvalid && s_axi_arready) begin
+            r_rd_outstanding <= 1'b1;
+        end
+    )
+
+    // For bursts (arlen>0): Don't pass through, let FSM handle all beats
+    // For single beats (arlen==0): Pass through directly for efficiency
+    assign m_axil_araddr = r_ar_active ? r_ar_addr : s_axi_araddr;
+    assign m_axil_arprot = r_ar_active ? r_ar_prot : s_axi_arprot;
+    // The passthrough leg drives arvalid from s_axi_arvalid directly, NOT
+    // from the accepted handshake, so it must carry the same outstanding
+    // guard as arready. Without it, an AR held off by the guard keeps
+    // arvalid asserted and the AXIL slave services the same read again on
+    // every cycle it is ready.
+    assign m_axil_arvalid = r_ar_active ? (r_rd_state != RD_IDLE) :
+                            (s_axi_arvalid && (s_axi_arlen == 0) &&
+                             !r_rd_outstanding);
+    // For bursts, accept AR immediately into registers (don't wait for AXIL ready)
+    // For single beats, tie to AXIL ready for passthrough
+    // r_r_id / r_r_len / r_r_beat_count are a SINGLE-entry record of the
+    // burst in flight, and accepting an AR overwrites them. For arlen==0
+    // r_ar_active never sets, so without the outstanding guard a second
+    // single-beat AR was accepted while the first read's R beat was still
+    // in flight: both beats then returned under the second burst's ID --
+    // the first master never saw its data (it hangs waiting) and the second
+    // received a beat that was not its own. Hold AR off until the burst in
+    // flight has delivered its last beat.
+    assign s_axi_arready = !r_ar_active && !r_rd_outstanding &&
+                           ((s_axi_arlen == 0) ? m_axil_arready : 1'b1);
+
+
+    // Read data path - accumulate responses
+    logic [7:0] r_r_beat_count;
+    logic [7:0] r_r_len;
+    logic [AXI_ID_WIDTH-1:0] r_r_id;
+    logic [1:0] r_r_resp_accum;  // Accumulate worst response
+
+    `ALWAYS_FF_RST(aclk, aresetn,
+        if (`RST_ASSERTED(aresetn)) begin
+            r_r_beat_count <= '0;
+            r_r_len <= '0;
+            r_r_id <= '0;
+            r_r_resp_accum <= 2'b00;  // OKAY
+        end else begin
+            // Capture burst info on first AR acceptance
+            if (s_axi_arvalid && s_axi_arready) begin
+                r_r_len <= s_axi_arlen;
+                r_r_id <= s_axi_arid;
+                r_r_resp_accum <= 2'b00;
+                r_r_beat_count <= 8'd0;
+            end
+            // Track read data beats
+            if (m_axil_rvalid && m_axil_rready) begin
+                r_r_beat_count <= r_r_beat_count + 1'b1;
+                // Accumulate worst response (SLVERR > DECERR > EXOKAY > OKAY)
+                if (m_axil_rresp > r_r_resp_accum)
+                    r_r_resp_accum <= m_axil_rresp;
+            end
+        end
+    )
+
+    // Read data channel passthrough
+    assign s_axi_rid = r_r_id;
+    assign s_axi_rdata = m_axil_rdata;
+    // The accumulator is a registered fold, so on the beat that concludes a
+    // burst it does not yet contain that beat's own response -- the
+    // non-blocking assign lands next cycle. Selecting it here dropped the
+    // final beat's error, and for arlen=0 the only beat IS the final one, so
+    // every single-beat error was reported to the master as OKAY. Fold the
+    // live beat in before emitting.
+    logic [1:0] w_r_resp_worst;
+    assign w_r_resp_worst = (m_axil_rresp > r_r_resp_accum) ? m_axil_rresp
+                                                            : r_r_resp_accum;
+    assign s_axi_rresp = (r_r_beat_count == r_r_len) ? w_r_resp_worst : m_axil_rresp;
+    assign s_axi_rlast = (r_r_beat_count == r_r_len);
+    assign s_axi_ruser = '0;  // AXI4-Lite has no USER
+    assign s_axi_rvalid = m_axil_rvalid;
+    assign m_axil_rready = s_axi_rready;
+
+endmodule : axi4_to_axil4_rd

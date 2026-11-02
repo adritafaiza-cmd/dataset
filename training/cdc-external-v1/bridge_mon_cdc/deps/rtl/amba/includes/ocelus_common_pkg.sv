@@ -1,0 +1,361 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2024-2025 sean galloway
+//
+// RTL Design Sherpa - Industry-Standard RTL Design and Verification
+// https://github.com/sean-galloway/RTLDesignSherpa
+//
+// Module: ocelus_common_pkg
+// Purpose: Common ocelus bus types and functions shared across all protocols
+//
+// Documentation: docs/markdown/rtl-amba/index.md
+// Subsystem: amba
+//
+// Author: sean galloway
+// Created: 2025-12-21
+
+`timescale 1ns / 1ps
+/**
+ * Ocelus Bus Common Type Definitions
+ *
+ * This package defines common type definitions used across all monitoring
+ * protocols including protocol type enumeration, packet type constants,
+ * packet structure, and manipulation functions.
+ *
+ * Packet width is locked at 128 bits via MONBUS_PKT_WIDTH (this file).
+ * Side-band timestamp width is locked at 64 bits via MONBUS_TS_WIDTH.
+ * Neither is exposed as a per-module parameter — there's exactly one
+ * packet format and one timestamp format in the codebase.
+ */
+// The file carries the Ocelus brand name; the package keeps its original
+// name (ocelus_common_pkg) so the ~600 import sites stay valid. The mismatch
+// is intentional -- tell Verilator's -Wall so (DECLFILENAME).
+/* verilator lint_off DECLFILENAME */
+package ocelus_common_pkg;
+/* verilator lint_on DECLFILENAME */
+
+    // -------------------------------------------------------------------------
+    // Single source of truth: ocelus bus packet + timestamp widths
+    // -------------------------------------------------------------------------
+    // ANY consumer that declares a bus or FIFO holding a packet MUST reference
+    // these localparams, not hard-code 128 / 64. See MON-PKT-64-to-128-plan.md.
+    localparam int MONBUS_PKT_WIDTH = 128;
+    localparam int MONBUS_TS_WIDTH  = 64;
+
+    // Protocol type enumeration for multi-protocol support
+    // 4 bits — 16 protocols max
+    typedef enum logic [3:0] {
+        PROTOCOL_AXI    = 4'h0,
+        PROTOCOL_AXIS   = 4'h1,  // AXI4-Stream
+        PROTOCOL_APB    = 4'h2,  // Advanced Peripheral Bus
+        PROTOCOL_ARB    = 4'h3,  // Arbiter specific packets
+        PROTOCOL_CORE   = 4'h4,  // Core specific packets
+        PROTOCOL_WB     = 4'h5,  // Wishbone B4 (event codes: ocelus_wb4_pkg)
+        PROTOCOL_CXS    = 4'h6,  // CXS, Arm IHI 0079 (event codes: ocelus_cxs_pkg)
+        PROTOCOL_CHI    = 4'h7   // CHI, Arm IHI 0050 (event codes: ocelus_chi_pkg)
+    } protocol_type_t;
+
+    // Ocelus bus packet types (used in packet_type field [127:124])
+    localparam logic [3:0] PktTypeError      = 4'h0;  // Error event
+    localparam logic [3:0] PktTypeCompletion = 4'h1;  // Transaction completion
+    localparam logic [3:0] PktTypeThreshold  = 4'h2;  // Threshold crossed
+    localparam logic [3:0] PktTypeTimeout    = 4'h3;  // Timeout event
+    localparam logic [3:0] PktTypePerf       = 4'h4;  // Performance metric event
+    localparam logic [3:0] PktTypeCredit     = 4'h5;  // Credit status (AXIS)
+    localparam logic [3:0] PktTypeChannel    = 4'h6;  // Channel status (AXIS)
+    localparam logic [3:0] PktTypeStream     = 4'h7;  // Stream event (AXIS)
+    localparam logic [3:0] PktTypeAddrMatch  = 4'h8;  // Address match event (AXI)
+    localparam logic [3:0] PktTypeAPB        = 4'h9;  // APB-specific event
+    localparam logic [3:0] PktTypeReservedA  = 4'hA;  // Reserved
+    localparam logic [3:0] PktTypeReservedB  = 4'hB;  // Reserved
+    localparam logic [3:0] PktTypeReservedC  = 4'hC;  // Reserved
+    // PerfWin: window-aggregate performance — cycle buckets, byte/beat
+    //   counters. One packet per metric, emitted on window close. See
+    //   docs/markdown/rtl-amba/index.md for event_code
+    //   assignments per protocol package (e.g. AXI_PERFWIN_* enum).
+    localparam logic [3:0] PktTypePerfWin    = 4'hD;
+    // PerfHist: histogram bucket counts. event_code[7:4]=histogram select,
+    //   event_code[3:0]=bucket index (0..15, log2 cycle thresholds).
+    //   See RFC for full encoding.
+    localparam logic [3:0] PktTypePerfHist   = 4'hE;
+    localparam logic [3:0] PktTypeDebug      = 4'hF;  // Debug/trace event
+
+    // =============================================================================
+    // OCELUS PACKET STRUCTURE AND HELPER FUNCTIONS
+    // =============================================================================
+
+    // 128-bit ocelus packet format:
+    // [127:124] - packet_type:  4 bits (error, timeout, completion, etc.)
+    // [123:109] - reserved:    15 bits (forward-compat slack)
+    // [108:105] - protocol:     4 bits (AXI/AXIS/APB/ARB/CORE/WB/CXS)
+    // [104: 97] - event_code:   8 bits (specific error or event code)
+    // [ 96: 88] - channel_id:   9 bits (channel ID and AXI ID)
+    // [ 87: 72] - agent_id:    16 bits (module identifier)
+    // [ 71: 64] - unit_id:      8 bits (subsystem identifier)
+    // [ 63:  0] - event_data:  64 bits (event-specific data, full 64-bit address)
+    typedef logic [MONBUS_PKT_WIDTH-1:0] monitor_packet_t;
+
+    // Side-band timestamp paired with each packet through the arbiter to the
+    // the monbus_group family. Sampled by the wrapper at emission time.
+    typedef logic [MONBUS_TS_WIDTH-1:0]  monbus_timestamp_t;
+
+    // ------------------------------------------------------------------------
+    // SATURATION-RECOVERY CONTRACT (single source of truth).
+    //
+    // The transaction table caps COMMAND-originated entries at
+    // MAX - cmd_entry_reserve(MAX), and axi_monitor_base re-asserts
+    // block_ready at active_count < MAX - (cmd_entry_reserve(MAX) - 1) --
+    // strictly ABOVE the cap, which is the entire recovery guarantee: a
+    // saturated table can always drain below the reopen threshold because
+    // command entries alone can never reach it.
+    //
+    // Both axi_monitor_trans_mgr and axi_monitor_base derive their constants
+    // from this function. It used to be two hand-synced localparams with a
+    // KEEP-IN-SYNC comment; a comment-encoded invariant on block_ready is how
+    // the saturation wedge shipped in the first place, so the sync is now
+    // structural.
+    //
+    // Tables smaller than 16 get reserve 0 (full legacy allocation): small
+    // tables cannot spare slots, and measurement showed even one reserved
+    // slot at MAX=8 starves oversubscribed same-ID tracking. They trade the
+    // recovery guarantee for capacity.
+    // ------------------------------------------------------------------------
+    function automatic int cmd_entry_reserve(input int max_transactions);
+        // FOUR, not two. block_ready is computed from a REGISTERED occupancy
+        // count that lags by one cycle, and THREE allocators (addr/data/resp
+        // _wants_alloc) can fire in that cycle -- so the gate's margin must be
+        // at least 3. axi_monitor_base derives BLOCK_MARGIN as
+        // cmd_entry_reserve-1, and the gate can only RE-ASSERT if the margin
+        // is <= reserve-1, so a reserve of 2 caps the margin at 1 and admits
+        // up to three allocations against it. That is the mechanism behind the
+        // observer-level tracking loss (4096 observed vs 3073 tracked): the
+        // discarded data beats are the symptom, admitting a command with no
+        // free slot is the defect. See amba BUG-030 (was AMBA-BLOCKMARGIN) / amba BUG-029 (was AMBA-MONTRACK).
+        //
+        // Raising the margin alone does NOT work and was measured to wedge the
+        // gate (active_count parks at 14/16 and block_ready never re-asserts);
+        // the reserve has to rise with it. Costs 2 more slots on a 16-deep
+        // table, 4 of 64 at the board sizing.
+        return (max_transactions >= 16) ? 4 : 0;
+    endfunction
+
+    // Helper functions for ocelus packet manipulation
+    function automatic logic [3:0] get_packet_type(monitor_packet_t pkt);
+        return pkt[127:124];
+    endfunction
+
+    function automatic logic [14:0] get_reserved(monitor_packet_t pkt);
+        return pkt[123:109];
+    endfunction
+
+    function automatic protocol_type_t get_protocol_type(monitor_packet_t pkt);
+        return protocol_type_t'(pkt[108:105]);
+    endfunction
+
+    function automatic logic [7:0] get_event_code(monitor_packet_t pkt);
+        return pkt[104:97];
+    endfunction
+
+    function automatic logic [8:0] get_channel_id(monitor_packet_t pkt);
+        return pkt[96:88];
+    endfunction
+
+    function automatic logic [15:0] get_agent_id(monitor_packet_t pkt);
+        return pkt[87:72];
+    endfunction
+
+    function automatic logic [7:0] get_unit_id(monitor_packet_t pkt);
+        return pkt[71:64];
+    endfunction
+
+    function automatic logic [63:0] get_event_data(monitor_packet_t pkt);
+        return pkt[63:0];
+    endfunction
+
+    function automatic monitor_packet_t create_monitor_packet(
+        logic [3:0]     packet_type,
+        protocol_type_t protocol,
+        logic [7:0]     event_code,
+        logic [8:0]     channel_id,
+        logic [7:0]     unit_id,
+        logic [15:0]    agent_id,
+        logic [63:0]    event_data
+    );
+        // Layout: {packet_type[4], reserved[15], protocol[4], event_code[8],
+        //         channel_id[9], agent_id[16], unit_id[8], event_data[64]}
+        return {packet_type, 15'h0, protocol, event_code,
+                channel_id, agent_id, unit_id, event_data};
+    endfunction
+
+    // =============================================================================
+    // COMMON PROTOCOL AND PAYLOAD TYPES
+    // =============================================================================
+
+    // AXIS transfer types
+    typedef enum logic [1:0] {
+        AXIS_TRANSFER_DATA   = 2'b00,  // Data transfer
+        AXIS_TRANSFER_LAST   = 2'b01,  // Last data transfer
+        AXIS_TRANSFER_NULL   = 2'b10,  // Null transfer (positioning)
+        AXIS_TRANSFER_IDLE   = 2'b11   // Idle (no transfer)
+    } axis_transfer_type_t;
+
+    // AXIS handshake states
+    typedef enum logic [1:0] {
+        AXIS_HANDSHAKE_IDLE   = 2'b00,  // No activity
+        AXIS_HANDSHAKE_VALID  = 2'b01,  // TVALID asserted
+        AXIS_HANDSHAKE_READY  = 2'b10,  // TREADY asserted
+        AXIS_HANDSHAKE_ACTIVE = 2'b11   // Both TVALID & TREADY
+    } axis_handshake_state_t;
+
+    // APB transaction phases for state tracking
+    typedef enum logic [1:0] {
+        APB_PHASE_IDLE    = 2'b00,  // Bus idle
+        APB_PHASE_SETUP   = 2'b01,  // Setup phase (PSEL asserted)
+        APB_PHASE_ACCESS  = 2'b10,  // Access phase (PENABLE asserted)
+        APB_PHASE_ENABLE  = 2'b11   // Enable phase (waiting for PREADY)
+    } apb_phase_t;
+
+    // APB protection types (PPROT encoding)
+    typedef enum logic [2:0] {
+        APB_PROT_NORMAL        = 3'b000,  // Normal access
+        APB_PROT_PRIVILEGED    = 3'b001,  // Privileged access
+        APB_PROT_SECURE        = 3'b010,  // Secure access
+        APB_PROT_PRIV_SECURE   = 3'b011,  // Privileged + Secure
+        APB_PROT_DATA          = 3'b100,  // Data access
+        APB_PROT_DATA_PRIV     = 3'b101,  // Data + Privileged
+        APB_PROT_DATA_SECURE   = 3'b110,  // Data + Secure
+        APB_PROT_DATA_PRIV_SEC = 3'b111   // Data + Privileged + Secure
+    } apb_prot_type_t;
+
+    // ARB arbitration types for configuration tracking
+    typedef enum logic [1:0] {
+        ARB_TYPE_ROUND_ROBIN = 2'b00,  // Round-robin arbitration
+        ARB_TYPE_WEIGHTED_RR = 2'b01,  // Weighted round-robin
+        ARB_TYPE_PRIORITY    = 2'b10,  // Fixed priority
+        ARB_TYPE_CUSTOM      = 2'b11   // Custom arbitration algorithm
+    } arb_type_t;
+
+    // ARB state for state machine tracking
+    typedef enum logic [2:0] {
+        ARB_STATE_IDLE       = 3'b000,  // Idle state
+        ARB_STATE_ARBITRATE  = 3'b001,  // Performing arbitration
+        ARB_STATE_GRANT      = 3'b010,  // Grant issued, waiting for ACK
+        ARB_STATE_BLOCKED    = 3'b011,  // Arbitration blocked
+        ARB_STATE_WEIGHT_UPD = 3'b100,  // Weight update in progress
+        ARB_STATE_ERROR      = 3'b101,  // Error state
+        ARB_STATE_RESERVED_6 = 3'b110,  // Reserved
+        ARB_STATE_RESERVED_7 = 3'b111   // Reserved
+    } arb_state_t;
+
+    // Transaction state enumeration for AXI monitoring
+    typedef enum logic [2:0] {
+        TRANS_IDLE       = 3'h0,  // Transaction slot is idle/free
+        TRANS_ADDR_PHASE = 3'h1,  // Address phase in progress
+        TRANS_DATA_PHASE = 3'h2,  // Data phase in progress
+        TRANS_COMPLETE   = 3'h3,  // Transaction completed successfully
+        TRANS_ERROR      = 3'h4,  // Transaction has error
+        TRANS_ORPHANED   = 3'h5   // Orphaned transaction (no matching phase)
+    } transaction_state_t;
+
+    // =============================================================================
+    // COMMON STRING FUNCTIONS FOR DEBUGGING
+    // =============================================================================
+
+    function automatic string get_packet_type_name(logic [3:0] pkt_type);
+        case (pkt_type)
+            PktTypeError     : return "ERROR";
+            PktTypeCompletion: return "COMPLETION";
+            PktTypeThreshold : return "THRESHOLD";
+            PktTypeTimeout   : return "TIMEOUT";
+            PktTypePerf      : return "PERF";
+            PktTypeCredit    : return "CREDIT";
+            PktTypeChannel   : return "CHANNEL";
+            PktTypeStream    : return "STREAM";
+            PktTypeAddrMatch : return "ADDR_MATCH";
+            PktTypeAPB       : return "APB";
+            PktTypePerfWin   : return "PERFWIN";
+            PktTypePerfHist  : return "PERFHIST";
+            PktTypeDebug     : return "DEBUG";
+            default          : return "UNKNOWN";
+        endcase
+    endfunction
+
+    // ------------------------------------------------------------------
+    // Filter family: which of the three mask sets a monbus filter applies to
+    // a packet. The group cores (monbus_group_core, _1wr) and the formal model
+    // all call THIS function, so a protocol added to protocol_type_t is
+    // visible at every capture the moment it is named here. The family is
+    // the packet-type set a protocol emits, not the protocol itself:
+    //   STREAM: AXIS, CXS, CHI       (Error/Timeout/Completion/Credit/Channel/Stream)
+    //   CORE:   CORE
+    //   AXI:    AXI, APB, ARB, WB, ACE (tagged PROTOCOL_AXI), and every value
+    //           not yet named -- a new protocol is NEVER dropped outright.
+    // Before 2026-10-30 the filters ended in `default: pkt_drop = 1`, which
+    // silently consumed APB, ARB, WB and CHI packets (and CXS until
+    // 2026-10-15). Dropping by DEFAULT is still the design -- the per-family
+    // cfg_*_pkt_mask / event masks are programmed from registers whose reset
+    // values drop most classes so a fully enabled system cannot flood itself
+    // -- but that drop is configurable; an unnamed protocol's was not.
+    // ------------------------------------------------------------------
+    typedef enum logic [1:0] {
+        FILTER_AXI    = 2'd0,
+        FILTER_STREAM = 2'd1,
+        FILTER_CORE   = 2'd2
+    } filter_family_t;
+
+    function automatic filter_family_t filter_family(logic [3:0] protocol);
+        case (protocol)
+            PROTOCOL_AXIS, PROTOCOL_CXS, PROTOCOL_CHI: return FILTER_STREAM;
+            PROTOCOL_CORE:                            return FILTER_CORE;
+            default:                                  return FILTER_AXI;
+        endcase
+    endfunction
+
+    function automatic string get_protocol_name(protocol_type_t protocol);
+        case (protocol)
+            PROTOCOL_AXI   : return "AXI";
+            PROTOCOL_AXIS  : return "AXIS";
+            PROTOCOL_APB   : return "APB";
+            PROTOCOL_ARB   : return "ARB";
+            PROTOCOL_CORE  : return "CORE";
+            PROTOCOL_WB    : return "WB";
+            PROTOCOL_CXS   : return "CXS";
+            PROTOCOL_CHI   : return "CHI";
+            default        : return "UNKNOWN";
+        endcase
+    endfunction
+
+
+    // =========================================================================
+    // Timer tick selection
+    // =========================================================================
+    // counter_freq_invariant divides aclk to produce a 1 us tick, and the
+    // divisor IS the clock frequency in MHz -- so the LUT index whose entry is
+    // nearest the real aclk gives the tick closest to a true microsecond.
+    // Ocelus timeouts are expressed in microseconds precisely so they mean the
+    // same wall-clock thing at any frequency; picking the wrong index breaks
+    // that contract silently.
+    //
+    // This exists because every ocelus wrapper hardwired `cfg_freq_sel =
+    // 4'b0001` with the comment "use aclk frequency". Index 1 of the default
+    // LUT is 19 MHz, so on a 100 MHz design every timeout was ~5x shorter than
+    // the number the host wrote.
+    //
+    // Defaults match axi_monitor_timer's CFI_* parameters (LINEAR 5..220 MHz
+    // over 16 entries). Keep them in step if those change.
+    function automatic int freq_sel_for_mhz(
+        input int aclk_mhz,
+        input int lo_mhz = 5,
+        input int hi_mhz = 220,
+        input int n_entries = 16
+    );
+        int idx;
+        if (n_entries <= 1 || hi_mhz <= lo_mhz) return 0;
+        // nearest index: round((aclk - lo) * (n-1) / (hi - lo))
+        idx = ((aclk_mhz - lo_mhz) * (n_entries - 1) + ((hi_mhz - lo_mhz) / 2))
+              / (hi_mhz - lo_mhz);
+        if (idx < 0)              idx = 0;
+        if (idx > n_entries - 1)  idx = n_entries - 1;
+        return idx;
+    endfunction
+
+endpackage : ocelus_common_pkg
