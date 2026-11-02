@@ -1,0 +1,164 @@
+// =============================================================================
+// Async FIFO (Gray-coded CDC, dual-port RAM)
+// =============================================================================
+//
+// Architecture:
+//   * Dual-port RAM: one write port (wclk), one read port (rclk).
+//   * Binary write/read pointers with Gray-coded copies for CDC.
+//   * Each pointer is synchronized into the opposite domain with a
+//     SYNC_STAGES-deep shift register.
+//   * Full/empty flags are computed in their own domain by comparing the
+//     local binary pointer with the synchronized remote Gray pointer.
+//
+// CDC safety:
+//   * Only Gray-coded pointers cross domains (single-bit change per step).
+//   * Multi-bit data is never sampled across domains; it is read from RAM
+//     in the read domain using the read-domain pointer.
+//   * Reset release is safe: each domain's pointer and sync registers are
+//     reset to zero in their own clock domain.
+// =============================================================================
+
+module async_fifo #(
+    parameter DATA_WIDTH  = 8,
+    parameter ADDR_WIDTH  = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam DEPTH = 1 << ADDR_WIDTH;
+
+    // ------------------------------------------------------------------
+    // Write-domain state
+    // ------------------------------------------------------------------
+    reg [ADDR_WIDTH:0] wptr_bin;
+    reg [ADDR_WIDTH:0] wptr_gray;
+
+    wire winc_eff = winc & ~wfull;
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr_bin  <= {(ADDR_WIDTH+1){1'b0}};
+            wptr_gray <= {(ADDR_WIDTH+1){1'b0}};
+        end else if (winc_eff) begin
+            wptr_bin  <= wptr_bin + 1'b1;
+            wptr_gray <= (wptr_bin + 1'b1) ^ wptr_bin;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Read-domain state
+    // ------------------------------------------------------------------
+    reg [ADDR_WIDTH:0] rptr_bin;
+    reg [ADDR_WIDTH:0] rptr_gray;
+
+    wire rinc_eff = rinc & ~rempty;
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr_bin  <= {(ADDR_WIDTH+1){1'b0}};
+            rptr_gray <= {(ADDR_WIDTH+1){1'b0}};
+        end else if (rinc_eff) begin
+            rptr_bin  <= rptr_bin + 1'b1;
+            rptr_gray <= (rptr_bin + 1'b1) ^ rptr_bin;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Synchronize write pointer into read domain
+    // ------------------------------------------------------------------
+    reg [ADDR_WIDTH:0] wptr_gray_r [0:SYNC_STAGES-1];
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            for (integer i = 0; i < SYNC_STAGES; i = i + 1)
+                wptr_gray_r[i] <= {(ADDR_WIDTH+1){1'b0}};
+        end else begin
+            wptr_gray_r[0] <= wptr_gray;
+            for (integer i = 1; i < SYNC_STAGES; i = i + 1)
+                wptr_gray_r[i] <= wptr_gray_r[i-1];
+        end
+    end
+
+    wire [ADDR_WIDTH:0] wptr_gray_r_sync = wptr_gray_r[SYNC_STAGES-1];
+    wire [ADDR_WIDTH:0] wptr_bin_r_sync  = gray_to_bin(wptr_gray_r_sync);
+
+    // ------------------------------------------------------------------
+    // Synchronize read pointer into write domain
+    // ------------------------------------------------------------------
+    reg [ADDR_WIDTH:0] rptr_gray_w [0:SYNC_STAGES-1];
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            for (integer i = 0; i < SYNC_STAGES; i = i + 1)
+                rptr_gray_w[i] <= {(ADDR_WIDTH+1){1'b0}};
+        end else begin
+            rptr_gray_w[0] <= rptr_gray;
+            for (integer i = 1; i < SYNC_STAGES; i = i + 1)
+                rptr_gray_w[i] <= rptr_gray_w[i-1];
+        end
+    end
+
+    wire [ADDR_WIDTH:0] rptr_gray_w_sync = rptr_gray_w[SYNC_STAGES-1];
+    wire [ADDR_WIDTH:0] rptr_bin_w_sync  = gray_to_bin(rptr_gray_w_sync);
+
+    // ------------------------------------------------------------------
+    // Full / Empty flags
+    // ------------------------------------------------------------------
+    // Full: write pointer has lapped the read pointer by exactly DEPTH.
+    //   In Gray code this means the top two bits differ and the rest match.
+    assign wfull = (wptr_gray == {~rptr_gray_w_sync[ADDR_WIDTH:ADDR_WIDTH-1],
+                                   rptr_gray_w_sync[ADDR_WIDTH-2:0]});
+
+    // Empty: read pointer equals write pointer.
+    assign rempty = (rptr_gray == wptr_gray_r_sync);
+
+    // ------------------------------------------------------------------
+    // RAM
+    // ------------------------------------------------------------------
+    reg [DATA_WIDTH-1:0] mem [0:DEPTH-1];
+
+    always @(posedge wclk) begin
+        if (winc_eff)
+            mem[wptr_bin[ADDR_WIDTH-1:0]] <= wdata;
+    end
+
+    always @(posedge rclk) begin
+        if (rinc_eff)
+            rdata <= mem[rptr_bin[ADDR_WIDTH-1:0]];
+    end
+
+    // ------------------------------------------------------------------
+    // Debug pointer outputs
+    // ------------------------------------------------------------------
+    assign waddr = wptr_bin;
+    assign raddr = rptr_bin;
+
+    // ------------------------------------------------------------------
+    // Gray-to-binary converter
+    // ------------------------------------------------------------------
+    function [ADDR_WIDTH:0] gray_to_bin;
+        input [ADDR_WIDTH:0] gray;
+        integer i;
+        begin
+            gray_to_bin[ADDR_WIDTH] = gray[ADDR_WIDTH];
+            for (i = ADDR_WIDTH-1; i >= 0; i = i - 1)
+                gray_to_bin[i] = gray_to_bin[i+1] ^ gray[i];
+        end
+    endfunction
+
+endmodule<|im_end|>

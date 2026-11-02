@@ -1,0 +1,277 @@
+// =============================================================================
+// I2C Master
+// =============================================================================
+//
+// This module implements an I2C master. It is designed to be used in a system
+// with a single clock domain.
+//
+// =============================================================================
+
+`default_nettype none
+
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // =========================================================================
+    // State machine
+    // =========================================================================
+
+    localparam IDLE = 0;
+    localparam START = 1;
+    localparam WRITE = 2;
+    localparam READ = 3;
+    localparam STOP = 4;
+
+    reg [1:0] state;
+
+    // =========================================================================
+    // Counters
+    // =========================================================================
+
+    reg [15:0] prescale_r;
+    reg [15:0] counter;
+
+    // =========================================================================
+    // Data
+    // =========================================================================
+
+    reg [7:0] data_r;
+    reg [2:0] bit_count;
+
+    // =========================================================================
+    // Control
+    // =========================================================================
+
+    reg [6:0] address_r;
+    reg       read_r;
+    reg       write_r;
+    reg       write_multiple_r;
+    reg       start_r;
+    reg       stop_r;
+
+    // =========================================================================
+    // Status
+    // =========================================================================
+
+    reg       missed_ack_r;
+
+    // =========================================================================
+    // I2C signals
+    // =========================================================================
+
+    reg       scl_o_r;
+    reg       scl_t_r;
+    reg       sda_o_r;
+    reg       sda_t_r;
+
+    // =========================================================================
+    // Host interface
+    // =========================================================================
+
+    assign s_axis_cmd_ready = (state == IDLE);
+    assign s_axis_data_tready = (state == WRITE) && (bit_count == 0);
+
+    assign m_axis_data_tdata = data_r;
+    assign m_axis_data_tvalid = (state == READ) && (bit_count == 0);
+    assign m_axis_data_tlast = s_axis_data_tlast;
+
+    // =========================================================================
+    // I2C signals
+    // =========================================================================
+
+    assign scl_o = scl_o_r;
+    assign scl_t = scl_t_r;
+    assign sda_o = sda_o_r;
+    assign sda_t = sda_t_r;
+
+    // =========================================================================
+    // Status
+    // =========================================================================
+
+    assign busy = (state != IDLE);
+    assign bus_control = (state != IDLE);
+    assign bus_active = (state != IDLE);
+    assign missed_ack = missed_ack_r;
+
+    // =========================================================================
+    // State machine
+    // =========================================================================
+
+    always @(posedge clk, posedge rst) begin
+        if (rst) begin
+            state <= IDLE;
+            prescale_r <= 0;
+            counter <= 0;
+            data_r <= 0;
+            bit_count <= 0;
+            address_r <= 0;
+            read_r <= 0;
+            write_r <= 0;
+            write_multiple_r <= 0;
+            start_r <= 0;
+            stop_r <= 0;
+            missed_ack_r <= 0;
+            scl_o_r <= 1;
+            scl_t_r <= 1;
+            sda_o_r <= 1;
+            sda_t_r <= 1;
+        end else begin
+            case (state)
+                IDLE: begin
+                    if (s_axis_cmd_valid) begin
+                        address_r <= s_axis_cmd_address;
+                        read_r <= s_axis_cmd_read;
+                        write_r <= s_axis_cmd_write;
+                        write_multiple_r <= s_axis_cmd_write_multiple;
+                        start_r <= s_axis_cmd_start;
+                        stop_r <= s_axis_cmd_stop;
+                        missed_ack_r <= 0;
+                        prescale_r <= prescale;
+                        counter <= 0;
+                        bit_count <= 0;
+                        state <= START;
+                    end
+                end
+
+                START: begin
+                    if (counter == prescale_r) begin
+                        counter <= 0;
+                        if (start_r) begin
+                            // Start condition
+                            scl_o_r <= 1;
+                            scl_t_r <= 1;
+                            sda_o_r <= 1;
+                            sda_t_r <= 1;
+                            state <= WRITE;
+                        end else begin
+                            // Repeated start condition
+                            scl_o_r <= 1;
+                            scl_t_r <= 1;
+                            sda_o_r <= 1;
+                            sda_t_r <= 1;
+                            state <= WRITE;
+                        end
+                    end else begin
+                        counter <= counter + 1;
+                    end
+                end
+
+                WRITE: begin
+                    if (counter == prescale_r) begin
+                        counter <= 0;
+                        if (bit_count == 0) begin
+                            // Load data
+                            if (read_r) begin
+                                data_r <= {address_r, 1'b1};
+                            end else begin
+                                data_r <= {address_r, 1'b0};
+                            end
+                            bit_count <= 7;
+                        end else begin
+                            // Shift out data
+                            scl_o_r <= 1;
+                            scl_t_r <= 1;
+                            sda_o_r <= data_r[7];
+                            sda_t_r <= 0;
+                            data_r <= {data_r[6:0], 1'b0};
+                            bit_count <= bit_count - 1;
+                        end
+                    end else begin
+                        counter <= counter + 1;
+                    end
+                end
+
+                READ: begin
+                    if (counter == prescale_r) begin
+                        counter <= 0;
+                        if (bit_count == 0) begin
+                            // Load data
+                            data_r <= {data_r[6:0], sda_i};
+                            bit_count <= 7;
+                        end else begin
+                            // Shift in data
+                            scl_o_r <= 1;
+                            scl_t_r <= 1;
+                            sda_o_r <= 1;
+                            sda_t_r <= 1;
+                            data_r <= {data_r[6:0], sda_i};
+                            bit_count <= bit_count - 1;
+                        end
+                    end else begin
+                        counter <= counter + 1;
+                    end
+                end
+
+                STOP: begin
+                    if (counter == prescale_r) begin
+                        counter <= 0;
+                        // Stop condition
+                        scl_o_r <= 1;
+                        scl_t_r <= 1;
+                        sda_o_r <= 1;
+                        sda_t_r <= 1;
+                        state <= IDLE;
+                    end else begin
+                        counter <= counter + 1;
+                    end
+                end
+
+                default: begin
+                    state <= IDLE;
+                end
+            endcase
+        end
+    end
+
+endmodule
+
+`default_nettype wire

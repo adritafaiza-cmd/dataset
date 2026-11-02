@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025, The Regents of the University of California,
+// through Lawrence Berkeley National Laboratory (subject to receipt of
+// government funding), National Renewable Energy Laboratory, and
+// University of Washington. All rights reserved.
+//
+// Author: Mark Hill
+//
+// This file is part of HAWK.
+//
+// Permission is hereby granted, free of charge, to any person
+// obtaining a copy of this software and associated documentation
+// files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use,
+// copy, modify, merge, publish, distribute, sublicense, and/or
+// sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following
+// conditions:
+//
+// The above copyright notice and this permission notice shall be
+// included in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+// OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+// WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+// OTHER DEALINGS IN THE SOFTWARE.
+
+`include "apb_regs.svh"
+
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  localparam int unsigned AddrShift = $clog2(AddrOffset);
+
+  function automatic int unsigned addr_to_idx(input apb_addr_t addr);
+    return (addr - base_addr_i) >> AddrShift;
+  endfunction
+
+  initial begin
+    for (int i = 0; i < NoApbRegs; i++) begin
+      reg_q_o[i] = reg_init_i[i];
+    end
+  end
+
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        reg_q_o[i] <= reg_init_i[i];
+      end
+    end else begin
+      if (req_i.write) begin
+        int unsigned idx = addr_to_idx(req_i.addr);
+        if (idx < NoApbRegs && !ReadOnly[idx]) begin
+          reg_q_o[idx] <= req_i.data;
+        end
+      end
+    end
+  end
+
+  assign resp_o.data = req_i.read ? reg_q_o[addr_to_idx(req_i.addr)] : '0;
+
+endmodule
