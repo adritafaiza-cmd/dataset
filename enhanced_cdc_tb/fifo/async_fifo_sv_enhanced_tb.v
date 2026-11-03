@@ -116,7 +116,7 @@ module async_fifo_sv_enhanced_tb;
                 cdc_fail("FIFO_RESET_SAFETY", "write-full flag asserted during reset");
         end else begin
             if ((^wfull) === 1'bx || (^waddr) === 1'bx)
-                cdc_fail("FIFO_GRAY_POINTER", "write-domain pointer or status contains unknown bits");
+                cdc_fail("FIFO_POINTER_X", "write-domain pointer or status contains unknown bits");
             if (winc && wfull)
                 cdc_fail("FIFO_OVERFLOW", "write was attempted while the FIFO was full");
         end
@@ -129,7 +129,7 @@ module async_fifo_sv_enhanced_tb;
                 cdc_fail("FIFO_RESET_SAFETY", "read-empty flag deasserted during reset");
         end else begin
             if ((^rempty) === 1'bx || (^raddr) === 1'bx)
-                cdc_fail("FIFO_GRAY_POINTER", "read-domain pointer or status contains unknown bits");
+                cdc_fail("FIFO_POINTER_X", "read-domain pointer or status contains unknown bits");
             if (rinc && rempty)
                 cdc_fail("FIFO_UNDERFLOW", "read was attempted while the FIFO was empty");
         end

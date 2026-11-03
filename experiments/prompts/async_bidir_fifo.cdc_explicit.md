@@ -52,13 +52,16 @@ Behavior:
     - Accepted writes must appear in order on the opposite side when that side reads.
     - Full/empty and almost-full/almost-empty flags are local to each side.
     - After reset the FIFO is empty.
-    - FALLTHROUGH does not select a combinational read. Each side's read data is one local sample taken while that side is the reader. Empty may be high for one local clock after an accepted read even when another word is stored. Pointers in both directions cross as acknowledged binary snapshots, so full and empty can lag.
+    - FALLTHROUGH does not select a combinational read. Each side's read data is one local sample taken while that side is the reader. Empty may remain high for multiple local clocks after an accepted read even when another word is stored. Pointers in both directions cross as acknowledged binary snapshots, so full and empty can lag.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings
     and must pass structural CDC/RDC analysis with zero unsafe crossings. Reset
     release must be safe in each clock domain, and transferred multi-bit data must
     remain coherent. Select the architecture yourself.
+
+Revised transfer contract (benchmark v2):
+    Payloads pass through two destination-clock stages before they are advertised as valid. Preserve source ownership of each queued word until its accepted destination transfer; synchronization stages alone do not establish multi-bit coherence. Availability may lag and bubbles may span multiple destination clocks. There is no one-beat-per-clock guarantee. Separate storage banks may implement the two directions. Keep the public capacity and direction-change rules; change direction only under the stated empty/idle preconditions.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

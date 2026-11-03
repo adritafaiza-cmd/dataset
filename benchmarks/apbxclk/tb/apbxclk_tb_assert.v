@@ -1,4 +1,6 @@
 `timescale 1ns/1ps
+// CDC behavioral checks are embedded below in plain Verilog.
+// Structural CDC checks (synchronizers and reset domains) run from sim/run.sh.
 // Assertion-enhanced starter testbench generated for simulation + protocol checking.
 module apbxclk_assert;
   localparam AW=12, DW=32;
@@ -30,17 +32,35 @@ module apbxclk_assert;
 
 
   // ---------------- Assertion monitors ----------------
+  reg cdc_prev_s_wait = 0;
+
   // APB enable phase is only valid while its peripheral is selected.
   always @(posedge SCLK) begin
     if (RSTN && S_PENABLE && !S_PSEL) begin
       $display("ASSERT FAIL: slave PENABLE without PSEL");
       errors = errors + 1;
     end
+
+    // CDC type E: an APB access may not disappear while waiting for PREADY.
+    if (RSTN && cdc_prev_s_wait && (!S_PSEL || !S_PENABLE)) begin
+      $display("CDC VIOLATION E: slave APB access dropped before PREADY");
+      errors = errors + 1;
+    end
+    if (!RSTN)
+      cdc_prev_s_wait <= 0;
+    else
+      cdc_prev_s_wait <= S_PSEL && S_PENABLE && !S_PREADY;
   end
 
   always @(posedge MCLK) begin
     if (M_PRESETn && M_PENABLE && !M_PSEL) begin
       $display("ASSERT FAIL: master PENABLE without PSEL");
+      errors = errors + 1;
+    end
+
+    // CDC type A/H: source reset must suppress requests in the destination.
+    if (!RSTN && M_PSEL) begin
+      $display("CDC VIOLATION A/H: master PSEL while source reset is asserted");
       errors = errors + 1;
     end
   end

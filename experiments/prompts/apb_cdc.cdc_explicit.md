@@ -57,13 +57,16 @@ Behavior:
     - Assert src_pready_o only after the destination transfer completes.
     - Do not lose, duplicate, or reorder requests. One outstanding transaction is enough.
     - Reset must idle both interfaces and must not create a transaction.
-    - Each FIFO beat is one registered sample. Valid can fall for one read clock before the next beat. The destination still waits for dst_pready_i before completing the access.
+    - Each FIFO beat is one registered sample. Valid can remain low for multiple read clocks before the next beat. The destination still waits for dst_pready_i before completing the access.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings
     and must pass structural CDC/RDC analysis with zero unsafe crossings. Reset
     release must be safe in each clock domain, and transferred multi-bit data must
     remain coherent. Select the architecture yourself.
+
+Revised transfer contract (benchmark v2):
+    Payloads pass through two destination-clock stages before they are advertised as valid. Preserve source ownership of each queued word until its accepted destination transfer; synchronization stages alone do not establish multi-bit coherence. Availability may lag and bubbles may span multiple destination clocks. There is no one-beat-per-clock guarantee.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

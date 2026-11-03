@@ -76,9 +76,11 @@ module	apbxclk #(
 
 	reg			s_request, s_tfr_request;
 	reg			m_request, m_request_pipe;
+	reg m_req_meta, m_req_sync;
 
 	reg			m_ack;
 	reg			s_ack, s_ack_pipe;
+	reg s_ack_meta, s_ack_sync;
 	reg	[DW-1:0]	m_prdata;
 	reg			m_pslverr;
 
@@ -87,6 +89,13 @@ module	apbxclk #(
 	//
 	// Synchronize resets
 	// {{{
+	(* ASYNC_REG = "TRUE" *) reg [AW-1:0] S_APB_PADDR_cdc_meta, S_APB_PADDR_cdc_sync;
+	(* ASYNC_REG = "TRUE" *) reg [1-1:0] S_APB_PWRITE_cdc_meta, S_APB_PWRITE_cdc_sync;
+	(* ASYNC_REG = "TRUE" *) reg [DW-1:0] S_APB_PWDATA_cdc_meta, S_APB_PWDATA_cdc_sync;
+	(* ASYNC_REG = "TRUE" *) reg [DW/8-1:0] S_APB_PWSTRB_cdc_meta, S_APB_PWSTRB_cdc_sync;
+	(* ASYNC_REG = "TRUE" *) reg [3-1:0] S_APB_PPROT_cdc_meta, S_APB_PPROT_cdc_sync;
+	(* ASYNC_REG = "TRUE" *) reg [DW-1:0] m_prdata_cdc_meta, m_prdata_cdc_sync;
+	(* ASYNC_REG = "TRUE" *) reg [1-1:0] m_pslverr_cdc_meta, m_pslverr_cdc_sync;
 	always @(posedge S_APB_PCLK or negedge S_PRESETn)
 	if (!S_PRESETn)
 		{ s_resetn, s_reset_pipe } <= 0;
@@ -140,10 +149,10 @@ module	apbxclk #(
 	// {{{
 	always @(posedge M_APB_PCLK or negedge M_PRESETn)
 	if (!M_PRESETn)
-		{ m_request, m_request_pipe } <= 0;
+		{ m_request, m_request_pipe, m_req_sync, m_req_meta } <= 0;
 	else
-		{ m_request, m_request_pipe }
-				<= { m_request_pipe, s_tfr_request };
+		{ m_request, m_request_pipe, m_req_sync, m_req_meta }
+				<= { m_request_pipe, m_req_sync, m_req_meta, s_tfr_request };
 	// }}}
 
 	// M_APB_PSEL, M_APB_PENABLE -- 4. Forward the request downstream
@@ -180,9 +189,9 @@ module	apbxclk #(
 	// {{{
 	always @(posedge S_APB_PCLK or negedge s_resetn)
 	if (!s_resetn)
-		{ s_ack, s_ack_pipe } <= 0;
+		{ s_ack, s_ack_pipe, s_ack_sync, s_ack_meta } <= 0;
 	else
-		{ s_ack, s_ack_pipe } <= { s_ack_pipe, m_ack };
+		{ s_ack, s_ack_pipe, s_ack_sync, s_ack_meta } <= { s_ack_pipe, s_ack_sync, s_ack_meta, m_ack };
 	// }}}
 
 	// S_APB_PREADY
@@ -215,78 +224,69 @@ module	apbxclk #(
 	// Handle the ancillary (data bearing) signals
 	// {{{
 
-	generate if (OPT_REGISTERED)
-	begin : GEN_REGISTERS
-		// {{{
-		// Register all results into the new domain when
-		// crossing clock domains
-		reg	[AW-1:0]	m_paddr;
-		reg			m_pwrite;
-		reg	[DW-1:0]	m_pwdata;
-		reg	[DW/8-1:0]	m_pwstrb;
-		reg	[2:0]		m_pprot;
+	// Both OPT_REGISTERED settings use one capture in the receiving
+	// clock. The request fields are taken on the first master clock
+	// where the synchronized request is high and not yet acknowledged,
+	// then held through PSEL and PENABLE. The return word is taken on
+	// the first slave clock where the synchronized acknowledge is high.
+	reg	[AW-1:0]	m_paddr;
+	reg			m_pwrite;
+	reg	[DW-1:0]	m_pwdata;
+	reg	[DW/8-1:0]	m_pwstrb;
+	reg	[2:0]		m_pprot;
+	reg			m_payload_held;
 
-		reg	[DW-1:0]	s_prdata;
-		reg			s_pslverr;
+	reg	[DW-1:0]	s_prdata;
+	reg			s_pslverr;
+	reg			s_return_held;
 
-		always @(posedge M_APB_PCLK)
-		if (m_request && !m_ack)
-		begin
-			m_paddr  <= S_APB_PADDR;
-			m_pwrite <= S_APB_PWRITE;
-			m_pwdata <= S_APB_PWDATA;
-			m_pwstrb <= S_APB_PWSTRB;
-			m_pprot  <= S_APB_PPROT;
-		end
+	always @(posedge M_APB_PCLK or negedge M_PRESETn)
+	if (!M_PRESETn) begin
+		m_paddr <= {AW{1'b0}};
+		m_pwrite <= 1'b0;
+		m_pwdata <= {DW{1'b0}};
+		m_pwstrb <= {(DW/8){1'b0}};
+		m_pprot <= 3'b000;
+		m_payload_held <= 1'b0;
+	end else if (!m_request || m_ack) begin
+		m_payload_held <= 1'b0;
+	end else if (!m_payload_held) begin
+		m_paddr  <= S_APB_PADDR_cdc_sync;
+		m_pwrite <= S_APB_PWRITE_cdc_sync;
+		m_pwdata <= S_APB_PWDATA_cdc_sync;
+		m_pwstrb <= S_APB_PWSTRB_cdc_sync;
+		m_pprot  <= S_APB_PPROT_cdc_sync;
+		m_payload_held <= 1'b1;
+	end
 
-		assign	M_APB_PADDR  = m_paddr;
-		assign	M_APB_PWRITE = m_pwrite;
-		assign	M_APB_PWDATA = m_pwdata;
-		assign	M_APB_PWSTRB = m_pwstrb;
-		assign	M_APB_PPROT  = m_pprot;
+	assign	M_APB_PADDR  = m_paddr;
+	assign	M_APB_PWRITE = m_pwrite;
+	assign	M_APB_PWDATA = m_pwdata;
+	assign	M_APB_PWSTRB = m_pwstrb;
+	assign	M_APB_PPROT  = m_pprot;
 
-		always @(posedge S_APB_PCLK or negedge s_resetn)
-		if (!s_resetn)
-			s_pslverr <= 1'b0;
-		else if (s_tfr_request && s_ack
-					&& (!S_APB_PREADY || !S_APB_PENABLE))
-			s_pslverr <= m_pslverr;
-		else
-			s_pslverr <= 0;
+	always @(posedge S_APB_PCLK or negedge s_resetn)
+	if (!s_resetn) begin
+		s_prdata <= {DW{1'b0}};
+		s_pslverr <= 1'b0;
+		s_return_held <= 1'b0;
+	end else if (!s_ack) begin
+		s_return_held <= 1'b0;
+	end else if (!s_return_held) begin
+		s_prdata <= m_prdata_cdc_sync;
+		s_pslverr <= m_pslverr_cdc_sync;
+		s_return_held <= 1'b1;
+	end
 
-		always @(posedge S_APB_PCLK)
-		if (s_request && s_ack)
-		begin
-			s_prdata  <= m_prdata;
-		end else begin
-			s_prdata  <= 0;
-		end
-
-		assign	S_APB_PRDATA  = s_prdata;
-		assign	S_APB_PSLVERR = s_pslverr;
-		// }}}
-	end else begin : NO_REGISTERING
-		// {{{
-		// Results will be stable whenever PSEL is true.  There's
-		// really no *need* to register them
-
-		assign	M_APB_PADDR  = S_APB_PADDR;
-		assign	M_APB_PWRITE = S_APB_PWRITE;
-		assign	M_APB_PWDATA = S_APB_PWDATA;
-		assign	M_APB_PWSTRB = S_APB_PWSTRB;
-		assign	M_APB_PPROT  = S_APB_PPROT;
-
-		assign	S_APB_PRDATA  = m_prdata;
-		assign	S_APB_PSLVERR = m_pslverr && S_APB_PREADY;
-		// }}}
-	end endgenerate
+	assign	S_APB_PRDATA  = s_prdata;
+	assign	S_APB_PSLVERR = s_pslverr && S_APB_PREADY;
 	// }}}
 
 	// Make Verilator happy
 	// {{{
 	// Verilator lint_off UNUSED
 	wire	unused;
-	assign	unused = &{ 1'b0 };
+	assign	unused = &{ 1'b0, OPT_REGISTERED };
 	// Verilator lint_on  UNUSED
 	// }}}
 ////////////////////////////////////////////////////////////////////////////////
@@ -298,6 +298,42 @@ module	apbxclk #(
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
+
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin S_APB_PADDR_cdc_meta <= 0; S_APB_PADDR_cdc_sync <= 0; end
+		else begin S_APB_PADDR_cdc_meta <= S_APB_PADDR; S_APB_PADDR_cdc_sync <= S_APB_PADDR_cdc_meta; end
+	end
+
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin S_APB_PWRITE_cdc_meta <= 0; S_APB_PWRITE_cdc_sync <= 0; end
+		else begin S_APB_PWRITE_cdc_meta <= S_APB_PWRITE; S_APB_PWRITE_cdc_sync <= S_APB_PWRITE_cdc_meta; end
+	end
+
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin S_APB_PWDATA_cdc_meta <= 0; S_APB_PWDATA_cdc_sync <= 0; end
+		else begin S_APB_PWDATA_cdc_meta <= S_APB_PWDATA; S_APB_PWDATA_cdc_sync <= S_APB_PWDATA_cdc_meta; end
+	end
+
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin S_APB_PWSTRB_cdc_meta <= 0; S_APB_PWSTRB_cdc_sync <= 0; end
+		else begin S_APB_PWSTRB_cdc_meta <= S_APB_PWSTRB; S_APB_PWSTRB_cdc_sync <= S_APB_PWSTRB_cdc_meta; end
+	end
+
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin S_APB_PPROT_cdc_meta <= 0; S_APB_PPROT_cdc_sync <= 0; end
+		else begin S_APB_PPROT_cdc_meta <= S_APB_PPROT; S_APB_PPROT_cdc_sync <= S_APB_PPROT_cdc_meta; end
+	end
+
+	always @(posedge S_APB_PCLK or negedge s_resetn) begin
+		if (!s_resetn) begin m_prdata_cdc_meta <= 0; m_prdata_cdc_sync <= 0; end
+		else begin m_prdata_cdc_meta <= m_prdata; m_prdata_cdc_sync <= m_prdata_cdc_meta; end
+	end
+
+	always @(posedge S_APB_PCLK or negedge s_resetn) begin
+		if (!s_resetn) begin m_pslverr_cdc_meta <= 0; m_pslverr_cdc_sync <= 0; end
+		else begin m_pslverr_cdc_meta <= m_pslverr; m_pslverr_cdc_sync <= m_pslverr_cdc_meta; end
+	end
+
 `ifdef	FORMAL
 	(* gclk *)	reg	gbl_clk;
 

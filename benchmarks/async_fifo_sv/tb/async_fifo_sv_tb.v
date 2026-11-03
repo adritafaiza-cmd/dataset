@@ -19,6 +19,20 @@ module async_fifo_sv_tb;
         .rempty(rempty), .raddr(raddr)
     );
 
+    // Plain-Verilog CDC type A checks for each FIFO clock domain.
+    always @(posedge wclk) begin
+        if (!wrst_n && wfull) begin
+            $display("CDC VIOLATION A: wfull asserted during write reset");
+            errors = errors + 1;
+        end
+    end
+    always @(posedge rclk) begin
+        if (!rrst_n && !rempty) begin
+            $display("CDC VIOLATION A: rempty deasserted during read reset");
+            errors = errors + 1;
+        end
+    end
+
     integer i;
     initial begin
         repeat (4) @(posedge wclk); wrst_n = 1;

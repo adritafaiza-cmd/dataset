@@ -52,7 +52,10 @@ Behavior:
     - Accepted writes must appear in order on the opposite side when that side reads.
     - Full/empty and almost-full/almost-empty flags are local to each side.
     - After reset the FIFO is empty.
-    - FALLTHROUGH does not select a combinational read. Each side's read data is one local sample taken while that side is the reader. Empty may be high for one local clock after an accepted read even when another word is stored. Pointers in both directions cross as acknowledged binary snapshots, so full and empty can lag.
+    - FALLTHROUGH does not select a combinational read. Each side's read data is one local sample taken while that side is the reader. Empty may remain high for multiple local clocks after an accepted read even when another word is stored. Pointers in both directions cross as acknowledged binary snapshots, so full and empty can lag.
+
+Revised transfer contract (benchmark v2):
+    Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

@@ -6,6 +6,9 @@ src_clk_i and dst_clk_i are independent clocks. Please take care of any clock-do
 
 Move source data to the destination in order, holding it while the receiver waits. A clear request isolates both ends, then drops the one outstanding beat by returning request and acknowledge to zero, and both sides return to idle without a stray transfer. There is no extra valid gap between beats. Each clear step reaches the other clock one handshake later.
 
+Revised behavior (benchmark v2):
+Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
+
 Give me the complete SystemVerilog code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.
 

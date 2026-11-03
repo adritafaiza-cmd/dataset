@@ -6,6 +6,9 @@ s_clk and m_clk are independent clocks. Please take care of any clock-domain cro
 
 Buffer stream beats between the two sides without disturbing their order, packet endings, or enabled sidebands. Full, empty, and depth use acknowledged binary pointer snapshots, so ready can lag. Hold tdata and tlast while tready is low. Honor the selected full, pause, and drop/mark options.
 
+Revised behavior (benchmark v2):
+Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
+
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.
 

@@ -4,7 +4,10 @@ Implement a bidirectional asynchronous FIFO.
 
 a_clk and b_clk are independent clocks. Please take care of any clock-domain crossings between them. The resets are active-low.
 
-Move words in either direction, as selected on each side. Preserve their order and honor full and empty status. Pointers in both directions cross as acknowledged binary snapshots, so the flags can lag. Each reading side samples the word once, and empty may be high for one local clock after an accepted read. Start empty after reset.
+Move words in either direction, as selected on each side. Preserve their order and honor full and empty status. Pointers in both directions cross as acknowledged binary snapshots, so the flags can lag. Each reading side samples the word once, and empty may remain high for multiple local clocks after an accepted read. Start empty after reset.
+
+Revised behavior (benchmark v2):
+Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
 
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.

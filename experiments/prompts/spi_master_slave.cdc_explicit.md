@@ -50,6 +50,9 @@ CDC requirement:
     release must be safe in each clock domain, and transferred multi-bit data must
     remain coherent. Select the architecture yourself.
 
+Revised transfer contract (benchmark v2):
+    Hold the transmit word until serial acceptance, synchronize both transmit and completed receive payloads, and use only final control synchronizer stages. Complete each request exactly once. Re-arm serial acceptance only after observing the request return low. di_req_o advertises that the complete return-to-zero handshake has finished and another word can be accepted; wr_ack_o acknowledges acceptance and do_valid_o pulses for each completed word.
+
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,
 or the reference implementation.

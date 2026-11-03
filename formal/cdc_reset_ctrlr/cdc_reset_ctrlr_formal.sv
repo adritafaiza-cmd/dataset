@@ -19,15 +19,15 @@ module cdc_reset_ctrlr_formal;
 
   reg active = 0, saw_a_iso = 0, saw_b_iso = 0;
   reg saw_a_clear = 0, saw_b_clear = 0;
-  reg [6:0] age = 0;
+  reg [7:0] age = 0;
   always @($global_clock) begin
     assume(!(a_clear_i && b_clear_i));
     if (!a_rst_ni || !b_rst_ni) assume(!a_clear_i && !b_clear_i);
     if (active || a_isolate_o || b_isolate_o)
       assume(!a_clear_i && !b_clear_i);
 
-    assert(!a_clear_o || a_isolate_o);
-    assert(!b_clear_o || b_isolate_o);
+    assert(!a_clear_o || (a_isolate_o && b_isolate_o));
+    assert(!b_clear_o || (b_isolate_o && a_isolate_o));
     if (!a_rst_ni) assert(!a_clear_o && !a_isolate_o);
     if (!b_rst_ni) assert(!b_clear_o && !b_isolate_o);
 
@@ -44,7 +44,7 @@ module cdc_reset_ctrlr_formal;
       saw_b_iso <= saw_b_iso || b_isolate_o;
       saw_a_clear <= saw_a_clear || a_clear_o;
       saw_b_clear <= saw_b_clear || b_clear_o;
-      assert(age < 70);
+      assert(age < 120);
       if (saw_a_iso && saw_b_iso && saw_a_clear && saw_b_clear &&
           !a_isolate_o && !b_isolate_o) begin
         active <= 0;

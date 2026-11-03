@@ -101,6 +101,25 @@ module cdc_2phase_clearable #(
   assign src_rst_sync_ni = src_rst_sync_q[1];
   assign dst_rst_sync_ni = dst_rst_sync_q[1];
 
+  // One cycle after the local reset synchronizer releases, so a reset flush
+  // is a real clear request rather than a level sampled inside reset.
+  reg src_por_clear_q;
+  reg dst_por_clear_q;
+
+  always @(posedge src_clk_i or negedge src_rst_sync_ni) begin
+    if (!src_rst_sync_ni)
+      src_por_clear_q <= CLEAR_ON_ASYNC_RESET;
+    else
+      src_por_clear_q <= 1'b0;
+  end
+
+  always @(posedge dst_clk_i or negedge dst_rst_sync_ni) begin
+    if (!dst_rst_sync_ni)
+      dst_por_clear_q <= CLEAR_ON_ASYNC_RESET;
+    else
+      dst_por_clear_q <= 1'b0;
+  end
+
   wire s_src_clear_req;
   reg  s_src_clear_ack_q;
   wire s_src_ready;
@@ -156,7 +175,7 @@ module cdc_2phase_clearable #(
   ) i_cdc_reset_ctrlr (
     .a_clk_i         (src_clk_i),
     .a_rst_ni        (src_rst_sync_ni),
-    .a_clear_i       (src_clear_i),
+    .a_clear_i       (src_clear_i | src_por_clear_q),
     .a_clear_o       (s_src_clear_req),
     .a_clear_ack_i   (s_src_clear_ack_q),
     .a_isolate_o     (s_src_isolate_req),
@@ -164,7 +183,7 @@ module cdc_2phase_clearable #(
 
     .b_clk_i         (dst_clk_i),
     .b_rst_ni        (dst_rst_sync_ni),
-    .b_clear_i       (dst_clear_i),
+    .b_clear_i       (dst_clear_i | dst_por_clear_q),
     .b_clear_o       (s_dst_clear_req),
     .b_clear_ack_i   (s_dst_clear_ack_q),
     .b_isolate_o     (s_dst_isolate_req),
@@ -274,6 +293,16 @@ module cdc_2phase_dst_clearable #(
 
   reg ack_dst_d;
   reg ack_dst_q;
+  (* ASYNC_REG = "TRUE" *) reg [WIDTH-1:0] payload_meta_q, payload_sync_q;
+  always @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      payload_meta_q <= {WIDTH{1'b0}};
+      payload_sync_q <= {WIDTH{1'b0}};
+    end else begin
+      payload_meta_q <= async_data_i;
+      payload_sync_q <= payload_meta_q;
+    end
+  end
   wire req_synced;
   reg req_synced_q1;
 
@@ -281,7 +310,7 @@ module cdc_2phase_dst_clearable #(
   reg [WIDTH-1:0] data_dst_q;
 
   sync #(
-    .STAGES(SYNC_STAGES)
+    .STAGES(SYNC_STAGES+2)
   ) i_sync (
     .clk_i    (clk_i),
     .rst_ni   (rst_ni),
@@ -303,7 +332,7 @@ module cdc_2phase_dst_clearable #(
     data_dst_d = data_dst_q;
 
     if ((req_synced != req_synced_q1) && !valid_o) begin
-      data_dst_d = async_data_i;
+      data_dst_d = payload_sync_q;
     end
   end
 

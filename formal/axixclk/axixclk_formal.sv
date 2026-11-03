@@ -1,7 +1,7 @@
 module axixclk_formal;
   localparam IW=1, AW=6, DW=8;
   (* gclk *) reg gclk;
-  reg [5:0] tick = 0;
+  reg [15:0] tick = 0;
   always @(posedge gclk) tick <= tick + 1'b1;
   wire S_AXI_ACLK = tick[0];
   wire M_AXI_ACLK = tick[1];

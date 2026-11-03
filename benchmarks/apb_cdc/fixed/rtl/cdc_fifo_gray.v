@@ -20,83 +20,102 @@ module cdc_fifo_gray #(
 );
 
     localparam PTRW = LOG_DEPTH + 1;
+    localparam NST = (SYNC_STAGES < 2) ? 2 : SYNC_STAGES;
     localparam [PTRW-1:0] PTR_FULL = {1'b1, {LOG_DEPTH{1'b0}}};
-
-    function [PTRW-1:0] bin2gray;
-        input [PTRW-1:0] b;
-        begin
-            bin2gray = b ^ (b >> 1);
-        end
-    endfunction
-
-    function [PTRW-1:0] gray2bin;
-        input [PTRW-1:0] g;
-        integer k;
-        begin
-            gray2bin[PTRW-1] = g[PTRW-1];
-            for (k = PTRW-2; k >= 0; k = k - 1)
-                gray2bin[k] = gray2bin[k+1] ^ g[k];
-        end
-    endfunction
 
     reg [WIDTH-1:0] mem [0:(1<<LOG_DEPTH)-1];
     reg [PTRW-1:0] wptr_bin, rptr_bin;
-    wire [PTRW-1:0] wptr_gray = bin2gray(wptr_bin);
-    wire [PTRW-1:0] rptr_gray = bin2gray(rptr_bin);
+    reg [PTRW-1:0] wsnap_q, rsnap_q;
+    reg [PTRW-1:0] wptr_dst, rptr_src;
+    reg wreq_q, rreq_q, wack_q, rack_q;
+    (* ASYNC_REG = "TRUE" *) reg [NST-1:0] wreq_sync, rreq_sync;
+    (* ASYNC_REG = "TRUE" *) reg [NST-1:0] wack_sync, rack_sync;
+    (* ASYNC_REG = "TRUE" *) reg [WIDTH-1:0] payload_meta_q, payload_sync_q;
+    reg [1:0] payload_wait_q;
+    reg [WIDTH-1:0] dst_data_q;
+    reg dst_hold;
 
-    (* ASYNC_REG = "TRUE" *) reg [PTRW-1:0] rptr_sync [0:SYNC_STAGES-1];
-    (* ASYNC_REG = "TRUE" *) reg [PTRW-1:0] wptr_sync [0:SYNC_STAGES-1];
-
-    integer s;
+    // Binary pointers advance only on an accepted beat. Each side sends
+    // a snapshot on one request bit. The other side captures that
+    // register when the request changes, so ready and valid do not
+    // reconverge a synchronized Gray bus.
+    assign src_ready_o = ((wptr_bin ^ rptr_src) != PTR_FULL);
+    assign dst_valid_o = dst_hold;
+    assign dst_data_o  = dst_data_q;
 
     always @(posedge src_clk_i or negedge src_rst_ni) begin
         if (!src_rst_ni) begin
-            for (s = 0; s < SYNC_STAGES; s = s + 1)
-                rptr_sync[s] <= {PTRW{1'b0}};
+            wptr_bin  <= {PTRW{1'b0}};
+            wsnap_q   <= {PTRW{1'b0}};
+            wreq_q    <= 1'b0;
+            rack_sync <= {NST{1'b0}};
+            rptr_src  <= {PTRW{1'b0}};
+            rreq_sync <= {NST{1'b0}};
+            wack_q    <= 1'b0;
         end else begin
-            rptr_sync[0] <= rptr_gray;
-            for (s = 1; s < SYNC_STAGES; s = s + 1)
-                rptr_sync[s] <= rptr_sync[s-1];
+            rack_sync <= {rack_sync[NST-2:0], rack_q};
+            rreq_sync <= {rreq_sync[NST-2:0], rreq_q};
+            if (rreq_sync[NST-1] != wack_q) begin
+                rptr_src <= rsnap_q;
+                wack_q   <= rreq_sync[NST-1];
+            end
+            if (src_valid_i && src_ready_o)
+                wptr_bin <= wptr_bin + 1'b1;
+            if ((wreq_q == rack_sync[NST-1]) && (wptr_bin != wsnap_q)) begin
+                wsnap_q <= wptr_bin;
+                wreq_q  <= ~wreq_q;
+            end
         end
     end
 
-    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
-        if (!dst_rst_ni) begin
-            for (s = 0; s < SYNC_STAGES; s = s + 1)
-                wptr_sync[s] <= {PTRW{1'b0}};
-        end else begin
-            wptr_sync[0] <= wptr_gray;
-            for (s = 1; s < SYNC_STAGES; s = s + 1)
-                wptr_sync[s] <= wptr_sync[s-1];
-        end
-    end
-
-    wire [PTRW-1:0] rptr_bin_src = gray2bin(rptr_sync[SYNC_STAGES-1]);
-    wire [PTRW-1:0] wptr_bin_dst = gray2bin(wptr_sync[SYNC_STAGES-1]);
-
-    assign src_ready_o = ((wptr_bin ^ rptr_bin_src) != PTR_FULL);
-    assign dst_valid_o = (wptr_bin_dst != rptr_bin);
-    assign dst_data_o  = mem[rptr_bin[LOG_DEPTH-1:0]];
-
-    always @(posedge src_clk_i or negedge src_rst_ni) begin
-        if (!src_rst_ni)
-            wptr_bin <= {PTRW{1'b0}};
-        else if (src_valid_i && src_ready_o)
-            wptr_bin <= wptr_bin + 1'b1;
-    end
-
-    // FIFO storage is not reset; keep it off the async-reset always block
-    // so the write data pin is not a reset-in-data-path.
     always @(posedge src_clk_i) begin
         if (src_valid_i && src_ready_o)
             mem[wptr_bin[LOG_DEPTH-1:0]] <= src_data_i;
     end
 
     always @(posedge dst_clk_i or negedge dst_rst_ni) begin
-        if (!dst_rst_ni)
-            rptr_bin <= {PTRW{1'b0}};
-        else if (dst_valid_o && dst_ready_i)
-            rptr_bin <= rptr_bin + 1'b1;
+        if (!dst_rst_ni) begin
+            rptr_bin  <= {PTRW{1'b0}};
+            rsnap_q   <= {PTRW{1'b0}};
+            rreq_q    <= 1'b0;
+            wack_sync <= {NST{1'b0}};
+            wptr_dst  <= {PTRW{1'b0}};
+            wreq_sync <= {NST{1'b0}};
+            rack_q    <= 1'b0;
+            dst_data_q <= {WIDTH{1'b0}};
+            dst_hold  <= 1'b0;
+        end else begin
+            wack_sync <= {wack_sync[NST-2:0], wack_q};
+            wreq_sync <= {wreq_sync[NST-2:0], wreq_q};
+            if (wreq_sync[NST-1] != rack_q) begin
+                wptr_dst <= wsnap_q;
+                rack_q   <= wreq_sync[NST-1];
+            end
+            if (!dst_hold && (wptr_dst != rptr_bin) && payload_wait_q == 2) begin
+                dst_data_q <= payload_sync_q;
+                dst_hold   <= 1'b1;
+            end else if (dst_hold && dst_ready_i) begin
+                dst_hold <= 1'b0;
+                rptr_bin <= rptr_bin + 1'b1;
+            end
+            if ((rreq_q == wack_sync[NST-1]) && (rptr_bin != rsnap_q)) begin
+                rsnap_q <= rptr_bin;
+                rreq_q  <= ~rreq_q;
+            end
+        end
     end
 
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            payload_meta_q <= {WIDTH{1'b0}};
+            payload_sync_q <= {WIDTH{1'b0}};
+            payload_wait_q <= 0;
+        end else begin
+            payload_meta_q <= mem[rptr_bin[LOG_DEPTH-1:0]];
+            payload_sync_q <= payload_meta_q;
+            if (!dst_hold && (wptr_dst != rptr_bin)) begin
+                if (payload_wait_q != 2) payload_wait_q <= payload_wait_q + 1'b1;
+            end else payload_wait_q <= 0;
+        end
+    end
 endmodule

@@ -75,14 +75,14 @@ reg s_flag_reg = 1'b0;
 (* srl_style = "register" *)
 reg s_flag_sync_reg_1 = 1'b0;
 (* srl_style = "register" *)
-reg s_flag_sync_reg_2 = 1'b0;
+reg s_flag_sync_reg_4 = 1'b0;
 
 reg [1:0] m_state_reg = 2'd0;
 reg m_flag_reg = 1'b0;
 (* srl_style = "register" *)
 reg m_flag_sync_reg_1 = 1'b0;
 (* srl_style = "register" *)
-reg m_flag_sync_reg_2 = 1'b0;
+reg m_flag_sync_reg_4 = 1'b0;
 
 reg [ADDR_WIDTH-1:0]  s_axil_araddr_reg = {ADDR_WIDTH{1'b0}};
 reg [2:0]             s_axil_arprot_reg = 3'd0;
@@ -108,6 +108,36 @@ assign m_axil_arprot = m_axil_arprot_reg;
 assign m_axil_arvalid = m_axil_arvalid_reg;
 assign m_axil_rready = !m_axil_rvalid_reg;
 
+(* ASYNC_REG = "TRUE" *) reg [ADDR_WIDTH-1:0] s_axil_araddr_reg_cdc_meta = 0, s_axil_araddr_reg_cdc_sync = 0;
+always @(posedge m_clk) begin
+    s_axil_araddr_reg_cdc_meta <= s_axil_araddr_reg;
+    s_axil_araddr_reg_cdc_sync <= s_axil_araddr_reg_cdc_meta;
+end
+(* ASYNC_REG = "TRUE" *) reg [3-1:0] s_axil_arprot_reg_cdc_meta = 0, s_axil_arprot_reg_cdc_sync = 0;
+always @(posedge m_clk) begin
+    s_axil_arprot_reg_cdc_meta <= s_axil_arprot_reg;
+    s_axil_arprot_reg_cdc_sync <= s_axil_arprot_reg_cdc_meta;
+end
+(* ASYNC_REG = "TRUE" *) reg [DATA_WIDTH-1:0] m_axil_rdata_reg_cdc_meta = 0, m_axil_rdata_reg_cdc_sync = 0;
+always @(posedge s_clk) begin
+    m_axil_rdata_reg_cdc_meta <= m_axil_rdata_reg;
+    m_axil_rdata_reg_cdc_sync <= m_axil_rdata_reg_cdc_meta;
+end
+(* ASYNC_REG = "TRUE" *) reg [2-1:0] m_axil_rresp_reg_cdc_meta = 0, m_axil_rresp_reg_cdc_sync = 0;
+always @(posedge s_clk) begin
+    m_axil_rresp_reg_cdc_meta <= m_axil_rresp_reg;
+    m_axil_rresp_reg_cdc_sync <= m_axil_rresp_reg_cdc_meta;
+end
+(* ASYNC_REG = "TRUE" *) reg s_flag_sync_reg_2 = 0, s_flag_sync_reg_3 = 0;
+always @(posedge m_clk) begin
+    s_flag_sync_reg_2 <= s_flag_sync_reg_1;
+    s_flag_sync_reg_3 <= s_flag_sync_reg_2;
+end
+(* ASYNC_REG = "TRUE" *) reg m_flag_sync_reg_2 = 0, m_flag_sync_reg_3 = 0;
+always @(posedge s_clk) begin
+    m_flag_sync_reg_2 <= m_flag_sync_reg_1;
+    m_flag_sync_reg_3 <= m_flag_sync_reg_2;
+end
 // slave side
 always @(posedge s_clk) begin
     s_axil_rvalid_reg <= s_axil_rvalid_reg && !s_axil_rready;
@@ -126,16 +156,16 @@ always @(posedge s_clk) begin
             end
         end
         2'd1: begin
-            if (m_flag_sync_reg_2) begin
+            if (m_flag_sync_reg_4) begin
                 s_state_reg <= 2'd2;
                 s_flag_reg <= 1'b0;
-                s_axil_rdata_reg <= m_axil_rdata_reg;
-                s_axil_rresp_reg <= m_axil_rresp_reg;
+                s_axil_rdata_reg <= m_axil_rdata_reg_cdc_sync;
+                s_axil_rresp_reg <= m_axil_rresp_reg_cdc_sync;
                 s_axil_rvalid_reg <= 1'b1;
             end
         end
         2'd2: begin
-            if (!m_flag_sync_reg_2) begin
+            if (!m_flag_sync_reg_4) begin
                 s_state_reg <= 2'd0;
                 s_axil_arvalid_reg <= 1'b0;
             end
@@ -153,12 +183,12 @@ end
 // synchronization
 always @(posedge s_clk) begin
     m_flag_sync_reg_1 <= m_flag_reg;
-    m_flag_sync_reg_2 <= m_flag_sync_reg_1;
+    m_flag_sync_reg_4 <= m_flag_sync_reg_3;
 end
 
 always @(posedge m_clk) begin
     s_flag_sync_reg_1 <= s_flag_reg;
-    s_flag_sync_reg_2 <= s_flag_sync_reg_1;
+    s_flag_sync_reg_4 <= s_flag_sync_reg_3;
 end
 
 // master side
@@ -173,10 +203,10 @@ always @(posedge m_clk) begin
 
     case (m_state_reg)
         2'd0: begin
-            if (s_flag_sync_reg_2) begin
+            if (s_flag_sync_reg_4) begin
                 m_state_reg <= 2'd1;
-                m_axil_araddr_reg <= s_axil_araddr_reg;
-                m_axil_arprot_reg <= s_axil_arprot_reg;
+                m_axil_araddr_reg <= s_axil_araddr_reg_cdc_sync;
+                m_axil_arprot_reg <= s_axil_arprot_reg_cdc_sync;
                 m_axil_arvalid_reg <= 1'b1;
                 m_axil_rvalid_reg <= 1'b0;
             end
@@ -188,7 +218,7 @@ always @(posedge m_clk) begin
             end
         end
         2'd2: begin
-            if (!s_flag_sync_reg_2) begin
+            if (!s_flag_sync_reg_4) begin
                 m_state_reg <= 2'd0;
                 m_flag_reg <= 1'b0;
             end

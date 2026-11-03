@@ -4,7 +4,10 @@ Implement an APB-mapped register file.
 
 The reset is active-low.
 
-Provide a small APB register bank with the configured layout. Keep read-only bits unchanged on writes and restore the initial register values on reset.
+Provide a small APB register bank with the configured layout. Keep read-only registers unchanged on writes. Writable registers reset to zero; read-only registers expose reg_init_i.
+
+Revised behavior (benchmark v2):
+Writes commit only during APB access (psel and penable). Byte strobes update only selected bytes; retain unstrobed bytes and idle-cycle state. Writable registers reset to zero. Read-only registers expose reg_init_i and ignore writes. Addresses in each AddrOffset-byte decoded range map to that register; writes outside its data width leave stored data unchanged. Reset cancels a pending write.
 
 Give me the complete SystemVerilog code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.

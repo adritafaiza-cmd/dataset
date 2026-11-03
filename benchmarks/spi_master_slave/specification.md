@@ -14,3 +14,10 @@ OpenCores SPI master/slave with independent serial and parallel clocks.
 ## Evaluation
 The generated RTL is compiled and simulated with the supplied testbench.
 JasperGold CDC/RDC analysis is not yet frozen for this imported circuit.
+
+
+## CDC-clean benchmark v2 revision
+
+Hold the transmit word until serial acceptance, synchronize both transmit and completed receive payloads, and use only final control synchronizer stages. Complete each request exactly once. Re-arm serial acceptance only after observing the request return low. di_req_o advertises that the complete return-to-zero handshake has finished and another word can be accepted; wr_ack_o acknowledges acceptance and do_valid_o pulses for each completed word.
+
+This revision retains distinct clocks and actual crossing extraction. Validation requires compile, functional TB, structural lint, enhanced TB, bounded formal assertions plus cover reachability, and Jasper zero raw CDC/RDC errors with zero waivers. Do not interpret bounded assertions as an unbounded proof or structural analysis as MTBF signoff.

@@ -44,7 +44,10 @@ Behavior:
     - src_clear_i / dst_clear_i request a flush: isolate both sides, drop stored and in-flight data, then return to empty.
     - *_clear_pending_o stays high until that side finishes.
     - Clear and reset must not create a destination beat.
-    - The destination word is one registered sample. dst_valid_o may fall for one destination clock after an accepted beat even when another word is stored. A clear resets each binary pointer and the Gray register that feeds its synchronizer on the same edge.
+    - The destination word is one registered sample. dst_valid_o may remain low for multiple destination clocks after an accepted beat even when another word is stored. A clear resets each binary pointer and the Gray register that feeds its synchronizer on the same edge.
+
+Revised transfer contract (benchmark v2):
+    Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

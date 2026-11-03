@@ -6,6 +6,9 @@ s_clk and m_clk are independent clocks. Please take care of any clock-domain cro
 
 Bridge AXI-Lite requests to the other clock domain and bring back the matching read and write responses. Do not lose or repeat a transaction.
 
+Revised behavior (benchmark v2):
+Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
+
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.
 

@@ -35,6 +35,12 @@ module async_fifo #(
     wire                  common_rst_n;
     wire                  wrst_n_sync;
     wire                  rrst_n_sync;
+    wire                  rempty_raw;
+    wire                  data_hold;
+
+    // Storage can still hold words while the registered sample is
+    // between beats. The public empty flag covers that cycle.
+    assign rempty = rempty_raw || !data_hold;
 
     // Coordinated async assertion; deassert is synchronized per domain.
     (* ASYNC_REG = "TRUE" *) reg [1:0] wrst_sync_ff;
@@ -88,7 +94,7 @@ module async_fifo #(
         .rclk          (rclk),
         .rrst_n        (rrst_n_sync),
         .rinc          (rinc),
-        .rempty        (rempty),
+        .rempty        (rempty_raw),
         .rptr          (rptr),
         .rptr_gray     (rptr_gray),
         .raddr         (raddr_int),
@@ -133,7 +139,12 @@ module async_fifo #(
         .winc  (winc),
         .waddr (waddr_int),
         .wdata (wdata),
+        .rclk  (rclk),
+        .rrst_n(rrst_n_sync),
+        .rinc  (rinc),
+        .rempty(rempty_raw),
         .raddr (raddr_int),
+        .data_hold(data_hold),
         .rdata (rdata)
     );
 

@@ -4,7 +4,10 @@ Implement a valid/ready asynchronous FIFO with 2**LOG_DEPTH entries of WIDTH bit
 
 src_clk_i and dst_clk_i are independent clocks. Please take care of any clock-domain crossings between them. The resets are active-low.
 
-Queue accepted source items and deliver them in order at the destination. Stop accepting items when there is no room, and start empty after reset. The destination word is a registered sample. dst_valid_o may fall for one destination clock after an accepted beat even when another word is already stored.
+Queue accepted source items and deliver them in order at the destination. Stop accepting items when there is no room, and start empty after reset. The destination word is a registered sample. dst_valid_o may remain low for multiple destination clocks after an accepted beat even when another word is already stored.
+
+Revised behavior (benchmark v2):
+Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
 
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.

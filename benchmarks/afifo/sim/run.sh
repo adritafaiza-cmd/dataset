@@ -7,7 +7,12 @@ XRUN_MODE=()
 if [[ "${COMPILE_ONLY:-0}" == "1" ]]; then
   XRUN_MODE=(-elaborate)
 fi
+DUT="$BENCH/fixed/rtl/afifo.v"
+CHECKS="$ROOT/cdc_tb_checks"
+if [[ "${CDC_CHECKS:-1}" != "0" ]]; then
+  python3 "$CHECKS/lint_cdc.py" --circuit afifo "$DUT"
+fi
 xrun "${XRUN_MODE[@]}" -64bit -sv -timescale 1ns/1ps -top afifo_tb \
   -xmlibdirname "$ROOT/build/sim/afifo" \
-  "$BENCH/fixed/rtl/afifo.v" \
+  "$DUT" \
   "$BENCH/tb/afifo_tb.v"

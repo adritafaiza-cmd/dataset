@@ -6,6 +6,9 @@ sclk_i and pclk_i are independent clocks. Please take care of any clock-domain c
 
 Send accepted parallel words over SPI and return received words when complete. Keep the serial interface idle after reset.
 
+Revised behavior (benchmark v2):
+di_req_o indicates that the previous request/response handshake has returned to idle and a new word can be accepted. wr_ack_o pulses on acceptance; do_valid_o pulses once per completed word. Extra turnaround latency is permitted. Do not duplicate serial transactions.
+
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.
 

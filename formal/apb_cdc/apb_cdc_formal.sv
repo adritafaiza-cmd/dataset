@@ -1,7 +1,7 @@
 module apb_cdc_formal;
   localparam AW=6, DW=8;
   (* gclk *) reg gclk;
-  reg [5:0] tick = 0;
+  reg [15:0] tick = 0;
   always @(posedge gclk) tick <= tick + 1'b1;
   wire src_pclk_i = tick[0];
   wire dst_pclk_i = tick[1];

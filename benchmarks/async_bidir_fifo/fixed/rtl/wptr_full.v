@@ -20,34 +20,26 @@ module wptr_full
 	);
 
     reg  [ADDRSIZE:0] wbin;
-    wire [ADDRSIZE:0] wgraynext, wbinnext, wgraynextp1;
+    wire [ADDRSIZE:0] wbinnext;
     wire              awfull_val, wfull_val;
+    localparam [ADDRSIZE:0] DEPTH = {1'b1, {ADDRSIZE{1'b0}}};
+    localparam [ADDRSIZE:0] ALMOST = DEPTH - 1'b1;
 
-	// GRAYSTYLE2 pointer
+	// Binary pointer. It advances only on an accepted write.
 	always @(posedge wclk or negedge wrst_n) begin
 
 		if (!wrst_n)
 			{wbin, wptr} <= 0;
 		else
-			{wbin, wptr} <= {wbinnext, wgraynext};
+			{wbin, wptr} <= {wbinnext, wbinnext};
 
 	end
 
-    // Memory write-address pointer (okay to use binary to address memory)
     assign waddr = wbin[ADDRSIZE-1:0];
     assign wbinnext  = wbin + ((winc & ~wfull) ? 1 : 0);
-    assign wgraynext = (wbinnext >> 1) ^ wbinnext;
-    assign wgraynextp1 = ((wbinnext + 1'b1) >> 1) ^ (wbinnext + 1'b1);
 
-    //------------------------------------------------------------------
-    // Simplified version of the three necessary full-tests:
-    // assign wfull_val=((wgnext[ADDRSIZE] !=wq2_rptr[ADDRSIZE] ) &&
-    //                   (wgnext[ADDRSIZE-1]  !=wq2_rptr[ADDRSIZE-1]) &&
-    // (wgnext[ADDRSIZE-2:0]==wq2_rptr[ADDRSIZE-2:0]));
-    //------------------------------------------------------------------
-
-     assign wfull_val = (wgraynext == {~wq2_rptr[ADDRSIZE:ADDRSIZE-1],wq2_rptr[ADDRSIZE-2:0]});
-     assign awfull_val = (wgraynextp1 == {~wq2_rptr[ADDRSIZE:ADDRSIZE-1],wq2_rptr[ADDRSIZE-2:0]});
+     assign wfull_val = (wbinnext == {~wq2_rptr[ADDRSIZE], wq2_rptr[ADDRSIZE-1:0]});
+     assign awfull_val = ((wbinnext - wq2_rptr) == ALMOST);
 
      always @(posedge wclk or negedge wrst_n) begin
 

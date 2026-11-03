@@ -27,6 +27,8 @@ module async_fifo
 
     wire [ASIZE-1:0] waddr, raddr;
     wire [ASIZE  :0] wptr, rptr, wq2_rptr, rq2_wptr;
+    wire             rempty_raw;
+    wire             data_hold;
     wire wrst_n_sync;
     wire rrst_n_sync;
 
@@ -59,6 +61,8 @@ module async_fifo
     sync_r2w (
     .wq2_rptr (wq2_rptr),
     .rptr     (rptr),
+    .rclk     (rclk),
+    .rrst_n   (rrst_n_sync),
     .wclk     (wclk),
     .wrst_n   (wrst_n_sync)
     );
@@ -70,6 +74,8 @@ module async_fifo
     sync_w2r (
     .rq2_wptr (rq2_wptr),
     .wptr     (wptr),
+    .wclk     (wclk),
+    .wrst_n   (wrst_n_sync),
     .rclk     (rclk),
     .rrst_n   (rrst_n_sync)
     );
@@ -94,7 +100,10 @@ module async_fifo
     fifomem (
     .rclken (rinc),
     .rclk   (rclk),
+    .rrst_n (rrst_n_sync),
     .rdata  (rdata),
+    .rempty (rempty_raw),
+    .data_hold (data_hold),
     .wdata  (wdata),
     .waddr  (waddr),
     .raddr  (raddr),
@@ -108,14 +117,17 @@ module async_fifo
     #(ASIZE)
     rptr_empty (
     .arempty  (arempty),
-    .rempty   (rempty),
+    .rempty   (rempty_raw),
     .raddr    (raddr),
     .rptr     (rptr),
     .rq2_wptr (rq2_wptr),
     .rinc     (rinc),
+    .data_hold (data_hold),
     .rclk     (rclk),
     .rrst_n   (rrst_n_sync)
     );
+
+    assign rempty = rempty_raw | ~data_hold;
 
 endmodule
 

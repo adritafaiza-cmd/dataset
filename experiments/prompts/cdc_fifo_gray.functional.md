@@ -41,7 +41,10 @@ Behavior:
     - Pointers and data that leave their clock domain must remain coherent.
     - SYNC_STAGES is an implementation parameter; choose a safe crossing yourself.
     - After reset the FIFO is empty.
-    - Pointers cross as acknowledged binary snapshots, so ready and valid can lag. dst_data_o is one destination-clock sample. dst_valid_o may fall for one destination clock after an accepted beat even when another word is stored.
+    - Pointers cross as acknowledged binary snapshots, so ready and valid can lag. dst_data_o is one destination-clock sample. dst_valid_o may remain low for multiple destination clocks after an accepted beat even when another word is stored.
+
+Revised transfer contract (benchmark v2):
+    Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

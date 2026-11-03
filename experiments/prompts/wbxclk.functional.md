@@ -54,7 +54,10 @@ Behavior:
     - Return ack/err/data to the source.
     - o_wb_stall must go high when the crossing cannot accept another cycle.
     - Reset must idle both buses and must not create a destination cycle.
-    - Each FIFO keeps its own order. A beat is one registered sample and empty falls on a later read clock. o_wb_stall remains the outstanding-request count.
+    - Each FIFO keeps its own order. A beat is one registered sample and empty falls on a later read clock. o_wb_stall is a Boolean backpressure flag based on outstanding-request capacity.
+
+Revised transfer contract (benchmark v2):
+    Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

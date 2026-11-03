@@ -41,13 +41,16 @@ Behavior:
     - Pointers and data that leave their clock domain must remain coherent.
     - SYNC_STAGES is an implementation parameter; choose a safe crossing yourself.
     - After reset the FIFO is empty.
-    - Pointers cross as acknowledged binary snapshots, so ready and valid can lag. dst_data_o is one destination-clock sample. dst_valid_o may fall for one destination clock after an accepted beat even when another word is stored.
+    - Pointers cross as acknowledged binary snapshots, so ready and valid can lag. dst_data_o is one destination-clock sample. dst_valid_o may remain low for multiple destination clocks after an accepted beat even when another word is stored.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings
     and must pass structural CDC/RDC analysis with zero unsafe crossings. Reset
     release must be safe in each clock domain, and transferred multi-bit data must
     remain coherent. Select the architecture yourself.
+
+Revised transfer contract (benchmark v2):
+    Payloads pass through two destination-clock stages before they are advertised as valid. Preserve source ownership of each queued word until its accepted destination transfer; synchronization stages alone do not establish multi-bit coherence. Availability may lag and bubbles may span multiple destination clocks. There is no one-beat-per-clock guarantee.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

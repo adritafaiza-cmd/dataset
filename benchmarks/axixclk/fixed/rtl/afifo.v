@@ -103,10 +103,30 @@ module afifo #(
 	(* ASYNC_REG = "TRUE" *) reg	[(LGFIFO+1)*(NFF-1)-1:0]
 					rgray_cross, wgray_cross;
 	wire				wclk;
-	reg	[WIDTH-1:0]		lcl_rd_data;
 	reg				lcl_read, lcl_rd_empty;
+	reg				data_hold;
+	localparam			NST = (NFF < 2) ? 2 : NFF;
+	reg				wr_req_q, rd_req_q, wr_ack_q, rd_ack_q;
+	reg	[LGFIFO:0]		wr_data_q, rd_data_q, wr_snap, rd_snap;
+	(* ASYNC_REG = "TRUE" *) reg [NST-1:0] wr_req_sync, rd_req_sync;
+	(* ASYNC_REG = "TRUE" *) reg [NST-1:0] wr_ack_sync, rd_ack_sync;
 	// }}}
 
+	(* ASYNC_REG = "TRUE" *) reg [WIDTH-1:0] payload_meta_q, payload_sync_q;
+	reg [1:0] payload_wait_q;
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			payload_meta_q <= 0;
+			payload_sync_q <= 0;
+			payload_wait_q <= 0;
+		end else begin
+			payload_meta_q <= mem[rd_addr[LGFIFO-1:0]];
+			payload_sync_q <= payload_meta_q;
+			if (!data_hold && !lcl_rd_empty) begin
+				if (payload_wait_q != 2) payload_wait_q <= payload_wait_q + 1'b1;
+			end else payload_wait_q <= 0;
+		end
+	end
 	// wclk - Write clock generation
 	// {{{
 	generate if (WRITE_ON_POSEDGE)
@@ -137,10 +157,29 @@ module afifo #(
 	begin
 		wr_addr <= 0;
 		wgray   <= 0;
-	end else if (i_wr && !o_wr_full)
-	begin
-		wr_addr <= next_wr_addr;
-		wgray   <= next_wr_addr ^ (next_wr_addr >> 1);
+		wr_req_q <= 1'b0;
+		wr_data_q <= 0;
+		rd_ack_sync <= 0;
+		rd_snap <= 0;
+		rd_req_sync <= 0;
+		wr_ack_q <= 1'b0;
+	end else begin
+		rd_ack_sync <= {rd_ack_sync[NST-2:0], rd_ack_q};
+		rd_req_sync <= {rd_req_sync[NST-2:0], rd_req_q};
+		if (rd_req_sync[NST-1] != wr_ack_q) begin
+			rd_snap <= rd_data_q;
+			wr_ack_q <= rd_req_sync[NST-1];
+		end
+		if (i_wr && !o_wr_full) begin
+			wr_addr <= next_wr_addr;
+			wgray   <= next_wr_addr ^ (next_wr_addr >> 1);
+		end
+		// Launch on this same edge. One request bit is in flight.
+		if ((wr_req_q == rd_ack_sync[NST-1])
+				&& (((i_wr && !o_wr_full) ? next_wr_addr : wr_addr) != wr_data_q)) begin
+			wr_data_q <= (i_wr && !o_wr_full) ? next_wr_addr : wr_addr;
+			wr_req_q <= ~wr_req_q;
+		end
 	end
 	// }}}
 
@@ -159,45 +198,34 @@ module afifo #(
 	begin
 		rd_addr <= 0;
 		rgray   <= 0;
-	end else if (lcl_read && !lcl_rd_empty)
-	begin
-		rd_addr <= next_rd_addr;
-		rgray   <= next_rd_addr ^ (next_rd_addr >> 1);
+		rd_req_q <= 1'b0;
+		rd_data_q <= 0;
+		wr_ack_sync <= 0;
+		wr_snap <= 0;
+		wr_req_sync <= 0;
+		rd_ack_q <= 1'b0;
+	end else begin
+		wr_ack_sync <= {wr_ack_sync[NST-2:0], wr_ack_q};
+		wr_req_sync <= {wr_req_sync[NST-2:0], wr_req_q};
+		if (wr_req_sync[NST-1] != rd_ack_q) begin
+			wr_snap <= wr_data_q;
+			rd_ack_q <= wr_req_sync[NST-1];
+		end
+		if (lcl_read && !lcl_rd_empty) begin
+			rd_addr <= next_rd_addr;
+			rgray   <= next_rd_addr ^ (next_rd_addr >> 1);
+		end
+		if ((rd_req_q == wr_ack_sync[NST-1])
+				&& (((lcl_read && !lcl_rd_empty) ? next_rd_addr : rd_addr) != rd_data_q)) begin
+			rd_data_q <= (lcl_read && !lcl_rd_empty) ? next_rd_addr : rd_addr;
+			rd_req_q <= ~rd_req_q;
+		end
 	end
 	// }}}
 
-	// Read from memory
-	// {{{
-	always @(*)
-		lcl_rd_data = mem[rd_addr[LGFIFO-1:0]];
-	// }}}
-	// }}}
-	////////////////////////////////////////////////////////////////////////
-	//
-	// Cross clock domains
-	// {{{
-	////////////////////////////////////////////////////////////////////////
-	//
-	//
-
-	// read pointer -> wr_rgray
-	// {{{
-	always @(posedge wclk or negedge i_wr_reset_n)
-	if (!i_wr_reset_n)
-		{ wr_rgray, rgray_cross } <= 0;
-	else
-		{ wr_rgray, rgray_cross } <= { rgray_cross, rgray };
-	// }}}
-
-	// write pointer -> rd_wgray
-	// {{{
-	always @(posedge i_rclk or negedge i_rd_reset_n)
-	if (!i_rd_reset_n)
-		{ rd_wgray, wgray_cross } <= 0;
-	else
-		{ rd_wgray, wgray_cross } <= { wgray_cross, wgray };
-	// }}}
-
+	// Binary pointer snapshots are launched from the pointer blocks above.
+	// One request bit crosses each way. The other clock captures the
+	// pointer when that request changes.
 	// }}}
 	////////////////////////////////////////////////////////////////////////
 	//
@@ -208,41 +236,41 @@ module afifo #(
 	//
 
 	always @(*)
-		o_wr_full = (wr_rgray == { ~wgray[MSB:MSB-1], wgray[MSB-2:0] });
+		o_wr_full = (wr_addr == { ~rd_snap[MSB], rd_snap[MSB-1:0] });
 
 	always @(*)
-		lcl_rd_empty = (rd_wgray == rgray);
+		lcl_rd_empty = (rd_addr == wr_snap);
 
 	// o_rd_empty, o_rd_data
 	// {{{
+	// Both OPT_REGISTER_READS settings use one read-clock sample.
+	// Empty can rise for one read clock after an accepted read.
 	generate if (OPT_REGISTER_READS)
 	begin : GEN_REGISTERED_READ
-		// {{{
 		always @(*)
-			lcl_read = (o_rd_empty || i_rd);
-
-		always @(posedge i_rclk or negedge i_rd_reset_n)
-		if (!i_rd_reset_n)
-			o_rd_empty <= 1'b1;
-		else if (lcl_read)
-			o_rd_empty <= lcl_rd_empty;
-
-		always @(posedge i_rclk)
-		if (lcl_read)
-			o_rd_data <= lcl_rd_data;
-		// }}}
+			lcl_read = data_hold && !o_rd_empty && i_rd;
 	end else begin : GEN_COMBINATORIAL_FLAGS
-		// {{{
 		always @(*)
-			lcl_read = i_rd;
-
-		always @(*)
-			o_rd_empty = lcl_rd_empty;
-
-		always @(*)
-			o_rd_data = lcl_rd_data;
-		// }}}
+			lcl_read = data_hold && !o_rd_empty && i_rd;
 	end endgenerate
+
+	// The word is registered on one read edge and o_rd_empty falls
+	// on a later read edge, so the payload is stable before valid.
+	always @(posedge i_rclk or negedge i_rd_reset_n)
+	if (!i_rd_reset_n) begin
+		o_rd_empty <= 1'b1;
+		o_rd_data <= 0;
+		data_hold <= 1'b0;
+	end else if (!data_hold && !lcl_rd_empty && payload_wait_q == 2) begin
+		o_rd_data <= payload_sync_q;
+		data_hold <= 1'b1;
+		o_rd_empty <= 1'b1;
+	end else if (data_hold && o_rd_empty) begin
+		o_rd_empty <= 1'b0;
+	end else if (data_hold && i_rd) begin
+		data_hold <= 1'b0;
+		o_rd_empty <= 1'b1;
+	end
 	// }}}
 	// }}}
 ////////////////////////////////////////////////////////////////////////////////

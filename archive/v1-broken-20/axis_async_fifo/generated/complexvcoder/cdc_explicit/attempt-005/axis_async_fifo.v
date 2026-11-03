@@ -1,0 +1,159 @@
+module axis_async_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    /*
+     * AXI input
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   s_pause_req,
+    output wire                   s_pause_ack,
+    input  wire                   m_pause_req,
+    output wire                   m_pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] s_status_depth,
+    output wire [$clog2(DEPTH):0] s_status_depth_commit,
+    output wire                   s_status_overflow,
+    output wire                   s_status_bad_frame,
+    output wire                   s_status_good_frame,
+    output wire [$clog2(DEPTH):0] m_status_depth,
+    output wire [$clog2(DEPTH):0] m_status_depth_commit,
+    output wire                   m_status_overflow,
+    output wire                   m_status_bad_frame,
+    output wire                   m_status_good_frame
+);
+
+    // Internal signals
+    reg [DATA_WIDTH-1:0] fifo_data [0:DEPTH-1];
+    reg [KEEP_WIDTH-1:0] fifo_keep [0:DEPTH-1];
+    reg [ID_WIDTH-1:0] fifo_id [0:DEPTH-1];
+    reg [DEST_WIDTH-1:0] fifo_dest [0:DEPTH-1];
+    reg [USER_WIDTH-1:0] fifo_user [0:DEPTH-1];
+    reg [1:0] fifo_count;
+    reg [1:0] fifo_read_ptr;
+    reg [1:0] fifo_write_ptr;
+    reg s_axis_tready_reg;
+    reg m_axis_tvalid_reg;
+    reg s_pause_ack_reg;
+    reg m_pause_ack_reg;
+
+    // Synchronous logic for s_clk domain
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            fifo_count <= 2'b00;
+            fifo_read_ptr <= 2'b00;
+            fifo_write_ptr <= 2'b00;
+            s_axis_tready_reg <= 1'b1;
+            m_axis_tvalid_reg <= 1'b0;
+            s_pause_ack_reg <= 1'b0;
+        end else begin
+            if (s_axis_tvalid && s_axis_tready && s_axis_tready_reg) begin
+                fifo_data[fifo_write_ptr] <= s_axis_tdata;
+                fifo_keep[fifo_write_ptr] <= s_axis_tkeep;
+                fifo_id[fifo_write_ptr] <= s_axis_tid;
+                fifo_dest[fifo_write_ptr] <= s_axis_tdest;
+                fifo_user[fifo_write_ptr] <= s_axis_tuser;
+                fifo_write_ptr <= fifo_write_ptr + 2'b01;
+                if (fifo_count < DEPTH) begin
+                    fifo_count <= fifo_count + 2'b01;
+                end
+            end
+            s_axis_tready_reg <= (fifo_count < DEPTH);
+            m_axis_tvalid_reg <= (fifo_count > 2'b00);
+            if (m_axis_tready && m_axis_tvalid_reg) begin
+                fifo_read_ptr <= fifo_read_ptr + 2'b01;
+                if (fifo_count > 2'b00) begin
+                    fifo_count <= fifo_count - 2'b01;
+                end
+            end
+            s_pause_ack_reg <= s_pause_req;
+            m_pause_ack_reg <= m_pause_req;
+        end
+    end
+
+    // Asynchronous logic for m_clk domain
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_axis_tdata <= 8'b00000000;
+            m_axis_tkeep <= 1'b0;
+            m_axis_tlast <= 1'b0;
+            m_axis_tid <= 8'b00000000;
+            m_axis_tdest <= 8'b00000000;
+            m_axis_tuser <= 1'b0;
+            m_status_depth <= 12'b000000000000;
+            m_status_depth_commit <= 12'b000000000000;
+            m_status_overflow <= 1'b0;
+            m_status_bad_frame <= 1'b0;
+            m_status_good_frame <= 1'b0;
+        end else begin
+            if (m_axis_tvalid_reg) begin
+                m_axis_tdata <= fifo_data[fifo_read_ptr];
+                m_axis_tkeep <= fifo_keep[fifo_read_ptr];
+                m_axis_tlast <= s_axis_tlast;
+                m_axis_tid <= fifo_id[fifo_read_ptr];
+                m_axis_tdest <= fifo_dest[fifo_read_ptr];
+                m_axis_tuser <= fifo_user[fifo_read_ptr];
+            end
+            m_status_depth <= fifo_count;
+            m_status_depth_commit <= fifo_count;
+            m_status_overflow <= (fifo_count == DEPTH);
+            m_status_bad_frame <= 1'b0;
+            m_status_good_frame <= (fifo_count > 2'b00);
+        end
+    end
+
+    assign s_axis_tready = s_axis_tready_reg;
+    assign m_axis_tvalid = m_axis_tvalid_reg;
+    assign s_pause_ack = s_pause_ack_reg;
+    assign m_pause_ack = m_pause_ack_reg;
+
+endmodule

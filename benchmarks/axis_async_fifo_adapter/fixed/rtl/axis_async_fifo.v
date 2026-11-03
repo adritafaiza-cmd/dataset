@@ -225,6 +225,18 @@ reg [ADDR_WIDTH:0] wr_ptr_commit_sync_reg = {ADDR_WIDTH+1{1'b0}};
 reg [ADDR_WIDTH:0] rd_ptr_gray_sync1_reg = {ADDR_WIDTH+1{1'b0}};
 (* SHREG_EXTRACT = "NO" *)
 reg [ADDR_WIDTH:0] rd_ptr_gray_sync2_reg = {ADDR_WIDTH+1{1'b0}};
+reg                    rd_req_q = 1'b0;
+reg [ADDR_WIDTH:0]     rd_data_q = {ADDR_WIDTH+1{1'b0}};
+reg [1:0]              rd_ack_sync = 2'b00;
+reg                    rd_ack_q = 1'b0;
+reg [1:0]              rd_req_sync = 2'b00;
+reg [ADDR_WIDTH:0]     rd_ptr_snap = {ADDR_WIDTH+1{1'b0}};
+reg                    wr_req_q = 1'b0;
+reg [ADDR_WIDTH:0]     wr_data_q = {ADDR_WIDTH+1{1'b0}};
+reg [1:0]              wr_ack_sync = 2'b00;
+reg                    wr_ack_q = 1'b0;
+reg [1:0]              wr_req_sync = 2'b00;
+reg [ADDR_WIDTH:0]     wr_ptr_snap = {ADDR_WIDTH+1{1'b0}};
 
 reg wr_ptr_update_valid_reg = 1'b0;
 reg wr_ptr_update_reg = 1'b0;
@@ -262,9 +274,9 @@ reg [RAM_PIPELINE+1-1:0] m_axis_tvalid_pipe_reg = 0;
 
 // full when first TWO MSBs do NOT match, but rest matches
 // (gray code equivalent of first MSB different but rest same)
-wire full = wr_ptr_gray_reg == (rd_ptr_gray_sync2_reg ^ {2'b11, {ADDR_WIDTH-1{1'b0}}});
+wire full = wr_ptr_reg == {~rd_ptr_snap[ADDR_WIDTH], rd_ptr_snap[ADDR_WIDTH-1:0]};
 // empty when pointers match exactly
-wire empty = FRAME_FIFO ? (rd_ptr_reg == wr_ptr_commit_sync_reg) : (rd_ptr_gray_reg == wr_ptr_gray_sync2_reg);
+wire empty = FRAME_FIFO ? (rd_ptr_reg == wr_ptr_commit_sync_reg) : (rd_ptr_reg == wr_ptr_snap);
 // overflow within packet
 wire full_wr = wr_ptr_reg == (wr_ptr_commit_reg ^ {1'b1, {ADDR_WIDTH{1'b0}}});
 
@@ -559,31 +571,71 @@ always @(posedge s_clk) begin
     end
 end
 
-// Write-side status
+// Write-side status. Depth uses the captured binary read pointer.
 always @(posedge s_clk) begin
-    rd_ptr_conv_reg <= gray2bin(rd_ptr_gray_sync2_reg);
+    rd_ptr_conv_reg <= rd_ptr_snap;
     s_depth_reg <= wr_ptr_reg - rd_ptr_conv_reg;
     s_depth_commit_reg <= wr_ptr_commit_reg - rd_ptr_conv_reg;
 end
 
+// Pointer snapshots. One request bit crosses each way. The binary
+// pointer is captured when that request changes, so full, empty, and
+// depth do not reconverge a synchronized Gray bus. The frame-commit
+// toggle below is unchanged.
+always @(posedge m_clk) begin
+    rd_ack_sync <= {rd_ack_sync[0], rd_ack_q};
+    if ((rd_req_q == rd_ack_sync[1]) && (rd_ptr_reg != rd_data_q)) begin
+        rd_data_q <= rd_ptr_reg;
+        rd_req_q <= ~rd_req_q;
+    end
+    wr_req_sync <= {wr_req_sync[0], wr_req_q};
+    if (wr_req_sync[1] != wr_ack_q) begin
+        wr_ptr_snap <= wr_data_q;
+        wr_ack_q <= wr_req_sync[1];
+    end
+    if (m_rst) begin
+        rd_req_q <= 1'b0;
+        rd_data_q <= {ADDR_WIDTH+1{1'b0}};
+        rd_ack_sync <= 2'b00;
+        wr_req_sync <= 2'b00;
+        wr_ack_q <= 1'b0;
+        wr_ptr_snap <= {ADDR_WIDTH+1{1'b0}};
+    end
+end
+
+always @(posedge s_clk) begin
+    wr_ack_sync <= {wr_ack_sync[0], wr_ack_q};
+    if ((wr_req_q == wr_ack_sync[1]) && (wr_ptr_reg != wr_data_q)) begin
+        wr_data_q <= wr_ptr_reg;
+        wr_req_q <= ~wr_req_q;
+    end
+    rd_req_sync <= {rd_req_sync[0], rd_req_q};
+    if (rd_req_sync[1] != rd_ack_q) begin
+        rd_ptr_snap <= rd_data_q;
+        rd_ack_q <= rd_req_sync[1];
+    end
+    if (s_rst) begin
+        wr_req_q <= 1'b0;
+        wr_data_q <= {ADDR_WIDTH+1{1'b0}};
+        wr_ack_sync <= 2'b00;
+        rd_req_sync <= 2'b00;
+        rd_ack_q <= 1'b0;
+        rd_ptr_snap <= {ADDR_WIDTH+1{1'b0}};
+    end
+end
+
 // pointer synchronization
 always @(posedge s_clk) begin
-    rd_ptr_gray_sync1_reg <= rd_ptr_gray_reg;
-    rd_ptr_gray_sync2_reg <= rd_ptr_gray_sync1_reg;
     wr_ptr_update_ack_sync1_reg <= wr_ptr_update_sync3_reg;
     wr_ptr_update_ack_sync2_reg <= wr_ptr_update_ack_sync1_reg;
 
     if (s_rst) begin
-        rd_ptr_gray_sync1_reg <= {ADDR_WIDTH+1{1'b0}};
-        rd_ptr_gray_sync2_reg <= {ADDR_WIDTH+1{1'b0}};
         wr_ptr_update_ack_sync1_reg <= 1'b0;
         wr_ptr_update_ack_sync2_reg <= 1'b0;
     end
 end
 
 always @(posedge m_clk) begin
-    wr_ptr_gray_sync1_reg <= wr_ptr_gray_reg;
-    wr_ptr_gray_sync2_reg <= wr_ptr_gray_sync1_reg;
     if (FRAME_FIFO && wr_ptr_update_sync2_reg ^ wr_ptr_update_sync3_reg) begin
         wr_ptr_commit_sync_reg <= wr_ptr_sync_commit_reg;
     end
@@ -591,13 +643,7 @@ always @(posedge m_clk) begin
     wr_ptr_update_sync2_reg <= wr_ptr_update_sync1_reg;
     wr_ptr_update_sync3_reg <= wr_ptr_update_sync2_reg;
 
-    if (FRAME_FIFO && m_rst_sync3_reg) begin
-        wr_ptr_gray_sync1_reg <= {ADDR_WIDTH+1{1'b0}};
-    end
-
     if (m_rst) begin
-        wr_ptr_gray_sync1_reg <= {ADDR_WIDTH+1{1'b0}};
-        wr_ptr_gray_sync2_reg <= {ADDR_WIDTH+1{1'b0}};
         wr_ptr_commit_sync_reg <= {ADDR_WIDTH+1{1'b0}};
         wr_ptr_update_sync1_reg <= 1'b0;
         wr_ptr_update_sync2_reg <= 1'b0;
@@ -642,6 +688,19 @@ always @(posedge m_clk) begin
     end
 end
 
+(* ASYNC_REG = "TRUE" *) reg [WIDTH-1:0] payload_meta_q, payload_sync_q;
+reg [1:0] payload_wait_q = 0;
+always @(posedge m_clk) begin
+    payload_meta_q <= mem[rd_ptr_reg[ADDR_WIDTH-1:0]];
+    payload_sync_q <= payload_meta_q;
+    if (m_rst || m_rst_sync3_reg || empty || m_drop_frame_reg)
+        payload_wait_q <= 0;
+    else if ((m_axis_tready_pipe || ~m_axis_tvalid_pipe_reg) && pipe_ready && payload_wait_q == 2)
+        payload_wait_q <= 0;
+    else if (payload_wait_q != 2)
+        payload_wait_q <= payload_wait_q + 1'b1;
+end
+
 // Read logic
 integer j;
 
@@ -664,8 +723,8 @@ always @(posedge m_clk) begin
     if (m_axis_tready_pipe || ~m_axis_tvalid_pipe_reg) begin
         // output ready or bubble in pipeline; read new data from FIFO
         m_axis_tvalid_pipe_reg[0] <= 1'b0;
-        m_axis_pipe_reg[0] <= mem[rd_ptr_reg[ADDR_WIDTH-1:0]];
-        if (!empty && !m_rst_sync3_reg && !m_drop_frame_reg && pipe_ready) begin
+        m_axis_pipe_reg[0] <= payload_sync_q;
+        if (!empty && !m_rst_sync3_reg && !m_drop_frame_reg && pipe_ready && payload_wait_q == 2) begin
             // not empty, increment pointer
             m_axis_tvalid_pipe_reg[0] <= 1'b1;
             rd_ptr_temp = rd_ptr_reg + 1;
@@ -723,7 +782,7 @@ end
 
 // Read-side status
 always @(posedge m_clk) begin
-    wr_ptr_conv_reg <= gray2bin(wr_ptr_gray_sync2_reg);
+    wr_ptr_conv_reg <= wr_ptr_snap;
     m_depth_reg <= wr_ptr_conv_reg - rd_ptr_reg;
     m_depth_commit_reg <= FRAME_FIFO ? wr_ptr_commit_sync_reg - rd_ptr_reg : wr_ptr_conv_reg - rd_ptr_reg;
 end

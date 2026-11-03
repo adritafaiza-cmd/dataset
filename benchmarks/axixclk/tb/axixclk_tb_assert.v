@@ -126,6 +126,8 @@ module axixclk_assert;
   // ---------------- Assertion monitors ----------------
   // AXI VALID must remain asserted while waiting for READY.
   reg s_prev_aw_wait, s_prev_w_wait, s_prev_ar_wait;
+  reg [AW-1:0] s_prev_awaddr, s_prev_araddr;
+  reg [DW-1:0] s_prev_wdata;
   always @(posedge s_clk) begin
     if (!s_rstn) begin
       s_prev_aw_wait <= 1'b0;
@@ -144,19 +146,40 @@ module axixclk_assert;
         $display("ASSERT FAIL: S_AXI_ARVALID dropped before ARREADY");
         errors = errors + 1;
       end
+      if (s_prev_aw_wait && S_AXI_AWADDR !== s_prev_awaddr) begin
+        $display("CDC VIOLATION E: S AXI AW payload changed while stalled");
+        errors = errors + 1;
+      end
+      if (s_prev_w_wait && S_AXI_WDATA !== s_prev_wdata) begin
+        $display("CDC VIOLATION E: S AXI W payload changed while stalled");
+        errors = errors + 1;
+      end
+      if (s_prev_ar_wait && S_AXI_ARADDR !== s_prev_araddr) begin
+        $display("CDC VIOLATION E: S AXI AR payload changed while stalled");
+        errors = errors + 1;
+      end
       s_prev_aw_wait <= S_AXI_AWVALID && !S_AXI_AWREADY;
       s_prev_w_wait  <= S_AXI_WVALID  && !S_AXI_WREADY;
       s_prev_ar_wait <= S_AXI_ARVALID && !S_AXI_ARREADY;
+      s_prev_awaddr <= S_AXI_AWADDR;
+      s_prev_wdata <= S_AXI_WDATA;
+      s_prev_araddr <= S_AXI_ARADDR;
     end
   end
 
   reg m_prev_aw_wait, m_prev_w_wait, m_prev_ar_wait;
+  reg [AW-1:0] m_prev_awaddr, m_prev_araddr;
+  reg [DW-1:0] m_prev_wdata;
   always @(posedge m_clk) begin
     if (!M_AXI_ARESETN) begin
       m_prev_aw_wait <= 1'b0;
       m_prev_w_wait  <= 1'b0;
       m_prev_ar_wait <= 1'b0;
     end else begin
+      if (!s_rstn && (M_AXI_AWVALID || M_AXI_WVALID || M_AXI_ARVALID)) begin
+        $display("CDC VIOLATION A/H: M AXI request active during source reset");
+        errors = errors + 1;
+      end
       if (m_prev_aw_wait && !M_AXI_AWVALID) begin
         $display("ASSERT FAIL: M_AXI_AWVALID dropped before AWREADY");
         errors = errors + 1;
@@ -169,9 +192,24 @@ module axixclk_assert;
         $display("ASSERT FAIL: M_AXI_ARVALID dropped before ARREADY");
         errors = errors + 1;
       end
+      if (m_prev_aw_wait && M_AXI_AWADDR !== m_prev_awaddr) begin
+        $display("CDC VIOLATION E: M AXI AW payload changed while stalled");
+        errors = errors + 1;
+      end
+      if (m_prev_w_wait && M_AXI_WDATA !== m_prev_wdata) begin
+        $display("CDC VIOLATION E: M AXI W payload changed while stalled");
+        errors = errors + 1;
+      end
+      if (m_prev_ar_wait && M_AXI_ARADDR !== m_prev_araddr) begin
+        $display("CDC VIOLATION E: M AXI AR payload changed while stalled");
+        errors = errors + 1;
+      end
       m_prev_aw_wait <= M_AXI_AWVALID && !M_AXI_AWREADY;
       m_prev_w_wait  <= M_AXI_WVALID  && !M_AXI_WREADY;
       m_prev_ar_wait <= M_AXI_ARVALID && !M_AXI_ARREADY;
+      m_prev_awaddr <= M_AXI_AWADDR;
+      m_prev_wdata <= M_AXI_WDATA;
+      m_prev_araddr <= M_AXI_ARADDR;
     end
   end
 

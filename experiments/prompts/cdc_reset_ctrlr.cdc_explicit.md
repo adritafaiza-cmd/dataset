@@ -41,13 +41,16 @@ Behavior:
     - When either side requests clear (*_clear_i), first raise both isolate outputs, wait for both isolate acks, then raise both clear outputs, wait for both clear acks, then release isolate and clear.
     - Do not leave one domain cleared while the other is still live.
     - After reset, isolate and clear outputs are inactive.
-    - Peer progress is delivered in order: idle, then active, then done, then idle. Each step waits until the previous transfer is acknowledged, so the other side observes it one handshake later than the local transition. Do not release isolate or clear before the peer completion has been observed.
+    - Peer progress is delivered in order: idle, then active, then done, then released, then idle. Each step waits until the previous transfer is acknowledged, so the other side observes it one handshake later than the local transition. Do not release isolate or clear before the peer completion has been observed.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings
     and must pass structural CDC/RDC analysis with zero unsafe crossings. Reset
     release must be safe in each clock domain, and transferred multi-bit data must
     remain coherent. Select the architecture yourself.
+
+Revised behavior (benchmark v2):
+    Both sides must acknowledge isolation before clearing begins. Hold clear while completion is exchanged with the peer. Drop clear before releasing isolation, and exchange an explicit release status so neither side leaves isolation while its peer is still clearing. Complete one sequence before accepting another. Added handshake latency is permitted.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

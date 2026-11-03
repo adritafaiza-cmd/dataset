@@ -57,7 +57,10 @@ Behavior:
     - Assert src_pready_o only after the destination transfer completes.
     - Do not lose, duplicate, or reorder requests. One outstanding transaction is enough.
     - Reset must idle both interfaces and must not create a transaction.
-    - Each FIFO beat is one registered sample. Valid can fall for one read clock before the next beat. The destination still waits for dst_pready_i before completing the access.
+    - Each FIFO beat is one registered sample. Valid can remain low for multiple read clocks before the next beat. The destination still waits for dst_pready_i before completing the access.
+
+Revised transfer contract (benchmark v2):
+    Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

@@ -30,6 +30,8 @@ config_rtlds -port \
     {dst_rst_ni dst_data_o dst_valid_o dst_ready_i} \
     -clock dst_clk_i
 
+# CDC does not import SDC set_clock_groups after the clock command.
+config_rtlds -clock -group -async {{src_clk_i} {dst_clk_i}}
 check_cdc -extract
 
 check_cdc -list clock_signals \
@@ -38,6 +40,7 @@ check_cdc -list design_resets \
     -file $RPT_DIR/inferred_resets.rpt -force
 check_cdc -list declared_resets \
     -file $RPT_DIR/declared_resets.rpt -force
+check_cdc -list pairs -file $RPT_DIR/cdc_pairs.rpt -force
 check_cdc -list domain_crossings \
     -file $RPT_DIR/cdc_crossings.rpt -force
 check_cdc -report -violation -detailed \

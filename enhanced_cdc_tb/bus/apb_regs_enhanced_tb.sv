@@ -189,15 +189,15 @@ module apb_regs_enhanced_tb;
 
         apb_write(BASE_ADDR, 32'h0000_00AA, 4'b0001, 1'b0);
         apb_read(BASE_ADDR, 1'b0, rdata);
-        check_equal("APB_STROBE", "low-byte strobe", rdata, 32'h0000_11AA);
+        check_equal("APB_STROBE", "low-byte strobe preserves high byte", rdata, 32'h0000_11AA);
 
         apb_write(BASE_ADDR, 32'h0000_BB00, 4'b0010, 1'b0);
         apb_read(BASE_ADDR, 1'b0, rdata);
-        check_equal("APB_STROBE", "high-byte strobe", rdata, 32'h0000_BBAA);
+        check_equal("APB_STROBE", "high-byte strobe preserves low byte", rdata, 32'h0000_BBAA);
 
         apb_write(BASE_ADDR, 32'hFFFF_0000, 4'b1100, 1'b0);
         apb_read(BASE_ADDR, 1'b0, rdata);
-        check_equal("APB_STROBE", "out-of-register strobes changed data", rdata, 32'h0000_BBAA);
+        check_equal("APB_STROBE", "out-of-register strobes preserve data", rdata, 32'h0000_BBAA);
 
         apb_read(BASE_ADDR + 4, 1'b0, rdata);
         check_equal("APB_READ_ONLY", "read-only register value", rdata, 32'h0000_C33C);

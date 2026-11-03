@@ -206,6 +206,14 @@ module axixclk #(
 
 	end else begin : WRITE_FIFO
 		wire	awfull, awempty, wfull, wempty, bfull, bempty;
+		wire [C_S_AXI_DATA_WIDTH-1:0] wfifo_data;
+		wire [(C_S_AXI_DATA_WIDTH/8)-1:0] wfifo_strb;
+		wire	wfifo_last;
+		reg	w_hold_valid;
+		reg [C_S_AXI_DATA_WIDTH-1:0] w_hold_data;
+		reg [(C_S_AXI_DATA_WIDTH/8)-1:0] w_hold_strb;
+		reg	w_hold_last;
+		wire	w_take;
 
 		afifo #(.LGFIFO(LGFIFO),
 			.NFF(XCLOCK_FFS),
@@ -233,11 +241,32 @@ module axixclk #(
 		wfifo(S_AXI_ACLK, S_AXI_ARESETN_SYNC, S_AXI_WVALID&& S_AXI_WREADY,
 			{ S_AXI_WDATA, S_AXI_WSTRB, S_AXI_WLAST },
 			wfull,
-			M_AXI_ACLK, M_AXI_ARESETN, M_AXI_WREADY,
-			{ M_AXI_WDATA, M_AXI_WSTRB, M_AXI_WLAST },
+			M_AXI_ACLK, M_AXI_ARESETN, w_take,
+			{ wfifo_data, wfifo_strb, wfifo_last },
 			wempty);
 
-		assign	M_AXI_WVALID = !wempty;
+		// Hold the write beat one M_AXI clock. A new AW and the first
+		// W of the next burst can leave their FIFOs on the same edge;
+		// presenting W on the following edge lets AW win that edge.
+		assign	w_take = !w_hold_valid && !wempty;
+		always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN)
+		if (!M_AXI_ARESETN) begin
+			w_hold_valid <= 1'b0;
+			w_hold_data <= 0;
+			w_hold_strb <= 0;
+			w_hold_last <= 1'b0;
+		end else if (w_take) begin
+			w_hold_valid <= 1'b1;
+			w_hold_data <= wfifo_data;
+			w_hold_strb <= wfifo_strb;
+			w_hold_last <= wfifo_last;
+		end else if (w_hold_valid && M_AXI_WREADY)
+			w_hold_valid <= 1'b0;
+
+		assign	M_AXI_WVALID = w_hold_valid;
+		assign	M_AXI_WDATA = w_hold_data;
+		assign	M_AXI_WSTRB = w_hold_strb;
+		assign	M_AXI_WLAST = w_hold_last;
 		assign	S_AXI_WREADY = !wfull;
 
 		afifo #(.LGFIFO(LGFIFO),

@@ -46,6 +46,26 @@ module cdc_fifo_gray_tb;
         end
     end
 
+    // Plain-Verilog CDC checks: reset isolation and backpressure data hold.
+    reg cdc_prev_stalled = 0;
+    reg [7:0] cdc_prev_data = 0;
+    always @(posedge dst_clk) begin
+        if (!src_rst_n || !dst_rst_n) begin
+            if (dst_valid) begin
+                $display("CDC VIOLATION A/H: dst_valid during reset");
+                errors = errors + 1;
+            end
+            cdc_prev_stalled <= 0;
+        end else begin
+            if (cdc_prev_stalled && (!dst_valid || dst_data !== cdc_prev_data)) begin
+                $display("CDC VIOLATION E: destination payload changed while stalled");
+                errors = errors + 1;
+            end
+            cdc_prev_stalled <= dst_valid && !dst_ready;
+            cdc_prev_data <= dst_data;
+        end
+    end
+
     integer i;
     initial begin
         repeat (5) @(posedge src_clk);

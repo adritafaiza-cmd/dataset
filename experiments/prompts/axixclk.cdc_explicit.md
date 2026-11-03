@@ -112,13 +112,16 @@ Behavior:
     - Reset must not create a burst.
     - OPT_WRITE_ONLY / OPT_READ_ONLY may omit the unused direction.
     - LGFIFO sizes internal buffering. XCLOCK_FFS is an implementation parameter; choose a safe crossing yourself.
-    - Each channel keeps its own order. Each beat is one registered sample, valid rises on a later read clock after that sample, and valid can fall for one read clock before the next beat. Master write data is held one extra M_AXI clock before M_AXI_WVALID.
+    - Each channel keeps its own order. Each beat is one registered sample, valid rises on a later read clock after that sample, and valid can remain low for multiple read clocks before the next beat. Master write data is held one extra M_AXI clock before M_AXI_WVALID.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings
     and must pass structural CDC/RDC analysis with zero unsafe crossings. Reset
     release must be safe in each clock domain, and transferred multi-bit data must
     remain coherent. Select the architecture yourself.
+
+Revised transfer contract (benchmark v2):
+    Payloads pass through two destination-clock stages before they are advertised as valid. Preserve source ownership of each queued word until its accepted destination transfer; synchronization stages alone do not establish multi-bit coherence. Availability may lag and bubbles may span multiple destination clocks. There is no one-beat-per-clock guarantee.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

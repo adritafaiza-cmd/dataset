@@ -44,6 +44,9 @@ Behavior:
     - di_req_o requests the next word.
     - After reset, selects are inactive and outputs are idle.
 
+Revised transfer contract (benchmark v2):
+    di_req_o indicates that the previous request/response handshake has returned to idle and a new word can be accepted. wr_ack_o pulses on acceptance; do_valid_o pulses once per completed word. Extra turnaround latency is permitted. Do not duplicate serial transactions.
+
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,
 or the reference implementation.

@@ -42,6 +42,9 @@ Behavior:
     - src_ready_o must be low whenever a new source item cannot safely be accepted.
     - Reset must return both interfaces to an idle state and must not create a spurious destination transaction.
 
+Revised transfer contract (benchmark v2):
+    Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
+
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,
 or the reference implementation.

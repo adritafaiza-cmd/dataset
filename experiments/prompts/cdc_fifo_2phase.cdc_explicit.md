@@ -39,13 +39,16 @@ Behavior:
     - Deliver destination beats in order when dst_valid_o and dst_ready_i are high.
     - src_ready_o must be low when the FIFO cannot accept another item.
     - After reset the FIFO is empty and dest is idle.
-    - The destination word is a registered sample. dst_valid_o may fall for one destination clock after an accepted beat even when another word is already stored.
+    - The destination word is a registered sample. dst_valid_o may remain low for multiple destination clocks after an accepted beat even when another word is already stored.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings
     and must pass structural CDC/RDC analysis with zero unsafe crossings. Reset
     release must be safe in each clock domain, and transferred multi-bit data must
     remain coherent. Select the architecture yourself.
+
+Revised transfer contract (benchmark v2):
+    Payloads pass through two destination-clock stages before they are advertised as valid. Preserve source ownership of each queued word until its accepted destination transfer; synchronization stages alone do not establish multi-bit coherence. Availability may lag and bubbles may span multiple destination clocks. There is no one-beat-per-clock guarantee.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

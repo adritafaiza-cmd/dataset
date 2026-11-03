@@ -26,6 +26,18 @@ module apb_regs_tb;
         .reg_q_o(regs)
     );
 
+    // Verilog-style protocol/reset monitor (no concurrent SVA).
+    always @(posedge clk) begin
+        if (!rst_n && (resp.pready || resp.pslverr)) begin
+            $display("CDC/RESET VIOLATION: APB response active during reset");
+            errors = errors + 1;
+        end
+        if (rst_n && req.penable && !req.psel) begin
+            $display("PROTOCOL VIOLATION: PENABLE without PSEL");
+            errors = errors + 1;
+        end
+    end
+
     task automatic apb_write(input addr_t addr, input data_t data);
         req = '{paddr: addr, pprot: 3'b000, psel: 1'b1, penable: 1'b0,
                 pwrite: 1'b1, pwdata: data, pstrb: 4'hF};

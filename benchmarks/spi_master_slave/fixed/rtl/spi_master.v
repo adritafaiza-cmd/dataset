@@ -23,8 +23,8 @@ module spi_master #(
     localparam DIVW = 4;
     reg [DIVW-1:0] div_cnt;
     reg spi_ce;
-    (* ASYNC_REG = "TRUE" *) reg [1:0] start_sync;
-    (* ASYNC_REG = "TRUE" *) reg [1:0] done_sync;
+    (* ASYNC_REG = "TRUE" *) reg [3:0] start_sync;
+    (* ASYNC_REG = "TRUE" *) reg [3:0] done_sync;
     (* ASYNC_REG = "TRUE" *) reg [1:0] p_rst_sync;
     (* ASYNC_REG = "TRUE" *) reg [1:0] s_rst_sync;
     wire p_rst = p_rst_sync[1];
@@ -32,6 +32,16 @@ module spi_master #(
     reg start_req, done_pulse, busy;
     reg [N-1:0] tx_shift, rx_shift, tx_hold;
     reg [4:0] bit_cnt;
+    reg done_seen, start_armed;
+    (* ASYNC_REG = "TRUE" *) reg [N-1:0] tx_meta, tx_sync, rx_meta, rx_sync;
+    always @(posedge sclk_i or posedge s_rst) begin
+        if (s_rst) begin tx_meta <= 0; tx_sync <= 0; end
+        else begin tx_meta <= tx_hold; tx_sync <= tx_meta; end
+    end
+    always @(posedge pclk_i or posedge p_rst) begin
+        if (p_rst) begin rx_meta <= 0; rx_sync <= 0; end
+        else begin rx_meta <= rx_shift; rx_sync <= rx_meta; end
+    end
 
     assign spi_mosi_o = tx_shift[N-1];
 
@@ -57,22 +67,25 @@ module spi_master #(
             tx_hold <= {N{1'b0}};
             do_o <= {N{1'b0}};
             do_valid_o <= 1'b0;
-            done_sync <= 2'b00;
+            done_sync <= 4'b0000;
+            done_seen <= 0;
         end else begin
-            done_sync <= {done_sync[0], done_pulse};
+            done_sync <= {done_sync[2:0], done_pulse};
+            done_seen <= done_sync[3];
+            if (!start_req && !done_sync[3]) di_req_o <= 1;
             wr_ack_o <= 1'b0;
             do_valid_o <= 1'b0;
-            if (wren_i && !start_req) begin
+            if (wren_i && !start_req && !done_sync[3]) begin
                 tx_hold <= di_i;
                 start_req <= 1'b1;
                 wr_ack_o <= 1'b1;
                 di_req_o <= 1'b0;
             end
-            if (done_sync == 2'b01) begin
+            if (done_sync[3] && !done_seen) begin
                 start_req <= 1'b0;
-                do_o <= rx_shift;
+                do_o <= rx_sync;
                 do_valid_o <= 1'b1;
-                di_req_o <= 1'b1;
+                di_req_o <= 1'b0;
             end
         end
     end
@@ -81,7 +94,8 @@ module spi_master #(
         if (s_rst) begin
             div_cnt <= {DIVW{1'b0}};
             spi_ce <= 1'b0;
-            start_sync <= 2'b00;
+            start_sync <= 4'b0000;
+            start_armed <= 1;
             busy <= 1'b0;
             done_pulse <= 1'b0;
             spi_ssel_o <= 1'b1;
@@ -90,7 +104,11 @@ module spi_master #(
             rx_shift <= {N{1'b0}};
             bit_cnt <= 5'd0;
         end else begin
-            start_sync <= {start_sync[0], start_req};
+            start_sync <= {start_sync[2:0], start_req};
+            if (!start_sync[3]) begin
+                start_armed <= 1;
+                if (!busy) done_pulse <= 0;
+            end
             if (div_cnt == (SPI_2X_CLK_DIV-1)) begin
                 div_cnt <= {DIVW{1'b0}};
                 spi_ce <= 1'b1;
@@ -100,12 +118,13 @@ module spi_master #(
             end
 
             if (spi_ce) begin
-                if (!busy && start_sync[1]) begin
+                if (!busy && start_sync[3] && start_armed) begin
                     busy <= 1'b1;
+                    start_armed <= 0;
                     done_pulse <= 1'b0;
                     spi_ssel_o <= 1'b0;
                     spi_sck_o <= 1'b0;
-                    tx_shift <= tx_hold;
+                    tx_shift <= tx_sync;
                     bit_cnt <= N;
                 end else if (busy) begin
                     if (spi_sck_o == 1'b0) begin

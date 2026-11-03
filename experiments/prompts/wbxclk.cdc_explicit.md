@@ -54,13 +54,16 @@ Behavior:
     - Return ack/err/data to the source.
     - o_wb_stall must go high when the crossing cannot accept another cycle.
     - Reset must idle both buses and must not create a destination cycle.
-    - Each FIFO keeps its own order. A beat is one registered sample and empty falls on a later read clock. o_wb_stall remains the outstanding-request count.
+    - Each FIFO keeps its own order. A beat is one registered sample and empty falls on a later read clock. o_wb_stall is a Boolean backpressure flag based on outstanding-request capacity.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings
     and must pass structural CDC/RDC analysis with zero unsafe crossings. Reset
     release must be safe in each clock domain, and transferred multi-bit data must
     remain coherent. Select the architecture yourself.
+
+Revised transfer contract (benchmark v2):
+    Payloads pass through two destination-clock stages before they are advertised as valid. Preserve source ownership of each queued word until its accepted destination transfer; synchronization stages alone do not establish multi-bit coherence. Availability may lag and bubbles may span multiple destination clocks. There is no one-beat-per-clock guarantee.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

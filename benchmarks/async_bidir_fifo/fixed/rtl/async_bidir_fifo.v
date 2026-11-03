@@ -56,6 +56,8 @@ module async_bidir_fifo
   wire [  ASIZE:0]             a_wptr, b_rptr, a2b_wptr, b2a_rptr;
   wire [  ASIZE:0]             a_rptr, b_wptr, a2b_rptr, b2a_wptr;
   wire                         a_rst_n_sync, b_rst_n_sync;
+  wire                         a_empty_raw, b_empty_raw;
+  wire                         a_hold, b_hold;
 
   (* async_reg = "true" *) reg [1:0] a_rst_sync_ff;
   (* async_reg = "true" *) reg [1:0] b_rst_sync_ff;
@@ -90,9 +92,11 @@ module async_bidir_fifo
   sync_ptr #(ASIZE)
   sync_b2a_wptr
     (
+     .src_clk    (b_clk),
+     .src_rst_n  (b_rst_n_sync),
+     .src_ptr    (b_wptr),
      .dest_clk   (a_clk),
      .dest_rst_n (a_rst_n_sync),
-     .src_ptr    (b_wptr),
      .dest_ptr   (b2a_wptr)
      );
 
@@ -100,9 +104,11 @@ module async_bidir_fifo
   sync_ptr #(ASIZE)
   sync_b2a_rptr
     (
+     .src_clk    (b_clk),
+     .src_rst_n  (b_rst_n_sync),
+     .src_ptr    (b_rptr),
      .dest_clk   (a_clk),
      .dest_rst_n (a_rst_n_sync),
-     .src_ptr    (b_rptr),
      .dest_ptr   (b2a_rptr)
      );
 
@@ -130,7 +136,7 @@ module async_bidir_fifo
      .rinc     (a_rinc),
      .rq2_wptr (b2a_wptr),
      .arempty  (a_aempty),
-     .rempty   (a_empty),
+     .rempty   (a_empty_raw),
      .raddr    (a_raddr),
      .rptr     (a_rptr)
      );
@@ -143,9 +149,11 @@ module async_bidir_fifo
   sync_ptr #(ASIZE)
   sync_a2b_wptr
     (
+     .src_clk    (a_clk),
+     .src_rst_n  (a_rst_n_sync),
+     .src_ptr    (a_wptr),
      .dest_clk   (b_clk),
      .dest_rst_n (b_rst_n_sync),
-     .src_ptr    (a_wptr),
      .dest_ptr   (a2b_wptr)
      );
 
@@ -153,9 +161,11 @@ module async_bidir_fifo
   sync_ptr #(ASIZE)
   sync_a2b_rptr
     (
+     .src_clk    (a_clk),
+     .src_rst_n  (a_rst_n_sync),
+     .src_ptr    (a_rptr),
      .dest_clk   (b_clk),
      .dest_rst_n (b_rst_n_sync),
-     .src_ptr    (a_rptr),
      .dest_ptr   (a2b_rptr)
      );
 
@@ -183,7 +193,7 @@ module async_bidir_fifo
      .rinc     (b_rinc),
      .rq2_wptr (a2b_wptr),
      .arempty  (b_aempty),
-     .rempty   (b_empty),
+     .rempty   (b_empty_raw),
      .raddr    (b_raddr),
      .rptr     (b_rptr)
      );
@@ -196,21 +206,33 @@ module async_bidir_fifo
   fifomem_dp
     (
      .a_clk   (a_clk),
+     .a_rst_n (a_rst_n_sync),
+     .a_sample (!a_dir && !a_empty_raw),
      .a_wdata (a_wdata),
      .a_rdata (a_rdata),
+     .a_hold  (a_hold),
      .a_addr  (a_addr),
      .a_rinc  (a_rinc & !a_dir),
      .a_winc  (a_winc & a_dir),
 
      .b_clk   (b_clk),
+     .b_rst_n (b_rst_n_sync),
+     .b_sample (!b_dir && !b_empty_raw),
      .b_wdata (b_wdata),
      .b_rdata (b_rdata),
+     .b_hold  (b_hold),
      .b_addr  (b_addr),
      .b_rinc  (b_rinc & !b_dir),
      .b_winc  (b_winc & b_dir)
      );
 
 
+
+  // Empty stays high until this side, acting as the reader, has
+  // captured one word. It rises again for one local clock after the
+  // read is accepted.
+  assign a_empty = a_empty_raw | ~a_hold;
+  assign b_empty = b_empty_raw | ~b_hold;
 
 endmodule
 

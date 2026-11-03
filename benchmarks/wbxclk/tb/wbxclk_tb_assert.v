@@ -35,6 +35,10 @@ module wbxclk_assert;
 
 
   // ---------------- Assertion monitors ----------------
+  reg cdc_prev_x_wait;
+  reg [AW-1:0] cdc_prev_x_addr;
+  reg [DW-1:0] cdc_prev_x_data;
+
   // Wishbone responses are valid only during an active bus cycle.
   always @(posedge wb_clk) begin
     if (!reset) begin
@@ -59,6 +63,22 @@ module wbxclk_assert;
       $display("ASSERT FAIL: downstream response without CYC");
       errors = errors + 1;
     end
+    if (reset && (x_cyc || x_stb)) begin
+      $display("CDC VIOLATION A/H: downstream request active during reset");
+      errors = errors + 1;
+    end
+    if (!reset && cdc_prev_x_wait &&
+        (!x_cyc || !x_stb || x_addr !== cdc_prev_x_addr ||
+         x_data !== cdc_prev_x_data)) begin
+      $display("CDC VIOLATION E: downstream request changed while stalled");
+      errors = errors + 1;
+    end
+    if (reset)
+      cdc_prev_x_wait <= 0;
+    else
+      cdc_prev_x_wait <= x_cyc && x_stb && x_stall;
+    cdc_prev_x_addr <= x_addr;
+    cdc_prev_x_data <= x_data;
   end
 
 endmodule

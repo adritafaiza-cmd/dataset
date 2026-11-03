@@ -6,6 +6,9 @@ S_APB_PCLK and M_APB_PCLK are independent clocks. Please take care of any clock-
 
 Bridge APB transactions from the slave side to the master side. Capture the request fields once in the master clock when the synchronized request arrives, and hold them while the master waits. Return the matching response, captured once in the slave clock, only after that transfer finishes. Keep both sides idle in reset. The registered option does not select a combinational bypass.
 
+Revised behavior (benchmark v2):
+Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
+
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.
 

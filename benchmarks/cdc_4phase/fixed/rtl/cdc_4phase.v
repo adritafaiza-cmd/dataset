@@ -252,13 +252,23 @@ module cdc_4phase_dst #(
   reg ack_dst_d;
   reg ack_dst_q;
 
+  (* ASYNC_REG = "TRUE" *) reg [WIDTH-1:0] payload_meta_q, payload_sync_q;
+  always @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      payload_meta_q <= {WIDTH{1'b0}};
+      payload_sync_q <= {WIDTH{1'b0}};
+    end else begin
+      payload_meta_q <= async_data_i;
+      payload_sync_q <= payload_meta_q;
+    end
+  end
   wire req_synced;
 
   reg data_valid;
   wire output_ready;
 
   sync #(
-    .STAGES(SYNC_STAGES)
+    .STAGES(SYNC_STAGES+2)
   ) i_sync (
     .clk_i    (clk_i),
     .rst_ni   (rst_ni),
@@ -327,7 +337,7 @@ module cdc_4phase_dst #(
         .rst_ni  (rst_ni),
         .valid_i (data_valid),
         .ready_o (output_ready),
-        .data_i  (async_data_i),
+        .data_i  (payload_sync_q),
         .valid_o (valid_o),
         .ready_i (ready_i),
         .data_o  (data_o)
@@ -335,7 +345,7 @@ module cdc_4phase_dst #(
     end else begin : gen_not_decoupled
       assign valid_o      = data_valid;
       assign output_ready = ready_i;
-      assign data_o       = async_data_i;
+      assign data_o       = payload_sync_q;
     end
   endgenerate
 

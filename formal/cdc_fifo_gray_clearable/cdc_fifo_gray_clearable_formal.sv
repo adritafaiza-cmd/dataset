@@ -1,5 +1,5 @@
 module cdc_fifo_gray_clearable_formal;
-  (* gclk *) reg gclk; reg [7:0] tick=0; always @(posedge gclk) tick<=tick+1'b1;
+  (* gclk *) reg gclk; reg [15:0] tick=0; always @(posedge gclk) tick<=tick+1'b1;
   wire src_clk_i=tick[0], dst_clk_i=tick[1]; wire src_rst_ni=tick>=2, dst_rst_ni=tick>=2;
   (* anyseq *) reg src_valid_i,dst_ready_i; wire src_clear_i=(tick==30), dst_clear_i=1'b0;
   reg [7:0] wr_seq=0,rd_seq=0; wire [7:0] src_data_i=wr_seq,dst_data_o;

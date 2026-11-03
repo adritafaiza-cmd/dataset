@@ -91,6 +91,9 @@ CDC requirement:
     release must be safe in each clock domain, and transferred multi-bit data must
     remain coherent. Select the architecture yourself.
 
+Revised transfer contract (benchmark v2):
+    Payloads pass through two destination-clock stages before they are advertised as valid. Preserve source ownership of each queued word until its accepted destination transfer; synchronization stages alone do not establish multi-bit coherence. Availability may lag and bubbles may span multiple destination clocks. There is no one-beat-per-clock guarantee.
+
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,
 or the reference implementation.

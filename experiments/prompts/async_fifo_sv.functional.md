@@ -41,9 +41,12 @@ Behavior:
     - A write is accepted when winc is high and wfull is low.
     - A read is accepted when rinc is high and rempty is low.
     - Data must return exactly once in write order.
-    - rdata is a read-clock sample of the word being offered. rempty may be high for one read clock after an accepted read even when another word is already stored.
+    - rdata is a read-clock sample of the word being offered. rempty may remain high for multiple read clocks after an accepted read even when another word is already stored.
     - After reset, wfull is low and rempty is high.
     - waddr and raddr are debug pointer outputs.
+
+Revised transfer contract (benchmark v2):
+    Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

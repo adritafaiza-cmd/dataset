@@ -46,13 +46,16 @@ Behavior:
     - wfull is generated in the write domain and rempty in the read domain.
     - awfull indicates that the FIFO is approaching full, and arempty indicates that it is approaching empty.
     - After reset, wfull must be low and rempty must be high.
-    - When FALLTHROUGH equals "TRUE", rdata presents the current oldest unread word once rempty falls, without requiring an additional accepted read. rdata is one read-clock sample. rempty may be high for one read clock after an accepted read even when another word is stored. Pointers cross as acknowledged binary snapshots, so full and empty can lag. FALLTHROUGH does not select a combinational memory read.
+    - When FALLTHROUGH equals "TRUE", rdata presents the current oldest unread word once rempty falls, without requiring an additional accepted read. rdata is one read-clock sample. rempty may remain high for multiple read clocks after an accepted read even when another word is stored. Pointers cross as acknowledged binary snapshots, so full and empty can lag. FALLTHROUGH does not select a combinational memory read.
 
 CDC requirement:
     The implementation must be safe for clock-domain and reset-domain crossings
     and must pass structural CDC/RDC analysis with zero unsafe crossings. Reset
     release must be safe in each clock domain, and transferred multi-bit data must
     remain coherent. Select the architecture yourself.
+
+Revised transfer contract (benchmark v2):
+    Payloads pass through two destination-clock stages before they are advertised as valid. Preserve source ownership of each queued word until its accepted destination transfer; synchronization stages alone do not establish multi-bit coherence. Availability may lag and bubbles may span multiple destination clocks. There is no one-beat-per-clock guarantee.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

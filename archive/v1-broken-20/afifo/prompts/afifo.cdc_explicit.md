@@ -1,0 +1,75 @@
+Please act as a professional Verilog designer.
+
+Implement an asynchronous FIFO with 2**LGFIFO entries of WIDTH bits.
+
+Module name:
+    afifo
+
+Language:
+    Verilog-2001
+
+Clocks:
+    i_wclk: Independent asynchronous clock (async to i_rclk).
+    i_rclk: Independent asynchronous clock (async to i_wclk).
+
+Resets:
+    i_wr_reset_n: active-low.
+    i_rd_reset_n: active-low.
+
+Input ports:
+    i_wclk: Clock.
+    i_wr_reset_n: Active-low reset.
+    i_wr: See Behavior.
+    i_wr_data: Data payload.
+    i_rclk: Clock.
+    i_rd_reset_n: Active-low reset.
+    i_rd: See Behavior.
+
+Output ports:
+    o_wr_full: FIFO full flag.
+    o_rd_data: Data payload.
+    o_rd_empty: FIFO empty flag.
+
+Parameters:
+    LGFIFO: Log2 of the number of FIFO entries.
+    WIDTH: Payload width in bits.
+    NFF: Implementation parameter. Choose a safe crossing yourself.
+    WRITE_ON_POSEDGE: See Behavior.
+    OPT_REGISTER_READS: See Behavior.
+
+Behavior:
+    - Storage accepts 2**LGFIFO writes before any read. o_wr_full is high only when that storage is occupied.
+    - A write is accepted when i_wr is high and o_wr_full is low, on the edge selected by WRITE_ON_POSEDGE.
+    - A read is accepted when i_rd is high and o_rd_empty is low.
+    - A write while full does not change stored data. A read while empty does not change o_rd_data and does not drop a later word.
+    - Accepted data returns exactly once, in write order.
+    - While write reset is asserted, o_wr_full is low. While read reset is asserted, o_rd_empty is high.
+    - o_rd_empty can be high while words remain stored. The read side presents one stored word at a time. After a read, empty may return high until the next stored word becomes visible.
+    - OPT_REGISTER_READS selects whether the read data and empty flag are registered.
+    - NFF is the synchronizer depth. Use at least 2 stages.
+    - Do not emit FORMAL-only ports.
+
+CDC requirement:
+    Cross only single-bit control between i_wclk and i_rclk, using NFF synchronizer stages.
+    Hold each memory word stable from the time it is offered until the read side takes it.
+    Do not form full or empty by comparing a multi-bit pointer that was synchronized bit by bit.
+    Reset release must be safe in each clock domain.
+
+Give me the complete code in one source file.
+Do not include a testbench, explanation, markdown, vendor primitives,
+or the reference implementation.
+
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);

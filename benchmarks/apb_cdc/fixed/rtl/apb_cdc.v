@@ -16,13 +16,13 @@ module apb_cdc #(
     input  [DATA_WIDTH-1:0]    src_pwdata_i,
     input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
     input  [2:0]               src_pprot_i,
-    output                     src_pready_o,
+    output reg                 src_pready_o,
     output [DATA_WIDTH-1:0]    src_prdata_o,
     output                     src_pslverr_o,
     input                      dst_pclk_i,
     input                      dst_preset_ni,
-    output                     dst_psel_o,
-    output                     dst_penable_o,
+    output reg                 dst_psel_o,
+    output reg                 dst_penable_o,
     output                     dst_pwrite_o,
     output [ADDR_WIDTH-1:0]    dst_paddr_o,
     output [DATA_WIDTH-1:0]    dst_pwdata_o,
@@ -49,9 +49,9 @@ module apb_cdc #(
     wire dst_req_valid, dst_resp_ready;
 
     reg src_state_q, src_state_d;
-    reg src_req_valid, src_resp_ready, src_pready_o;
+    reg src_req_valid, src_resp_ready;
     reg [1:0] dst_state_q, dst_state_d;
-    reg dst_req_ready, dst_resp_valid, dst_psel_o, dst_penable_o;
+    reg dst_req_ready, dst_resp_valid;
 
     assign {dst_paddr_o, dst_pprot_o, dst_pwrite_o, dst_pwdata_o, dst_pstrb_o} = dst_req_data;
     assign src_prdata_o  = src_resp_data[DATA_WIDTH:1];

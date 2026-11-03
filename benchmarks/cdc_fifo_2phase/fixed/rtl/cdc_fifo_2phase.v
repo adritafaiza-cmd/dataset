@@ -61,29 +61,71 @@ module cdc_fifo_2phase #(
             fifo_data[src_wptr_q[LOG_DEPTH-1:0]] <= src_data_i;
     end
 
+    // The destination samples the selected memory word once, into
+    // dst_data_q, and holds it while valid. A combinational read of
+    // fifo_data in dst_clk_i is the CDC_NO_SYNC path. valid falls for
+    // one destination clock after an accept even if another word is
+    // already stored, so the next sample uses the updated pointer.
+    (* ASYNC_REG = "TRUE" *) reg [WIDTH-1:0] payload_meta_q, payload_sync_q;
+    reg [1:0] payload_wait_q;
+    reg [WIDTH-1:0] dst_data_q;
+    reg             dst_hold;
+
+    wire dst_more = (dst_rptr_q != dst_wptr);
+
     always @(posedge dst_clk_i or negedge dst_rst_sync_ni) begin
-        if (!dst_rst_sync_ni)
+        if (!dst_rst_sync_ni) begin
             dst_rptr_q <= {PTRW{1'b0}};
-        else if (dst_valid_o && dst_ready_i)
+            dst_data_q <= {WIDTH{1'b0}};
+            dst_hold   <= 1'b0;
+        end else if ((!dst_hold && dst_more) && payload_wait_q == 2) begin
+            dst_data_q <= payload_sync_q;
+            dst_hold   <= 1'b1;
+        end else if (dst_hold && dst_ready_i) begin
+            dst_hold   <= 1'b0;
             dst_rptr_q <= dst_rptr_q + 1'b1;
+        end
     end
 
     assign src_ready_o = ((src_wptr_q ^ src_rptr) != PTR_FULL);
-    assign dst_valid_o = (dst_rptr_q != dst_wptr);
-    assign dst_data_o  = fifo_data[dst_rptr_q[LOG_DEPTH-1:0]];
+    assign dst_valid_o = dst_hold;
+    assign dst_data_o  = dst_data_q;
 
-    cdc_2phase #(.WIDTH(PTRW)) i_cdc_wptr (
-        .src_rst_ni(src_rst_sync_ni), .src_clk_i(src_clk_i),
-        .src_data_i(src_wptr_q), .src_valid_i(1'b1), .src_ready_o(),
-        .dst_rst_ni(dst_rst_sync_ni), .dst_clk_i(dst_clk_i),
-        .dst_data_o(dst_wptr), .dst_valid_o(), .dst_ready_i(1'b1)
+    wire wptr_req, wptr_ack;
+    wire [PTRW-1:0] wptr_payload;
+    cdc_2phase_src #(.WIDTH(PTRW)) i_wptr_src (
+        .rst_ni(src_rst_sync_ni), .clk_i(src_clk_i), .data_i(src_wptr_q),
+        .valid_i(1'b1), .ready_o(), .async_req_o(wptr_req),
+        .async_ack_i(wptr_ack), .async_data_o(wptr_payload)
     );
-
-    cdc_2phase #(.WIDTH(PTRW)) i_cdc_rptr (
-        .src_rst_ni(dst_rst_sync_ni), .src_clk_i(dst_clk_i),
-        .src_data_i(dst_rptr_q), .src_valid_i(1'b1), .src_ready_o(),
-        .dst_rst_ni(src_rst_sync_ni), .dst_clk_i(src_clk_i),
-        .dst_data_o(src_rptr), .dst_valid_o(), .dst_ready_i(1'b1)
+    cdc_2phase_dst #(.WIDTH(PTRW)) i_wptr_dst (
+        .rst_ni(dst_rst_sync_ni), .clk_i(dst_clk_i), .data_o(dst_wptr),
+        .valid_o(), .ready_i(1'b1), .async_req_i(wptr_req),
+        .async_ack_o(wptr_ack), .async_data_i(wptr_payload)
     );
-
+    wire rptr_req, rptr_ack;
+    wire [PTRW-1:0] rptr_payload;
+    cdc_2phase_src #(.WIDTH(PTRW)) i_rptr_src (
+        .rst_ni(dst_rst_sync_ni), .clk_i(dst_clk_i), .data_i(dst_rptr_q),
+        .valid_i(1'b1), .ready_o(), .async_req_o(rptr_req),
+        .async_ack_i(rptr_ack), .async_data_o(rptr_payload)
+    );
+    cdc_2phase_dst #(.WIDTH(PTRW)) i_rptr_dst (
+        .rst_ni(src_rst_sync_ni), .clk_i(src_clk_i), .data_o(src_rptr),
+        .valid_o(), .ready_i(1'b1), .async_req_i(rptr_req),
+        .async_ack_o(rptr_ack), .async_data_i(rptr_payload)
+    );
+    always @(posedge dst_clk_i or negedge dst_rst_sync_ni) begin
+        if (!dst_rst_sync_ni) begin
+            payload_meta_q <= {WIDTH{1'b0}};
+            payload_sync_q <= {WIDTH{1'b0}};
+            payload_wait_q <= 0;
+        end else begin
+            payload_meta_q <= fifo_data[dst_rptr_q[LOG_DEPTH-1:0]];
+            payload_sync_q <= payload_meta_q;
+            if (!dst_hold && dst_more) begin
+                if (payload_wait_q != 2) payload_wait_q <= payload_wait_q + 1'b1;
+            end else payload_wait_q <= 0;
+        end
+    end
 endmodule

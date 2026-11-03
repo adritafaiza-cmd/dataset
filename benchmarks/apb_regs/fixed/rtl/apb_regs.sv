@@ -87,7 +87,7 @@ module apb_regs #(
   } rule_t;
 
   logic has_reset_d, has_reset_q;
-  `FFARN(has_reset_q, has_reset_q, 1'b0, pclk_i, preset_ni)
+  `FFARN(has_reset_q, has_reset_d, 1'b0, pclk_i, preset_ni)
   assign has_reset_d = 1'b1;
 
   // signal declarations
@@ -128,7 +128,7 @@ module apb_regs #(
                 reg_d[reg_idx][i] = req_i.pwdata[i];
               end
             end
-            reg_update[reg_idx] = |req_i.pstrb;
+            reg_update[reg_idx] = (|req_i.pstrb) && req_i.penable;
           end else begin
             // this register is read only
             resp_o.pslverr = apb_pkg::RESP_SLVERR;

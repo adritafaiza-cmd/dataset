@@ -34,6 +34,8 @@ config_rtlds -port \
      M_APB_PRDATA M_APB_PSLVERR} \
     -clock M_APB_PCLK
 
+# CDC does not import SDC set_clock_groups after the clock command.
+config_rtlds -clock -group -async {{S_APB_PCLK} {M_APB_PCLK}}
 check_cdc -extract
 
 check_cdc -list clock_signals \
@@ -42,6 +44,7 @@ check_cdc -list design_resets \
     -file $RPT_DIR/inferred_resets.rpt -force
 check_cdc -list declared_resets \
     -file $RPT_DIR/declared_resets.rpt -force
+check_cdc -list pairs -file $RPT_DIR/cdc_pairs.rpt -force
 check_cdc -list domain_crossings \
     -file $RPT_DIR/cdc_crossings.rpt -force
 check_cdc -report -violation -detailed \

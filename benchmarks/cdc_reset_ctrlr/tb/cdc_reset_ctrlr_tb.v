@@ -48,6 +48,20 @@ module cdc_reset_ctrlr_tb;
             b_clear_ack <= 1'b0;
     end
 
+    // Plain-Verilog CDC checks: each local reset must leave its sequencer idle.
+    always @(posedge a_clk) begin
+        if (!a_rst_n && (a_iso || a_clear_o)) begin
+            $display("CDC VIOLATION A: domain A sequencer active during reset");
+            errors = errors + 1;
+        end
+    end
+    always @(posedge b_clk) begin
+        if (!b_rst_n && (b_iso || b_clear_o)) begin
+            $display("CDC VIOLATION A: domain B sequencer active during reset");
+            errors = errors + 1;
+        end
+    end
+
     initial begin
         repeat (4) @(posedge a_clk); a_rst_n = 1;
         repeat (4) @(posedge b_clk); b_rst_n = 1;

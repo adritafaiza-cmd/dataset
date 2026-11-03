@@ -1,6 +1,6 @@
 module async_fifo_formal;
   (* gclk *) reg gclk;
-  reg [5:0] tick = 0;
+  reg [15:0] tick = 0;
   always @(posedge gclk) tick <= tick + 1'b1;
   wire wclk = tick[0], rclk = tick[1];
   wire wrst_n = tick >= 2, rrst_n = tick >= 2;

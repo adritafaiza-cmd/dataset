@@ -45,15 +45,18 @@ Behavior:
     - Accepted data returns exactly once, in write order.
     - While write reset is asserted, o_wr_full is low. While read reset is asserted, o_rd_empty is high.
     - o_rd_empty can be high while words remain stored. The read side presents one stored word at a time. After a read, empty may return high until the next stored word becomes visible.
-    - OPT_REGISTER_READS selects whether the read data and empty flag are registered.
+    - OPT_REGISTER_READS selects additional output registering; the payload must always have destination-clock synchronization.
     - NFF is the synchronizer depth. Use at least 2 stages.
     - Do not emit FORMAL-only ports.
 
 CDC requirement:
-    Cross only single-bit control between i_wclk and i_rclk, using NFF synchronizer stages.
+    Use acknowledged single-bit control between i_wclk and i_rclk, with at least NFF stages and sufficient payload settling. Synchronize the held payload separately; do not independently synchronize a changing data bus.
     Hold each memory word stable from the time it is offered until the read side takes it.
     Do not form full or empty by comparing a multi-bit pointer that was synchronized bit by bit.
     Reset release must be safe in each clock domain.
+
+Revised transfer contract (benchmark v2):
+    Payloads pass through two destination-clock stages before they are advertised as valid. Preserve source ownership of each queued word until its accepted destination transfer; synchronization stages alone do not establish multi-bit coherence. Availability may lag and bubbles may span multiple destination clocks. There is no one-beat-per-clock guarantee. Register the offered word in the write domain before launching its request. NFF sets the minimum control synchronization depth; additional request-settling stages are permitted. OPT_REGISTER_READS selects an additional destination holding register or the synchronized destination payload, never an asynchronous memory bypass.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

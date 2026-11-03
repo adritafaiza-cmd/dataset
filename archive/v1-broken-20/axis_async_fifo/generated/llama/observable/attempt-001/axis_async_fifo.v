@@ -1,0 +1,249 @@
+module axis_async_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    input  wire                   s_pause_req,
+    output wire                   s_pause_ack,
+    input  wire                   m_pause_req,
+    output wire                   m_pause_ack,
+    output wire [$clog2(DEPTH):0] s_status_depth,
+    output wire [$clog2(DEPTH):0] s_status_depth_commit,
+    output wire                   s_status_overflow,
+    output wire                   s_status_bad_frame,
+    output wire                   s_status_good_frame,
+    output wire [$clog2(DEPTH):0] m_status_depth,
+    output wire [$clog2(DEPTH):0] m_status_depth_commit,
+    output wire                   m_status_overflow,
+    output wire                   m_status_bad_frame,
+    output wire                   m_status_good_frame
+);
+
+reg [DATA_WIDTH-1:0] mem [DEPTH-1:0];
+reg [KEEP_WIDTH-1:0] keep [DEPTH-1:0];
+reg [ID_WIDTH-1:0] id [DEPTH-1:0];
+reg [DEST_WIDTH-1:0] dest [DEPTH-1:0];
+reg [USER_WIDTH-1:0] user [DEPTH-1:0];
+reg [DEPTH-1:0] full;
+reg [DEPTH-1:0] empty;
+reg [$clog2(DEPTH):0] wr_ptr;
+reg [$clog2(DEPTH):0] rd_ptr;
+reg [$clog2(DEPTH):0] wr_ptr_gray;
+reg [$clog2(DEPTH):0] rd_ptr_gray;
+reg [DATA_WIDTH-1:0] m_axis_tdata_reg;
+reg [KEEP_WIDTH-1:0] m_axis_tkeep_reg;
+reg m_axis_tvalid_reg;
+reg m_axis_tlast_reg;
+reg [ID_WIDTH-1:0] m_axis_tid_reg;
+reg [DEST_WIDTH-1:0] m_axis_tdest_reg;
+reg [USER_WIDTH-1:0] m_axis_tuser_reg;
+reg s_pause_ack_reg;
+reg m_pause_ack_reg;
+reg [DEPTH-1:0] s_status_depth_reg;
+reg [DEPTH-1:0] s_status_depth_commit_reg;
+reg s_status_overflow_reg;
+reg s_status_bad_frame_reg;
+reg s_status_good_frame_reg;
+reg [DEPTH-1:0] m_status_depth_reg;
+reg [DEPTH-1:0] m_status_depth_commit_reg;
+reg m_status_overflow_reg;
+reg m_status_bad_frame_reg;
+reg m_status_good_frame_reg;
+
+always @(posedge s_clk or posedge s_rst) begin
+    if (s_rst) begin
+        wr_ptr <= 0;
+        wr_ptr_gray <= 0;
+        s_axis_tready <= 1'b1;
+        s_pause_ack_reg <= 1'b0;
+        s_status_depth_reg <= 0;
+        s_status_depth_commit_reg <= 0;
+        s_status_overflow_reg <= 1'b0;
+        s_status_bad_frame_reg <= 1'b0;
+        s_status_good_frame_reg <= 1'b0;
+    end else begin
+        if (s_axis_tvalid && s_axis_tready) begin
+            mem[wr_ptr] <= s_axis_tdata;
+            keep[wr_ptr] <= s_axis_tkeep;
+            id[wr_ptr] <= s_axis_tid;
+            dest[wr_ptr] <= s_axis_tdest;
+            user[wr_ptr] <= s_axis_tuser;
+            wr_ptr <= wr_ptr + 1;
+            wr_ptr_gray <= wr_ptr_gray + 1;
+            if (wr_ptr == DEPTH - 1) begin
+                wr_ptr <= 0;
+                wr_ptr_gray <= 0;
+            end
+        end
+        if (s_pause_req) begin
+            s_pause_ack_reg <= 1'b1;
+        end else begin
+            s_pause_ack_reg <= 1'b0;
+        end
+        if (full[DEPTH-1]) begin
+            s_status_overflow_reg <= 1'b1;
+        end else begin
+            s_status_overflow_reg <= 1'b0;
+        end
+        if (s_axis_tlast && s_axis_tvalid && s_axis_tready) begin
+            if (s_axis_tuser == USER_BAD_FRAME_VALUE) begin
+                s_status_bad_frame_reg <= 1'b1;
+            end else begin
+                s_status_bad_frame_reg <= 1'b0;
+            end
+            if (s_axis_tuser!= USER_BAD_FRAME_VALUE) begin
+                s_status_good_frame_reg <= 1'b1;
+            end else begin
+                s_status_good_frame_reg <= 1'b0;
+            end
+        end
+        s_status_depth_reg <= wr_ptr;
+        s_status_depth_commit_reg <= wr_ptr_gray;
+    end
+end
+
+always @(posedge m_clk or posedge m_rst) begin
+    if (m_rst) begin
+        rd_ptr <= 0;
+        rd_ptr_gray <= 0;
+        m_axis_tvalid_reg <= 1'b0;
+        m_axis_tready <= 1'b1;
+        m_pause_ack_reg <= 1'b0;
+        m_status_depth_reg <= 0;
+        m_status_depth_commit_reg <= 0;
+        m_status_overflow_reg <= 1'b0;
+        m_status_bad_frame_reg <= 1'b0;
+        m_status_good_frame_reg <= 1'b0;
+    end else begin
+        if (m_axis_tvalid_reg && m_axis_tready) begin
+            rd_ptr <= rd_ptr + 1;
+            rd_ptr_gray <= rd_ptr_gray + 1;
+            if (rd_ptr == DEPTH - 1) begin
+                rd_ptr <= 0;
+                rd_ptr_gray <= 0;
+            end
+        end
+        if (m_pause_req) begin
+            m_pause_ack_reg <= 1'b1;
+        end else begin
+            m_pause_ack_reg <= 1'b0;
+        end
+        if (empty[DEPTH-1]) begin
+            m_status_overflow_reg <= 1'b0;
+        end else begin
+            m_status_overflow_reg <= 1'b1;
+        end
+        if (m_axis_tlast_reg && m_axis_tvalid_reg && m_axis_tready) begin
+            if (m_axis_tuser_reg == USER_BAD_FRAME_VALUE) begin
+                m_status_bad_frame_reg <= 1'b1;
+            end else begin
+                m_status_bad_frame_reg <= 1'b0;
+            end
+            if (m_axis_tuser_reg!= USER_BAD_FRAME_VALUE) begin
+                m_status_good_frame_reg <= 1'b1;
+            end else begin
+                m_status_good_frame_reg <= 1'b0;
+            end
+        end
+        m_status_depth_reg <= rd_ptr;
+        m_status_depth_commit_reg <= rd_ptr_gray;
+        if (full[DEPTH-1] &&!m_axis_tready) begin
+            m_axis_tvalid_reg <= 1'b0;
+        end else if (empty[DEPTH-1]) begin
+            m_axis_tvalid_reg <= 1'b0;
+        end else begin
+            m_axis_tvalid_reg <= 1'b1;
+        end
+        if (m_axis_tvalid_reg) begin
+            m_axis_tdata_reg <= mem[rd_ptr];
+            m_axis_tkeep_reg <= keep[rd_ptr];
+            m_axis_tlast_reg <= (rd_ptr == DEPTH - 1);
+            m_axis_tid_reg <= id[rd_ptr];
+            m_axis_tdest_reg <= dest[rd_ptr];
+            m_axis_tuser_reg <= user[rd_ptr];
+        end
+    end
+end
+
+always @(posedge s_clk) begin
+    s_axis_tready <=!full[DEPTH-1];
+end
+
+always @(posedge m_clk) begin
+    m_axis_tdata <= m_axis_tdata_reg;
+    m_axis_tkeep <= m_axis_tkeep_reg;
+    m_axis_tvalid <= m_axis_tvalid_reg;
+    m_axis_tlast <= m_axis_tlast_reg;
+    m_axis_tid <= m_axis_tid_reg;
+    m_axis_tdest <= m_axis_tdest_reg;
+    m_axis_tuser <= m_axis_tuser_reg;
+    s_pause_ack <= s_pause_ack_reg;
+    m_pause_ack <= m_pause_ack_reg;
+    s_status_depth <= s_status_depth_reg;
+    s_status_depth_commit <= s_status_depth_commit_reg;
+    s_status_overflow <= s_status_overflow_reg;
+    s_status_bad_frame <= s_status_bad_frame_reg;
+    s_status_good_frame <= s_status_good_frame_reg;
+    m_status_depth <= m_status_depth_reg;
+    m_status_depth_commit <= m_status_depth_commit_reg;
+    m_status_overflow <= m_status_overflow_reg;
+    m_status_bad_frame <= m_status_bad_frame_reg;
+    m_status_good_frame <= m_status_good_frame_reg;
+end
+
+always @(posedge s_clk) begin
+    full[0] <= (wr_ptr == rd_ptr);
+    for (genvar i = 1; i < DEPTH; i++) begin
+        full[i] <= (wr_ptr == (rd_ptr + i));
+    end
+end
+
+always @(posedge m_clk) begin
+    empty[0] <= (wr_ptr == rd_ptr);
+    for (genvar i = 1; i < DEPTH; i++) begin
+        empty[i] <= (wr_ptr == (rd_ptr + i));
+    end
+end
+
+endmodule

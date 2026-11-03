@@ -1,4 +1,6 @@
 `timescale 1ns / 1ps
+// CDC behavioral checks are embedded below in plain Verilog.
+// Structural CDC checks (pointer encoding and reset domains) run from sim/run.sh.
 
 module async_fifo_unit_test;
 
@@ -56,8 +58,24 @@ module async_fifo_unit_test;
         $dumpvars(0, async_fifo_unit_test);
     end
 
+    // CDC type A: reset must force safe FIFO status in each local domain.
+    always @(posedge wclk) begin
+        if (!wrst_n && wfull) begin
+            $display("CDC VIOLATION A: wfull asserted during write reset");
+            errors = errors + 1;
+        end
+    end
+
+    always @(posedge rclk) begin
+        if (!rrst_n && !rempty) begin
+            $display("CDC VIOLATION A: rempty deasserted during read reset");
+            errors = errors + 1;
+        end
+    end
+
     task reset_fifo;
     begin
+        @(negedge wclk);
         wrst_n = 1'b0;
         rrst_n = 1'b0;
         winc = 1'b0;
@@ -133,13 +151,15 @@ module async_fifo_unit_test;
         winc = 1'b0;
 
         #100;
-        rinc = 1'b1;
         for (i = 0; i < 10; i = i + 1) begin
             wait (rempty == 1'b0);
-            @(posedge rclk);
+            @(negedge rclk);
             check_equal(rdata, i, "multiple read data");
+            rinc = 1'b1;
+            @(posedge rclk);
+            @(negedge rclk);
+            rinc = 1'b0;
         end
-        rinc = 1'b0;
 
         $display("TEST_FULL_FLAG");
         reset_fifo;

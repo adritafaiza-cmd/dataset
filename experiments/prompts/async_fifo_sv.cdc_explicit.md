@@ -41,7 +41,7 @@ Behavior:
     - A write is accepted when winc is high and wfull is low.
     - A read is accepted when rinc is high and rempty is low.
     - Data must return exactly once in write order.
-    - rdata is a read-clock sample of the word being offered. rempty may be high for one read clock after an accepted read even when another word is already stored.
+    - rdata is a read-clock sample of the word being offered. rempty may remain high for multiple read clocks after an accepted read even when another word is already stored.
     - After reset, wfull is low and rempty is high.
     - waddr and raddr are debug pointer outputs.
 
@@ -50,6 +50,9 @@ CDC requirement:
     and must pass structural CDC/RDC analysis with zero unsafe crossings. Reset
     release must be safe in each clock domain, and transferred multi-bit data must
     remain coherent. Select the architecture yourself.
+
+Revised transfer contract (benchmark v2):
+    Payloads pass through two destination-clock stages before they are advertised as valid. Preserve source ownership of each queued word until its accepted destination transfer; synchronization stages alone do not establish multi-bit coherence. Availability may lag and bubbles may span multiple destination clocks. There is no one-beat-per-clock guarantee.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

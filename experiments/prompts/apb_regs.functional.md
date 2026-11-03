@@ -15,15 +15,15 @@ Resets:
     preset_ni: reset.
 
 Input ports:
-    pclk_i: Clock.
-    preset_ni: Reset reset.
-    req_t: See Behavior.
-    apb_addr_t: Address.
-    reg_data_t: Data payload.
+    pclk_i: Register-bank clock.
+    preset_ni: Active-low reset.
+    req_i: APB request, with type req_t.
+    base_addr_i: Base address of the decoded register bank.
+    reg_init_i: Values exposed by read-only registers.
 
 Output ports:
-    resp_t: Response status.
-    reg_data_t: Data payload.
+    resp_o: APB response, with type resp_t.
+    reg_q_o: Current register values; read-only entries expose reg_init_i.
 
 Parameters:
     NoApbRegs: See Behavior.
@@ -40,9 +40,12 @@ Parameters:
 Behavior:
     - Map NoApbRegs registers of RegDataWidth, spaced AddrOffset bytes apart, starting at base_addr_i.
     - req_i / resp_o use the APB request and response types supplied by the testbench.
-    - Initialize from reg_init_i and drive reg_q_o with current values.
-    - Read-only bits in ReadOnly must ignore writes.
-    - After reset, registers return to reg_init_i.
+    - Drive reg_q_o with current register values; read-only registers expose reg_init_i.
+    - Read-only registers selected by ReadOnly must ignore writes.
+    - Writable registers reset to zero; read-only registers expose reg_init_i.
+
+Revised behavior (benchmark v2):
+    Writes commit only in the APB access phase (psel and penable). Byte strobes update only the selected bytes of a writable register; unstrobed bytes and idle-cycle state are preserved. Writes outside the register width do not change stored data. Each AddrOffset-byte decoded address range maps to its register. Reset cancels pending writes, clears writable registers to zero, and leaves read-only registers exposing reg_init_i.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

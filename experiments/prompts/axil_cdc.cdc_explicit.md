@@ -80,6 +80,9 @@ CDC requirement:
     release must be safe in each clock domain, and transferred multi-bit data must
     remain coherent. Select the architecture yourself.
 
+Revised transfer contract (benchmark v2):
+    Hold each transaction payload stable under the request/acknowledge protocol. Synchronize the held payload through at least two destination-clock stages and delay its control indication sufficiently for the payload to settle before capture or acceptance. Preserve ordered, exactly-once transfers and stable outputs under backpressure. Additional crossing latency is permitted; do not require an exact cycle count.
+
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,
 or the reference implementation.

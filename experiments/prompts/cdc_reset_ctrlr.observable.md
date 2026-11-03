@@ -4,7 +4,10 @@ Implement a two-domain isolate-then-clear reset controller.
 
 a_clk_i and b_clk_i are independent clocks. Please take care of any clock-domain crossings between them. The resets are active-low.
 
-When either side requests a clear, isolate both sides before clearing either of them; wait for both acknowledgments at each step before releasing them. Peer progress arrives in order (idle, then active, then done, then idle), one handshake after the local transition. Do not release isolate or clear before the peer completion has been observed.
+When either side requests a clear, isolate both sides before clearing either of them; wait for both acknowledgments at each step before releasing them. Peer progress arrives in order (idle, then active, then done, then released, then idle), one handshake after the local transition. Do not release isolate or clear before the peer completion has been observed.
+
+Revised behavior (benchmark v2):
+Isolate both sides before clearing. Hold clear while completion is exchanged with the peer. Drop clear before releasing isolation, and exchange an explicit released status so neither side leaves isolation while its peer is still clearing. Complete one sequence before accepting another; additional handshake latency is permitted.
 
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.

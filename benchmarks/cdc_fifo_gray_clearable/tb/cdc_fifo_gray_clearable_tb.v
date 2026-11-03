@@ -48,6 +48,29 @@ module cdc_fifo_gray_clearable_tb;
         end
     end
 
+    // Plain-Verilog CDC checks: reset/clear isolation and payload hold.
+    reg cdc_prev_stalled = 0;
+    reg [7:0] cdc_prev_data = 0;
+    always @(posedge dst_clk) begin
+        if (!src_rst_n || !dst_rst_n || src_clear || dst_clear) begin
+            if (dst_valid) begin
+                $display("CDC VIOLATION A/H: dst_valid during reset or clear");
+                errors = errors + 1;
+            end
+            cdc_prev_stalled <= 0;
+        end else if (src_pending || dst_pending) begin
+            // A coordinated clear may retire an already visible word.
+            cdc_prev_stalled <= 0;
+        end else begin
+            if (cdc_prev_stalled && (!dst_valid || dst_data !== cdc_prev_data)) begin
+                $display("CDC VIOLATION E: destination payload changed while stalled");
+                errors = errors + 1;
+            end
+            cdc_prev_stalled <= dst_valid && !dst_ready;
+            cdc_prev_data <= dst_data;
+        end
+    end
+
     integer i;
     initial begin
         repeat (4) @(posedge src_clk); src_rst_n = 1;

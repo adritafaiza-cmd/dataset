@@ -17,6 +17,18 @@ module spi_master_slave_tb;
         .wr_ack_o(wr_ack), .do_valid_o(do_valid), .do_o(do_o)
     );
 
+    // Plain-Verilog cross-clock reset/data checks.
+    always @(posedge pclk_i) begin
+        if (rst_i && (do_valid || wr_ack)) begin
+            $display("CDC VIOLATION A: SPI response active during reset");
+            errors = errors + 1;
+        end
+        if (!rst_i && do_valid && (^do_o === 1'bx)) begin
+            $display("CDC VIOLATION E: SPI receive data unknown when valid");
+            errors = errors + 1;
+        end
+    end
+
     initial begin
         repeat (8) @(posedge pclk_i); rst_i = 0;
         repeat (4) @(posedge pclk_i);

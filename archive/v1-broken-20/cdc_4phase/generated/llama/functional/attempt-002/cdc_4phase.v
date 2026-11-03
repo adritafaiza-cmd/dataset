@@ -1,0 +1,102 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  logic [WIDTH-1:0] src_data;
+  logic src_valid;
+  logic src_ready;
+  logic [WIDTH-1:0] dst_data;
+  logic dst_valid;
+  logic dst_ready;
+
+  // Source domain
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (~src_rst_ni) begin
+      src_data <= '0;
+      src_valid <= 1'b0;
+      src_ready <= 1'b0;
+    end else if (src_valid_i && src_ready) begin
+      src_data <= src_data_i;
+      src_valid <= 1'b1;
+    end else if (src_valid && ~src_ready) begin
+      src_valid <= 1'b0;
+    end
+  end
+
+  // Destination domain
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (~dst_rst_ni) begin
+      dst_data <= '0;
+      dst_valid <= 1'b0;
+      dst_ready <= 1'b0;
+    end else if (dst_valid && dst_ready_i) begin
+      dst_valid <= 1'b0;
+    end else if (~dst_valid && src_valid) begin
+      dst_data <= src_data;
+      dst_valid <= 1'b1;
+    end
+  end
+
+  // Handshake logic
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (~src_rst_ni) begin
+      src_ready <= 1'b0;
+    end else if (src_valid && ~src_ready) begin
+      src_ready <= 1'b1;
+    end else if (~src_valid && src_ready) begin
+      src_ready <= 1'b0;
+    end
+  end
+
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (~dst_rst_ni) begin
+      dst_ready <= 1'b0;
+    end else if (dst_valid && ~dst_ready) begin
+      dst_ready <= 1'b1;
+    end else if (~dst_valid && dst_ready) begin
+      dst_ready <= 1'b0;
+    end
+  end
+
+  // Decoupled mode
+  if (DECOUPLED) begin
+    always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+      if (~src_rst_ni) begin
+        src_ready <= 1'b0;
+      end else if (src_valid_i && src_ready) begin
+        src_ready <= 1'b1;
+      end else if (~src_valid_i && src_ready) begin
+        src_ready <= 1'b0;
+      end
+    end
+  end
+
+  // Reset message
+  if (SEND_RESET_MSG) begin
+    always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+      if (~src_rst_ni) begin
+        src_data <= RESET_MSG;
+        src_valid <= 1'b1;
+      end
+    end
+  end
+
+  assign src_ready_o = src_ready;
+  assign dst_data_o = dst_data;
+  assign dst_valid_o = dst_valid;
+
+endmodule

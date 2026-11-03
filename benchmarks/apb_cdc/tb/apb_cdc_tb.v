@@ -43,6 +43,27 @@ module apb_cdc_tb;
         .dst_pready_i(dst_pready), .dst_prdata_i(dst_prdata), .dst_pslverr_i(dst_pslverr)
     );
 
+    // Plain-Verilog CDC checks: reset isolation and APB access hold.
+    reg cdc_prev_src_wait = 0;
+    always @(posedge src_pclk) begin
+        if ((!src_rst_n || !dst_rst_n) && src_pready) begin
+            $display("CDC VIOLATION A/H: source response during reset");
+            errors = errors + 1;
+        end
+        if (src_rst_n && cdc_prev_src_wait && !src_pready &&
+            (!src_psel || !src_penable)) begin
+            $display("CDC VIOLATION E: source APB access dropped before ready");
+            errors = errors + 1;
+        end
+        cdc_prev_src_wait <= src_rst_n && src_psel && src_penable && !src_pready;
+    end
+    always @(posedge dst_pclk) begin
+        if ((!src_rst_n || !dst_rst_n) && dst_psel) begin
+            $display("CDC VIOLATION A/H: destination select during reset");
+            errors = errors + 1;
+        end
+    end
+
     task apb_write;
         input [7:0] addr;
         input [31:0] data;

@@ -47,6 +47,9 @@ Behavior:
     - Reset and clear must not create a destination beat.
     - Isolate gates both ends before clear. Clear drops the one outstanding beat by returning the two-phase request and acknowledge to zero. The destination payload is still captured on the request edge, with no extra valid gap between beats. Each clear step reaches the other clock one handshake later.
 
+Revised transfer contract (benchmark v2):
+    Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
+
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,
 or the reference implementation.

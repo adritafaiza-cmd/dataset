@@ -39,10 +39,13 @@ config_rtlds -port \
      m_axil_rdata m_axil_rresp m_axil_rvalid m_axil_rready} \
     -clock m_clk
 
+# CDC does not import SDC set_clock_groups after the clock command.
+config_rtlds -clock -group -async {{s_clk} {m_clk}}
 check_cdc -extract
 check_cdc -list clock_signals -file $RPT_DIR/inferred_clocks.rpt -force
 check_cdc -list design_resets -file $RPT_DIR/inferred_resets.rpt -force
 check_cdc -list declared_resets -file $RPT_DIR/declared_resets.rpt -force
+check_cdc -list pairs -file $RPT_DIR/cdc_pairs.rpt -force
 check_cdc -list domain_crossings -file $RPT_DIR/cdc_crossings.rpt -force
 check_cdc -report -violation -detailed -file $RPT_DIR/cdc_report.rpt -force
 puts "\[cdc_run\] $TOP: reports written to $RPT_DIR"

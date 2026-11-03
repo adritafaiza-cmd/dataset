@@ -45,9 +45,12 @@ Behavior:
     - Accepted data returns exactly once, in write order.
     - While write reset is asserted, o_wr_full is low. While read reset is asserted, o_rd_empty is high.
     - o_rd_empty can be high while words remain stored. The read side presents one stored word at a time. After a read, empty may return high until the next stored word becomes visible.
-    - OPT_REGISTER_READS selects whether the read data and empty flag are registered.
+    - OPT_REGISTER_READS selects additional output registering; the payload must always have destination-clock synchronization.
     - NFF is the synchronizer depth. Use at least 2 stages.
     - Do not emit FORMAL-only ports.
+
+Revised transfer contract (benchmark v2):
+    Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee. OPT_REGISTER_READS selects an additional output holding register or a destination-clock sample; neither setting provides an asynchronous memory bypass.
 
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,

@@ -60,6 +60,20 @@ module async_bidir_fifo_tb;
         .b_dir(b_dir)
     );
 
+    // Plain-Verilog CDC type A/H checks for both independently reset domains.
+    always @(posedge a_clk) begin
+        if ((!a_rst_n || !b_rst_n) && (a_full || !a_empty)) begin
+            $display("CDC VIOLATION A/H: A FIFO status unsafe during reset");
+            errors = errors + 1;
+        end
+    end
+    always @(posedge b_clk) begin
+        if ((!a_rst_n || !b_rst_n) && (b_full || !b_empty)) begin
+            $display("CDC VIOLATION A/H: B FIFO status unsafe during reset");
+            errors = errors + 1;
+        end
+    end
+
     task reset_dut;
     begin
         a_rst_n = 0;

@@ -46,8 +46,14 @@ module cdc_fifo_gray_clearable #(
 
     reg [WIDTH-1:0] mem [0:(1<<LOG_DEPTH)-1];
     reg [PTRW-1:0] wptr_bin, rptr_bin;
-    wire [PTRW-1:0] wptr_gray = bin2gray(wptr_bin);
-    wire [PTRW-1:0] rptr_gray = bin2gray(rptr_bin);
+    // Registered on the same edge as the binary pointer, including the
+    // clear edge that writes both back to zero. The synchronizer input
+    // is this register, not the combinational Gray encode.
+    reg [PTRW-1:0] wptr_gray_q, rptr_gray_q;
+    (* ASYNC_REG = "TRUE" *) reg [WIDTH-1:0] payload_meta_q, payload_sync_q;
+    reg [1:0] payload_wait_q;
+    reg [WIDTH-1:0] dst_data_q;
+    reg dst_word;
 
     (* ASYNC_REG = "TRUE" *) reg [PTRW-1:0] rptr_sync [0:SYNC_STAGES-1];
     (* ASYNC_REG = "TRUE" *) reg [PTRW-1:0] wptr_sync [0:SYNC_STAGES-1];
@@ -91,7 +97,7 @@ module cdc_fifo_gray_clearable #(
                 rptr_sync[s] <= {PTRW{1'b0}};
             dst_clr_sync <= {SYNC_STAGES{1'b0}};
         end else begin
-            rptr_sync[0] <= rptr_gray;
+            rptr_sync[0] <= rptr_gray_q;
             for (s = 1; s < SYNC_STAGES; s = s + 1)
                 rptr_sync[s] <= rptr_sync[s-1];
             dst_clr_sync <= {dst_clr_sync[SYNC_STAGES-2:0], dst_clr_level};
@@ -104,7 +110,7 @@ module cdc_fifo_gray_clearable #(
                 wptr_sync[s] <= {PTRW{1'b0}};
             src_clr_sync <= {SYNC_STAGES{1'b0}};
         end else begin
-            wptr_sync[0] <= wptr_gray;
+            wptr_sync[0] <= wptr_gray_q;
             for (s = 1; s < SYNC_STAGES; s = s + 1)
                 wptr_sync[s] <= wptr_sync[s-1];
             src_clr_sync <= {src_clr_sync[SYNC_STAGES-2:0], src_clr_level};
@@ -119,12 +125,16 @@ module cdc_fifo_gray_clearable #(
     assign src_clear_pending_o = (src_hold != 5'd0);
     assign dst_clear_pending_o = (dst_hold != 5'd0);
     assign src_ready_o = fifo_ready & (src_hold == 5'd0);
-    assign dst_valid_o = fifo_valid & (dst_hold == 5'd0);
-    assign dst_data_o  = mem[rptr_bin[LOG_DEPTH-1:0]];
+    // A stored word is sampled once. valid falls for one destination
+    // clock after an accept, and it stays low for the whole clear hold
+    // so a pre-clear word is not presented again.
+    assign dst_valid_o = dst_word & (dst_hold == 5'd0);
+    assign dst_data_o  = dst_data_q;
 
     always @(posedge src_clk_i or negedge src_rst_sync_ni) begin
         if (!src_rst_sync_ni) begin
             wptr_bin <= {PTRW{1'b0}};
+            wptr_gray_q <= {PTRW{1'b0}};
             src_clr_level <= 1'b0;
             src_remote_q <= 1'b0;
             src_hold <= 5'd0;
@@ -140,10 +150,13 @@ module cdc_fifo_gray_clearable #(
             else if (src_hold == 5'd1)
                 src_clr_level <= 1'b0;
 
-            if (src_hold == 5'd1)
+            if (src_hold == 5'd1) begin
                 wptr_bin <= {PTRW{1'b0}};
-            else if (src_valid_i && src_ready_o)
+                wptr_gray_q <= {PTRW{1'b0}};
+            end else if (src_valid_i && src_ready_o) begin
                 wptr_bin <= wptr_bin + 1'b1;
+                wptr_gray_q <= bin2gray(wptr_bin + 1'b1);
+            end
         end
     end
 
@@ -155,6 +168,9 @@ module cdc_fifo_gray_clearable #(
     always @(posedge dst_clk_i or negedge dst_rst_sync_ni) begin
         if (!dst_rst_sync_ni) begin
             rptr_bin <= {PTRW{1'b0}};
+            rptr_gray_q <= {PTRW{1'b0}};
+            dst_data_q <= {WIDTH{1'b0}};
+            dst_word <= 1'b0;
             dst_clr_level <= 1'b0;
             dst_remote_q <= 1'b0;
             dst_hold <= 5'd0;
@@ -170,11 +186,35 @@ module cdc_fifo_gray_clearable #(
             else if (dst_hold == 5'd1)
                 dst_clr_level <= 1'b0;
 
-            if (dst_hold == 5'd1)
+            if (dst_hold != 5'd0)
+                dst_word <= 1'b0;
+            else if ((!dst_word && fifo_valid) && payload_wait_q == 2) begin
+                dst_data_q <= payload_sync_q;
+                dst_word <= 1'b1;
+            end else if (dst_word && dst_ready_i)
+                dst_word <= 1'b0;
+
+            if (dst_hold == 5'd1) begin
                 rptr_bin <= {PTRW{1'b0}};
-            else if (dst_valid_o && dst_ready_i)
+                rptr_gray_q <= {PTRW{1'b0}};
+            end else if ((dst_hold == 5'd0) && dst_word && dst_ready_i) begin
                 rptr_bin <= rptr_bin + 1'b1;
+                rptr_gray_q <= bin2gray(rptr_bin + 1'b1);
+            end
         end
     end
 
+    always @(posedge dst_clk_i or negedge dst_rst_sync_ni) begin
+        if (!dst_rst_sync_ni) begin
+            payload_meta_q <= {WIDTH{1'b0}};
+            payload_sync_q <= {WIDTH{1'b0}};
+            payload_wait_q <= 0;
+        end else begin
+            payload_meta_q <= mem[rptr_bin[LOG_DEPTH-1:0]];
+            payload_sync_q <= payload_meta_q;
+            if (!dst_word && fifo_valid) begin
+                if (payload_wait_q != 2) payload_wait_q <= payload_wait_q + 1'b1;
+            end else payload_wait_q <= 0;
+        end
+    end
 endmodule

@@ -1,0 +1,220 @@
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+reg [ADDR_WIDTH-1:0] s_axil_awaddr_sync;
+reg [2:0] s_axil_awprot_sync;
+reg s_axil_awvalid_sync;
+reg s_axil_awready_sync;
+reg [DATA_WIDTH-1:0] s_axil_wdata_sync;
+reg [STRB_WIDTH-1:0] s_axil_wstrb_sync;
+reg s_axil_wvalid_sync;
+reg s_axil_wready_sync;
+reg [1:0] s_axil_bresp_sync;
+reg s_axil_bvalid_sync;
+reg s_axil_bready_sync;
+reg [ADDR_WIDTH-1:0] s_axil_araddr_sync;
+reg [2:0] s_axil_arprot_sync;
+reg s_axil_arvalid_sync;
+reg s_axil_arready_sync;
+reg [DATA_WIDTH-1:0] s_axil_rdata_sync;
+reg [1:0] s_axil_rresp_sync;
+reg s_axil_rvalid_sync;
+reg s_axil_rready_sync;
+
+reg [ADDR_WIDTH-1:0] m_axil_awaddr_sync;
+reg [2:0] m_axil_awprot_sync;
+reg m_axil_awvalid_sync;
+reg m_axil_awready_sync;
+reg [DATA_WIDTH-1:0] m_axil_wdata_sync;
+reg [STRB_WIDTH-1:0] m_axil_wstrb_sync;
+reg m_axil_wvalid_sync;
+reg m_axil_wready_sync;
+reg [1:0] m_axil_bresp_sync;
+reg m_axil_bvalid_sync;
+reg m_axil_bready_sync;
+reg [ADDR_WIDTH-1:0] m_axil_araddr_sync;
+reg [2:0] m_axil_arprot_sync;
+reg m_axil_arvalid_sync;
+reg m_axil_arready_sync;
+reg [DATA_WIDTH-1:0] m_axil_rdata_sync;
+reg [1:0] m_axil_rresp_sync;
+reg m_axil_rvalid_sync;
+reg m_axil_rready_sync;
+
+always @(posedge s_clk) begin
+    if (s_rst) begin
+        s_axil_awaddr_sync <= 0;
+        s_axil_awprot_sync <= 0;
+        s_axil_awvalid_sync <= 0;
+        s_axil_awready_sync <= 0;
+        s_axil_wdata_sync <= 0;
+        s_axil_wstrb_sync <= 0;
+        s_axil_wvalid_sync <= 0;
+        s_axil_wready_sync <= 0;
+        s_axil_bresp_sync <= 0;
+        s_axil_bvalid_sync <= 0;
+        s_axil_bready_sync <= 0;
+        s_axil_araddr_sync <= 0;
+        s_axil_arprot_sync <= 0;
+        s_axil_arvalid_sync <= 0;
+        s_axil_arready_sync <= 0;
+        s_axil_rdata_sync <= 0;
+        s_axil_rresp_sync <= 0;
+        s_axil_rvalid_sync <= 0;
+        s_axil_rready_sync <= 0;
+    end else begin
+        s_axil_awaddr_sync <= s_axil_awaddr;
+        s_axil_awprot_sync <= s_axil_awprot;
+        s_axil_awvalid_sync <= s_axil_awvalid;
+        s_axil_awready_sync <= s_axil_awready;
+        s_axil_wdata_sync <= s_axil_wdata;
+        s_axil_wstrb_sync <= s_axil_wstrb;
+        s_axil_wvalid_sync <= s_axil_wvalid;
+        s_axil_wready_sync <= s_axil_wready;
+        s_axil_bresp_sync <= s_axil_bresp;
+        s_axil_bvalid_sync <= s_axil_bvalid;
+        s_axil_bready_sync <= s_axil_bready;
+        s_axil_araddr_sync <= s_axil_araddr;
+        s_axil_arprot_sync <= s_axil_arprot;
+        s_axil_arvalid_sync <= s_axil_arvalid;
+        s_axil_arready_sync <= s_axil_arready;
+        s_axil_rdata_sync <= s_axil_rdata;
+        s_axil_rresp_sync <= s_axil_rresp;
+        s_axil_rvalid_sync <= s_axil_rvalid;
+        s_axil_rready_sync <= s_axil_rready;
+    end
+end
+
+always @(posedge m_clk) begin
+    if (m_rst) begin
+        m_axil_awaddr_sync <= 0;
+        m_axil_awprot_sync <= 0;
+        m_axil_awvalid_sync <= 0;
+        m_axil_awready_sync <= 0;
+        m_axil_wdata_sync <= 0;
+        m_axil_wstrb_sync <= 0;
+        m_axil_wvalid_sync <= 0;
+        m_axil_wready_sync <= 0;
+        m_axil_bresp_sync <= 0;
+        m_axil_bvalid_sync <= 0;
+        m_axil_bready_sync <= 0;
+        m_axil_araddr_sync <= 0;
+        m_axil_arprot_sync <= 0;
+        m_axil_arvalid_sync <= 0;
+        m_axil_arready_sync <= 0;
+        m_axil_rdata_sync <= 0;
+        m_axil_rresp_sync <= 0;
+        m_axil_rvalid_sync <= 0;
+        m_axil_rready_sync <= 0;
+    end else begin
+        m_axil_awaddr_sync <= s_axil_awaddr_sync;
+        m_axil_awprot_sync <= s_axil_awprot_sync;
+        m_axil_awvalid_sync <= s_axil_awvalid_sync;
+        m_axil_awready_sync <= s_axil_awready_sync;
+        m_axil_wdata_sync <= s_axil_wdata_sync;
+        m_axil_wstrb_sync <= s_axil_wstrb_sync;
+        m_axil_wvalid_sync <= s_axil_wvalid_sync;
+        m_axil_wready_sync <= s_axil_wready_sync;
+        m_axil_bresp_sync <= s_axil_bresp_sync;
+        m_axil_bvalid_sync <= s_axil_bvalid_sync;
+        m_axil_bready_sync <= s_axil_bready_sync;
+        m_axil_araddr_sync <= s_axil_araddr_sync;
+        m_axil_arprot_sync <= s_axil_arprot_sync;
+        m_axil_arvalid_sync <= s_axil_arvalid_sync;
+        m_axil_arready_sync <= s_axil_arready_sync;
+        m_axil_rdata_sync <= s_axil_rdata_sync;
+        m_axil_rresp_sync <= s_axil_rresp_sync;
+        m_axil_rvalid_sync <= s_axil_rvalid_sync;
+        m_axil_rready_sync <= s_axil_rready_sync;
+    end
+end
+
+assign m_axil_awaddr = m_axil_awaddr_sync;
+assign m_axil_awprot = m_axil_awprot_sync;
+assign m_axil_awvalid = m_axil_awvalid_sync;
+assign m_axil_awready = m_axil_awready_sync;
+assign m_axil_wdata = m_axil_wdata_sync;
+assign m_axil_wstrb = m_axil_wstrb_sync;
+assign m_axil_wvalid = m_axil_wvalid_sync;
+assign m_axil_wready = m_axil_wready_sync;
+assign m_axil_bresp = m_axil_bresp_sync;
+assign m_axil_bvalid = m_axil_bvalid_sync;
+assign m_axil_bready = m_axil_bready_sync;
+assign m_axil_araddr = m_axil_araddr_sync;
+assign m_axil_arprot = m_axil_arprot_sync;
+assign m_axil_arvalid = m_axil_arvalid_sync;
+assign m_axil_arready = m_axil_arready_sync;
+assign m_axil_rdata = m_axil_rdata_sync;
+assign m_axil_rresp = m_axil_rresp_sync;
+assign m_axil_rvalid = m_axil_rvalid_sync;
+assign m_axil_rready = m_axil_rready_sync;
+
+assign s_axil_awaddr = s_axil_awaddr_sync;
+assign s_axil_awprot = s_axil_awprot_sync;
+assign s_axil_awvalid = s_axil_awvalid_sync;
+assign s_axil_awready = s_axil_awready_sync;
+assign s_axil_wdata = s_axil_wdata_sync;
+assign s_axil_wstrb = s_axil_wstrb_sync;
+assign s_axil_wvalid = s_axil_wvalid_sync;
+assign s_axil_wready = s_axil_wready_sync;
+assign s_axil_bresp = s_axil_bresp_sync;
+assign s_axil_bvalid = s_axil_bvalid_sync;
+assign s_axil_bready = s_axil_bready_sync;
+assign s_axil_araddr = s_axil_araddr_sync;
+assign s_axil_arprot = s_axil_arprot_sync;
+assign s_axil_arvalid = s_axil_arvalid_sync;
+assign s_axil_arready = s_axil_arready_sync;
+assign s_axil_rdata = s_axil_rdata_sync;
+assign s_axil_rresp = s_axil_rresp_sync;
+assign s_axil_rvalid = s_axil_rvalid_sync;
+assign s_axil_rready = s_axil_rready_sync;
+
+endmodule

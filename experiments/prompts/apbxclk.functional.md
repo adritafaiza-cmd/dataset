@@ -59,6 +59,9 @@ Behavior:
     - Both interfaces must remain inactive during reset, and reset must not create a transaction.
     - Crossing payload and response fields are captured once in the receiving clock and then held. OPT_REGISTERED does not select a combinational bypass. Both parameter settings use that capture and must preserve APB behavior.
 
+Revised transfer contract (benchmark v2):
+    Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
+
 Give me the complete code in one source file.
 Do not include a testbench, explanation, markdown, vendor primitives,
 or the reference implementation.

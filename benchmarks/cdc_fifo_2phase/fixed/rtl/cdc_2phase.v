@@ -56,14 +56,40 @@ module cdc_2phase #(
   input  dst_ready_i
 );
 
-  // Parent (cdc_fifo_2phase) already ANDs the two POR pins and
-  // synchronizes deassertion. Do not AND or resynchronize here.
+  // The two-phase protocol requires coordinated reset assertion. Either
+  // external reset therefore resets both sides; deassertion is synchronized
+  // independently to each local clock.
+  wire common_rst_ni;
+  wire src_rst_sync_ni;
+  wire dst_rst_sync_ni;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] src_rst_sync_q;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] dst_rst_sync_q;
+
+  assign common_rst_ni = src_rst_ni & dst_rst_ni;
+
+  always @(posedge src_clk_i or negedge common_rst_ni) begin
+    if (!common_rst_ni)
+      src_rst_sync_q <= 2'b00;
+    else
+      src_rst_sync_q <= {src_rst_sync_q[0], 1'b1};
+  end
+
+  always @(posedge dst_clk_i or negedge common_rst_ni) begin
+    if (!common_rst_ni)
+      dst_rst_sync_q <= 2'b00;
+    else
+      dst_rst_sync_q <= {dst_rst_sync_q[0], 1'b1};
+  end
+
+  assign src_rst_sync_ni = src_rst_sync_q[1];
+  assign dst_rst_sync_ni = dst_rst_sync_q[1];
+
   wire async_req;
   wire async_ack;
   wire [WIDTH-1:0] async_data;
 
   cdc_2phase_src #(.WIDTH(WIDTH)) i_src (
-    .rst_ni       (src_rst_ni),
+    .rst_ni       (src_rst_sync_ni),
     .clk_i        (src_clk_i),
     .data_i       (src_data_i),
     .valid_i      (src_valid_i),
@@ -74,7 +100,7 @@ module cdc_2phase #(
   );
 
   cdc_2phase_dst #(.WIDTH(WIDTH)) i_dst (
-    .rst_ni       (dst_rst_ni),
+    .rst_ni       (dst_rst_sync_ni),
     .clk_i        (dst_clk_i),
     .data_o       (dst_data_o),
     .valid_o      (dst_valid_o),
@@ -143,7 +169,17 @@ module cdc_2phase_dst #(
   input  [WIDTH-1:0] async_data_i
 );
 
-  reg req_dst_q, req_q0, req_q1, ack_dst_q;
+  reg req_dst_q, req_q0, req_q1, req_settle_q, ack_dst_q;
+  (* ASYNC_REG = "TRUE" *) reg [WIDTH-1:0] data_meta_q, data_sync_q;
+  always @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      data_meta_q <= {WIDTH{1'b0}};
+      data_sync_q <= {WIDTH{1'b0}};
+    end else begin
+      data_meta_q <= async_data_i;
+      data_sync_q <= data_meta_q;
+    end
+  end
   reg [WIDTH-1:0] data_dst_q;
 
   always @(posedge clk_i or negedge rst_ni) begin
@@ -156,8 +192,8 @@ module cdc_2phase_dst #(
   always @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni)
       data_dst_q <= {WIDTH{1'b0}};
-    else if ((req_q0 != req_q1) && !valid_o)
-      data_dst_q <= async_data_i;
+    else if ((req_q1 != req_settle_q) && !valid_o)
+      data_dst_q <= data_sync_q;
   end
 
   always @(posedge clk_i or negedge rst_ni) begin
@@ -165,14 +201,16 @@ module cdc_2phase_dst #(
       req_dst_q <= 1'b0;
       req_q0    <= 1'b0;
       req_q1    <= 1'b0;
+      req_settle_q <= 1'b0;
     end else begin
       req_dst_q <= async_req_i;
       req_q0    <= req_dst_q;
       req_q1    <= req_q0;
+      req_settle_q <= req_q1;
     end
   end
 
-  assign valid_o = (ack_dst_q != req_q1);
+  assign valid_o = (ack_dst_q != req_settle_q);
   assign data_o = data_dst_q;
   assign async_ack_o = ack_dst_q;
 

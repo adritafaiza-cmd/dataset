@@ -18,6 +18,9 @@ module axis_async_fifo_smoke_tb;
 
     integer errors = 0;
     integer received = 0;
+    reg cdc_prev_stalled = 0;
+    reg [7:0] cdc_prev_data = 0;
+    reg cdc_prev_last = 0;
 
     axis_async_fifo #(
         .DEPTH(DEPTH),
@@ -82,6 +85,18 @@ module axis_async_fifo_smoke_tb;
     endtask
 
     always @(posedge m_clk) begin
+        if ((s_rst || m_rst) && m_valid) begin
+            $display("CDC VIOLATION A/H: destination valid during reset");
+            errors = errors + 1;
+        end
+        if (!s_rst && !m_rst && cdc_prev_stalled &&
+            (!m_valid || m_data !== cdc_prev_data || m_last !== cdc_prev_last)) begin
+            $display("CDC VIOLATION E: AXIS payload changed while stalled");
+            errors = errors + 1;
+        end
+        cdc_prev_stalled <= !s_rst && !m_rst && m_valid && !m_ready;
+        cdc_prev_data <= m_data;
+        cdc_prev_last <= m_last;
         if (!m_rst && m_valid && m_ready) begin
             if (m_data !== received[7:0]) begin
                 $display("FAIL FIFO beat=%0d actual=%h expected=%h",

@@ -1,7 +1,7 @@
 module apbxclk_formal;
   localparam AW=6, DW=8;
   (* gclk *) reg gclk;
-  reg [5:0] tick = 0;
+  reg [15:0] tick = 0;
   always @(posedge gclk) tick <= tick + 1'b1;
   wire S_APB_PCLK = tick[0];
   wire M_APB_PCLK = tick[1];
@@ -30,6 +30,10 @@ module apbxclk_formal;
 
   always @(posedge S_APB_PCLK) begin
     assume(!S_APB_PENABLE || S_APB_PSEL);
+    // A legal APB setup phase must advance to access with stable fields.
+    if (S_PRESETn && $past(S_PRESETn && S_APB_PSEL && !S_APB_PENABLE))
+      assume(S_APB_PSEL && S_APB_PENABLE &&
+             $stable({S_APB_PWRITE,S_APB_PADDR,S_APB_PWDATA,S_APB_PWSTRB,S_APB_PPROT}));
     if (S_PRESETn && $past(S_PRESETn && S_APB_PSEL && S_APB_PENABLE && !S_APB_PREADY))
       assume(S_APB_PSEL && S_APB_PENABLE &&
              $stable({S_APB_PWRITE, S_APB_PADDR, S_APB_PWDATA, S_APB_PWSTRB, S_APB_PPROT}));

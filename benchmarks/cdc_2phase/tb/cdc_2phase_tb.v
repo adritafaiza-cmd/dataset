@@ -1,4 +1,6 @@
 `timescale 1ns/1ps
+// CDC behavioral checks are embedded below in plain Verilog.
+// Structural CDC checks (missing synchronizers, foreign resets) run from sim/run.sh.
 
 module cdc_2phase_tb;
     reg src_clk = 0, dst_clk = 0;
@@ -50,6 +52,28 @@ module cdc_2phase_tb;
                 errors = errors + 1;
             end
             received = received + 1;
+        end
+    end
+
+    // CDC type A/H: neither reset domain may expose a destination transfer.
+    // CDC type E: a back-pressured destination payload must remain stable.
+    reg cdc_prev_stalled = 0;
+    reg [7:0] cdc_prev_data = 0;
+    always @(posedge dst_clk) begin
+        if (!src_rst_n || !dst_rst_n) begin
+            if (dst_valid) begin
+                $display("CDC VIOLATION A/H: dst_valid while a reset is asserted");
+                errors = errors + 1;
+            end
+            cdc_prev_stalled <= 0;
+        end else begin
+            if (cdc_prev_stalled &&
+                (!dst_valid || dst_data !== cdc_prev_data)) begin
+                $display("CDC VIOLATION E: destination payload changed while stalled");
+                errors = errors + 1;
+            end
+            cdc_prev_stalled <= dst_valid && !dst_ready;
+            cdc_prev_data <= dst_data;
         end
     end
 

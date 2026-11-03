@@ -77,6 +77,44 @@ module axil_cdc_tb;
         .m_axil_rvalid(m_rvalid), .m_axil_rready(m_rready)
     );
 
+    // Plain-Verilog CDC checks: reset isolation and VALID/data hold.
+    reg cdc_prev_s_rwait = 0, cdc_prev_m_awwait = 0, cdc_prev_m_wwait = 0;
+    reg [31:0] cdc_prev_s_rdata = 0, cdc_prev_m_wdata = 0;
+    reg [7:0] cdc_prev_m_awaddr = 0;
+    always @(posedge s_clk) begin
+        if ((s_rst || m_rst) && (s_bvalid || s_rvalid)) begin
+            $display("CDC VIOLATION A/H: source response during reset");
+            errors = errors + 1;
+        end
+        if (!s_rst && cdc_prev_s_rwait &&
+            (!s_rvalid || s_rdata !== cdc_prev_s_rdata)) begin
+            $display("CDC VIOLATION E: source read payload changed while stalled");
+            errors = errors + 1;
+        end
+        cdc_prev_s_rwait <= !s_rst && s_rvalid && !s_rready;
+        cdc_prev_s_rdata <= s_rdata;
+    end
+    always @(posedge m_clk) begin
+        if ((s_rst || m_rst) && (m_awvalid || m_wvalid || m_arvalid)) begin
+            $display("CDC VIOLATION A/H: destination request during reset");
+            errors = errors + 1;
+        end
+        if (!m_rst && cdc_prev_m_awwait &&
+            (!m_awvalid || m_awaddr !== cdc_prev_m_awaddr)) begin
+            $display("CDC VIOLATION E: AW channel changed while stalled");
+            errors = errors + 1;
+        end
+        if (!m_rst && cdc_prev_m_wwait &&
+            (!m_wvalid || m_wdata !== cdc_prev_m_wdata)) begin
+            $display("CDC VIOLATION E: W channel changed while stalled");
+            errors = errors + 1;
+        end
+        cdc_prev_m_awwait <= !m_rst && m_awvalid && !m_awready;
+        cdc_prev_m_wwait <= !m_rst && m_wvalid && !m_wready;
+        cdc_prev_m_awaddr <= m_awaddr;
+        cdc_prev_m_wdata <= m_wdata;
+    end
+
     initial begin
         repeat (4) @(posedge s_clk); s_rst = 0;
         repeat (4) @(posedge m_clk); m_rst = 0;

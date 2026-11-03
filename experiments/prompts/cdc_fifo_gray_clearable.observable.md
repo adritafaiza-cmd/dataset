@@ -4,7 +4,10 @@ Implement a clearable valid/ready asynchronous FIFO.
 
 src_clk_i and dst_clk_i are independent clocks. Please take care of any clock-domain crossings between them. The resets are active-low.
 
-Queue data between the two sides in order. A clear request should flush pending data together on both sides so nothing stale appears afterward. The destination word is one registered sample, and dst_valid_o may fall for one destination clock between beats. A clear resets each pointer and the Gray value synchronized from it on the same edge.
+Queue data between the two sides in order. A clear request should flush pending data together on both sides so nothing stale appears afterward. The destination word is one registered sample, and dst_valid_o may remain low for multiple destination clocks between beats. A clear resets each pointer and the Gray value synchronized from it on the same edge.
+
+Revised behavior (benchmark v2):
+Additional transfer latency and bubbles spanning multiple receiving-clock edges are permitted. Preserve ordered, exactly-once accepted transfers, the stated capacity, and stable valid data while stalled. There is no one-beat-per-clock throughput guarantee.
 
 Give me the complete Verilog-2001 code in one source file, using this module interface.
 Do not include a testbench, explanation, markdown, vendor primitives, or the reference implementation.
