@@ -1,0 +1,181 @@
+Here is the complete Verilog code for the cdc_fifo_gray module:
+
+```
+module cdc_fifo_gray #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 2
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    // Local parameters
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam ADDR_WIDTH = LOG_DEPTH;
+    localparam DATA_WIDTH = WIDTH;
+    localparam META_WIDTH = 1;
+    localparam FULL_THRESHOLD = DEPTH - 1;
+    localparam EMPTY_THRESHOLD = 0;
+
+    // Internal signals
+    reg [ADDR_WIDTH-1:0] src_rd_ptr;
+    reg [ADDR_WIDTH-1:0] src_wr_ptr;
+    reg [ADDR_WIDTH-1:0] dst_rd_ptr;
+    reg [ADDR_WIDTH-1:0] dst_wr_ptr;
+    reg [DATA_WIDTH-1:0] fifo [0:DEPTH-1];
+    reg [META_WIDTH-1:0] meta [0:DEPTH-1];
+    reg [ADDR_WIDTH-1:0] next_src_wr_ptr;
+    reg [ADDR_WIDTH-1:0] next_dst_rd_ptr;
+    reg [ADDR_WIDTH-1:0] next_dst_wr_ptr;
+    reg [DATA_WIDTH-1:0] next_dst_data_o;
+    reg [META_WIDTH-1:0] next_meta_wr_ptr;
+    reg [META_WIDTH-1:0] next_meta_rd_ptr;
+    reg [META_WIDTH-1:0] next_meta_data_o;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_next_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_rd_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_WIDTH-1:0] gray_wr_ptr_sync_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ADDR_

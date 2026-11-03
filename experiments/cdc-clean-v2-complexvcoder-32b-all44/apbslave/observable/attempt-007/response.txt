@@ -1,0 +1,149 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "apbslave",
+      "function": "Implement a single-clock APB slave that supports ordinary setup and access phases, reads, and byte-strobed writes. Reset should leave it idle.",
+      "parameters": [
+        { "name": "C_APB_ADDR_WIDTH", "value": "12" },
+        { "name": "C_APB_DATA_WIDTH", "value": "32" }
+      ],
+      "ports": [
+        { "name": "PCLK", "direction": "input", "width": 1, "clock_domain": "PCLK" },
+        { "name": "PRESETn", "direction": "input", "width": 1, "clock_domain": "PCLK" },
+        { "name": "PSEL", "direction": "input", "width": 1, "clock_domain": "PCLK" },
+        { "name": "PENABLE", "direction": "input", "width": 1, "clock_domain": "PCLK" },
+        { "name": "PREADY", "direction": "output", "width": 1, "clock_domain": "PCLK" },
+        { "name": "PADDR", "direction": "input", "width": "C_APB_ADDR_WIDTH", "clock_domain": "PCLK" },
+        { "name": "PWRITE", "direction": "input", "width": 1, "clock_domain": "PCLK" },
+        { "name": "PWDATA", "direction": "input", "width": "C_APB_DATA_WIDTH", "clock_domain": "PCLK" },
+        { "name": "PWSTRB", "direction": "input", "width": "C_APB_DATA_WIDTH/8", "clock_domain": "PCLK" },
+        { "name": "PPROT", "direction": "input", "width": 3, "clock_domain": "PCLK" },
+        { "name": "PRDATA", "direction": "output", "width": "C_APB_DATA_WIDTH", "clock_domain": "PCLK" },
+        { "name": "PSLVERR", "direction": "output", "width": 1, "clock_domain": "PCLK" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        { "name": "state", "width": 2 },
+        { "name": "next_state", "width": 2 },
+        { "name": "read_data", "width": "C_APB_DATA_WIDTH" },
+        { "name": "write_data", "width": "C_APB_DATA_WIDTH" },
+        { "name": "write_enable", "width": "C_APB_DATA_WIDTH/8" }
+      ],
+      "behavior": [
+        "At reset (PRESETn low), the module should be idle.",
+        "On the setup phase (PSEL high, PENABLE low), the module should prepare for the access phase.",
+        "On the access phase (PSEL high, PENABLE high), the module should perform the read or write operation based on PWRITE.",
+        "PREADY should be asserted to indicate the module is ready for the next access phase.",
+        "PRDATA should be driven with the read data on a read operation.",
+        "PSLVERR should be deasserted (low) for normal operations."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module apbslave #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH,
+		localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+	) (
+		input	wire			PCLK, PRESETn,
+		input	wire			PSEL,
+		input	wire			PENABLE,
+		output	reg			PREADY,
+		input	wire	[AW-1:0]	PADDR,
+		input	wire			PWRITE,
+		input	wire	[DW-1:0]	PWDATA,
+		input	wire	[DW/8-1:0]	PWSTRB,
+		input	wire	[2:0]		PPROT,
+		output	reg	[DW-1:0]	PRDATA,
+		output	wire			PSLVERR
+	);
+
+	// States
+	localparam	IDLE = 2'b00;
+	localparam	SETUP = 2'b01;
+	localparam	ACCESS = 2'b10;
+
+	// Internal signals
+	reg [1:0] state, next_state;
+	reg [DW-1:0] read_data, write_data;
+	reg [DW/8-1:0] write_enable;
+
+	// Memory for storing data
+	reg [DW-1:0] mem [0:(1<<AW)-1];
+
+	// State machine
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			state <= IDLE;
+		end else begin
+			state <= next_state;
+		end
+	end
+
+	// Next state logic
+	always @(*) begin
+		case (state)
+			IDLE: begin
+				if (PSEL && !PENABLE)
+					next_state = SETUP;
+				else
+					next_state = IDLE;
+			end
+			SETUP: begin
+				if (PSEL && PENABLE)
+					next_state = ACCESS;
+				else
+					next_state = IDLE;
+			end
+			ACCESS: begin
+				next_state = IDLE;
+			end
+			default: next_state = IDLE;
+		endcase
+	end
+
+	// Output logic
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			PREADY <= 0;
+			PRDATA <= 0;
+			PSLVERR <= 0;
+		end else begin
+			case (state)
+				IDLE: begin
+					PREADY <= 0;
+					PRDATA <= 0;
+				end
+				SETUP: begin
+					PREADY <= 1;
+				end
+				ACCESS: begin
+					if (PWRITE) begin
+						for (int i = 0; i < DW/8; i = i + 1) begin
+							if (PWSTRB[i]) begin
+								mem[PADDR][8*i +: 8] <= PWDATA[8*i +: 8];
+							end
+						end
+					end else begin
+						read_data <= mem[PADDR];
+					end
+					PRDATA <= PWRITE ? 0 : read_data;
+				end
+			endcase
+		end
+	end
+
+	// PSLVERR is always deasserted for normal operations
+	assign PSLVERR = 0;
+
+endmodule
+```

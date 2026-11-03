@@ -1,0 +1,96 @@
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Internal register file
+  reg_data_t [NoApbRegs-1:0] reg_file;
+
+  // Internal signals
+  logic [ApbAddrWidth-1:0] addr;
+  logic [NoApbRegs-1:0]    addr_match;
+  logic [NoApbRegs-1:0]    write_enable;
+  logic [ApbDataWidth-1:0] write_data;
+  logic [ApbDataWidth-1:0] byte_strobe;
+  logic                    psel;
+  logic                    penable;
+  logic                    pwrite;
+  logic [ApbDataWidth-1:0] prdata;
+  logic                    pready;
+
+  // Decode the address
+  assign addr = req_i.paddr - base_addr_i;
+  assign addr_match = (addr / AddrOffset) < NoApbRegs;
+
+  // Decode the write enable
+  assign write_enable = addr_match & psel & penable & pwrite;
+
+  // Generate byte strobe
+  assign byte_strobe = req_i.pstrb;
+
+  // Write data generation
+  genvar i;
+  generate
+    for (i = 0; i < ApbDataWidth / 8; i = i + 1) begin : gen_byte_strobe
+      assign write_data[i*8 +: 8] = byte_strobe[i] ? req_i.pwdata[i*8 +: 8] : reg_file[addr / AddrOffset][i*8 +: 8];
+    end
+  endgenerate
+
+  // Register file logic
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int j = 0; j < NoApbRegs; j = j + 1) begin
+        if (ReadOnly[j])
+          reg_file[j] <= reg_init_i[j];
+        else
+          reg_file[j] <= '0;
+      end
+    end else begin
+      for (int j = 0; j < NoApbRegs; j = j + 1) begin
+        if (write_enable[j])
+          reg_file[j] <= write_data;
+      end
+    end
+  end
+
+  // Read data output
+  always_comb begin
+    prdata = '0;
+    pready = '1;
+    for (int j = 0; j < NoApbRegs; j = j + 1) begin
+      if (addr_match[j] && psel && !pwrite) begin
+        prdata = reg_file[j];
+      end
+    end
+  end
+
+  // Assign outputs
+  assign resp_o.prdata = prdata;
+  assign resp_o.pready = pready;
+  assign resp_o.pslverr = 1'b0;
+
+  // Assign register values output
+  assign reg_q_o = reg_file;
+
+  // Assign APB control signals
+  assign psel = req_i.psel;
+  assign penable = req_i.penable;
+  assign pwrite = req_i.pwrite;
+
+endmodule

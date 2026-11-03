@@ -1,0 +1,383 @@
+module uart_top (
+    input wire wb_clk_i,
+    input wire wb_rst_i,
+    input wire [7:0] wb_adr_i,
+    input wire [31:0] wb_dat_i,
+    output wire [31:0] wb_dat_o,
+    input wire wb_we_i,
+    input wire wb_stb_i,
+    input wire wb_cyc_i,
+    output wire wb_ack_o,
+    input wire [3:0] wb_sel_i,
+    output wire int_o,
+    output wire stx_pad_o,
+    input wire srx_pad_i,
+    output wire rts_pad_o,
+    input wire cts_pad_i,
+    output wire dtr_pad_o,
+    input wire dsr_pad_i,
+    input wire ri_pad_i,
+    input wire dcd_pad_i
+);
+
+    // Internal signals
+    wire [31:0] uart_data_in;
+    wire [31:0] uart_data_out;
+    wire uart_we;
+    wire uart_stb;
+    wire uart_ack;
+    wire [15:0] baud_rate;
+
+    wire [31:0] modem_ctrl_in;
+    wire [31:0] modem_ctrl_out;
+    wire modem_ctrl_we;
+    wire modem_ctrl_stb;
+    wire modem_ctrl_ack;
+
+    // Instantiate wb_slave module
+    wb_slave wb_slave_inst (
+        .wb_clk_i(wb_clk_i),
+        .wb_rst_i(wb_rst_i),
+        .wb_adr_i(wb_adr_i),
+        .wb_dat_i(wb_dat_i),
+        .wb_dat_o(wb_dat_o),
+        .wb_we_i(wb_we_i),
+        .wb_stb_i(wb_stb_i),
+        .wb_cyc_i(wb_cyc_i),
+        .wb_ack_o(wb_ack_o),
+        .wb_sel_i(wb_sel_i),
+        .uart_data_in(uart_data_in),
+        .uart_data_out(uart_data_out),
+        .uart_we(uart_we),
+        .uart_stb(uart_stb),
+        .uart_ack(uart_ack),
+        .modem_ctrl_in(modem_ctrl_in),
+        .modem_ctrl_out(modem_ctrl_out),
+        .modem_ctrl_we(modem_ctrl_we),
+        .modem_ctrl_stb(modem_ctrl_stb),
+        .modem_ctrl_ack(modem_ctrl_ack),
+        .baud_rate(baud_rate)
+    );
+
+    // Instantiate uart_core module
+    uart_core uart_core_inst (
+        .wb_clk_i(wb_clk_i),
+        .wb_rst_i(wb_rst_i),
+        .uart_data_in(uart_data_in),
+        .uart_data_out(uart_data_out),
+        .uart_we(uart_we),
+        .uart_stb(uart_stb),
+        .uart_ack(uart_ack),
+        .int_o(int_o),
+        .stx_pad_o(stx_pad_o),
+        .srx_pad_i(srx_pad_i),
+        .baud_rate(baud_rate)
+    );
+
+    // Instantiate modem_ctrl module
+    modem_ctrl modem_ctrl_inst (
+        .wb_clk_i(wb_clk_i),
+        .wb_rst_i(wb_rst_i),
+        .modem_ctrl_in(modem_ctrl_in),
+        .modem_ctrl_out(modem_ctrl_out),
+        .modem_ctrl_we(modem_ctrl_we),
+        .modem_ctrl_stb(modem_ctrl_stb),
+        .modem_ctrl_ack(modem_ctrl_ack),
+        .rts_pad_o(rts_pad_o),
+        .cts_pad_i(cts_pad_i),
+        .dtr_pad_o(dtr_pad_o),
+        .dsr_pad_i(dsr_pad_i),
+        .ri_pad_i(ri_pad_i),
+        .dcd_pad_i(dcd_pad_i)
+    );
+
+endmodule
+
+module wb_slave (
+    input wire wb_clk_i,
+    input wire wb_rst_i,
+    input wire [7:0] wb_adr_i,
+    input wire [31:0] wb_dat_i,
+    output reg [31:0] wb_dat_o,
+    input wire wb_we_i,
+    input wire wb_stb_i,
+    input wire wb_cyc_i,
+    output reg wb_ack_o,
+    input wire [3:0] wb_sel_i,
+    output reg [31:0] uart_data_in,
+    input wire [31:0] uart_data_out,
+    output reg uart_we,
+    output reg uart_stb,
+    input wire uart_ack,
+    output reg [31:0] modem_ctrl_in,
+    input wire [31:0] modem_ctrl_out,
+    output reg modem_ctrl_we,
+    output reg modem_ctrl_stb,
+    input wire modem_ctrl_ack,
+    output reg [15:0] baud_rate
+);
+
+    reg [31:0] uart_reg;
+    reg [31:0] modem_ctrl_reg;
+    reg [15:0] baud_rate_reg;
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            wb_ack_o <= 0;
+            uart_data_in <= 0;
+            uart_we <= 0;
+            uart_stb <= 0;
+            modem_ctrl_in <= 0;
+            modem_ctrl_we <= 0;
+            modem_ctrl_stb <= 0;
+            baud_rate_reg <= 0;
+        end else if (wb_cyc_i && wb_stb_i) begin
+            wb_ack_o <= 1;
+
+            if (wb_adr_i == 8'h00) begin // UART data register
+                if (wb_we_i) begin
+                    uart_data_in <= wb_dat_i;
+                    uart_we <= 1;
+                    uart_stb <= 1;
+                end else begin
+                    wb_dat_o <= uart_data_out;
+                end
+            end else if (wb_adr_i == 8'h01) begin // Modem control register
+                if (wb_we_i) begin
+                    modem_ctrl_in <= wb_dat_i;
+                    modem_ctrl_we <= 1;
+                    modem_ctrl_stb <= 1;
+                end else begin
+                    wb_dat_o <= modem_ctrl_out;
+                end
+            end else if (wb_adr_i == 8'h02) begin // Baud rate register
+                if (wb_we_i) begin
+                    baud_rate_reg <= wb_dat_i[15:0];
+                end else begin
+                    wb_dat_o <= {16'h0, baud_rate_reg};
+                end
+            end
+
+            uart_stb <= 0;
+            modem_ctrl_stb <= 0;
+        end else begin
+            wb_ack_o <= 0;
+        end
+    end
+
+    assign uart_ack = uart_ack;
+    assign modem_ctrl_ack = modem_ctrl_ack;
+    assign baud_rate = baud_rate_reg;
+
+endmodule
+
+module uart_core (
+    input wire wb_clk_i,
+    input wire wb_rst_i,
+    input wire [31:0] uart_data_in,
+    output reg [31:0] uart_data_out,
+    input wire uart_we,
+    input wire uart_stb,
+    output reg uart_ack,
+    output reg int_o,
+    output reg stx_pad_o,
+    input wire srx_pad_i,
+    input wire [15:0] baud_rate
+);
+
+    reg [7:0] tx_fifo [0:15];
+    reg [3:0] tx_fifo_head;
+    reg [3:0] tx_fifo_tail;
+    reg tx_fifo_full;
+    reg tx_fifo_empty;
+
+    reg [7:0] rx_fifo [0:15];
+    reg [3:0] rx_fifo_head;
+    reg [3:0] rx_fifo_tail;
+    reg rx_fifo_full;
+    reg rx_fifo_empty;
+
+    reg [15:0] baud_counter;
+    reg [3:0] bit_counter;
+    reg [7:0] tx_shift_reg;
+    reg [7:0] rx_shift_reg;
+
+    reg tx_state;
+    reg rx_state;
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            uart_data_out <= 0;
+            uart_ack <= 0;
+            int_o <= 0;
+            stx_pad_o <= 1;
+            tx_fifo_head <= 0;
+            tx_fifo_tail <= 0;
+            tx_fifo_full <= 0;
+            tx_fifo_empty <= 1;
+            rx_fifo_head <= 0;
+            rx_fifo_tail <= 0;
+            rx_fifo_full <= 0;
+            rx_fifo_empty <= 1;
+            baud_counter <= 0;
+            bit_counter <= 0;
+            tx_shift_reg <= 0;
+            rx_shift_reg <= 0;
+            tx_state <= 0;
+            rx_state <= 0;
+        end else begin
+            // UART write handling
+            if (uart_we && uart_stb && !tx_fifo_full) begin
+                tx_fifo[tx_fifo_head] <= uart_data_in[7:0];
+                tx_fifo_head <= tx_fifo_head + 1;
+                tx_fifo_empty <= 0;
+                if (tx_fifo_head == tx_fifo_tail) begin
+                    tx_fifo_full <= 1;
+                end
+                uart_ack <= 1;
+            end else begin
+                uart_ack <= 0;
+            end
+
+            // UART read handling
+            if (!rx_fifo_empty) begin
+                uart_data_out <= {24'h0, rx_fifo[rx_fifo_tail]};
+                rx_fifo_tail <= rx_fifo_tail + 1;
+                rx_fifo_full <= 0;
+                if (rx_fifo_head == rx_fifo_tail) begin
+                    rx_fifo_empty <= 1;
+                end
+            end
+
+            // Baud rate generation
+            if (baud_rate == 0) begin
+                baud_counter <= 0;
+            end else if (baud_counter == baud_rate - 1) begin
+                baud_counter <= 0;
+            end else begin
+                baud_counter <= baud_counter + 1;
+            end
+
+            // Transmit state machine
+            case (tx_state)
+                1'b0: begin // Idle state
+                    if (!tx_fifo_empty && baud_counter == 0) begin
+                        tx_shift_reg <= {tx_fifo[tx_fifo_tail], 1'b0};
+                        tx_fifo_tail <= tx_fifo_tail + 1;
+                        tx_fifo_full <= 0;
+                        if (tx_fifo_head == tx_fifo_tail) begin
+                            tx_fifo_empty <= 1;
+                        end
+                        bit_counter <= 3'd0;
+                        stx_pad_o <= 1'b0; // Start bit
+                        tx_state <= 1'b1;
+                    end
+                end
+                1'b1: begin // Data bits state
+                    if (baud_counter == 0) begin
+                        stx_pad_o <= tx_shift_reg[0];
+                        tx_shift_reg <= {1'b1, tx_shift_reg[7:1]};
+                        bit_counter <= bit_counter + 1;
+                        if (bit_counter == 3'd7) begin
+                            tx_state <= 1'b10;
+                        end
+                    end
+                end
+                10'b10: begin // Stop bit state
+                    if (baud_counter == 0) begin
+                        stx_pad_o <= 1'b1;
+                        tx_state <= 1'b0;
+                    end
+                end
+            endcase
+
+            // Receive state machine
+            case (rx_state)
+                1'b0: begin // Idle state
+                    if (!srx_pad_i) begin
+                        bit_counter <= 3'd0;
+                        rx_shift_reg <= 8'b0;
+                        rx_state <= 1'b1;
+                    end
+                end
+                1'b1: begin // Start bit state
+                    if (baud_counter == 0) begin
+                        if (srx_pad_i) begin
+                            rx_state <= 1'b0;
+                        end else begin
+                            rx_state <= 1'b10;
+                        end
+                    end
+                end
+                10'b10: begin // Data bits state
+                    if (baud_counter == 0) begin
+                        rx_shift_reg <= {srx_pad_i, rx_shift_reg[7:1]};
+                        bit_counter <= bit_counter + 1;
+                        if (bit_counter == 3'd7) begin
+                            rx_state <= 10'b100;
+                        end
+                    end
+                end
+                100'b100: begin // Stop bit state
+                    if (baud_counter == 0) begin
+                        if (!srx_pad_i) begin
+                            rx_state <= 1'b10;
+                        end else begin
+                            if (!rx_fifo_full) begin
+                                rx_fifo[rx_fifo_head] <= rx_shift_reg;
+                                rx_fifo_head <= rx_fifo_head + 1;
+                                rx_fifo_empty <= 0;
+                                if (rx_fifo_head == rx_fifo_tail) begin
+                                    rx_fifo_full <= 1;
+                                end
+                            end
+                            rx_state <= 1'b0;
+                        end
+                    end
+                end
+            endcase
+
+            // Interrupt handling
+            int_o <= !rx_fifo_empty || !tx_fifo_empty;
+        end
+    end
+
+endmodule
+
+module modem_ctrl (
+    input wire wb_clk_i,
+    input wire wb_rst_i,
+    input wire [31:0] modem_ctrl_in,
+    output reg [31:0] modem_ctrl_out,
+    input wire modem_ctrl_we,
+    input wire modem_ctrl_stb,
+    output reg modem_ctrl_ack,
+    output reg rts_pad_o,
+    input wire cts_pad_i,
+    output reg dtr_pad_o,
+    input wire dsr_pad_i,
+    input wire ri_pad_i,
+    input wire dcd_pad_i
+);
+
+    reg [31:0] modem_ctrl_reg;
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            modem_ctrl_out <= 0;
+            modem_ctrl_ack <= 0;
+            rts_pad_o <= 0;
+            dtr_pad_o <= 0;
+        end else if (modem_ctrl_we && modem_ctrl_stb) begin
+            modem_ctrl_reg <= modem_ctrl_in;
+            modem_ctrl_ack <= 1;
+        end else begin
+            modem_ctrl_ack <= 0;
+        end
+
+        rts_pad_o <= modem_ctrl_reg[0];
+        dtr_pad_o <= modem_ctrl_reg[1];
+        modem_ctrl_out <= {24'h0, cts_pad_i, dsr_pad_i, ri_pad_i, dcd_pad_i};
+    end
+
+endmodule

@@ -1,0 +1,166 @@
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam PTR_W = LGFIFO + 1;
+
+	// Memory
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+
+	// Write pointer (write clock domain)
+	reg [PTR_W-1:0] wr_ptr;
+	// Read pointer (read clock domain)
+	reg [PTR_W-1:0] rd_ptr;
+
+	// Gray code pointers for CDC
+	reg [PTR_W-1:0] wr_ptr_gray;
+	reg [PTR_W-1:0] rd_ptr_gray;
+
+	// Synchronized read pointer in write domain
+	reg [PTR_W-1:0] rd_ptr_gray_sync;
+	reg [PTR_W-1:0] rd_ptr_gray_sync1;
+	reg [PTR_W-1:0] rd_ptr_gray_sync2;
+
+	// Synchronized write pointer in read domain
+	reg [PTR_W-1:0] wr_ptr_gray_sync;
+	reg [PTR_W-1:0] wr_ptr_gray_sync1;
+	reg [PTR_W-1:0] wr_ptr_gray_sync2;
+
+	// Gray code conversion
+	function [PTR_W-1:0] bin2gray;
+		input [PTR_W-1:0] bin;
+		begin
+			bin2gray = bin ^ (bin >> 1);
+		end
+	endfunction
+
+	// Write clock domain
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_ptr <= {PTR_W{1'b0}};
+			wr_ptr_gray <= {PTR_W{1'b0}};
+			o_wr_full <= 1'b0;
+		end else begin
+			if (i_wr && !o_wr_full) begin
+				mem[wr_ptr[LGFIFO-1:0]] <= i_wr_data;
+				wr_ptr <= wr_ptr + 1'b1;
+				wr_ptr_gray <= bin2gray(wr_ptr + 1'b1);
+			end
+		end
+	end
+
+	// Synchronize read pointer gray into write domain
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			rd_ptr_gray_sync1 <= {PTR_W{1'b0}};
+			rd_ptr_gray_sync2 <= {PTR_W{1'b0}};
+			rd_ptr_gray_sync <= {PTR_W{1'b0}};
+		end else begin
+			rd_ptr_gray_sync1 <= rd_ptr_gray;
+			rd_ptr_gray_sync2 <= rd_ptr_gray_sync1;
+			rd_ptr_gray_sync <= rd_ptr_gray_sync2;
+		end
+	end
+
+	// Full condition: write pointer gray MSB and MSB-1 differ from read pointer gray,
+	// and the lower bits match. This means write pointer is one full depth ahead.
+	wire [PTR_W-1:0] rd_ptr_gray_sync_inv = ~rd_ptr_gray_sync;
+	wire full_cond = (wr_ptr_gray[PTR_W-1] != rd_ptr_gray_sync[PTR_W-1]) &&
+	                 (wr_ptr_gray[PTR_W-2] != rd_ptr_gray_sync[PTR_W-2]) &&
+	                 (wr_ptr_gray[PTR_W-3:0] == rd_ptr_gray_sync[PTR_W-3:0]);
+
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			o_wr_full <= 1'b0;
+		else
+			o_wr_full <= full_cond;
+	end
+
+	// Read clock domain
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_ptr <= {PTR_W{1'b0}};
+			rd_ptr_gray <= {PTR_W{1'b0}};
+			o_rd_empty <= 1'b1;
+			o_rd_data <= {WIDTH{1'b0}};
+		end else begin
+			if (i_rd && !o_rd_empty) begin
+				rd_ptr <= rd_ptr + 1'b1;
+				rd_ptr_gray <= bin2gray(rd_ptr + 1'b1);
+			end
+		end
+	end
+
+	// Synchronize write pointer gray into read domain
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			wr_ptr_gray_sync1 <= {PTR_W{1'b0}};
+			wr_ptr_gray_sync2 <= {PTR_W{1'b0}};
+			wr_ptr_gray_sync <= {PTR_W{1'b0}};
+		end else begin
+			wr_ptr_gray_sync1 <= wr_ptr_gray;
+			wr_ptr_gray_sync2 <= wr_ptr_gray_sync1;
+			wr_ptr_gray_sync <= wr_ptr_gray_sync2;
+		end
+	end
+
+	// Empty condition: write pointer gray equals read pointer gray
+	wire empty_cond = (wr_ptr_gray_sync == rd_ptr_gray);
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_empty <= 1'b1;
+		else
+			o_rd_empty <= empty_cond;
+	end
+
+	// Read data output
+	// OPT_REGISTER_READS: if 1, use an additional output holding register
+	// if 0, direct sample from memory in read clock domain
+	// Neither setting provides asynchronous memory bypass.
+
+	reg [WIDTH-1:0] rd_data_reg;
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_data_reg <= {WIDTH{1'b0}};
+		end else begin
+			// Sample memory at current read pointer
+			// We read from mem[rd_ptr[LGFIFO-1:0]]
+			// But we need to handle the timing carefully.
+			// When i_rd is asserted and not empty, we advance rd_ptr.
+			// The data should be the word at the old rd_ptr position.
+			// So we capture mem[rd_ptr[LGFIFO-1:0]] before advancing.
+			if (i_rd && !o_rd_empty) begin
+				rd_data_reg <= mem[rd_ptr[LGFIFO-1:0]];
+			end
+		end
+	end
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			o_rd_data <= {WIDTH{1'b0}};
+		end else begin
+			if (OPT_REGISTER_READS) begin
+				// Additional output holding register
+				o_rd_data <= rd_data_reg;
+			end else begin
+				// Direct destination-clock sample
+				o_rd_data <= rd_data_reg;
+			end
+		end
+	end
+
+endmodule

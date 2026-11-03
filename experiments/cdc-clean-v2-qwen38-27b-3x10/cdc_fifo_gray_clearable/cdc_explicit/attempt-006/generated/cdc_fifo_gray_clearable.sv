@@ -1,0 +1,256 @@
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH + 1;
+    localparam GRAY_W = LOG_DEPTH + 1;
+
+    // Source domain
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg [PTR_W-1:0] src_wr_ptr;
+    reg [GRAY_W-1:0] src_wr_gray;
+    reg [GRAY_W-1:0] dst_rd_gray_src_sync [0:SYNC_STAGES-1];
+    reg [GRAY_W-1:0] dst_rd_gray_src;
+    reg src_clear_pending;
+    reg src_clear_active;
+
+    // Destination domain
+    reg [PTR_W-1:0] dst_rd_ptr;
+    reg [GRAY_W-1:0] dst_rd_gray;
+    reg [GRAY_W-1:0] src_wr_gray_dst_sync [0:SYNC_STAGES-1];
+    reg [GRAY_W-1:0] src_wr_gray_dst;
+    reg dst_clear_pending;
+    reg dst_clear_active;
+    reg [WIDTH-1:0] dst_data_reg;
+    reg dst_valid_reg;
+
+    // Helper: binary to gray
+    function [GRAY_W-1:0] bin2gray;
+        input [PTR_W-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    // Helper: gray to binary
+    function [PTR_W-1:0] gray2bin;
+        input [GRAY_W-1:0] gray;
+        integer i;
+        reg [PTR_W-1:0] bin;
+        begin
+            bin[PTR_W-1] = gray[PTR_W-1];
+            for (i = PTR_W-2; i >= 0; i = i - 1)
+                bin[i] = bin[i+1] ^ gray[i];
+            gray2bin = bin;
+        end
+    endfunction
+
+    // Source domain logic
+    wire [PTR_W-1:0] dst_rd_gray_src_bin = gray2bin(dst_rd_gray_src);
+    wire [PTR_W-1:0] src_wr_ptr_next = src_wr_ptr + 1'b1;
+    wire [GRAY_W-1:0] src_wr_gray_next = bin2gray(src_wr_ptr_next);
+
+    wire src_full = (src_wr_ptr[PTR_W-1:1] == dst_rd_gray_src_bin[PTR_W-1:1]) &&
+                    (src_wr_ptr[0] != dst_rd_gray_src_bin[0]);
+    wire src_empty = (src_wr_ptr == dst_rd_gray_src_bin);
+
+    wire src_can_write = src_valid_i && !src_full && !src_clear_active;
+    wire src_ready = !src_full && !src_clear_active;
+
+    // Source clear pending logic
+    // Clear is pending until the FIFO is empty from source's perspective
+    // and the destination has acknowledged the clear (dst_clear_pending is low)
+    // Actually, we need to coordinate: source clear pending until dst_clear_pending is low
+    // But we can't directly see dst_clear_pending in source domain.
+    // Instead, we use a handshake: when src_clear_i is asserted, we set src_clear_active.
+    // We wait until the FIFO is empty (src_wr_ptr == dst_rd_gray_src_bin) and 
+    // the destination has finished its clear.
+    // To know when destination finished, we can use a simple flag that gets cleared
+    // when the destination signals it's done. But that requires another CDC.
+    // 
+    // Alternative approach: 
+    // - When src_clear_i is asserted, set src_clear_active = 1.
+    // - src_clear_pending = src_clear_active.
+    // - We clear src_clear_active when the FIFO is empty AND we've seen the destination
+    //   clear pending go low. But we can't see it directly.
+    //
+    // Let's use a different approach:
+    // - src_clear_i triggers a clear sequence.
+    // - We set src_clear_active = 1.
+    // - We wait until src_wr_ptr == dst_rd_gray_src_bin (FIFO empty from source view).
+    // - At that point, we know all data has been consumed or dropped.
+    // - We also need to ensure the destination has dropped its in-flight data.
+    // - The destination will clear its own state when dst_clear_i is asserted.
+    // - But src_clear_i and dst_clear_i are independent. The spec says "request a flush".
+    // - I think the intent is that either clear can be asserted, and both sides should
+    //   coordinate to flush.
+    //
+    // Let's re-read: "src_clear_i / dst_clear_i request a flush: isolate both sides, 
+    // drop stored and in-flight data, then return to empty."
+    // "*_clear_pending_o stays high until that side finishes."
+    //
+    // So if src_clear_i is asserted, src_clear_pending_o goes high until source side finishes.
+    // If dst_clear_i is asserted, dst_clear_pending_o goes high until destination side finishes.
+    //
+    // For source side to finish: FIFO must be empty (no more writes, all reads done).
+    // For destination side to finish: no more valid data to output.
+    //
+    // Let's implement:
+    // - src_clear_active: set when src_clear_i is high, cleared when FIFO is empty.
+    // - dst_clear_active: set when dst_clear_i is high, cleared when no valid data pending.
+
+    // Source clear active: set on src_clear_i, clear when FIFO empty
+    // We need to handle the case where src_clear_i is a pulse or level.
+    // Let's assume it's a level signal. When high, we enter clear mode.
+    // We exit clear mode when the FIFO is empty.
+
+    // Actually, let's use a simpler approach:
+    // src_clear_pending_o = src_clear_i || src_clear_active_internal
+    // where src_clear_active_internal is set when src_clear_i transitions from 0 to 1,
+    // and cleared when the FIFO is empty.
+
+    // Let's use edge detection for clear signals.
+    reg src_clear_i_d;
+    wire src_clear_i_rise = src_clear_i && !src_clear_i_d;
+
+    // Source clear active: set on rising edge of src_clear_i, cleared when FIFO empty
+    // But we also need to handle the case where src_clear_i is held high.
+    // Let's just use: src_clear_active is set when src_clear_i is high, and cleared
+    // when the FIFO is empty and src_clear_i is low.
+
+    // Simpler: src_clear_pending_o is high when src_clear_i is high OR when we're in
+    // the process of clearing (FIFO not yet empty).
+
+    // Let's define:
+    // src_clear_pending_o = src_clear_i || (src_clear_active && !src_empty)
+    // where src_clear_active is set when src_clear_i was high at any point since last clear.
+
+    // Actually, the simplest interpretation:
+    // - When src_clear_i is asserted, we start clearing.
+    // - src_clear_pending_o is high until the FIFO is empty.
+    // - Once empty, src_clear_pending_o goes low.
+    // - If src_clear_i is deasserted before FIFO is empty, we still finish clearing.
+
+    // Let's use:
+    // src_clear_active: set when src_clear_i is high, cleared when src_empty.
+    // src_clear_pending_o = src_clear_active;
+
+    // But we need to handle the case where src_clear_i is a pulse.
+    // Let's assume src_clear_i is a level signal that stays high until the clear is done.
+    // Or it could be a pulse. Let's handle both by using a latch.
+
+    // I'll use: src_clear_active is set when src_clear_i is high, and cleared when src_empty.
+    // This way, if src_clear_i is a pulse, we still complete the clear.
+
+    // Source domain always block
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_wr_ptr <= {PTR_W{1'b0}};
+            src_wr_gray <= {GRAY_W{1'b0}};
+            src_clear_pending <= 1'b0;
+            src_clear_active <= 1'b0;
+            src_clear_i_d <= 1'b0;
+            for (integer i = 0; i < SYNC_STAGES; i = i + 1)
+                dst_rd_gray_src_sync[i] <= {GRAY_W{1'b0}};
+        end else begin
+            src_clear_i_d <= src_clear_i;
+            
+            // Synchronize dst_rd_gray
+            dst_rd_gray_src_sync[0] <= dst_rd_gray;
+            for (integer i = 1; i < SYNC_STAGES; i = i + 1)
+                dst_rd_gray_src_sync[i] <= dst_rd_gray_src_sync[i-1];
+            dst_rd_gray_src <= dst_rd_gray_src_sync[SYNC_STAGES-1];
+
+            // Clear active logic
+            if (src_clear_i) begin
+                src_clear_active <= 1'b1;
+            end else if (src_clear_active && src_empty) begin
+                src_clear_active <= 1'b0;
+            end
+
+            // Write logic
+            if (src_can_write) begin
+                mem[src_wr_ptr[LOG_DEPTH-1:0]] <= src_data_i;
+                src_wr_ptr <= src_wr_ptr_next;
+                src_wr_gray <= src_wr_gray_next;
+            end
+        end
+    end
+
+    assign src_clear_pending_o = src_clear_active;
+    assign src_ready_o = src_ready;
+
+    // Destination domain logic
+    wire [PTR_W-1:0] src_wr_gray_dst_bin = gray2bin(src_wr_gray_dst);
+    wire [PTR_W-1:0] dst_rd_ptr_next = dst_rd_ptr + 1'b1;
+    wire [GRAY_W-1:0] dst_rd_gray_next = bin2gray(dst_rd_ptr_next);
+
+    wire dst_empty = (dst_rd_ptr == src_wr_gray_dst_bin);
+    wire dst_can_read = !dst_empty && dst_ready_i && !dst_clear_active;
+
+    // Destination clear active: set when dst_clear_i is high, cleared when dst_empty
+    reg dst_clear_i_d;
+    wire dst_clear_i_rise = dst_clear_i && !dst_clear_i_d;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_rd_ptr <= {PTR_W-1:0};
+            dst_rd_gray <= {GRAY_W-1:0};
+            dst_clear_pending <= 1'b0;
+            dst_clear_active <= 1'b0;
+            dst_clear_i_d <= 1'b0;
+            dst_data_reg <= {WIDTH{1'b0}};
+            dst_valid_reg <= 1'b0;
+            for (integer i = 0; i < SYNC_STAGES; i = i + 1)
+                src_wr_gray_dst_sync[i] <= {GRAY_W{1'b0}};
+        end else begin
+            dst_clear_i_d <= dst_clear_i;
+
+            // Synchronize src_wr_gray
+            src_wr_gray_dst_sync[0] <= src_wr_gray;
+            for (integer i = 1; i < SYNC_STAGES; i = i + 1)
+                src_wr_gray_dst_sync[i] <= src_wr_gray_dst_sync[i-1];
+            src_wr_gray_dst <= src_wr_gray_dst_sync[SYNC_STAGES-1];
+
+            // Clear active logic
+            if (dst_clear_i) begin
+                dst_clear_active <= 1'b1;
+            end else if (dst_clear_active && dst_empty) begin
+                dst_clear_active <= 1'b0;
+            end
+
+            // Read logic
+            if (dst_can_read) begin
+                dst_data_reg <= mem[dst_rd_ptr[LOG_DEPTH-1:0]];
+                dst_valid_reg <= 1'b1;
+                dst_rd_ptr <= dst_rd_ptr_next;
+                dst_rd_gray <= dst_rd_gray_next;
+            end else begin
+                dst_valid_reg <= 1'b0;
+            end
+        end
+    end
+
+    assign dst_clear_pending_o = dst_clear_active;
+    assign dst_data_o = dst_data_reg;
+    assign dst_valid_o = dst_valid_reg;
+
+endmodule

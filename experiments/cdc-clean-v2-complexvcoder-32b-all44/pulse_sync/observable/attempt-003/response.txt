@@ -1,0 +1,234 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "pulse_sync",
+            "function": "One-pulse-in, one-pulse-out crossing between asynchronous clocks with busy indication.",
+            "parameters": [
+                {
+                    "name": "STAGES",
+                    "value": 2
+                }
+            ],
+            "ports": [
+                {
+                    "name": "clk_a",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "rstn_a",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "clk_b",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "rstn_b",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "pulseA_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "pulseB_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "busy_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                }
+            ],
+            "instances": [
+                {
+                    "module": "async_fifo",
+                    "name": "fifo_inst",
+                    "function": "Asynchronous FIFO for pulse synchronization",
+                    "connections": [
+                        {
+                            "source": "clk_a",
+                            "destination": "clk_wr"
+                        },
+                        {
+                            "source": "rstn_a",
+                            "destination": "rstn_wr"
+                        },
+                        {
+                            "source": "clk_b",
+                            "destination": "clk_rd"
+                        },
+                        {
+                            "source": "rstn_b",
+                            "destination": "rstn_rd"
+                        },
+                        {
+                            "source": "pulseA_i",
+                            "destination": "data_wr"
+                        },
+                        {
+                            "source": "data_rd",
+                            "destination": "pulseB_o"
+                        },
+                        {
+                            "source": "full",
+                            "destination": "busy_o"
+                        }
+                    ]
+                }
+            ],
+            "connections": [],
+            "internal_signals": [],
+            "behavior": [
+                "The pulse_sync module synchronizes a single pulse from clk_a to clk_b.",
+                "It uses an asynchronous FIFO to handle the clock domain crossing.",
+                "The busy_o signal indicates when a pulse is in flight and prevents further pulses from being accepted.",
+                "The FIFO is configured with a depth of 2 (STAGES parameter).",
+                "On reset, the FIFO and outputs are cleared."
+            ]
+        },
+        {
+            "Top_module_name": "async_fifo",
+            "function": "Asynchronous FIFO for data transfer between two clock domains.",
+            "parameters": [],
+            "ports": [
+                {
+                    "name": "clk_wr",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "rstn_wr",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "clk_rd",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "rstn_rd",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "data_wr",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "data_rd",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "full",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [],
+            "behavior": [
+                "The async_fifo module implements a FIFO with asynchronous read and write clocks.",
+                "It has a depth of 2, as specified by the STAGES parameter in the pulse_sync module.",
+                "The full signal indicates when the FIFO is full, preventing further writes.",
+                "The data_wr signal is written to the FIFO on the clk_wr clock domain.",
+                "The data_rd signal is read from the FIFO on the clk_rd clock domain.",
+                "On reset, the FIFO is cleared."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+reg [STAGES-1:0] fifo_wr;
+reg [STAGES-1:0] fifo_rd;
+reg [STAGES-1:0] fifo_wr_sync;
+reg [STAGES-1:0] fifo_rd_sync;
+
+reg pulseA_i_sync;
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        fifo_wr <= 0;
+        pulseA_i_sync <= 0;
+    end else begin
+        pulseA_i_sync <= pulseA_i;
+        if (pulseA_i_sync && !fifo_wr[0]) begin
+            fifo_wr <= {fifo_wr[STAGES-2:0], 1'b1};
+        end
+    end
+end
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        fifo_rd <= 0;
+    end else begin
+        if (fifo_wr_sync[0] && !fifo_rd[0]) begin
+            fifo_rd <= {fifo_rd[STAGES-2:0], 1'b1};
+        end else if (fifo_rd[0]) begin
+            fifo_rd <= {fifo_rd[STAGES-2:0], 1'b0};
+        end
+    end
+end
+
+always @(posedge clk_a or negedge rstn_a) begin
+    if (!rstn_a) begin
+        fifo_wr_sync <= 0;
+    end else begin
+        fifo_wr_sync <= fifo_wr;
+    end
+end
+
+always @(posedge clk_b or negedge rstn_b) begin
+    if (!rstn_b) begin
+        fifo_rd_sync <= 0;
+    end else begin
+        fifo_rd_sync <= fifo_rd;
+    end
+end
+
+assign busy_o = fifo_wr_sync[STAGES-1] | fifo_rd_sync[STAGES-1];
+assign pulseB_o = fifo_wr_sync[0] & ~fifo_rd_sync[0];
+
+endmodule
+```

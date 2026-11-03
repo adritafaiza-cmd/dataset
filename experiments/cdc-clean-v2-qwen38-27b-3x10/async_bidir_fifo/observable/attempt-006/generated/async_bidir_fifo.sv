@@ -1,0 +1,221 @@
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam AWIDTH = ASIZE + 1;
+
+  // Shared storage
+  reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+  // A-side pointers
+  reg [AWIDTH-1:0] a_wr_ptr;
+  reg [AWIDTH-1:0] a_rd_ptr;
+
+  // B-side pointers
+  reg [AWIDTH-1:0] b_wr_ptr;
+  reg [AWIDTH-1:0] b_rd_ptr;
+
+  // Synchronized pointers
+  reg [AWIDTH-1:0] a_wr_ptr_sync1, a_wr_ptr_sync2;
+  reg [AWIDTH-1:0] a_rd_ptr_sync1, a_rd_ptr_sync2;
+  reg [AWIDTH-1:0] b_wr_ptr_sync1, b_wr_ptr_sync2;
+  reg [AWIDTH-1:0] b_rd_ptr_sync1, b_rd_ptr_sync2;
+
+  // Direction synchronization
+  reg a_dir_sync1, a_dir_sync2;
+  reg b_dir_sync1, b_dir_sync2;
+
+  // Synchronized direction signals
+  wire a_dir_sync = a_dir_sync2;
+  wire b_dir_sync = b_dir_sync2;
+
+  // Determine which side is writing/reading
+  // When a_dir=1, A writes to B (A is writer, B is reader)
+  // When a_dir=0, A reads from B (A is reader, B is writer)
+  wire a_is_writer = a_dir_sync;
+  wire b_is_writer = ~b_dir_sync;
+
+  // Effective write/read enables per side
+  wire a_write_en = a_winc & a_is_writer;
+  wire a_read_en  = a_rinc & ~a_is_writer;
+  wire b_write_en = b_winc & b_is_writer;
+  wire b_read_en  = b_rinc & ~b_is_writer;
+
+  // Full/Empty calculations
+  // A is full when A is writer and (a_wr_ptr - a_rd_ptr) == DEPTH
+  // A is empty when A is reader and (a_wr_ptr - a_rd_ptr) == 0
+  // B is full when B is writer and (b_wr_ptr - b_rd_ptr) == DEPTH
+  // B is empty when B is reader and (b_wr_ptr - b_rd_ptr) == 0
+
+  wire [AWIDTH-1:0] a_count = a_wr_ptr - a_rd_ptr;
+  wire [AWIDTH-1:0] b_count = b_wr_ptr - b_rd_ptr;
+
+  wire a_full  = a_is_writer & (a_count == DEPTH);
+  wire a_empty = ~a_is_writer & (a_count == 0);
+  wire b_full  = b_is_writer & (b_count == DEPTH);
+  wire b_empty = ~b_is_writer & (b_count == 0);
+
+  // Almost full/empty (one slot margin)
+  wire a_afull  = a_is_writer & (a_count == DEPTH - 1);
+  wire a_aempty = ~a_is_writer & (a_count <= 1);
+  wire b_afull  = b_is_writer & (b_count == DEPTH - 1);
+  wire b_aempty = ~b_is_writer & (b_count <= 1);
+
+  // Write operations
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_wr_ptr <= {AWIDTH{1'b0}};
+    else if (a_write_en && !a_full)
+      a_wr_ptr <= a_wr_ptr + 1'b1;
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_wr_ptr <= {AWIDTH{1'b0}};
+    else if (b_write_en && !b_full)
+      b_wr_ptr <= b_wr_ptr + 1'b1;
+  end
+
+  // Read operations
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_rd_ptr <= {AWIDTH{1'b0}};
+    else if (a_read_en && !a_empty)
+      a_rd_ptr <= a_rd_ptr + 1'b1;
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_rd_ptr <= {AWIDTH{1'b0}};
+    else if (b_read_en && !b_empty)
+      b_rd_ptr <= b_rd_ptr + 1'b1;
+  end
+
+  // Memory writes
+  always @(posedge a_clk) begin
+    if (a_write_en && !a_full)
+      mem[a_wr_ptr[ASIZE-1:0]] <= a_wdata;
+  end
+
+  always @(posedge b_clk) begin
+    if (b_write_en && !b_full)
+      mem[b_wr_ptr[ASIZE-1:0]] <= b_wdata;
+  end
+
+  // Memory reads
+  reg [DSIZE-1:0] a_rdata_reg;
+  reg [DSIZE-1:0] b_rdata_reg;
+
+  always @(posedge a_clk) begin
+    if (a_read_en && !a_empty)
+      a_rdata_reg <= mem[a_rd_ptr[ASIZE-1:0]];
+  end
+
+  always @(posedge b_clk) begin
+    if (b_read_en && !b_empty)
+      b_rdata_reg <= mem[b_rd_ptr[ASIZE-1:0]];
+  end
+
+  assign a_rdata = a_rdata_reg;
+  assign b_rdata = b_rdata_reg;
+
+  // Pointer synchronization
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_wr_ptr_sync1 <= {AWIDTH{1'b0}};
+      a_wr_ptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      a_wr_ptr_sync1 <= a_wr_ptr;
+      a_wr_ptr_sync2 <= a_wr_ptr_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_wr_ptr_sync1 <= {AWIDTH{1'b0}};
+      b_wr_ptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      b_wr_ptr_sync1 <= b_wr_ptr;
+      b_wr_ptr_sync2 <= b_wr_ptr_sync1;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_rd_ptr_sync1 <= {AWIDTH{1'b0}};
+      a_rd_ptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      a_rd_ptr_sync1 <= a_rd_ptr;
+      a_rd_ptr_sync2 <= a_rd_ptr_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_rd_ptr_sync1 <= {AWIDTH{1'b0}};
+      b_rd_ptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      b_rd_ptr_sync1 <= b_rd_ptr;
+      b_rd_ptr_sync2 <= b_rd_ptr_sync1;
+    end
+  end
+
+  // Direction synchronization
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_dir_sync1 <= 1'b0;
+      a_dir_sync2 <= 1'b0;
+    end else begin
+      a_dir_sync1 <= a_dir;
+      a_dir_sync2 <= a_dir_sync1;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_dir_sync1 <= 1'b0;
+      b_dir_sync2 <= 1'b0;
+    end else begin
+      b_dir_sync1 <= b_dir;
+      b_dir_sync2 <= b_dir_sync1;
+    end
+  end
+
+  // Outputs
+  assign a_full   = a_full;
+  assign a_afull  = a_afull;
+  assign a_empty  = a_empty;
+  assign a_aempty = a_aempty;
+  assign b_full   = b_full;
+  assign b_afull  = b_afull;
+  assign b_empty  = b_empty;
+  assign b_aempty = b_aempty;
+
+endmodule

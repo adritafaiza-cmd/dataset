@@ -1,0 +1,416 @@
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ========================================================================
+    // Write Address Channel: S -> M
+    // ========================================================================
+    reg  [ADDR_WIDTH-1:0] s_awaddr_reg;
+    reg  [2:0]            s_awprot_reg;
+    reg                   s_awreq;
+    wire                  m_awack;
+
+    // Synchronizer for request (S -> M)
+    reg [2:0] awreq_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            awreq_sync <= 3'b000;
+        else
+            awreq_sync <= {awreq_sync[1:0], s_awreq};
+    end
+    wire m_awreq_synced = awreq_sync[2];
+
+    // Synchronizer for acknowledge (M -> S)
+    reg [2:0] awack_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            awack_sync <= 3'b000;
+        else
+            awack_sync <= {awack_sync[1:0], m_awack};
+    end
+    wire s_awack_synced = awack_sync[2];
+
+    // S-domain: hold payload, generate request
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_awaddr_reg <= {ADDR_WIDTH{1'b0}};
+            s_awprot_reg <= 3'b000;
+            s_awreq      <= 1'b0;
+        end else begin
+            if (s_axil_awvalid && s_axil_awready) begin
+                s_awaddr_reg <= s_axil_awaddr;
+                s_awprot_reg <= s_axil_awprot;
+                s_awreq      <= 1'b1;
+            end else if (s_awack_synced) begin
+                s_awreq <= 1'b0;
+            end
+        end
+    end
+
+    assign s_axil_awready = ~s_awreq;
+
+    // M-domain: capture payload, drive master, generate ack
+    reg  [ADDR_WIDTH-1:0] m_awaddr_reg;
+    reg  [2:0]            m_awprot_reg;
+    reg                   m_awvalid_reg;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_awaddr_reg  <= {ADDR_WIDTH{1'b0}};
+            m_awprot_reg  <= 3'b000;
+            m_awvalid_reg <= 1'b0;
+        end else begin
+            if (m_awreq_synced && !m_awvalid_reg) begin
+                m_awaddr_reg  <= s_awaddr_reg;
+                m_awprot_reg  <= s_awprot_reg;
+                m_awvalid_reg <= 1'b1;
+            end else if (m_awvalid_reg && m_axil_awready) begin
+                m_awvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    assign m_axil_awaddr  = m_awaddr_reg;
+    assign m_axil_awprot  = m_awprot_reg;
+    assign m_axil_awvalid = m_awvalid_reg;
+    assign m_awack        = m_awvalid_reg && m_axil_awready;
+
+    // ========================================================================
+    // Write Data Channel: S -> M
+    // ========================================================================
+    reg  [DATA_WIDTH-1:0] s_wdata_reg;
+    reg  [STRB_WIDTH-1:0] s_wstrb_reg;
+    reg                   s_wreq;
+    wire                  m_wack;
+
+    // Synchronizer for request (S -> M)
+    reg [2:0] wreq_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            wreq_sync <= 3'b000;
+        else
+            wreq_sync <= {wreq_sync[1:0], s_wreq};
+    end
+    wire m_wreq_synced = wreq_sync[2];
+
+    // Synchronizer for acknowledge (M -> S)
+    reg [2:0] wack_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            wack_sync <= 3'b000;
+        else
+            wack_sync <= {wack_sync[1:0], m_wack};
+    end
+    wire s_wack_synced = wack_sync[2];
+
+    // S-domain: hold payload, generate request
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_wdata_reg <= {DATA_WIDTH{1'b0}};
+            s_wstrb_reg <= {STRB_WIDTH{1'b0}};
+            s_wreq      <= 1'b0;
+        end else begin
+            if (s_axil_wvalid && s_axil_wready) begin
+                s_wdata_reg <= s_axil_wdata;
+                s_wstrb_reg <= s_axil_wstrb;
+                s_wreq      <= 1'b1;
+            end else if (s_wack_synced) begin
+                s_wreq <= 1'b0;
+            end
+        end
+    end
+
+    assign s_axil_wready = ~s_wreq;
+
+    // M-domain: capture payload, drive master, generate ack
+    reg  [DATA_WIDTH-1:0] m_wdata_reg;
+    reg  [STRB_WIDTH-1:0] m_wstrb_reg;
+    reg                   m_wvalid_reg;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_wdata_reg  <= {DATA_WIDTH{1'b0}};
+            m_wstrb_reg  <= {STRB_WIDTH{1'b0}};
+            m_wvalid_reg <= 1'b0;
+        end else begin
+            if (m_wreq_synced && !m_wvalid_reg) begin
+                m_wdata_reg  <= s_wdata_reg;
+                m_wstrb_reg  <= s_wstrb_reg;
+                m_wvalid_reg <= 1'b1;
+            end else if (m_wvalid_reg && m_axil_wready) begin
+                m_wvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    assign m_axil_wdata  = m_wdata_reg;
+    assign m_axil_wstrb  = m_wstrb_reg;
+    assign m_axil_wvalid = m_wvalid_reg;
+    assign m_wack        = m_wvalid_reg && m_axil_wready;
+
+    // ========================================================================
+    // Write Response Channel: M -> S
+    // ========================================================================
+    reg  [1:0] m_bresp_reg;
+    reg        m_breq;
+    wire       s_back;
+
+    // Synchronizer for request (M -> S)
+    reg [2:0] breq_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            breq_sync <= 3'b000;
+        else
+            breq_sync <= {breq_sync[1:0], m_breq};
+    end
+    wire s_breq_synced = breq_sync[2];
+
+    // Synchronizer for acknowledge (S -> M)
+    reg [2:0] back_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            back_sync <= 3'b000;
+        else
+            back_sync <= {back_sync[1:0], s_back};
+    end
+    wire m_back_synced = back_sync[2];
+
+    // M-domain: hold payload, generate request
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_bresp_reg <= 2'b00;
+            m_breq      <= 1'b0;
+        end else begin
+            if (m_axil_bvalid && m_axil_bready) begin
+                m_bresp_reg <= m_axil_bresp;
+                m_breq      <= 1'b1;
+            end else if (m_back_synced) begin
+                m_breq <= 1'b0;
+            end
+        end
+    end
+
+    assign m_axil_bready = ~m_breq;
+
+    // S-domain: capture payload, drive slave, generate ack
+    reg  [1:0] s_bresp_reg;
+    reg        s_bvalid_reg;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_bresp_reg  <= 2'b00;
+            s_bvalid_reg <= 1'b0;
+        end else begin
+            if (s_breq_synced && !s_bvalid_reg) begin
+                s_bresp_reg  <= m_bresp_reg;
+                s_bvalid_reg <= 1'b1;
+            end else if (s_bvalid_reg && s_axil_bready) begin
+                s_bvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    assign s_axil_bresp  = s_bresp_reg;
+    assign s_axil_bvalid = s_bvalid_reg;
+    assign s_back        = s_bvalid_reg && s_axil_bready;
+
+    // ========================================================================
+    // Read Address Channel: S -> M
+    // ========================================================================
+    reg  [ADDR_WIDTH-1:0] s_araddr_reg;
+    reg  [2:0]            s_arprot_reg;
+    reg                   s_arreq;
+    wire                  m_arack;
+
+    // Synchronizer for request (S -> M)
+    reg [2:0] arreq_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            arreq_sync <= 3'b000;
+        else
+            arreq_sync <= {arreq_sync[1:0], s_arreq};
+    end
+    wire m_arreq_synced = arreq_sync[2];
+
+    // Synchronizer for acknowledge (M -> S)
+    reg [2:0] arack_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            arack_sync <= 3'b000;
+        else
+            arack_sync <= {arack_sync[1:0], m_arack};
+    end
+    wire s_arack_synced = arack_sync[2];
+
+    // S-domain: hold payload, generate request
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_araddr_reg <= {ADDR_WIDTH{1'b0}};
+            s_arprot_reg <= 3'b000;
+            s_arreq      <= 1'b0;
+        end else begin
+            if (s_axil_arvalid && s_axil_arready) begin
+                s_araddr_reg <= s_axil_araddr;
+                s_arprot_reg <= s_axil_arprot;
+                s_arreq      <= 1'b1;
+            end else if (s_arack_synced) begin
+                s_arreq <= 1'b0;
+            end
+        end
+    end
+
+    assign s_axil_arready = ~s_arreq;
+
+    // M-domain: capture payload, drive master, generate ack
+    reg  [ADDR_WIDTH-1:0] m_araddr_reg;
+    reg  [2:0]            m_arprot_reg;
+    reg                   m_arvalid_reg;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_araddr_reg  <= {ADDR_WIDTH{1'b0}};
+            m_arprot_reg  <= 3'b000;
+            m_arvalid_reg <= 1'b0;
+        end else begin
+            if (m_arreq_synced && !m_arvalid_reg) begin
+                m_araddr_reg  <= s_araddr_reg;
+                m_arprot_reg  <= s_arprot_reg;
+                m_arvalid_reg <= 1'b1;
+            end else if (m_arvalid_reg && m_axil_arready) begin
+                m_arvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    assign m_axil_araddr  = m_araddr_reg;
+    assign m_axil_arprot  = m_arprot_reg;
+    assign m_axil_arvalid = m_arvalid_reg;
+    assign m_arack        = m_arvalid_reg && m_axil_arready;
+
+    // ========================================================================
+    // Read Data Channel: M -> S
+    // ========================================================================
+    reg  [DATA_WIDTH-1:0] m_rdata_reg;
+    reg  [1:0]            m_rresp_reg;
+    reg                   m_rreq;
+    wire                  s_rack;
+
+    // Synchronizer for request (M -> S)
+    reg [2:0] rreq_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            rreq_sync <= 3'b000;
+        else
+            rreq_sync <= {rreq_sync[1:0], m_rreq};
+    end
+    wire s_rreq_synced = rreq_sync[2];
+
+    // Synchronizer for acknowledge (S -> M)
+    reg [2:0] rack_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            rack_sync <= 3'b000;
+        else
+            rack_sync <= {rack_sync[1:0], s_rack};
+    end
+    wire m_rack_synced = rack_sync[2];
+
+    // M-domain: hold payload, generate request
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rdata_reg <= {DATA_WIDTH{1'b0}};
+            m_rresp_reg <= 2'b00;
+            m_rreq      <= 1'b0;
+        end else begin
+            if (m_axil_rvalid && m_axil_rready) begin
+                m_rdata_reg <= m_axil_rdata;
+                m_rresp_reg <= m_axil_rresp;
+                m_rreq      <= 1'b1;
+            end else if (m_rack_synced) begin
+                m_rreq <= 1'b0;
+            end
+        end
+    end
+
+    assign m_axil_rready = ~m_rreq;
+
+    // S-domain: capture payload, drive slave, generate ack
+    reg  [DATA_WIDTH-1:0] s_rdata_reg;
+    reg  [1:0]            s_rresp_reg;
+    reg                   s_rvalid_reg;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_rdata_reg  <= {DATA_WIDTH{1'b0}};
+            s_rresp_reg  <= 2'b00;
+            s_rvalid_reg <= 1'b0;
+        end else begin
+            if (s_rreq_synced && !s_rvalid_reg) begin
+                s_rdata_reg  <= m_rdata_reg;
+                s_rresp_reg  <= m_rresp_reg;
+                s_rvalid_reg <= 1'b1;
+            end else if (s_rvalid_reg && s_axil_rready) begin
+                s_rvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    assign s_axil_rdata  = s_rdata_reg;
+    assign s_axil_rresp  = s_rresp_reg;
+    assign s_axil_rvalid = s_rvalid_reg;
+    assign s_rack        = s_rvalid_reg && s_axil_rready;
+
+endmodule

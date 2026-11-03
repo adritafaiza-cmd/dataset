@@ -1,0 +1,120 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // Internal signals
+    reg [N-1:0]        shift_reg;
+    reg [3:0]          bit_cnt;
+    reg                spi_start;
+    reg                spi_busy;
+    reg [N-1:0]        di_i_sync;
+    reg                wren_i_sync;
+
+    // Synchronize inputs from pclk_i domain to sclk_i domain
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_i_sync <= 0;
+            wren_i_sync <= 0;
+        end else begin
+            di_i_sync <= di_i;
+            wren_i_sync <= wren_i;
+        end
+    end
+
+    // SPI state machine
+    typedef enum reg [2:0] {
+        IDLE,
+        START,
+        TRANSFER,
+        FINISH
+    } spi_state_t;
+
+    spi_state_t state, next_state;
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state <= IDLE;
+            spi_ssel_o <= 1;
+            spi_sck_o <= 0;
+            spi_mosi_o <= 0;
+            di_req_o <= 1;
+            wr_ack_o <= 0;
+            do_valid_o <= 0;
+            do_o <= 0;
+            spi_start <= 0;
+            spi_busy <= 0;
+            bit_cnt <= 0;
+            shift_reg <= 0;
+        end else begin
+            state <= next_state;
+            case (state)
+                IDLE: begin
+                    spi_ssel_o <= 1;
+                    spi_sck_o <= 0;
+                    spi_mosi_o <= 0;
+                    di_req_o <= 1;
+                    wr_ack_o <= 0;
+                    do_valid_o <= 0;
+                    if (wren_i_sync && !spi_busy) begin
+                        spi_start <= 1;
+                        spi_busy <= 1;
+                        shift_reg <= di_i_sync;
+                        bit_cnt <= N-1;
+                        next_state <= START;
+                    end else begin
+                        next_state <= IDLE;
+                    end
+                end
+                START: begin
+                    spi_ssel_o <= 0;
+                    spi_sck_o <= 0;
+                    spi_mosi_o <= shift_reg[bit_cnt];
+                    wr_ack_o <= 1;
+                    next_state <= TRANSFER;
+                end
+                TRANSFER: begin
+                    spi_sck_o <= ~spi_sck_o;
+                    if (spi_sck_o) begin
+                        spi_mosi_o <= shift_reg[bit_cnt];
+                    end else begin
+                        if (bit_cnt > 0) begin
+                            bit_cnt <= bit_cnt - 1;
+                            shift_reg <= {spi_miso_i, shift_reg[N-1:1]};
+                        end else begin
+                            shift_reg <= {spi_miso_i, shift_reg[N-1:1]};
+                            next_state <= FINISH;
+                        end
+                    end
+                end
+                FINISH: begin
+                    spi_ssel_o <= 1;
+                    spi_sck_o <= 0;
+                    spi_mosi_o <= 0;
+                    do_o <= shift_reg;
+                    do_valid_o <= 1;
+                    spi_busy <= 0;
+                    next_state <= IDLE;
+                end
+                default: begin
+                    next_state <= IDLE;
+                end
+            endcase
+        end
+    end
+
+endmodule

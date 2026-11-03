@@ -1,0 +1,177 @@
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire src_req;
+  wire dst_ack;
+  wire dst_req;
+  wire src_ack;
+
+  // Source domain: request generation
+  reg src_req_reg;
+  assign src_req = src_req_reg;
+
+  // Destination domain: acknowledge generation
+  reg dst_ack_reg;
+  assign dst_ack = dst_ack_reg;
+
+  // Destination domain: request generation (for clear)
+  reg dst_req_reg;
+  assign dst_req = dst_req_reg;
+
+  // Source domain: acknowledge generation (for clear)
+  reg src_ack_reg;
+  assign src_ack = src_ack_reg;
+
+  // Source domain: clear pending
+  reg src_clear_pending_reg;
+  assign src_clear_pending_o = src_clear_pending_reg;
+
+  // Destination domain: clear pending
+  reg dst_clear_pending_reg;
+  assign dst_clear_pending_o = dst_clear_pending_reg;
+
+  // Source domain: ready
+  assign src_ready_o = ~src_req_reg | dst_ack;
+
+  // Destination domain: valid and data
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_valid_reg;
+  assign dst_data_o = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+  // Synchronizers for request (src -> dst)
+  reg [SYNC_STAGES-1:0] req_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      req_sync <= {SYNC_STAGES{1'b0}};
+    else
+      req_sync <= {req_sync[SYNC_STAGES-2:0], src_req};
+  end
+  wire req_synced = req_sync[SYNC_STAGES-1];
+
+  // Synchronizers for acknowledge (dst -> src)
+  reg [SYNC_STAGES-1:0] ack_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      ack_sync <= {SYNC_STAGES{1'b0}};
+    else
+      ack_sync <= {ack_sync[SYNC_STAGES-2:0], dst_ack};
+  end
+  wire ack_synced = ack_sync[SYNC_STAGES-1];
+
+  // Synchronizers for clear request (dst -> src)
+  reg [SYNC_STAGES-1:0] dst_req_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_req_sync <= {SYNC_STAGES{1'b0}};
+    else
+      dst_req_sync <= {dst_req_sync[SYNC_STAGES-2:0], dst_req};
+  end
+  wire dst_req_synced = dst_req_sync[SYNC_STAGES-1];
+
+  // Synchronizers for clear acknowledge (src -> dst)
+  reg [SYNC_STAGES-1:0] src_ack_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_ack_sync <= {SYNC_STAGES{1'b0}};
+    else
+      src_ack_sync <= {src_ack_sync[SYNC_STAGES-2:0], src_ack};
+  end
+  wire src_ack_synced = src_ack_sync[SYNC_STAGES-1];
+
+  // Source domain: data latch
+  reg [WIDTH-1:0] src_data_latch;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      src_data_latch <= {WIDTH{1'b0}};
+    else if (src_valid_i && src_ready_o)
+      src_data_latch <= src_data_i;
+  end
+
+  // Source domain: request logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_req_reg <= 1'b0;
+      src_ack_reg <= 1'b0;
+      src_clear_pending_reg <= 1'b0;
+    end else begin
+      // Handle clear from destination
+      if (dst_req_synced) begin
+        src_req_reg <= 1'b0;
+        src_ack_reg <= 1'b1;
+        src_clear_pending_reg <= 1'b1;
+      end else if (src_clear_pending_reg) begin
+        // Wait for dst to acknowledge the clear
+        if (src_ack_synced) begin
+          src_clear_pending_reg <= 1'b0;
+          src_ack_reg <= 1'b0;
+        end
+      end else begin
+        // Normal operation
+        if (src_valid_i && src_ready_o) begin
+          src_req_reg <= 1'b1;
+        end else if (ack_synced) begin
+          src_req_reg <= 1'b0;
+        end
+      end
+    end
+  end
+
+  // Destination domain: acknowledge logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_ack_reg <= 1'b0;
+      dst_req_reg <= 1'b0;
+      dst_clear_pending_reg <= 1'b0;
+      dst_data_reg <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+    end else begin
+      // Handle clear from source
+      if (src_ack_synced && src_clear_pending_reg) begin
+        dst_req_reg <= 1'b0;
+        dst_ack_reg <= 1'b0;
+        dst_clear_pending_reg <= 1'b0;
+        dst_valid_reg <= 1'b0;
+      end else if (dst_clear_pending_reg) begin
+        // Wait for src to acknowledge the clear
+        if (dst_ack_synced) begin
+          dst_clear_pending_reg <= 1'b0;
+          dst_ack_reg <= 1'b0;
+        end
+      end else begin
+        // Normal operation
+        if (dst_clear_i) begin
+          dst_req_reg <= 1'b1;
+          dst_clear_pending_reg <= 1'b1;
+        end else if (req_synced) begin
+          dst_ack_reg <= 1'b1;
+          dst_data_reg <= src_data_latch;
+          dst_valid_reg <= 1'b1;
+        end else if (dst_valid_reg && dst_ready_i) begin
+          dst_valid_reg <= 1'b0;
+          dst_ack_reg <= 1'b0;
+        end
+      end
+    end
+  end
+
+endmodule

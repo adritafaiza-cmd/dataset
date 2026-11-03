@@ -1,0 +1,126 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    reg [N-1:0] shift_reg;
+    reg [3:0]   bit_cnt;
+    reg         shift_en;
+    reg         sclk_div_cnt;
+    reg         sclk_edge;
+    reg [N-1:0] data_in;
+    reg         data_in_valid;
+    reg         data_out_valid;
+    reg [N-1:0] data_out;
+
+    // SCLK Divider
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sclk_div_cnt <= 0;
+            sclk_edge <= 0;
+        end else begin
+            if (sclk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                sclk_div_cnt <= 0;
+                sclk_edge <= ~sclk_edge;
+            end else begin
+                sclk_div_cnt <= sclk_div_cnt + 1;
+            end
+        end
+    end
+
+    // SPI Clock and Select
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_sck_o <= 0;
+            spi_ssel_o <= 1;
+        end else begin
+            if (sclk_edge) begin
+                spi_sck_o <= ~spi_sck_o;
+                if (bit_cnt == N) begin
+                    spi_ssel_o <= 1;
+                end else begin
+                    spi_ssel_o <= 0;
+                end
+            end
+        end
+    end
+
+    // Shift Register Control
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            shift_reg <= 0;
+            bit_cnt <= 0;
+            shift_en <= 0;
+        end else begin
+            if (sclk_edge && spi_ssel_o == 0) begin
+                if (bit_cnt == 0) begin
+                    shift_reg <= data_in;
+                    bit_cnt <= N;
+                end else begin
+                    shift_reg <= {shift_reg[N-2:0], spi_miso_i};
+                    bit_cnt <= bit_cnt - 1;
+                end
+            end
+        end
+    end
+
+    // Data Input Handling
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            data_in <= 0;
+            data_in_valid <= 0;
+            di_req_o <= 1;
+            wr_ack_o <= 0;
+        end else begin
+            if (wren_i && di_req_o) begin
+                data_in <= di_i;
+                data_in_valid <= 1;
+                di_req_o <= 0;
+                wr_ack_o <= 1;
+            end else begin
+                wr_ack_o <= 0;
+            end
+            if (bit_cnt == N && spi_ssel_o == 1 && data_in_valid) begin
+                data_in_valid <= 0;
+                di_req_o <= 1;
+            end
+        end
+    end
+
+    // Data Output Handling
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            data_out <= 0;
+            data_out_valid <= 0;
+            do_valid_o <= 0;
+            do_o <= 0;
+        end else begin
+            if (bit_cnt == 0 && spi_ssel_o == 1 && data_in_valid == 0) begin
+                data_out <= shift_reg;
+                data_out_valid <= 1;
+                do_valid_o <= 1;
+                do_o <= shift_reg;
+            end else begin
+                do_valid_o <= 0;
+            end
+        end
+    end
+
+    // MOSI Output
+    assign spi_mosi_o = shift_reg[N-1];
+
+endmodule

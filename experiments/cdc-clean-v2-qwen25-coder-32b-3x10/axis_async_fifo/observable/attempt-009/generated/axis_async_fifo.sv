@@ -1,0 +1,328 @@
+module axis_async_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    /*
+     * AXI input
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   s_pause_req,
+    output wire                   s_pause_ack,
+    input  wire                   m_pause_req,
+    output wire                   m_pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] s_status_depth,
+    output wire [$clog2(DEPTH):0] s_status_depth_commit,
+    output wire                   s_status_overflow,
+    output wire                   s_status_bad_frame,
+    output wire                   s_status_good_frame,
+    output wire [$clog2(DEPTH):0] m_status_depth,
+    output wire [$clog2(DEPTH):0] m_status_depth_commit,
+    output wire                   m_status_overflow,
+    output wire                   m_status_bad_frame,
+    output wire                   m_status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+
+    reg [ADDR_WIDTH:0] wptr_s, wptr_m, rptr_s, rptr_m;
+    reg [ADDR_WIDTH:0] wptr_gray_s, wptr_gray_m, rptr_gray_s, rptr_gray_m;
+    reg [ADDR_WIDTH:0] wptr_gray_sync_m, wptr_gray_sync_s;
+    reg [ADDR_WIDTH:0] rptr_gray_sync_m, rptr_gray_sync_s;
+
+    reg [DATA_WIDTH-1:0] mem_data [0:DEPTH-1];
+    reg [KEEP_WIDTH-1:0] mem_keep [0:DEPTH-1];
+    reg [USER_WIDTH-1:0] mem_user [0:DEPTH-1];
+    reg [ID_WIDTH-1:0] mem_id [0:DEPTH-1];
+    reg [DEST_WIDTH-1:0] mem_dest [0:DEPTH-1];
+    reg mem_last [0:DEPTH-1];
+
+    reg [ADDR_WIDTH:0] depth_s, depth_m;
+    reg [ADDR_WIDTH:0] depth_commit_s, depth_commit_m;
+    reg overflow_s, overflow_m;
+    reg bad_frame_s, bad_frame_m;
+    reg good_frame_s, good_frame_m;
+
+    reg s_axis_tready_reg;
+    reg m_axis_tvalid_reg;
+    reg [DATA_WIDTH-1:0] m_axis_tdata_reg;
+    reg [KEEP_WIDTH-1:0] m_axis_tkeep_reg;
+    reg [USER_WIDTH-1:0] m_axis_tuser_reg;
+    reg [ID_WIDTH-1:0] m_axis_tid_reg;
+    reg [DEST_WIDTH-1:0] m_axis_tdest_reg;
+    reg m_axis_tlast_reg;
+
+    reg s_pause_ack_reg;
+    reg m_pause_ack_reg;
+
+    // Binary to Gray code conversion
+    function [ADDR_WIDTH:0] bin_to_gray;
+        input [ADDR_WIDTH:0] bin;
+        bin_to_gray = bin ^ (bin >> 1);
+    endfunction
+
+    // Gray to Binary code conversion
+    function [ADDR_WIDTH:0] gray_to_bin;
+        input [ADDR_WIDTH:0] gray;
+        integer i;
+        reg [ADDR_WIDTH:0] bin;
+        bin = gray;
+        for (i = ADDR_WIDTH-1; i >= 0; i = i - 1) begin
+            bin[i] = bin[i] ^ bin[i+1];
+        end
+        gray_to_bin = bin;
+    endfunction
+
+    // Write side logic
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            wptr_s <= 0;
+            wptr_gray_s <= 0;
+            depth_s <= 0;
+            depth_commit_s <= 0;
+            overflow_s <= 0;
+            bad_frame_s <= 0;
+            good_frame_s <= 0;
+            s_axis_tready_reg <= 0;
+        end else begin
+            reg [ADDR_WIDTH:0] next_wptr_s;
+            reg [ADDR_WIDTH:0] next_depth_s;
+            reg [ADDR_WIDTH:0] next_depth_commit_s;
+            reg next_overflow_s;
+            reg next_bad_frame_s;
+            reg next_good_frame_s;
+            reg next_s_axis_tready_reg;
+
+            next_wptr_s = wptr_s;
+            next_depth_s = depth_s;
+            next_depth_commit_s = depth_commit_s;
+            next_overflow_s = overflow_s;
+            next_bad_frame_s = bad_frame_s;
+            next_good_frame_s = good_frame_s;
+            next_s_axis_tready_reg = s_axis_tready_reg;
+
+            if (s_axis_tvalid && s_axis_tready_reg) begin
+                mem_data[wptr_s[ADDR_WIDTH-1:0]] <= s_axis_tdata;
+                mem_keep[wptr_s[ADDR_WIDTH-1:0]] <= s_axis_tkeep;
+                mem_user[wptr_s[ADDR_WIDTH-1:0]] <= s_axis_tuser;
+                mem_id[wptr_s[ADDR_WIDTH-1:0]] <= s_axis_tid;
+                mem_dest[wptr_s[ADDR_WIDTH-1:0]] <= s_axis_tdest;
+                mem_last[wptr_s[ADDR_WIDTH-1:0]] <= s_axis_tlast;
+
+                next_wptr_s = wptr_s + 1;
+                next_depth_s = depth_s + 1;
+                next_depth_commit_s = depth_commit_s + 1;
+
+                if (s_axis_tlast) begin
+                    next_good_frame_s = 1;
+                    next_bad_frame_s = 0;
+                end else if (depth_s >= DEPTH) begin
+                    next_overflow_s = 1;
+                end
+            end else if (depth_commit_s > 0) begin
+                next_depth_commit_s = depth_commit_s - 1;
+            end
+
+            if (depth_s >= DEPTH) begin
+                next_s_axis_tready_reg = 0;
+            end else if (!s_pause_req || !PAUSE_ENABLE) begin
+                next_s_axis_tready_reg = 1;
+            end
+
+            wptr_s <= next_wptr_s;
+            wptr_gray_s <= bin_to_gray(next_wptr_s);
+            depth_s <= next_depth_s;
+            depth_commit_s <= next_depth_commit_s;
+            overflow_s <= next_overflow_s;
+            bad_frame_s <= next_bad_frame_s;
+            good_frame_s <= next_good_frame_s;
+            s_axis_tready_reg <= next_s_axis_tready_reg;
+        end
+    end
+
+    // Read side logic
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            rptr_m <= 0;
+            rptr_gray_m <= 0;
+            depth_m <= 0;
+            depth_commit_m <= 0;
+            overflow_m <= 0;
+            bad_frame_m <= 0;
+            good_frame_m <= 0;
+            m_axis_tvalid_reg <= 0;
+            m_axis_tdata_reg <= 0;
+            m_axis_tkeep_reg <= 0;
+            m_axis_tuser_reg <= 0;
+            m_axis_tid_reg <= 0;
+            m_axis_tdest_reg <= 0;
+            m_axis_tlast_reg <= 0;
+        end else begin
+            reg [ADDR_WIDTH:0] next_rptr_m;
+            reg [ADDR_WIDTH:0] next_depth_m;
+            reg [ADDR_WIDTH:0] next_depth_commit_m;
+            reg next_overflow_m;
+            reg next_bad_frame_m;
+            reg next_good_frame_m;
+            reg next_m_axis_tvalid_reg;
+            reg [DATA_WIDTH-1:0] next_m_axis_tdata_reg;
+            reg [KEEP_WIDTH-1:0] next_m_axis_tkeep_reg;
+            reg [USER_WIDTH-1:0] next_m_axis_tuser_reg;
+            reg [ID_WIDTH-1:0] next_m_axis_tid_reg;
+            reg [DEST_WIDTH-1:0] next_m_axis_tdest_reg;
+            reg next_m_axis_tlast_reg;
+
+            next_rptr_m = rptr_m;
+            next_depth_m = depth_m;
+            next_depth_commit_m = depth_commit_m;
+            next_overflow_m = overflow_m;
+            next_bad_frame_m = bad_frame_m;
+            next_good_frame_m = good_frame_m;
+            next_m_axis_tvalid_reg = m_axis_tvalid_reg;
+            next_m_axis_tdata_reg = m_axis_tdata_reg;
+            next_m_axis_tkeep_reg = m_axis_tkeep_reg;
+            next_m_axis_tuser_reg = m_axis_tuser_reg;
+            next_m_axis_tid_reg = m_axis_tid_reg;
+            next_m_axis_tdest_reg = m_axis_tdest_reg;
+            next_m_axis_tlast_reg = m_axis_tlast_reg;
+
+            if (m_axis_tvalid_reg && m_axis_tready) begin
+                next_rptr_m = rptr_m + 1;
+                next_depth_m = depth_m - 1;
+                next_depth_commit_m = depth_commit_m - 1;
+
+                if (m_axis_tlast_reg) begin
+                    next_good_frame_m = 1;
+                    next_bad_frame_m = 0;
+                end
+            end else if (depth_commit_m > 0) begin
+                next_depth_commit_m = depth_commit_m - 1;
+            end
+
+            if (depth_m > 0) begin
+                next_m_axis_tvalid_reg = 1;
+                next_m_axis_tdata_reg = mem_data[rptr_m[ADDR_WIDTH-1:0]];
+                next_m_axis_tkeep_reg = mem_keep[rptr_m[ADDR_WIDTH-1:0]];
+                next_m_axis_tuser_reg = mem_user[rptr_m[ADDR_WIDTH-1:0]];
+                next_m_axis_tid_reg = mem_id[rptr_m[ADDR_WIDTH-1:0]];
+                next_m_axis_tdest_reg = mem_dest[rptr_m[ADDR_WIDTH-1:0]];
+                next_m_axis_tlast_reg = mem_last[rptr_m[ADDR_WIDTH-1:0]];
+            end else begin
+                next_m_axis_tvalid_reg = 0;
+            end
+
+            rptr_m <= next_rptr_m;
+            rptr_gray_m <= bin_to_gray(next_rptr_m);
+            depth_m <= next_depth_m;
+            depth_commit_m <= next_depth_commit_m;
+            overflow_m <= next_overflow_m;
+            bad_frame_m <= next_bad_frame_m;
+            good_frame_m <= next_good_frame_m;
+            m_axis_tvalid_reg <= next_m_axis_tvalid_reg;
+            m_axis_tdata_reg <= next_m_axis_tdata_reg;
+            m_axis_tkeep_reg <= next_m_axis_tkeep_reg;
+            m_axis_tuser_reg <= next_m_axis_tuser_reg;
+            m_axis_tid_reg <= next_m_axis_tid_reg;
+            m_axis_tdest_reg <= next_m_axis_tdest_reg;
+            m_axis_tlast_reg <= next_m_axis_tlast_reg;
+        end
+    end
+
+    // Cross-domain synchronization
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            wptr_gray_sync_m <= 0;
+            rptr_gray_sync_m <= 0;
+        end else begin
+            wptr_gray_sync_m <= wptr_gray_s;
+            rptr_gray_sync_m <= wptr_gray_sync_m;
+        end
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            wptr_gray_sync_s <= 0;
+            rptr_gray_sync_s <= 0;
+        end else begin
+            rptr_gray_sync_s <= rptr_gray_m;
+            wptr_gray_sync_s <= rptr_gray_sync_s;
+        end
+    end
+
+    // Status signals
+    assign s_status_depth = depth_s;
+    assign s_status_depth_commit = depth_commit_s;
+    assign s_status_overflow = overflow_s;
+    assign s_status_bad_frame = bad_frame_s;
+    assign s_status_good_frame = good_frame_s;
+
+    assign m_status_depth = depth_m;
+    assign m_status_depth_commit = depth_commit_m;
+    assign m_status_overflow = overflow_m;
+    assign m_status_bad_frame = bad_frame_m;
+    assign m_status_good_frame = good_frame_m;
+
+    // Ready and valid signals
+    assign s_axis_tready = s_axis_tready_reg;
+    assign m_axis_tvalid = m_axis_tvalid_reg;
+    assign m_axis_tdata = m_axis_tdata_reg;
+    assign m_axis_tkeep = m_axis_tkeep_reg;
+    assign m_axis_tuser = m_axis_tuser_reg;
+    assign m_axis_tid = m_axis_tid_reg;
+    assign m_axis_tdest = m_axis_tdest_reg;
+    assign m_axis_tlast = m_axis_tlast_reg;
+
+    // Pause signals
+    assign s_pause_ack = s_pause_ack_reg;
+    assign m_pause_ack = m_pause_ack_reg;
+
+endmodule

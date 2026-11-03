@@ -1,0 +1,427 @@
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam AWIDTH = ASIZE + 1;
+
+  // Gray code conversion
+  function [AWIDTH-1:0] bin2gray;
+    input [AWIDTH-1:0] bin;
+    begin
+      bin2gray = bin ^ (bin >> 1);
+    end
+  endfunction
+
+  function [AWIDTH-1:0] gray2bin;
+    input [AWIDTH-1:0] gray;
+    integer i;
+    begin
+      gray2bin[AWIDTH-1] = gray[AWIDTH-1];
+      for (i = AWIDTH-2; i >= 0; i = i - 1)
+        gray2bin[i] = gray2bin[i+1] ^ gray[i];
+    end
+  endfunction
+
+  // A-side FIFO (A writes, B reads)
+  reg [DSIZE-1:0] a_fifo_mem [0:DEPTH-1];
+  reg [AWIDTH-1:0] a_wr_ptr;
+  reg [AWIDTH-1:0] a_rd_ptr;
+  reg [AWIDTH-1:0] a_wr_ptr_gray;
+  reg [AWIDTH-1:0] a_rd_ptr_gray;
+
+  // B-side FIFO (B writes, A reads)
+  reg [DSIZE-1:0] b_fifo_mem [0:DEPTH-1];
+  reg [AWIDTH-1:0] b_wr_ptr;
+  reg [AWIDTH-1:0] b_rd_ptr;
+  reg [AWIDTH-1:0] b_wr_ptr_gray;
+  reg [AWIDTH-1:0] b_rd_ptr_gray;
+
+  // Cross-domain synchronization: A write pointer to B domain
+  reg [AWIDTH-1:0] a_wr_ptr_gray_b1;
+  reg [AWIDTH-1:0] a_wr_ptr_gray_b2;
+  reg [AWIDTH-1:0] a_wr_ptr_gray_b3;
+
+  // Cross-domain synchronization: B read pointer to A domain
+  reg [AWIDTH-1:0] b_rd_ptr_gray_a1;
+  reg [AWIDTH-1:0] b_rd_ptr_gray_a2;
+  reg [AWIDTH-1:0] b_rd_ptr_gray_a3;
+
+  // Cross-domain synchronization: B write pointer to A domain
+  reg [AWIDTH-1:0] b_wr_ptr_gray_a1;
+  reg [AWIDTH-1:0] b_wr_ptr_gray_a2;
+  reg [AWIDTH-1:0] b_wr_ptr_gray_a3;
+
+  // Cross-domain synchronization: A read pointer to B domain
+  reg [AWIDTH-1:0] a_rd_ptr_gray_b1;
+  reg [AWIDTH-1:0] a_rd_ptr_gray_b2;
+  reg [AWIDTH-1:0] a_rd_ptr_gray_b3;
+
+  // A-side status
+  wire [AWIDTH-1:0] a_wr_ptr_gray_sync = a_wr_ptr_gray;
+  wire [AWIDTH-1:0] a_rd_ptr_gray_sync = a_rd_ptr_gray;
+
+  // B-side status
+  wire [AWIDTH-1:0] b_wr_ptr_gray_sync = b_wr_ptr_gray;
+  wire [AWIDTH-1:0] b_rd_ptr_gray_sync = b_rd_ptr_gray;
+
+  // A-side: A writes to a_fifo, B reads from a_fifo
+  // A sees: a_full (can't write), a_empty (nothing to read from b_fifo)
+  // B sees: b_full (can't write to b_fifo), b_empty (nothing to read from a_fifo)
+
+  // A-side write to a_fifo
+  wire a_fifo_full = (a_wr_ptr_gray_b3 == a_rd_ptr_gray_b3) ? 1'b0 : 
+                     (a_wr_ptr_gray_b3[AWIDTH-1] != a_rd_ptr_gray_b3[AWIDTH-1]) &&
+                     (a_wr_ptr_gray_b3[AWIDTH-2:0] == a_rd_ptr_gray_b3[AWIDTH-2:0]) ? 1'b1 : 1'b0;
+
+  // Wait, let me redo the full/empty logic properly.
+  // For a FIFO with ASIZE address bits and AWIDTH = ASIZE+1 pointer bits:
+  // Full: MSB differs, lower bits equal
+  // Empty: pointers equal
+
+  // A-side FIFO (A writes, B reads)
+  // A domain: write pointer is a_wr_ptr, read pointer (synced from B) is b_rd_ptr_gray_a3
+  // B domain: read pointer is b_rd_ptr, write pointer (synced from A) is a_wr_ptr_gray_b3
+
+  // A-side: can A write to a_fifo?
+  wire a_fifo_full_a = (a_wr_ptr_gray[AWIDTH-1] != b_rd_ptr_gray_a3[AWIDTH-1]) &&
+                       (a_wr_ptr_gray[AWIDTH-2:0] == b_rd_ptr_gray_a3[AWIDTH-2:0]);
+
+  // B-side: can B read from a_fifo?
+  wire a_fifo_empty_b = (a_wr_ptr_gray_b3 == b_rd_ptr_gray);
+
+  // B-side FIFO (B writes, A reads)
+  // B domain: write pointer is b_wr_ptr, read pointer (synced from A) is a_rd_ptr_gray_b3
+  // A domain: read pointer is a_rd_ptr, write pointer (synced from B) is b_wr_ptr_gray_a3
+
+  // B-side: can B write to b_fifo?
+  wire b_fifo_full_b = (b_wr_ptr_gray[AWIDTH-1] != a_rd_ptr_gray_b3[AWIDTH-1]) &&
+                       (b_wr_ptr_gray[AWIDTH-2:0] == a_rd_ptr_gray_b3[AWIDTH-2:0]);
+
+  // A-side: can A read from b_fifo?
+  wire b_fifo_empty_a = (b_wr_ptr_gray_a3 == a_rd_ptr_gray);
+
+  // Direction logic:
+  // a_dir = 1: A is writing (to a_fifo), A is not reading
+  // a_dir = 0: A is reading (from b_fifo), A is not writing
+  // b_dir = 1: B is writing (to b_fifo), B is not reading
+  // b_dir = 0: B is reading (from a_fifo), B is not writing
+
+  // A-side outputs
+  assign a_full = a_dir ? a_fifo_full_a : b_fifo_full_b;
+  assign a_empty = a_dir ? b_fifo_empty_a : a_fifo_empty_b;
+
+  // Wait, this doesn't make sense. Let me reconsider.
+  // a_full should indicate whether A can write. If a_dir=1, A writes to a_fifo, so a_full = a_fifo_full_a.
+  // If a_dir=0, A is reading, so a_full should be... hmm.
+  // Actually, a_full and a_empty are status flags for the A side.
+  // a_full: A cannot write (FIFO full)
+  // a_empty: A cannot read (FIFO empty)
+  // But A can only do one thing at a time based on a_dir.
+  // Let me just provide both flags regardless of direction.
+
+  assign a_full = a_fifo_full_a;
+  assign a_empty = b_fifo_empty_a;
+
+  // Hmm, but that mixes the two FIFOs. Let me think again.
+  // The interface has a_winc, a_wdata, a_rinc, a_rdata.
+  // a_dir selects direction. If a_dir=1, A writes (a_winc valid). If a_dir=0, A reads (a_rinc valid).
+  // a_full should be high when A cannot write (i.e., when a_dir=1 and a_fifo is full).
+  // a_empty should be high when A cannot read (i.e., when a_dir=0 and b_fifo is empty).
+  // But the flags should probably be independent of direction for safety.
+
+  // Let me just define:
+  // a_full: a_fifo is full (A cannot write to a_fifo)
+  // a_empty: b_fifo is empty (A cannot read from b_fifo)
+  // b_full: b_fifo is full (B cannot write to b_fifo)
+  // b_empty: a_fifo is empty (B cannot read from a_fifo)
+
+  assign a_full = a_fifo_full_a;
+  assign a_empty = b_fifo_empty_a;
+  assign b_full = b_fifo_full_b;
+  assign b_empty = a_fifo_empty_b;
+
+  // Almost full/empty (one less than full/empty)
+  // For almost full: full - 1, i.e., one slot remaining
+  // For almost empty: empty + 1, i.e., one item remaining
+
+  // a_afull: a_fifo has DEPTH-1 items
+  wire a_afull_internal = (a_wr_ptr_gray[AWIDTH-1] != b_rd_ptr_gray_a3[AWIDTH-1]) &&
+                          (a_wr_ptr_gray[AWIDTH-2:0] == b_rd_ptr_gray_a3[AWIDTH-2:0]) ? 1'b1 :
+                          (a_wr_ptr_gray[AWIDTH-2:0] == b_rd_ptr_gray_a3[AWIDTH-2:0] + 1'b1) ? 1'b1 : 1'b0;
+
+  // This is getting complicated. Let me use a simpler approach with binary counters.
+
+  // Actually, let me restart with a cleaner design.
+
+endmodule
+
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam AWIDTH = ASIZE + 1;
+
+  function [AWIDTH-1:0] bin2gray;
+    input [AWIDTH-1:0] bin;
+    begin
+      bin2gray = bin ^ (bin >> 1);
+    end
+  endfunction
+
+  function [AWIDTH-1:0] gray2bin;
+    input [AWIDTH-1:0] gray;
+    integer i;
+    begin
+      gray2bin[AWIDTH-1] = gray[AWIDTH-1];
+      for (i = AWIDTH-2; i >= 0; i = i - 1)
+        gray2bin[i] = gray2bin[i+1] ^ gray[i];
+    end
+  endfunction
+
+  // FIFO A: A writes, B reads
+  reg [DSIZE-1:0] fifo_a_mem [0:DEPTH-1];
+  reg [AWIDTH-1:0] fifo_a_wr_ptr;
+  reg [AWIDTH-1:0] fifo_a_rd_ptr;
+  reg [AWIDTH-1:0] fifo_a_wr_ptr_gray;
+  reg [AWIDTH-1:0] fifo_a_rd_ptr_gray;
+
+  // FIFO B: B writes, A reads
+  reg [DSIZE-1:0] fifo_b_mem [0:DEPTH-1];
+  reg [AWIDTH-1:0] fifo_b_wr_ptr;
+  reg [AWIDTH-1:0] fifo_b_rd_ptr;
+  reg [AWIDTH-1:0] fifo_b_wr_ptr_gray;
+  reg [AWIDTH-1:0] fifo_b_rd_ptr_gray;
+
+  // Sync FIFO A write pointer to B domain
+  reg [AWIDTH-1:0] fifo_a_wr_ptr_gray_b1;
+  reg [AWIDTH-1:0] fifo_a_wr_ptr_gray_b2;
+  reg [AWIDTH-1:0] fifo_a_wr_ptr_gray_b3;
+
+  // Sync FIFO A read pointer to A domain (from B)
+  reg [AWIDTH-1:0] fifo_a_rd_ptr_gray_a1;
+  reg [AWIDTH-1:0] fifo_a_rd_ptr_gray_a2;
+  reg [AWIDTH-1:0] fifo_a_rd_ptr_gray_a3;
+
+  // Sync FIFO B write pointer to A domain
+  reg [AWIDTH-1:0] fifo_b_wr_ptr_gray_a1;
+  reg [AWIDTH-1:0] fifo_b_wr_ptr_gray_a2;
+  reg [AWIDTH-1:0] fifo_b_wr_ptr_gray_a3;
+
+  // Sync FIFO B read pointer to B domain (from A)
+  reg [AWIDTH-1:0] fifo_b_rd_ptr_gray_b1;
+  reg [AWIDTH-1:0] fifo_b_rd_ptr_gray_b2;
+  reg [AWIDTH-1:0] fifo_b_rd_ptr_gray_b3;
+
+  // A domain: FIFO A write
+  wire fifo_a_full = (fifo_a_wr_ptr_gray[AWIDTH-1] != fifo_a_rd_ptr_gray_a3[AWIDTH-1]) &&
+                     (fifo_a_wr_ptr_gray[AWIDTH-2:0] == fifo_a_rd_ptr_gray_a3[AWIDTH-2:0]);
+
+  wire fifo_a_afull = (fifo_a_wr_ptr_gray[AWIDTH-1] != fifo_a_rd_ptr_gray_a3[AWIDTH-1]) &&
+                      (fifo_a_wr_ptr_gray[AWIDTH-2:0] == fifo_a_rd_ptr_gray_a3[AWIDTH-2:0]) ? 1'b1 :
+                      (fifo_a_wr_ptr_gray[AWIDTH-2:0] == fifo_a_rd_ptr_gray_a3[AWIDTH-2:0] + 1'b1) ? 1'b1 : 1'b0;
+
+  // A domain: FIFO B read
+  wire fifo_b_empty = (fifo_b_wr_ptr_gray_a3 == fifo_b_rd_ptr_gray);
+  wire fifo_b_aempty = (fifo_b_wr_ptr_gray_a3 == fifo_b_rd_ptr_gray) ? 1'b1 :
+                       (fifo_b_wr_ptr_gray_a3[AWIDTH-1] == fifo_b_rd_ptr_gray[AWIDTH-1]) &&
+                       (fifo_b_wr_ptr_gray_a3[AWIDTH-2:0] == fifo_b_rd_ptr_gray[AWIDTH-2:0] + 1'b1) ? 1'b1 : 1'b0;
+
+  // B domain: FIFO B write
+  wire fifo_b_full = (fifo_b_wr_ptr_gray[AWIDTH-1] != fifo_b_rd_ptr_gray_b3[AWIDTH-1]) &&
+                     (fifo_b_wr_ptr_gray[AWIDTH-2:0] == fifo_b_rd_ptr_gray_b3[AWIDTH-2:0]);
+
+  wire fifo_b_afull = (fifo_b_wr_ptr_gray[AWIDTH-1] != fifo_b_rd_ptr_gray_b3[AWIDTH-1]) &&
+                      (fifo_b_wr_ptr_gray[AWIDTH-2:0] == fifo_b_rd_ptr_gray_b3[AWIDTH-2:0]) ? 1'b1 :
+                      (fifo_b_wr_ptr_gray[AWIDTH-2:0] == fifo_b_rd_ptr_gray_b3[AWIDTH-2:0] + 1'b1) ? 1'b1 : 1'b0;
+
+  // B domain: FIFO A read
+  wire fifo_a_empty = (fifo_a_wr_ptr_gray_b3 == fifo_a_rd_ptr_gray);
+  wire fifo_a_aempty = (fifo_a_wr_ptr_gray_b3 == fifo_a_rd_ptr_gray) ? 1'b1 :
+                       (fifo_a_wr_ptr_gray_b3[AWIDTH-1] == fifo_a_rd_ptr_gray[AWIDTH-1]) &&
+                       (fifo_a_wr_ptr_gray_b3[AWIDTH-2:0] == fifo_a_rd_ptr_gray[AWIDTH-2:0] + 1'b1) ? 1'b1 : 1'b0;
+
+  // A-side outputs
+  assign a_full = fifo_a_full;
+  assign a_afull = fifo_a_afull;
+  assign a_empty = fifo_b_empty;
+  assign a_aempty = fifo_b_aempty;
+
+  // B-side outputs
+  assign b_full = fifo_b_full;
+  assign b_afull = fifo_b_afull;
+  assign b_empty = fifo_a_empty;
+  assign b_aempty = fifo_a_aempty;
+
+  // A-side data
+  wire [ASIZE-1:0] fifo_b_rd_addr = fifo_b_rd_ptr[ASIZE-1:0];
+  assign a_rdata = fifo_b_mem[fifo_b_rd_addr];
+
+  // B-side data
+  wire [ASIZE-1:0] fifo_a_rd_addr = fifo_a_rd_ptr[ASIZE-1:0];
+  assign b_rdata = fifo_a_mem[fifo_a_rd_addr];
+
+  // A domain: FIFO A write pointer
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      fifo_a_wr_ptr <= {AWIDTH{1'b0}};
+      fifo_a_wr_ptr_gray <= {AWIDTH{1'b0}};
+    end else if (a_winc && a_dir && !fifo_a_full) begin
+      fifo_a_wr_ptr <= fifo_a_wr_ptr + 1'b1;
+      fifo_a_wr_ptr_gray <= bin2gray(fifo_a_wr_ptr + 1'b1);
+    end
+  end
+
+  // A domain: FIFO B read pointer
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      fifo_b_rd_ptr <= {AWIDTH{1'b0}};
+      fifo_b_rd_ptr_gray <= {AWIDTH{1'b0}};
+    end else if (a_rinc && !a_dir && !fifo_b_empty) begin
+      fifo_b_rd_ptr <= fifo_b_rd_ptr + 1'b1;
+      fifo_b_rd_ptr_gray <= bin2gray(fifo_b_rd_ptr + 1'b1);
+    end
+  end
+
+  // B domain: FIFO B write pointer
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      fifo_b_wr_ptr <= {AWIDTH{1'b0}};
+      fifo_b_wr_ptr_gray <= {AWIDTH{1'b0}};
+    end else if (b_winc && b_dir && !fifo_b_full) begin
+      fifo_b_wr_ptr <= fifo_b_wr_ptr + 1'b1;
+      fifo_b_wr_ptr_gray <= bin2gray(fifo_b_wr_ptr + 1'b1);
+    end
+  end
+
+  // B domain: FIFO A read pointer
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      fifo_a_rd_ptr <= {AWIDTH{1'b0}};
+      fifo_a_rd_ptr_gray <= {AWIDTH{1'b0}};
+    end else if (b_rinc && !b_dir && !fifo_a_empty) begin
+      fifo_a_rd_ptr <= fifo_a_rd_ptr + 1'b1;
+      fifo_a_rd_ptr_gray <= bin2gray(fifo_a_rd_ptr + 1'b1);
+    end
+  end
+
+  // A domain: FIFO A memory write
+  always @(posedge a_clk) begin
+    if (a_winc && a_dir && !fifo_a_full) begin
+      fifo_a_mem[fifo_a_wr_ptr[ASIZE-1:0]] <= a_wdata;
+    end
+  end
+
+  // B domain: FIFO B memory write
+  always @(posedge b_clk) begin
+    if (b_winc && b_dir && !fifo_b_full) begin
+      fifo_b_mem[fifo_b_wr_ptr[ASIZE-1:0]] <= b_wdata;
+    end
+  end
+
+  // Sync FIFO A write pointer to B domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      fifo_a_wr_ptr_gray_b1 <= {AWIDTH{1'b0}};
+      fifo_a_wr_ptr_gray_b2 <= {AWIDTH{1'b0}};
+      fifo_a_wr_ptr_gray_b3 <= {AWIDTH{1'b0}};
+    end else begin
+      fifo_a_wr_ptr_gray_b1 <= fifo_a_wr_ptr_gray;
+      fifo_a_wr_ptr_gray_b2 <= fifo_a_wr_ptr_gray_b1;
+      fifo_a_wr_ptr_gray_b3 <= fifo_a_wr_ptr_gray_b2;
+    end
+  end
+
+  // Sync FIFO A read pointer to A domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      fifo_a_rd_ptr_gray_a1 <= {AWIDTH{1'b0}};
+      fifo_a_rd_ptr_gray_a2 <= {AWIDTH{1'b0}};
+      fifo_a_rd_ptr_gray_a3 <= {AWIDTH{1'b0}};
+    end else begin
+      fifo_a_rd_ptr_gray_a1 <= fifo_a_rd_ptr_gray;
+      fifo_a_rd_ptr_gray_a2 <= fifo_a_rd_ptr_gray_a1;
+      fifo_a_rd_ptr_gray_a3 <= fifo_a_rd_ptr_gray_a2;
+    end
+  end
+
+  // Sync FIFO B write pointer to A domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      fifo_b_wr_ptr_gray_a1 <= {AWIDTH{1'b0}};
+      fifo_b_wr_ptr_gray_a2 <= {AWIDTH{1'b0}};
+      fifo_b_wr_ptr_gray_a3 <= {AWIDTH{1'b0}};
+    end else begin
+      fifo_b_wr_ptr_gray_a1 <= fifo_b_wr_ptr_gray;
+      fifo_b_wr_ptr_gray_a2 <= fifo_b_wr_ptr_gray_a1;
+      fifo_b_wr_ptr_gray_a3 <= fifo_b_wr_ptr_gray_a2;
+    end
+  end
+
+  // Sync FIFO B read pointer to B domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      fifo_b_rd_ptr_gray_b1 <= {AWIDTH{1'b0}};
+      fifo_b_rd_ptr_gray_b2 <= {AWIDTH{1'b0}};
+      fifo_b_rd_ptr_gray_b3 <= {AWIDTH{1'b0}};
+    end else begin
+      fifo_b_rd_ptr_gray_b1 <= fifo_b_rd_ptr_gray;
+      fifo_b_rd_ptr_gray_b2 <= fifo_b_rd_ptr_gray_b1;
+      fifo_b_rd_ptr_gray_b3 <= fifo_b_rd_ptr_gray_b2;
+    end
+  end
+
+endmodule

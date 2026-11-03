@@ -1,0 +1,213 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "arbiter",
+            "function": "Multi-port request arbiter with configurable priority and blocking mechanisms.",
+            "parameters": [
+                {
+                    "name": "PORTS",
+                    "value": "4"
+                },
+                {
+                    "name": "ARB_TYPE_ROUND_ROBIN",
+                    "value": "0"
+                },
+                {
+                    "name": "ARB_BLOCK",
+                    "value": "0"
+                },
+                {
+                    "name": "ARB_BLOCK_ACK",
+                    "value": "1"
+                },
+                {
+                    "name": "ARB_LSB_HIGH_PRIORITY",
+                    "value": "0"
+                }
+            ],
+            "ports": [
+                {
+                    "name": "clk",
+                    "direction": "input",
+                    "width": "1",
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "rst",
+                    "direction": "input",
+                    "width": "1",
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "request",
+                    "direction": "input",
+                    "width": "PORTS",
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "acknowledge",
+                    "direction": "input",
+                    "width": "PORTS",
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "grant",
+                    "direction": "output",
+                    "width": "PORTS",
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "grant_valid",
+                    "direction": "output",
+                    "width": "1",
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "grant_encoded",
+                    "direction": "output",
+                    "width": "$clog2(PORTS)",
+                    "clock_domain": "clk"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {
+                    "name": "next_grant",
+                    "width": "PORTS"
+                },
+                {
+                    "name": "grant_reg",
+                    "width": "PORTS"
+                },
+                {
+                    "name": "grant_valid_reg",
+                    "width": "1"
+                },
+                {
+                    "name": "grant_encoded_reg",
+                    "width": "$clog2(PORTS)"
+                },
+                {
+                    "name": "priority",
+                    "width": "PORTS"
+                },
+                {
+                    "name": "req_mask",
+                    "width": "PORTS"
+                },
+                {
+                    "name": "ack_mask",
+                    "width": "PORTS"
+                }
+            ],
+            "behavior": [
+                "On reset (rst high), grant_reg is set to 0, grant_valid_reg is set to 0, and grant_encoded_reg is set to 0.",
+                "Priority selection is determined by ARB_TYPE_ROUND_ROBIN and ARB_LSB_HIGH_PRIORITY parameters.",
+                "If ARB_TYPE_ROUND_ROBIN is set, the priority rotates among the requestors. Otherwise, fixed priority is used.",
+                "If ARB_LSB_HIGH_PRIORITY is set, the least significant bit has higher priority in case of ties.",
+                "req_mask is calculated based on the current grant and acknowledge signals.",
+                "ack_mask is calculated based on the acknowledge signals.",
+                "next_grant is determined by the highest priority requestor that is not blocked.",
+                "If ARB_BLOCK is set, the grant is held until the acknowledge is received (if ARB_BLOCK_ACK is set) or the request drops.",
+                "grant_reg is updated with next_grant on the rising edge of clk, considering the blocking conditions.",
+                "grant_valid_reg is set to 1 when a grant is made and remains 1 until the request drops or acknowledge is received based on ARB_BLOCK and ARB_BLOCK_ACK.",
+                "grant_encoded_reg is updated with the encoded index of the granted requestor.",
+                "grant, grant_valid, and grant_encoded outputs are driven by grant_reg, grant_valid_reg, and grant_encoded_reg respectively."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    reg [PORTS-1:0]         grant_reg;
+    reg                     grant_valid_reg;
+    reg [$clog2(PORTS)-1:0] grant_encoded_reg;
+    reg [PORTS-1:0]         priority;
+    reg [PORTS-1:0]         req_mask;
+    reg [PORTS-1:0]         ack_mask;
+    reg [PORTS-1:0]         next_grant;
+
+    // Priority calculation
+    always @(*) begin
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            // Rotate priority
+            priority = {grant_reg[0], grant_reg[PORTS-1:1]};
+        end else begin
+            // Fixed priority
+            priority = {PORTS{1'b1}};
+        end
+    end
+
+    // req_mask calculation
+    always @(*) begin
+        req_mask = request & priority;
+        if (ARB_BLOCK) begin
+            req_mask = req_mask & ~acknowledge;
+        end
+    end
+
+    // next_grant calculation
+    always @(*) begin
+        next_grant = 0;
+        if (ARB_LSB_HIGH_PRIORITY) begin
+            for (integer i = 0; i < PORTS; i = i + 1) begin
+                if (req_mask[i]) begin
+                    next_grant = (1 << i);
+                end
+            end
+        end else begin
+            for (integer i = PORTS - 1; i >= 0; i = i - 1) begin
+                if (req_mask[i]) begin
+                    next_grant = (1 << i);
+                end
+            end
+        end
+    end
+
+    // grant_reg, grant_valid_reg, grant_encoded_reg update
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            grant_reg <= 0;
+            grant_valid_reg <= 0;
+            grant_encoded_reg <= 0;
+        end else begin
+            if (next_grant != 0) begin
+                grant_reg <= next_grant;
+                grant_valid_reg <= 1;
+                grant_encoded_reg <= $clog2(PORTS)'(next_grant);
+            end else if (grant_valid_reg && (!ARB_BLOCK || !ARB_BLOCK_ACK || acknowledge[grant_encoded_reg])) begin
+                grant_valid_reg <= 0;
+            end
+        end
+    end
+
+    // Outputs
+    assign grant = grant_reg;
+    assign grant_valid = grant_valid_reg;
+    assign grant_encoded = grant_encoded_reg;
+
+endmodule
+```

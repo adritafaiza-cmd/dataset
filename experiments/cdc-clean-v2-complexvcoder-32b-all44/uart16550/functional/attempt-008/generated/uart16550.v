@@ -1,0 +1,320 @@
+module uart_top (
+    input wire wb_clk_i,
+    input wire wb_rst_i,
+    input wire [7:0] wb_adr_i,
+    input wire [31:0] wb_dat_i,
+    output reg [31:0] wb_dat_o,
+    input wire wb_we_i,
+    input wire wb_stb_i,
+    input wire wb_cyc_i,
+    output reg wb_ack_o,
+    input wire [3:0] wb_sel_i,
+    output reg int_o,
+    output reg stx_pad_o,
+    input wire srx_pad_i,
+    output reg rts_pad_o,
+    input wire cts_pad_i,
+    output reg dtr_pad_o,
+    input wire dsr_pad_i,
+    input wire ri_pad_i,
+    input wire dcd_pad_i
+);
+
+    // Internal signals for communication between wishbone_slave and uart_core
+    reg [7:0] rx_data;
+    reg [7:0] tx_data;
+    reg [7:0] control;
+    reg [15:0] baud_rate;
+    wire [7:0] rx_fifo;
+    wire [7:0] tx_fifo;
+    wire [7:0] status;
+
+    // Instantiate wishbone_slave module
+    wishbone_slave wb_slave_inst (
+        .clk_i(wb_clk_i),
+        .rst_i(wb_rst_i),
+        .adr_i(wb_adr_i),
+        .dat_i(wb_dat_i),
+        .dat_o(wb_dat_o),
+        .we_i(wb_we_i),
+        .stb_i(wb_stb_i),
+        .cyc_i(wb_cyc_i),
+        .ack_o(wb_ack_o),
+        .sel_i(wb_sel_i),
+        .rx_data(rx_data),
+        .tx_data(tx_data),
+        .control(control),
+        .baud_rate(baud_rate),
+        .rx_fifo(rx_fifo),
+        .tx_fifo(tx_fifo),
+        .status(status)
+    );
+
+    // Instantiate uart_core module
+    uart_core uart_core_inst (
+        .clk_i(wb_clk_i),
+        .rst_i(wb_rst_i),
+        .rx_i(srx_pad_i),
+        .tx_o(stx_pad_o),
+        .cts_i(cts_pad_i),
+        .rts_o(rts_pad_o),
+        .dtr_o(dtr_pad_o),
+        .dsr_i(dsr_pad_i),
+        .ri_i(ri_pad_i),
+        .dcd_i(dcd_pad_i),
+        .int_o(int_o),
+        .rx_data(rx_data),
+        .tx_data(tx_data),
+        .control(control),
+        .baud_rate(baud_rate),
+        .rx_fifo(rx_fifo),
+        .tx_fifo(tx_fifo),
+        .status(status)
+    );
+
+endmodule
+
+// Wishbone Slave Interface Module
+module wishbone_slave (
+    input wire clk_i,
+    input wire rst_i,
+    input wire [7:0] adr_i,
+    input wire [31:0] dat_i,
+    output reg [31:0] dat_o,
+    input wire we_i,
+    input wire stb_i,
+    input wire cyc_i,
+    output reg ack_o,
+    input wire [3:0] sel_i,
+    output reg [7:0] rx_data,
+    input wire [7:0] tx_data,
+    input wire [7:0] control,
+    input wire [15:0] baud_rate,
+    input wire [7:0] rx_fifo,
+    input wire [7:0] tx_fifo,
+    input wire [7:0] status
+);
+
+    // Internal registers
+    reg [7:0] r_rx_data;
+    reg [7:0] r_tx_data;
+    reg [7:0] r_control;
+    reg [15:0] r_baud_rate;
+    reg [7:0] r_rx_fifo;
+    reg [7:0] r_tx_fifo;
+    reg [7:0] r_status;
+
+    // Assign internal registers to output signals
+    assign rx_data = r_rx_data;
+    assign tx_data = r_tx_data;
+    assign control = r_control;
+    assign baud_rate = r_baud_rate;
+    assign rx_fifo = r_rx_fifo;
+    assign tx_fifo = r_tx_fifo;
+    assign status = r_status;
+
+    // Register map
+    localparam REG_RX_DATA = 8'h0;
+    localparam REG_TX_DATA = 8'h1;
+    localparam REG_CONTROL = 8'h2;
+    localparam REG_BAUD_RATE = 8'h3;
+    localparam REG_RX_FIFO = 8'h4;
+    localparam REG_TX_FIFO = 8'h5;
+    localparam REG_STATUS = 8'h6;
+
+    // Wishbone transaction handling
+    always @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            ack_o <= 0;
+            r_rx_data <= 0;
+            r_tx_data <= 0;
+            r_control <= 0;
+            r_baud_rate <= 0;
+            r_rx_fifo <= 0;
+            r_tx_fifo <= 0;
+            r_status <= 0;
+        end else if (cyc_i && stb_i) begin
+            ack_o <= 1;
+            dat_o <= 0;
+
+            if (we_i) begin
+                case (adr_i)
+                    REG_RX_DATA: r_rx_data <= dat_i[7:0];
+                    REG_TX_DATA: r_tx_data <= dat_i[7:0];
+                    REG_CONTROL: r_control <= dat_i[7:0];
+                    REG_BAUD_RATE: r_baud_rate <= dat_i[15:0];
+                endcase
+            end else begin
+                case (adr_i)
+                    REG_RX_DATA: dat_o[7:0] <= r_rx_data;
+                    REG_TX_DATA: dat_o[7:0] <= r_tx_data;
+                    REG_CONTROL: dat_o[7:0] <= r_control;
+                    REG_BAUD_RATE: dat_o[15:0] <= r_baud_rate;
+                    REG_RX_FIFO: dat_o[7:0] <= r_rx_fifo;
+                    REG_TX_FIFO: dat_o[7:0] <= r_tx_fifo;
+                    REG_STATUS: dat_o[7:0] <= r_status;
+                endcase
+            end
+        end else begin
+            ack_o <= 0;
+        end
+    end
+
+endmodule
+
+// UART Core Module
+module uart_core (
+    input wire clk_i,
+    input wire rst_i,
+    input wire rx_i,
+    output reg tx_o,
+    input wire cts_i,
+    output reg rts_o,
+    output reg dtr_o,
+    input wire dsr_i,
+    input wire ri_i,
+    input wire dcd_i,
+    output reg int_o,
+    input wire [7:0] rx_data,
+    input wire [7:0] tx_data,
+    input wire [7:0] control,
+    input wire [15:0] baud_rate,
+    input wire [7:0] rx_fifo,
+    input wire [7:0] tx_fifo,
+    input wire [7:0] status
+);
+
+    // Internal signals
+    reg [7:0] tx_shift_reg;
+    reg [3:0] tx_bit_cnt;
+    reg tx_start;
+    reg tx_done;
+    reg [15:0] baud_cnt;
+    reg [15:0] baud_max;
+
+    // Baud rate generation
+    always @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            baud_cnt <= 0;
+            baud_max <= baud_rate;
+        end else begin
+            if (baud_cnt == baud_max) begin
+                baud_cnt <= 0;
+            end else begin
+                baud_cnt <= baud_cnt + 1;
+            end
+        end
+    end
+
+    // Transmit logic
+    always @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            tx_o <= 1;
+            tx_start <= 0;
+            tx_done <= 0;
+            tx_shift_reg <= 0;
+            tx_bit_cnt <= 0;
+        end else begin
+            if (tx_start && baud_cnt == 0) begin
+                tx_o <= tx_shift_reg[0];
+                tx_shift_reg <= {tx_shift_reg[6:0], 1'b1};
+                tx_bit_cnt <= tx_bit_cnt + 1;
+                if (tx_bit_cnt == 8) begin
+                    tx_done <= 1;
+                end
+            end else if (tx_done && baud_cnt == 0) begin
+                tx_o <= 1;
+                tx_start <= 0;
+                tx_done <= 0;
+                tx_bit_cnt <= 0;
+            end else if (baud_cnt == 0) begin
+                tx_start <= (control[5] && !tx_fifo_empty) ? 1 : 0;
+            end
+        end
+    end
+
+    // FIFOs and control logic
+    reg [7:0] rx_fifo_reg;
+    reg [7:0] tx_fifo_reg;
+    reg [2:0] rx_fifo_cnt;
+    reg [2:0] tx_fifo_cnt;
+    reg rx_fifo_full;
+    reg rx_fifo_empty;
+    reg tx_fifo_full;
+    reg tx_fifo_empty;
+
+    // RX FIFO logic
+    always @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            rx_fifo_reg <= 0;
+            rx_fifo_cnt <= 0;
+            rx_fifo_full <= 0;
+            rx_fifo_empty <= 1;
+        end else if (rx_fifo_cnt < 8 && !rx_fifo_full) begin
+            if (rx_start && baud_cnt == 0) begin
+                rx_fifo_reg <= rx_shift_reg;
+                rx_fifo_cnt <= rx_fifo_cnt + 1;
+                if (rx_fifo_cnt == 7) begin
+                    rx_fifo_full <= 1;
+                end
+                rx_fifo_empty <= 0;
+            end
+        end else if (rx_fifo_cnt > 0 && !rx_fifo_empty) begin
+            if (control[2]) begin
+                rx_fifo_cnt <= rx_fifo_cnt - 1;
+                if (rx_fifo_cnt == 1) begin
+                    rx_fifo_empty <= 1;
+                end
+                rx_fifo_full <= 0;
+            end
+        end
+    end
+
+    // TX FIFO logic
+    always @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            tx_fifo_reg <= 0;
+            tx_fifo_cnt <= 0;
+            tx_fifo_full <= 0;
+            tx_fifo_empty <= 1;
+        end else if (tx_fifo_cnt < 8 && !tx_fifo_full) begin
+            if (control[6] && !tx_fifo_full) begin
+                tx_fifo_reg <= tx_data;
+                tx_fifo_cnt <= tx_fifo_cnt + 1;
+                if (tx_fifo_cnt == 7) begin
+                    tx_fifo_full <= 1;
+                end
+                tx_fifo_empty <= 0;
+            end
+        end else if (tx_fifo_cnt > 0 && !tx_fifo_empty) begin
+            if (tx_done) begin
+                tx_fifo_cnt <= tx_fifo_cnt - 1;
+                if (tx_fifo_cnt == 1) begin
+                    tx_fifo_empty <= 1;
+                end
+                tx_fifo_full <= 0;
+            end
+        end
+    end
+
+    // Modem control and status
+    always @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            rts_o <= 1;
+            dtr_o <= 1;
+        end else begin
+            rts_o <= control[1];
+            dtr_o <= control[0];
+        end
+    end
+
+    // Interrupt logic
+    always @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            int_o <= 0;
+        end else begin
+            int_o <= (rx_fifo_full || tx_fifo_empty) ? 1 : 0;
+        end
+    end
+
+endmodule

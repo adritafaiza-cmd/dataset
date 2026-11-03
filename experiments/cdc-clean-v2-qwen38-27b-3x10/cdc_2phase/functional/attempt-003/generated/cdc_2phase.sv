@@ -1,0 +1,140 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain: request signal
+  reg src_req;
+  wire src_fire = src_valid_i & src_ready_o;
+
+  // Destination domain: acknowledge signal
+  reg dst_ack;
+
+  // Synchronizers
+  // src_req synchronized to dst domain
+  reg [2:0] req_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      req_sync <= 3'b000;
+    else
+      req_sync <= {req_sync[1:0], src_req};
+  end
+
+  // dst_ack synchronized to src domain
+  reg [2:0] ack_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      ack_sync <= 3'b000;
+    else
+      ack_sync <= {ack_sync[1:0], dst_ack};
+  end
+
+  // Source domain logic
+  // src_ready_o is high when we can accept a new item
+  // We can accept when src_req is low (no outstanding request)
+  // src_req is set when src_fire occurs, cleared when dst_ack (synchronized) is high
+  // But we need to be careful: we clear src_req when we see the ack, but we must
+  // ensure we don't clear it prematurely.
+
+  // Let's use a state machine approach in source domain
+  // States: IDLE, WAIT_ACK
+  // In IDLE: src_ready_o = 1, src_req = 0
+  //   If src_fire: go to WAIT_ACK, set src_req = 1
+  // In WAIT_ACK: src_ready_o = 0, src_req = 1
+  //   If ack_sync[2] (synchronized dst_ack) is high: go to IDLE, clear src_req = 0
+
+  // Actually, let's think about this more carefully.
+  // The two-phase handshake:
+  // - src_req goes high when source has data to send
+  // - dst_ack goes high when destination has acknowledged
+  // - src_req goes low after seeing dst_ack high
+  // - dst_ack goes low after seeing src_req low
+
+  // But we need to handle the data transfer as well.
+  // The data must be stable while src_req is high.
+
+  // Let's use a simpler approach:
+  // Source domain:
+  //   - src_ready_o = ~src_req (can accept when no outstanding request)
+  //   - When src_fire: latch data, set src_req
+  //   - When synchronized dst_ack is high: clear src_req
+
+  // Destination domain:
+  //   - When synchronized src_req transitions from 0 to 1: latch data, set dst_valid
+  //   - When dst_valid & dst_ready: clear dst_valid, set dst_ack
+  //   - When synchronized src_req is low: clear dst_ack
+
+  // Wait, but the data needs to be transferred. Let's latch the data in source domain
+  // when src_fire occurs, and keep it stable while src_req is high.
+
+  reg [WIDTH-1:0] src_data_latch;
+  reg src_req_reg;
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_req_reg <= 1'b0;
+      src_data_latch <= {WIDTH{1'b0}};
+    end else begin
+      if (src_fire) begin
+        src_req_reg <= 1'b1;
+        src_data_latch <= src_data_i;
+      end else if (ack_sync[2]) begin
+        src_req_reg <= 1'b0;
+      end
+    end
+  end
+
+  assign src_ready_o = ~src_req_reg;
+  assign src_req = src_req_reg;
+
+  // Destination domain logic
+  // Detect rising edge of synchronized src_req
+  reg req_sync_prev;
+  wire req_rise = req_sync[2] & ~req_sync_prev;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      req_sync_prev <= 1'b0;
+    else
+      req_sync_prev <= req_sync[2];
+  end
+
+  reg dst_valid_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_ack_reg;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_data_reg <= {WIDTH{1'b0}};
+      dst_ack_reg <= 1'b0;
+    end else begin
+      // When we see a new request (rising edge of synchronized src_req)
+      if (req_rise) begin
+        dst_valid_reg <= 1'b1;
+        dst_data_reg <= src_data_latch; // This is a cross-domain read!
+      end else if (dst_valid_reg & dst_ready_i) begin
+        dst_valid_reg <= 1'b0;
+        dst_ack_reg <= 1'b1;
+      end else if (!req_sync[2]) begin
+        // src_req is low, so we can clear dst_ack
+        dst_ack_reg <= 1'b0;
+      end
+    end
+  end
+
+  assign dst_valid_o = dst_valid_reg;
+  assign dst_data_o = dst_data_reg;
+  assign dst_ack = dst_ack_reg;
+
+endmodule

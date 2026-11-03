@@ -1,0 +1,318 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam FIFO_DEPTH = 1 << LOG_DEPTH;
+    localparam FIFO_ADDR_WIDTH = LOG_DEPTH;
+
+    // Source-side state
+    reg src_state;
+    localparam SRC_IDLE = 1'b0;
+    localparam SRC_WAIT = 1'b1;
+
+    // Destination-side state
+    reg dst_state;
+    localparam DST_IDLE = 1'b0;
+    localparam DST_SETUP = 1'b1;
+    localparam DST_ACCESS = 1'b10;
+
+    // FIFO control signals
+    reg src_wr_en;
+    reg dst_rd_en;
+    wire src_fifo_full;
+    wire dst_fifo_empty;
+    wire [FIFO_ADDR_WIDTH-1:0] src_wr_ptr;
+    wire [FIFO_ADDR_WIDTH-1:0] dst_rd_ptr;
+
+    // FIFO data
+    reg [DATA_WIDTH-1:0] src_fifo_data [0:FIFO_DEPTH-1];
+    reg [ADDR_WIDTH-1:0] src_fifo_addr [0:FIFO_DEPTH-1];
+    reg [DATA_WIDTH/8-1:0] src_fifo_strb [0:FIFO_DEPTH-1];
+    reg [2:0] src_fifo_prot [0:FIFO_DEPTH-1];
+    reg src_fifo_write [0:FIFO_DEPTH-1];
+
+    // Destination read data
+    wire [DATA_WIDTH-1:0] dst_fifo_data;
+    wire [ADDR_WIDTH-1:0] dst_fifo_addr;
+    wire [DATA_WIDTH/8-1:0] dst_fifo_strb;
+    wire [2:0] dst_fifo_prot;
+    wire dst_fifo_write;
+
+    // Synchronization signals
+    reg [1:0] src_full_sync;
+    reg [1:0] dst_empty_sync;
+    reg [1:0] dst_done_sync;
+    reg [1:0] src_wr_ptr_sync;
+    reg [1:0] dst_rd_ptr_sync;
+
+    // Source-side FIFO write pointer
+    reg [FIFO_ADDR_WIDTH-1:0] src_wr_ptr_reg;
+    // Destination-side FIFO read pointer
+    reg [FIFO_ADDR_WIDTH-1:0] dst_rd_ptr_reg;
+
+    // Synchronize src_wr_ptr to dst domain
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni)
+            src_wr_ptr_sync <= 2'b00;
+        else
+            src_wr_ptr_sync <= {src_wr_ptr_sync[0], src_wr_ptr_reg[FIFO_ADDR_WIDTH-1]};
+    end
+
+    // Synchronize dst_rd_ptr to src domain
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            dst_rd_ptr_sync <= 2'b00;
+        else
+            dst_rd_ptr_sync <= {dst_rd_ptr_sync[0], dst_rd_ptr_reg[FIFO_ADDR_WIDTH-1]};
+    end
+
+    // Synchronize dst_done to src domain
+    reg dst_done;
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni)
+            dst_done <= 1'b0;
+        else
+            dst_done <= (dst_state == DST_ACCESS) && dst_pready_i;
+    end
+
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            dst_done_sync <= 2'b00;
+        else
+            dst_done_sync <= {dst_done_sync[0], dst_done};
+    end
+
+    // Synchronize src_full to dst domain
+    wire src_full = (src_wr_ptr_reg == dst_rd_ptr_sync[FIFO_ADDR_WIDTH-1:0]) && 
+                    (src_wr_ptr_reg[FIFO_ADDR_WIDTH-1] != dst_rd_ptr_sync[FIFO_ADDR_WIDTH-1]);
+    // Actually, for a simple FIFO with LOG_DEPTH, let's use a different approach
+    // Let's use a standard async FIFO with Gray code pointers
+
+    // Let me redo this with a proper async FIFO using Gray code
+
+    // Gray code conversion
+    function [FIFO_ADDR_WIDTH:0] bin2gray;
+        input [FIFO_ADDR_WIDTH:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    // Source-side write pointer (binary and gray)
+    reg [FIFO_ADDR_WIDTH:0] src_wr_ptr_bin;
+    wire [FIFO_ADDR_WIDTH:0] src_wr_ptr_gray = bin2gray(src_wr_ptr_bin);
+
+    // Destination-side read pointer (binary and gray)
+    reg [FIFO_ADDR_WIDTH:0] dst_rd_ptr_bin;
+    wire [FIFO_ADDR_WIDTH:0] dst_rd_ptr_gray = bin2gray(dst_rd_ptr_bin);
+
+    // Synchronize src_wr_ptr_gray to dst domain
+    reg [FIFO_ADDR_WIDTH:0] src_wr_ptr_gray_sync;
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni)
+            src_wr_ptr_gray_sync <= {(FIFO_ADDR_WIDTH+1){1'b0}};
+        else
+            src_wr_ptr_gray_sync <= src_wr_ptr_gray;
+    end
+
+    // Synchronize dst_rd_ptr_gray to src domain
+    reg [FIFO_ADDR_WIDTH:0] dst_rd_ptr_gray_sync;
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            dst_rd_ptr_gray_sync <= {(FIFO_ADDR_WIDTH+1){1'b0}};
+        else
+            dst_rd_ptr_gray_sync <= dst_rd_ptr_gray;
+    end
+
+    // Convert synchronized gray to binary
+    function [FIFO_ADDR_WIDTH:0] gray2bin;
+        input [FIFO_ADDR_WIDTH:0] gray;
+        reg [FIFO_ADDR_WIDTH:0] bin;
+        integer i;
+        begin
+            bin[FIFO_ADDR_WIDTH] = gray[FIFO_ADDR_WIDTH];
+            for (i = FIFO_ADDR_WIDTH-1; i >= 0; i = i-1)
+                bin[i] = gray[i] ^ bin[i+1];
+            gray2bin = bin;
+        end
+    endfunction
+
+    wire [FIFO_ADDR_WIDTH:0] src_wr_ptr_bin_sync = gray2bin(src_wr_ptr_gray_sync);
+    wire [FIFO_ADDR_WIDTH:0] dst_rd_ptr_bin_sync = gray2bin(dst_rd_ptr_gray_sync);
+
+    // Full and empty conditions
+    wire src_fifo_full = (src_wr_ptr_bin[FIFO_ADDR_WIDTH] != dst_rd_ptr_bin_sync[FIFO_ADDR_WIDTH]) && 
+                         (src_wr_ptr_bin[FIFO_ADDR_WIDTH-1:0] == dst_rd_ptr_bin_sync[FIFO_ADDR_WIDTH-1:0]);
+    wire dst_fifo_empty = (dst_rd_ptr_bin == src_wr_ptr_bin_sync);
+
+    // Source-side FIFO write
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_wr_ptr_bin <= {(FIFO_ADDR_WIDTH+1){1'b0}};
+            src_state <= SRC_IDLE;
+            src_pready_o <= 1'b0;
+            src_prdata_o <= {DATA_WIDTH{1'b0}};
+            src_pslverr_o <= 1'b0;
+        end else begin
+            case (src_state)
+                SRC_IDLE: begin
+                    src_pready_o <= 1'b0;
+                    if (src_psel_i && !src_fifo_full) begin
+                        src_wr_en <= 1'b1;
+                        src_state <= SRC_WAIT;
+                    end else begin
+                        src_wr_en <= 1'b0;
+                    end
+                end
+                SRC_WAIT: begin
+                    src_wr_en <= 1'b0;
+                    if (dst_done_sync[1]) begin
+                        src_state <= SRC_IDLE;
+                        src_pready_o <= 1'b1;
+                    end else begin
+                        src_pready_o <= 1'b0;
+                    end
+                end
+                default: begin
+                    src_state <= SRC_IDLE;
+                    src_pready_o <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Write to FIFO
+    always @(posedge src_pclk_i) begin
+        if (src_wr_en) begin
+            src_fifo_data[src_wr_ptr_bin[FIFO_ADDR_WIDTH-1:0]] <= src_pwdata_i;
+            src_fifo_addr[src_wr_ptr_bin[FIFO_ADDR_WIDTH-1:0]] <= src_paddr_i;
+            src_fifo_strb[src_wr_ptr_bin[FIFO_ADDR_WIDTH-1:0]] <= src_pstrb_i;
+            src_fifo_prot[src_wr_ptr_bin[FIFO_ADDR_WIDTH-1:0]] <= src_pprot_i;
+            src_fifo_write[src_wr_ptr_bin[FIFO_ADDR_WIDTH-1:0]] <= src_pwrite_i;
+            src_wr_ptr_bin <= src_wr_ptr_bin + 1'b1;
+        end
+    end
+
+    // Read from FIFO (destination side)
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_rd_ptr_bin <= {(FIFO_ADDR_WIDTH+1){1'b0}};
+            dst_state <= DST_IDLE;
+            dst_psel_o <= 1'b0;
+            dst_penable_o <= 1'b0;
+            dst_pwrite_o <= 1'b0;
+            dst_paddr_o <= {ADDR_WIDTH{1'b0}};
+            dst_pwdata_o <= {DATA_WIDTH{1'b0}};
+            dst_pstrb_o <= {(DATA_WIDTH/8){1'b0}};
+            dst_pprot_o <= 3'b000;
+        end else begin
+            case (dst_state)
+                DST_IDLE: begin
+                    dst_psel_o <= 1'b0;
+                    dst_penable_o <= 1'b0;
+                    if (!dst_fifo_empty) begin
+                        dst_rd_en <= 1'b1;
+                        dst_state <= DST_SETUP;
+                        dst_psel_o <= 1'b1;
+                    end else begin
+                        dst_rd_en <= 1'b0;
+                    end
+                end
+                DST_SETUP: begin
+                    dst_rd_en <= 1'b0;
+                    dst_psel_o <= 1'b1;
+                    dst_penable_o <= 1'b1;
+                    dst_state <= DST_ACCESS;
+                end
+                DST_ACCESS: begin
+                    dst_psel_o <= 1'b1;
+                    dst_penable_o <= 1'b1;
+                    if (dst_pready_i) begin
+                        dst_state <= DST_IDLE;
+                        dst_psel_o <= 1'b0;
+                        dst_penable_o <= 1'b0;
+                    end
+                end
+                default: begin
+                    dst_state <= DST_IDLE;
+                    dst_psel_o <= 1'b0;
+                    dst_penable_o <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Read data from FIFO
+    always @(posedge dst_pclk_i) begin
+        if (dst_rd_en) begin
+            dst_rd_ptr_bin <= dst_rd_ptr_bin + 1'b1;
+        end
+    end
+
+    // Combinational read from FIFO
+    assign dst_fifo_data = src_fifo_data[dst_rd_ptr_bin[FIFO_ADDR_WIDTH-1:0]];
+    assign dst_fifo_addr = src_fifo_addr[dst_rd_ptr_bin[FIFO_ADDR_WIDTH-1:0]];
+    assign dst_fifo_strb = src_fifo_strb[dst_rd_ptr_bin[FIFO_ADDR_WIDTH-1:0]];
+    assign dst_fifo_prot = src_fifo_prot[dst_rd_ptr_bin[FIFO_ADDR_WIDTH-1:0]];
+    assign dst_fifo_write = src_fifo_write[dst_rd_ptr_bin[FIFO_ADDR_WIDTH-1:0]];
+
+    // Drive destination APB signals
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_pwrite_o <= 1'b0;
+            dst_paddr_o <= {ADDR_WIDTH{1'b0}};
+            dst_pwdata_o <= {DATA_WIDTH{1'b0}};
+            dst_pstrb_o <= {(DATA_WIDTH/8){1'b0}};
+            dst_pprot_o <= 3'b000;
+        end else begin
+            if (dst_state == DST_IDLE && !dst_fifo_empty) begin
+                dst_pwrite_o <= dst_fifo_write;
+                dst_paddr_o <= dst_fifo_addr;
+                dst_pwdata_o <= dst_fifo_data;
+                dst_pstrb_o <= dst_fifo_strb;
+                dst_pprot_o <= dst_fifo_prot;
+            end
+        end
+    end
+
+    // Return read data and error to source
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_prdata_o <= {DATA_WIDTH{1'b0}};
+            src_pslverr_o <= 1'b0;
+        end else begin
+            if (dst_done_sync[1]) begin
+                src_prdata_o <= dst_prdata_i;
+                src_pslverr_o <= dst_pslverr_i;
+            end
+        end
+    end
+
+endmodule

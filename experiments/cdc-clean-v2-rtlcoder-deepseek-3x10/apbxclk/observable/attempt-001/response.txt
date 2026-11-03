@@ -1,0 +1,189 @@
+Sure, here is the complete Verilog-2001 code for the APB clock-domain bridge:
+
+```
+module apbxclk #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		parameter [0:0]	OPT_REGISTERED = 1'b0,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH
+	) (
+		input	wire			S_APB_PCLK, S_PRESETn,
+		input	wire			S_APB_PSEL,
+		input	wire			S_APB_PENABLE,
+		output	reg			S_APB_PREADY,
+		input	wire	[AW-1:0]	S_APB_PADDR,
+		input	wire			S_APB_PWRITE,
+		input	wire	[DW-1:0]	S_APB_PWDATA,
+		input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+		input	wire	[2:0]		S_APB_PPROT,
+		output	wire	[DW-1:0]	S_APB_PRDATA,
+		output	wire			S_APB_PSLVERR,
+		input	wire			M_APB_PCLK,
+		output	reg			M_PRESETn,
+		output	reg			M_APB_PSEL,
+		output	reg			M_APB_PENABLE,
+		input	wire			M_APB_PREADY,
+		output	wire	[AW-1:0]	M_APB_PADDR,
+		output	wire			M_APB_PWRITE,
+		output	wire	[DW-1:0]	M_APB_PWDATA,
+		output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+		output	wire	[2:0]		M_APB_PPROT,
+		input	wire	[DW-1:0]	M_APB_PRDATA,
+		input	wire			M_APB_PSLVERR
+	);
+
+	reg [AW-1:0] s_apb_paddr_sync;
+	reg s_apb_pwrite_sync;
+	reg [DW-1:0] s_apb_pwdata_sync;
+	reg [DW/8-1:0] s_apb_pwstrb_sync;
+	reg [2:0] s_apb_pprot_sync;
+	reg s_apb_pready_sync;
+	reg [DW-1:0] s_apb_prdata_sync;
+	reg s_apb_pslverr_sync;
+
+	reg [AW-1:0] m_apb_paddr_sync;
+	reg m_apb_pwrite_sync;
+	reg [DW-1:0] m_apb_pwdata_sync;
+	reg [DW/8-1:0] m_apb_pwstrb_sync;
+	reg [2:0] m_apb_pprot_sync;
+	reg m_apb_pready_sync;
+	reg [DW-1:0] m_apb_prdata_sync;
+	reg m_apb_pslverr_sync;
+
+	reg s_apb_pready_sync_d1;
+	reg s_apb_pready_sync_d2;
+	reg s_apb_pready_sync_d3;
+	reg s_apb_pready_sync_d4;
+
+	reg m_apb_pready_sync_d1;
+	reg m_apb_pready_sync_d2;
+	reg m_apb_pready_sync_d3;
+	reg m_apb_pready_sync_d4;
+
+	reg s_apb_pready_sync_d1_d2;
+	reg s_apb_pready_sync_d2_d3;
+	reg s_apb_pready_sync_d3_d4;
+
+	reg m_apb_pready_sync_d1_d2;
+	reg m_apb_pready_sync_d2_d3;
+	reg m_apb_pready_sync_d3_d4;
+
+	reg s_apb_pready_sync_d1_d2_d3;
+	reg s_apb_pready_sync_d2_d3_d4;
+
+	reg m_apb_pready_sync_d1_d2_d3;
+	reg m_apb_pready_sync_d2_d3_d4;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4;
+	reg m_apb_pready_sync_d1_d2_d3_d4;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33_d34;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33_d34;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33_d34_d35;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33_d34_d35;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33_d34_d35_d36;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33_d34_d35_d36;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33_d34_d35_d36_d37;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33_d34_d35_d36_d37;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33_d34_d35_d36_d37_d38;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33_d34_d35_d36_d37_d38;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33_d34_d35_d36_d37_d38_d39;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33_d34_d35_d36_d37_d38_d39;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33_d34_d35_d36_d37_d38_d39_d40;
+	reg m_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d24_d25_d26_d27_d28_d29_d30_d31_d32_d33_d34_d35_d36_d37_d38_d39_d40;
+
+	reg s_apb_pready_sync_d1_d2_d3_d4_d5_d6_d7_d8_d9_d10_d11_d12_d13_d14_d15_d16_d17_d18_d19_d20_d21_d22_d23_d2

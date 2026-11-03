@@ -1,0 +1,129 @@
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain signals
+  logic src_valid_sync;
+  logic src_clear_sync;
+  logic src_clear_pending;
+  logic src_ready;
+  logic [WIDTH-1:0] src_data_sync;
+
+  // Destination domain signals
+  logic dst_valid_sync;
+  logic dst_clear_sync;
+  logic dst_clear_pending;
+  logic dst_ready;
+  logic [WIDTH-1:0] dst_data;
+
+  // Synchronization FIFO
+  logic [WIDTH-1:0] sync_fifo [0:SYNC_STAGES-1];
+  logic [SYNC_STAGES:0] sync_valid;
+  logic [SYNC_STAGES:0] sync_clear;
+
+  // Source domain logic
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_sync <= 0;
+      src_clear_sync <= 0;
+      src_clear_pending <= 0;
+      src_ready <= 0;
+    end else begin
+      // Synchronize clear signal
+      src_clear_sync <= src_clear_i;
+
+      // Handle clear request
+      if (src_clear_i) begin
+        src_clear_pending <= 1;
+        src_ready <= 0;
+      end else if (src_clear_pending && !dst_clear_sync) begin
+        src_clear_pending <= 0;
+      end
+
+      // Handle valid signal
+      if (src_valid_i && src_ready) begin
+        src_valid_sync <= 1;
+      end else if (dst_valid_sync && dst_ready) begin
+        src_valid_sync <= 0;
+      end
+
+      // Ready signal
+      src_ready <= !src_clear_pending && (!src_valid_sync || (dst_valid_sync && dst_ready));
+    end
+  end
+
+  // Synchronization logic
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      sync_valid <= 0;
+      sync_clear <= 0;
+      dst_valid_sync <= 0;
+      dst_clear_sync <= 0;
+      dst_clear_pending <= 0;
+      dst_ready <= 0;
+    end else begin
+      // Shift valid and clear signals through synchronization stages
+      sync_valid[0] <= src_valid_sync;
+      sync_clear[0] <= src_clear_sync;
+      for (int i = 1; i < SYNC_STAGES; i = i + 1) begin
+        sync_valid[i] <= sync_valid[i-1];
+        sync_clear[i] <= sync_clear[i-1];
+      end
+
+      // Synchronize valid and clear signals
+      dst_valid_sync <= sync_valid[SYNC_STAGES-1];
+      dst_clear_sync <= sync_clear[SYNC_STAGES-1];
+
+      // Handle clear request
+      if (dst_clear_i) begin
+        dst_clear_pending <= 1;
+        dst_ready <= 0;
+      end else if (dst_clear_pending && !src_clear_sync) begin
+        dst_clear_pending <= 0;
+      end
+
+      // Handle ready signal
+      dst_ready <= !dst_clear_pending && (!dst_valid_sync || dst_ready_i);
+
+      // Capture data on the valid edge
+      if (src_valid_i && src_ready) begin
+        sync_fifo[0] <= src_data_i;
+      end else if (dst_valid_sync && dst_ready) begin
+        sync_fifo[0] <= sync_fifo[1];
+      end
+
+      // Shift data through synchronization stages
+      for (int i = 1; i < SYNC_STAGES; i = i + 1) begin
+        sync_fifo[i] <= sync_fifo[i-1];
+      end
+
+      // Output data
+      dst_data <= sync_fifo[SYNC_STAGES-1];
+    end
+  end
+
+  // Output assignments
+  assign src_clear_pending_o = src_clear_pending;
+  assign src_ready_o = src_ready;
+  assign dst_clear_pending_o = dst_clear_pending;
+  assign dst_data_o = dst_data;
+  assign dst_valid_o = dst_valid_sync;
+
+endmodule

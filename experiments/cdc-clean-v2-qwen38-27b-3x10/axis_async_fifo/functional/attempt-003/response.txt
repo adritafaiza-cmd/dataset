@@ -1,0 +1,372 @@
+```verilog
+module axis_async_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    /*
+     * AXI input
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   s_pause_req,
+    output wire                   s_pause_ack,
+    input  wire                   m_pause_req,
+    output wire                   m_pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] s_status_depth,
+    output wire [$clog2(DEPTH):0] s_status_depth_commit,
+    output wire                   s_status_overflow,
+    output wire                   s_status_bad_frame,
+    output wire                   s_status_good_frame,
+    output wire [$clog2(DEPTH):0] m_status_depth,
+    output wire [$clog2(DEPTH):0] m_status_depth_commit,
+    output wire                   m_status_overflow,
+    output wire                   m_status_bad_frame,
+    output wire                   m_status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam PTR_WIDTH = ADDR_WIDTH + 1;
+    localparam DEPTH_MASK = DEPTH - 1;
+
+    // Total data width for storage
+    localparam TOTAL_DATA_WIDTH = DATA_WIDTH + 
+                                  (KEEP_ENABLE ? KEEP_WIDTH : 0) +
+                                  (LAST_ENABLE ? 1 : 0) +
+                                  (ID_ENABLE ? ID_WIDTH : 0) +
+                                  (DEST_ENABLE ? DEST_WIDTH : 0) +
+                                  (USER_ENABLE ? USER_WIDTH : 0);
+
+    // Internal signals
+    reg [TOTAL_DATA_WIDTH-1:0] mem [0:DEPTH-1];
+    
+    // Write pointer (source clock domain)
+    reg [PTR_WIDTH-1:0] w_ptr;
+    // Read pointer (master clock domain)
+    reg [PTR_WIDTH-1:0] r_ptr;
+    
+    // Gray code pointers for CDC
+    reg [PTR_WIDTH-1:0] w_ptr_gray;
+    reg [PTR_WIDTH-1:0] r_ptr_gray;
+    
+    // Synchronizers
+    reg [PTR_WIDTH-1:0] w_ptr_gray_sync1, w_ptr_gray_sync2;
+    reg [PTR_WIDTH-1:0] r_ptr_gray_sync1, r_ptr_gray_sync2;
+    
+    // Binary pointers from gray code
+    reg [PTR_WIDTH-1:0] w_ptr_bin_sync;
+    reg [PTR_WIDTH-1:0] r_ptr_bin_sync;
+    
+    // Status flags
+    reg s_overflow;
+    reg m_overflow;
+    reg s_bad_frame;
+    reg m_bad_frame;
+    reg s_good_frame;
+    reg m_good_frame;
+    
+    // Pause signals
+    reg s_pause_active;
+    reg m_pause_active;
+    
+    // Frame tracking
+    reg in_frame;
+    reg frame_overflow;
+    
+    // Helper functions
+    function [PTR_WIDTH-1:0] gray_to_bin;
+        input [PTR_WIDTH-1:0] gray;
+        integer i;
+        begin
+            gray_to_bin[PTR_WIDTH-1] = gray[PTR_WIDTH-1];
+            for (i = PTR_WIDTH-2; i >= 0; i = i - 1)
+                gray_to_bin[i] = gray_to_bin[i+1] ^ gray[i];
+        end
+    endfunction
+    
+    function [PTR_WIDTH-1:0] bin_to_gray;
+        input [PTR_WIDTH-1:0] bin;
+        begin
+            bin_to_gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    // Write data assembly
+    wire [TOTAL_DATA_WIDTH-1:0] w_data;
+    assign w_data = {
+        (USER_ENABLE ? s_axis_tuser : {USER_WIDTH{1'b0}}),
+        (DEST_ENABLE ? s_axis_tdest : {DEST_WIDTH{1'b0}}),
+        (ID_ENABLE ? s_axis_tid : {ID_WIDTH{1'b0}}),
+        (LAST_ENABLE ? s_axis_tlast : 1'b0),
+        (KEEP_ENABLE ? s_axis_tkeep : {KEEP_WIDTH{1'b0}}),
+        s_axis_tdata
+    };
+
+    // Read data extraction
+    wire [TOTAL_DATA_WIDTH-1:0] r_data;
+    wire [DATA_WIDTH-1:0] r_tdata;
+    wire [KEEP_WIDTH-1:0] r_tkeep;
+    wire r_tlast;
+    wire [ID_WIDTH-1:0] r_tid;
+    wire [DEST_WIDTH-1:0] r_tdest;
+    wire [USER_WIDTH-1:0] r_tuser;
+
+    assign r_tdata = r_data[DATA_WIDTH-1:0];
+    assign r_tkeep = KEEP_ENABLE ? r_data[DATA_WIDTH + KEEP_WIDTH-1:DATA_WIDTH] : {KEEP_WIDTH{1'b0}};
+    assign r_tlast = LAST_ENABLE ? r_data[DATA_WIDTH + (KEEP_ENABLE ? KEEP_WIDTH : 0)] : 1'b0;
+    assign r_tid = ID_ENABLE ? r_data[DATA_WIDTH + (KEEP_ENABLE ? KEEP_WIDTH : 0) + (LAST_ENABLE ? 1 : 0) + ID_WIDTH-1 : DATA_WIDTH + (KEEP_ENABLE ? KEEP_WIDTH : 0) + (LAST_ENABLE ? 1 : 0)] : {ID_WIDTH{1'b0}};
+    assign r_tdest = DEST_ENABLE ? r_data[DATA_WIDTH + (KEEP_ENABLE ? KEEP_WIDTH : 0) + (LAST_ENABLE ? 1 : 0) + (ID_ENABLE ? ID_WIDTH : 0) + DEST_WIDTH-1 : DATA_WIDTH + (KEEP_ENABLE ? KEEP_WIDTH : 0) + (LAST_ENABLE ? 1 : 0) + (ID_ENABLE ? ID_WIDTH : 0)] : {DEST_WIDTH{1'b0}};
+    assign r_tuser = USER_ENABLE ? r_data[TOTAL_DATA_WIDTH-1:DATA_WIDTH + (KEEP_ENABLE ? KEEP_WIDTH : 0) + (LAST_ENABLE ? 1 : 0) + (ID_ENABLE ? ID_WIDTH : 0) + (DEST_ENABLE ? DEST_WIDTH : 0)] : {USER_WIDTH{1'b0}};
+
+    // Depth calculation
+    wire [PTR_WIDTH-1:0] w_ptr_bin_m;
+    wire [PTR_WIDTH-1:0] r_ptr_bin_s;
+    wire [PTR_WIDTH-1:0] depth_s;
+    wire [PTR_WIDTH-1:0] depth_m;
+    
+    assign w_ptr_bin_m = gray_to_bin(w_ptr_gray_sync2);
+    assign r_ptr_bin_s = gray_to_bin(r_ptr_gray_sync2);
+    
+    assign depth_s = w_ptr - r_ptr_bin_s;
+    assign depth_m = w_ptr_bin_m - r_ptr;
+
+    // Full and empty conditions
+    wire s_full;
+    wire m_empty;
+    wire s_empty;
+    wire m_full;
+    
+    assign s_full = (w_ptr[PTR_WIDTH-1] == r_ptr_bin_s[PTR_WIDTH-1]) && 
+                    (w_ptr[ADDR_WIDTH-1:0] == r_ptr_bin_s[ADDR_WIDTH-1:0]) &&
+                    (w_ptr[PTR_WIDTH-1] != r_ptr_bin_s[PTR_WIDTH-1]) ||
+                    (w_ptr == r_ptr_bin_s + DEPTH);
+    
+    // Simpler full check: full when write pointer has lapped read pointer by DEPTH
+    assign s_full = (w_ptr - r_ptr_bin_s) == DEPTH;
+    assign m_empty = (w_ptr_bin_m - r_ptr) == 0;
+    assign s_empty = (w_ptr - r_ptr_bin_s) == 0;
+    assign m_full = (w_ptr_bin_m - r_ptr) == DEPTH;
+
+    // Write enable
+    wire s_write_en;
+    assign s_write_en = s_axis_tvalid && s_axis_tready && !s_pause_active;
+
+    // Read enable
+    wire m_read_en;
+    assign m_read_en = m_axis_tvalid && m_axis_tready && !m_pause_active;
+
+    // Source clock domain
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            w_ptr <= {PTR_WIDTH{1'b0}};
+            w_ptr_gray <= {PTR_WIDTH{1'b0}};
+            s_overflow <= 1'b0;
+            s_bad_frame <= 1'b0;
+            s_good_frame <= 1'b0;
+            s_pause_active <= 1'b0;
+            in_frame <= 1'b0;
+            frame_overflow <= 1'b0;
+        end else begin
+            // Update write pointer
+            if (s_write_en) begin
+                w_ptr <= w_ptr + 1'b1;
+            end
+            
+            // Update gray code
+            w_ptr_gray <= bin_to_gray(w_ptr);
+            
+            // Overflow detection
+            if (s_write_en && s_full) begin
+                s_overflow <= 1'b1;
+            end
+            
+            // Frame tracking
+            if (s_write_en) begin
+                if (s_axis_tlast) begin
+                    if (in_frame) begin
+                        s_good_frame <= 1'b1;
+                    end
+                    in_frame <= 1'b0;
+                end else begin
+                    in_frame <= 1'b1;
+                end
+            end
+            
+            // Pause handling
+            if (PAUSE_ENABLE) begin
+                if (s_pause_req) begin
+                    s_pause_active <= 1'b1;
+                end else if (s_empty) begin
+                    s_pause_active <= 1'b0;
+                end
+            end
+        end
+    end
+
+    // Write to memory
+    always @(posedge s_clk) begin
+        if (s_write_en) begin
+            mem[w_ptr[ADDR_WIDTH-1:0]] <= w_data;
+        end
+    end
+
+    // Synchronize write pointer gray code to master clock
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            w_ptr_gray_sync1 <= {PTR_WIDTH{1'b0}};
+            w_ptr_gray_sync2 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            w_ptr_gray_sync1 <= w_ptr_gray;
+            w_ptr_gray_sync2 <= w_ptr_gray_sync1;
+        end
+    end
+
+    // Synchronize read pointer gray code to source clock
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            r_ptr_gray_sync1 <= {PTR_WIDTH{1'b0}};
+            r_ptr_gray_sync2 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            r_ptr_gray_sync1 <= r_ptr_gray;
+            r_ptr_gray_sync2 <= r_ptr_gray_sync1;
+        end
+    end
+
+    // Master clock domain
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            r_ptr <= {PTR_WIDTH{1'b0}};
+            r_ptr_gray <= {PTR_WIDTH{1'b0}};
+            m_overflow <= 1'b0;
+            m_bad_frame <= 1'b0;
+            m_good_frame <= 1'b0;
+            m_pause_active <= 1'b0;
+        end else begin
+            // Update read pointer
+            if (m_read_en) begin
+                r_ptr <= r_ptr + 1'b1;
+            end
+            
+            // Update gray code
+            r_ptr_gray <= bin_to_gray(r_ptr);
+            
+            // Pause handling
+            if (PAUSE_ENABLE) begin
+                if (m_pause_req) begin
+                    m_pause_active <= 1'b1;
+                end else if (m_empty) begin
+                    m_pause_active <= 1'b0;
+                end
+            end
+        end
+    end
+
+    // Read from memory
+    reg [TOTAL_DATA_WIDTH-1:0] r_data_reg;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            r_data_reg <= {TOTAL_DATA_WIDTH{1'b0}};
+        end else begin
+            r_data_reg <= mem[r_ptr[ADDR_WIDTH-1:0]];
+        end
+    end
+
+    assign r_data = r_data_reg;
+
+    // Output valid
+    assign m_axis_tvalid = !m_empty && !m_pause_active;
+
+    // Output data
+    assign m_axis_tdata = r_tdata;
+    assign m_axis_tkeep = r_tkeep;
+    assign m_axis_tlast = r_tlast;
+    assign m_axis_tid = r_tid;
+    assign m_axis_tdest = r_tdest;
+    assign m_axis_tuser = r_tuser;
+
+    // Input ready
+    wire s_ready_base;
+    assign s_ready_base = !s_full && !s_pause_active;
+    
+    // Drop/mark when full logic
+    wire s_ready_final;
+    if (DROP_WHEN_FULL) begin
+        assign s_ready_final = 1'b1;
+    end else if (MARK_WHEN_FULL) begin
+        assign s_ready_final = s_ready_base;
+    end else begin
+        assign s_ready_final = s_ready_base;
+    end
+    
+    assign s_axis_tready = s_ready_final;
+
+    // Pause ack
+    assign s_pause_ack = s_pause_active;
+    assign m_pause_ack = m_pause_active;
+
+    // Status depth
+    assign s_status_depth = depth_s[ADDR_WIDTH:0];
+    assign m_status_depth = depth_m[ADDR_WIDTH:0];
+    
+    // Depth commit (simplified - use current depth)
+    assign s_status_depth_commit = depth_s[ADDR_WIDTH:0];
+    assign m_status_depth_commit = depth_m[ADDR_WIDTH:0];
+
+    // Status flags
+    assign s_status_overflow = s_overflow;
+    assign m_status_overflow = m_overflow;
+    assign s_status_bad_frame = s_bad_frame;
+    assign m_status_bad_frame = m_bad_frame;
+    assign s_status_good_frame = s_good_frame;
+    assign m_status_good_frame = m_good_frame;
+
+endmodule
+```<|im_end|>

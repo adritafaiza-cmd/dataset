@@ -1,0 +1,136 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "arbiter",
+            "function": "Multi-port request arbiter",
+            "parameters": [
+                {"name": "PORTS", "value": 4},
+                {"name": "ARB_TYPE_ROUND_ROBIN", "value": 0},
+                {"name": "ARB_BLOCK", "value": 0},
+                {"name": "ARB_BLOCK_ACK", "value": 1},
+                {"name": "ARB_LSB_HIGH_PRIORITY", "value": 0}
+            ],
+            "ports": [
+                {"name": "clk", "direction": "input", "width": 1, "clock_domain": "clk"},
+                {"name": "rst", "direction": "input", "width": 1, "clock_domain": "clk"},
+                {"name": "request", "direction": "input", "width": "PORTS", "clock_domain": "clk"},
+                {"name": "acknowledge", "direction": "input", "width": "PORTS", "clock_domain": "clk"},
+                {"name": "grant", "direction": "output", "width": "PORTS", "clock_domain": "clk"},
+                {"name": "grant_valid", "direction": "output", "width": 1, "clock_domain": "clk"},
+                {"name": "grant_encoded", "direction": "output", "width": "$clog2(PORTS)", "clock_domain": "clk"}
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {"name": "next_grant", "width": "PORTS"},
+                {"name": "current_grant", "width": "PORTS"},
+                {"name": "current_grant_encoded", "width": "$clog2(PORTS)"},
+                {"name": "request_valid", "width": 1},
+                {"name": "round_robin_counter", "width": "$clog2(PORTS)"},
+                {"name": "next_round_robin_counter", "width": "$clog2(PORTS)"}
+            ],
+            "behavior": [
+                "On reset (rst is active-high), clear all grants and set initial state.",
+                "Evaluate the request signal to determine which port(s) are requesting access.",
+                "If ARB_TYPE_ROUND_ROBIN is set, use a round-robin algorithm to select the next grant, starting from round_robin_counter.",
+                "If ARB_TYPE_ROUND_ROBIN is not set, use fixed priority to select the grant (higher index has higher priority by default, LSB has higher priority if ARB_LSB_HIGH_PRIORITY is set).",
+                "If ARB_BLOCK is set, hold the grant until the acknowledge signal is received (if ARB_BLOCK_ACK is nonzero) or the request drops (if ARB_BLOCK_ACK is zero).",
+                "Set grant_valid to indicate the validity of the grant.",
+                "Encode the grant signal into grant_encoded to indicate which port is granted.",
+                "Update the round_robin_counter to the next position after granting if ARB_TYPE_ROUND_ROBIN is set."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    reg [PORTS-1:0]                 next_grant;
+    reg [PORTS-1:0]                 current_grant;
+    reg [$clog2(PORTS)-1:0]         current_grant_encoded;
+    reg                             request_valid;
+    reg [$clog2(PORTS)-1:0]         round_robin_counter;
+    reg [$clog2(PORTS)-1:0]         next_round_robin_counter;
+
+    always @(*) begin
+        next_grant = 0;
+        next_round_robin_counter = round_robin_counter;
+        request_valid = |request;
+
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            // Find the next request starting from round_robin_counter
+            for (integer i = 0; i < PORTS; i = i + 1) begin
+                integer index = (round_robin_counter + i) % PORTS;
+                if (request[index]) begin
+                    next_grant[index] = 1;
+                    next_round_robin_counter = index + 1;
+                    break;
+                end
+            end
+        end else begin
+            // Fixed priority with LSB high priority if ARB_LSB_HIGH_PRIORITY
+            if (ARB_LSB_HIGH_PRIORITY) begin
+                for (integer i = 0; i < PORTS; i = i + 1) begin
+                    if (request[i]) begin
+                        next_grant[i] = 1;
+                        break;
+                    end
+                end
+            end else begin
+                for (integer i = PORTS - 1; i >= 0; i = i - 1) begin
+                    if (request[i]) begin
+                        next_grant[i] = 1;
+                        break;
+                    end
+                end
+            end
+        end
+    end
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            current_grant <= 0;
+            current_grant_encoded <= 0;
+            round_robin_counter <= 0;
+            grant_valid <= 0;
+        end else begin
+            if (!grant_valid || (!ARB_BLOCK_ACK && acknowledge[current_grant_encoded]) || !request[current_grant_encoded]) begin
+                current_grant <= next_grant;
+                current_grant_encoded <= 0;
+                for (integer i = 0; i < PORTS; i = i + 1) begin
+                    if (next_grant[i]) begin
+                        current_grant_encoded <= i;
+                    end
+                end
+                round_robin_counter <= next_round_robin_counter;
+                grant_valid <= request_valid;
+            end
+        end
+    end
+
+    assign grant = current_grant;
+    assign grant_encoded = current_grant_encoded;
+
+endmodule
+```

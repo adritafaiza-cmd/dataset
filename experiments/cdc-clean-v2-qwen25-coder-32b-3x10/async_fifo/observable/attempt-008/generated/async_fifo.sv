@@ -1,0 +1,129 @@
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 2**ASIZE;
+    localparam AWIDTH = ASIZE + 1;
+
+    reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+    reg [AWIDTH-1:0] wptr, rptr;
+    reg [AWIDTH-1:0] wptr_gray, rptr_gray;
+    reg [AWIDTH-1:0] wptr_gray_sync, rptr_gray_sync;
+
+    // Write side logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= 0;
+        end else if (winc && !wfull) begin
+            mem[wptr[ASIZE-1:0]] <= wdata;
+            wptr <= wptr + 1;
+        end
+    end
+
+    // Read side logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= 0;
+        end else if (rinc && !rempty) begin
+            rptr <= rptr + 1;
+        end
+    end
+
+    // Gray code conversion for pointers
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr_gray <= 0;
+        end else begin
+            wptr_gray <= (wptr >> 1) ^ wptr;
+        end
+    end
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr_gray <= 0;
+        end else begin
+            rptr_gray <= (rptr >> 1) ^ rptr;
+        end
+    end
+
+    // Synchronize gray pointers across clock domains
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_gray_sync <= 0;
+        end else begin
+            wptr_gray_sync <= wptr_gray;
+        end
+    end
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_sync <= 0;
+        end else begin
+            rptr_gray_sync <= rptr_gray;
+        end
+    end
+
+    // Binary conversion of synchronized gray pointers
+    reg [AWIDTH-1:0] wptr_sync_bin, rptr_sync_bin;
+
+    binary_conversion wptr_sync_bin_conv (
+        .gray(wptr_gray_sync),
+        .bin(wptr_sync_bin)
+    );
+
+    binary_conversion rptr_sync_bin_conv (
+        .gray(rptr_gray_sync),
+        .bin(rptr_sync_bin)
+    );
+
+    // Full and empty flags
+    assign wfull = (wptr_sync_bin == {rptr_gray[AWIDTH-1], rptr_gray[AWIDTH-2:0] + 1'b1});
+    assign rempty = (rptr_sync_bin == wptr_gray);
+
+    // Almost full and almost empty flags
+    assign awfull = (wptr_sync_bin == {rptr_gray[AWIDTH-1], rptr_gray[AWIDTH-2:0] + 2'b10});
+    assign arempty = (rptr_sync_bin == {wptr_gray[AWIDTH-1], wptr_gray[AWIDTH-2:0] + 1'b1});
+
+    // Read data output
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rdata <= 0;
+        end else if (rinc && !rempty) begin
+            rdata <= mem[rptr[ASIZE-1:0]];
+        end
+    end
+
+endmodule
+
+// Gray to binary conversion module
+module binary_conversion (
+    input  [AWIDTH-1:0] gray,
+    output [AWIDTH-1:0] bin
+);
+
+    assign bin[AWIDTH-1] = gray[AWIDTH-1];
+    genvar i;
+    generate
+        for (i = AWIDTH-2; i >= 0; i = i - 1) begin : gen_bin
+            assign bin[i] = bin[i+1] ^ gray[i];
+        end
+    endgenerate
+
+endmodule

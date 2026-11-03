@@ -1,0 +1,269 @@
+```verilog
+module apbxclk #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	parameter [0:0]	OPT_REGISTERED = 1'b0,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH
+) (
+	input	wire			S_APB_PCLK, S_PRESETn,
+	input	wire			S_APB_PSEL,
+	input	wire			S_APB_PENABLE,
+	output	reg			S_APB_PREADY,
+	input	wire	[AW-1:0]	S_APB_PADDR,
+	input	wire			S_APB_PWRITE,
+	input	wire	[DW-1:0]	S_APB_PWDATA,
+	input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+	input	wire	[2:0]		S_APB_PPROT,
+	output	wire	[DW-1:0]	S_APB_PRDATA,
+	output	wire			S_APB_PSLVERR,
+	input	wire			M_APB_PCLK,
+	output	reg			M_PRESETn,
+	output	reg			M_APB_PSEL,
+	output	reg			M_APB_PENABLE,
+	input	wire			M_APB_PREADY,
+	output	wire	[AW-1:0]	M_APB_PADDR,
+	output	wire			M_APB_PWRITE,
+	output	wire	[DW-1:0]	M_APB_PWDATA,
+	output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+	output	wire	[2:0]		M_APB_PPROT,
+	input	wire	[DW-1:0]	M_APB_PRDATA,
+	input	wire			M_APB_PSLVERR
+);
+
+	// ------------------------------------------------------------------
+	// Slave-side state machine
+	// ------------------------------------------------------------------
+	localparam S_IDLE = 2'd0;
+	localparam S_SETUP = 2'd1;
+	localparam S_ACCESS = 2'd2;
+	localparam S_DONE = 2'd3;
+
+	reg [1:0] s_state;
+	reg [1:0] s_state_next;
+
+	// Synchronization of slave request to master clock
+	reg s_req_valid;
+	reg s_req_valid_sync1, s_req_valid_sync2;
+
+	// Synchronization of master response to slave clock
+	reg m_resp_valid;
+	reg m_resp_valid_sync1, m_resp_valid_sync2;
+
+	// Captured request fields (in master clock domain)
+	reg [AW-1:0] m_addr;
+	reg m_write;
+	reg [DW-1:0] m_wdata;
+	reg [DW/8-1:0] m_wstrb;
+	reg [2:0] m_pprot;
+
+	// Captured response fields (in slave clock domain)
+	reg [DW-1:0] s_rdata;
+	reg s_slverr;
+
+	// Master-side state machine
+	localparam M_IDLE = 2'd0;
+	localparam M_SETUP = 2'd1;
+	localparam M_ACCESS = 2'd2;
+	localparam M_DONE = 2'd3;
+
+	reg [1:0] m_state;
+	reg [1:0] m_state_next;
+
+	// ------------------------------------------------------------------
+	// Slave clock domain
+	// ------------------------------------------------------------------
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_state <= S_IDLE;
+			s_req_valid <= 1'b0;
+			s_rdata <= {DW{1'b0}};
+			s_slverr <= 1'b0;
+			S_APB_PREADY <= 1'b0;
+		end else begin
+			s_state <= s_state_next;
+			S_APB_PREADY <= (s_state_next == S_ACCESS) ? 1'b1 : 1'b0;
+
+			// Capture response when master response arrives
+			if (m_resp_valid_sync2) begin
+				s_rdata <= m_rdata_sync;
+				s_slverr <= m_slverr_sync;
+				s_req_valid <= 1'b0;
+			end
+
+			// Assert request when entering SETUP
+			if (s_state == S_IDLE && S_APB_PSEL) begin
+				s_req_valid <= 1'b1;
+			end
+		end
+	end
+
+	// Slave state machine next-state logic
+	always @(*) begin
+		s_state_next = s_state;
+		case (s_state)
+			S_IDLE: begin
+				if (S_APB_PSEL)
+					s_state_next = S_SETUP;
+			end
+			S_SETUP: begin
+				if (S_APB_PENABLE)
+					s_state_next = S_ACCESS;
+			end
+			S_ACCESS: begin
+				if (m_resp_valid_sync2)
+					s_state_next = S_DONE;
+			end
+			S_DONE: begin
+				s_state_next = S_IDLE;
+			end
+			default: s_state_next = S_IDLE;
+		endcase
+	end
+
+	// Synchronize m_resp_valid to slave clock
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_resp_valid_sync1 <= 1'b0;
+			m_resp_valid_sync2 <= 1'b0;
+		end else begin
+			m_resp_valid_sync1 <= m_resp_valid;
+			m_resp_valid_sync2 <= m_resp_valid_sync1;
+		end
+	end
+
+	// Synchronize response data to slave clock
+	reg [DW-1:0] m_rdata_sync;
+	reg m_slverr_sync;
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_rdata_sync <= {DW{1'b0}};
+			m_slverr_sync <= 1'b0;
+		end else begin
+			m_rdata_sync <= m_rdata;
+			m_slverr_sync <= m_slverr;
+		end
+	end
+
+	// ------------------------------------------------------------------
+	// Master clock domain
+	// ------------------------------------------------------------------
+	// Synchronize s_req_valid to master clock
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			s_req_valid_sync1 <= 1'b0;
+			s_req_valid_sync2 <= 1'b0;
+		end else begin
+			s_req_valid_sync1 <= s_req_valid;
+			s_req_valid_sync2 <= s_req_valid_sync1;
+		end
+	end
+
+	// Capture request fields when synchronized request arrives
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_addr <= {AW{1'b0}};
+			m_write <= 1'b0;
+			m_wdata <= {DW{1'b0}};
+			m_wstrb <= {(DW/8){1'b0}};
+			m_pprot <= 3'b0;
+			m_state <= M_IDLE;
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			m_resp_valid <= 1'b0;
+			m_rdata <= {DW{1'b0}};
+			m_slverr <= 1'b0;
+		end else begin
+			m_state <= m_state_next;
+
+			// Capture request fields when entering SETUP
+			if (m_state == M_IDLE && s_req_valid_sync2) begin
+				m_addr <= S_APB_PADDR;
+				m_write <= S_APB_PWRITE;
+				m_wdata <= S_APB_PWDATA;
+				m_wstrb <= S_APB_PWSTRB;
+				m_pprot <= S_APB_PPROT;
+			end
+
+			// Drive master APB signals
+			case (m_state_next)
+				M_SETUP: begin
+					M_APB_PSEL <= 1'b1;
+					M_APB_PENABLE <= 1'b0;
+				end
+				M_ACCESS: begin
+					M_APB_PSEL <= 1'b1;
+					M_APB_PENABLE <= 1'b1;
+				end
+				default: begin
+					M_APB_PSEL <= 1'b0;
+					M_APB_PENABLE <= 1'b0;
+				end
+			endcase
+
+			// Capture response and assert m_resp_valid
+			if (m_state == M_ACCESS && M_APB_PREADY) begin
+				m_rdata <= M_APB_PRDATA;
+				m_slverr <= M_APB_PSLVERR;
+				m_resp_valid <= 1'b1;
+			end else if (m_state == M_DONE) begin
+				m_resp_valid <= 1'b0;
+			end
+		end
+	end
+
+	// Master state machine next-state logic
+	always @(*) begin
+		m_state_next = m_state;
+		case (m_state)
+			M_IDLE: begin
+				if (s_req_valid_sync2)
+					m_state_next = M_SETUP;
+			end
+			M_SETUP: begin
+				m_state_next = M_ACCESS;
+			end
+			M_ACCESS: begin
+				if (M_APB_PREADY)
+					m_state_next = M_DONE;
+			end
+			M_DONE: begin
+				m_state_next = M_IDLE;
+			end
+			default: m_state_next = M_IDLE;
+		endcase
+	end
+
+	// ------------------------------------------------------------------
+	// Master APB output assignments
+	// ------------------------------------------------------------------
+	assign M_APB_PADDR = m_addr;
+	assign M_APB_PWRITE = m_write;
+	assign M_APB_PWDATA = m_wdata;
+	assign M_APB_PWSTRB = m_wstrb;
+	assign M_APB_PPROT = m_pprot;
+
+	// ------------------------------------------------------------------
+	// Slave APB output assignments
+	// ------------------------------------------------------------------
+	assign S_APB_PRDATA = s_rdata;
+	assign S_APB_PSLVERR = s_slverr;
+
+	// ------------------------------------------------------------------
+	// Reset synchronization for master side
+	// ------------------------------------------------------------------
+	reg m_reset_sync1, m_reset_sync2;
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_reset_sync1 <= 1'b0;
+			m_reset_sync2 <= 1'b0;
+		end else begin
+			m_reset_sync1 <= 1'b1;
+			m_reset_sync2 <= m_reset_sync1;
+		end
+	end
+
+	assign M_PRESETn = m_reset_sync2;
+
+endmodule
+```<|im_end|>

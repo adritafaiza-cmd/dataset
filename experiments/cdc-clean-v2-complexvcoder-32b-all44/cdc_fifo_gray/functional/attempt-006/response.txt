@@ -1,0 +1,217 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "cdc_fifo_gray",
+            "function": "Implements a valid/ready asynchronous FIFO with 2**LOG_DEPTH entries of WIDTH bits.",
+            "parameters": [
+                {"name": "WIDTH", "value": "8"},
+                {"name": "LOG_DEPTH", "value": "3"},
+                {"name": "SYNC_STAGES", "value": "2"}
+            ],
+            "ports": [
+                {"name": "src_rst_ni", "direction": "input", "width": 1, "clock_domain": "source"},
+                {"name": "src_clk_i", "direction": "input", "width": 1, "clock_domain": "source"},
+                {"name": "src_data_i", "direction": "input", "width": "WIDTH", "clock_domain": "source"},
+                {"name": "src_valid_i", "direction": "input", "width": 1, "clock_domain": "source"},
+                {"name": "src_ready_o", "direction": "output", "width": 1, "clock_domain": "source"},
+                {"name": "dst_rst_ni", "direction": "input", "width": 1, "clock_domain": "destination"},
+                {"name": "dst_clk_i", "direction": "input", "width": 1, "clock_domain": "destination"},
+                {"name": "dst_data_o", "direction": "output", "width": "WIDTH", "clock_domain": "destination"},
+                {"name": "dst_valid_o", "direction": "output", "width": 1, "clock_domain": "destination"},
+                {"name": "dst_ready_i", "direction": "input", "width": 1, "clock_domain": "destination"}
+            ],
+            "instances": [
+                {"module": "gray_counter", "name": "src_gray_counter", "function": "Generates gray code for source pointers", "connections": ["src_rst_ni", "src_clk_i", "src_wr_ptr_gray", "src_wr_ptr_bin"]},
+                {"module": "gray_counter", "name": "dst_gray_counter", "function": "Generates gray code for destination pointers", "connections": ["dst_rst_ni", "dst_clk_i", "dst_rd_ptr_gray", "dst_rd_ptr_bin"]},
+                {"module": "sync_stage", "name": "sync_wr_ptr_gray", "function": "Synchronizes source write pointer to destination domain", "connections": ["dst_clk_i", "src_wr_ptr_gray", "dst_wr_ptr_gray_sync"]},
+                {"module": "sync_stage", "name": "sync_rd_ptr_gray", "function": "Synchronizes destination read pointer to source domain", "connections": ["src_clk_i", "dst_rd_ptr_gray", "src_rd_ptr_gray_sync"]}
+            ],
+            "connections": [
+                {"src": "src_gray_counter.src_wr_ptr_gray", "dst": "sync_wr_ptr_gray.src_ptr_gray"},
+                {"src": "sync_wr_ptr_gray.dst_ptr_gray_sync", "dst": "dst_gray_counter.dst_wr_ptr_gray_sync"},
+                {"src": "dst_gray_counter.dst_rd_ptr_gray", "dst": "sync_rd_ptr_gray.src_ptr_gray"},
+                {"src": "sync_rd_ptr_gray.dst_ptr_gray_sync", "dst": "src_gray_counter.src_rd_ptr_gray_sync"},
+                {"src": "src_valid_i & src_ready_o", "dst": "src_wr_en"},
+                {"src": "dst_ready_i & dst_valid_o", "dst": "dst_rd_en"}
+            ],
+            "internal_signals": [
+                {"name": "src_wr_ptr_gray", "width": "LOG_DEPTH+1"},
+                {"name": "src_wr_ptr_bin", "width": "LOG_DEPTH+1"},
+                {"name": "src_rd_ptr_gray_sync", "width": "LOG_DEPTH+1"},
+                {"name": "src_rd_ptr_bin_sync", "width": "LOG_DEPTH+1"},
+                {"name": "dst_wr_ptr_gray_sync", "width": "LOG_DEPTH+1"},
+                {"name": "dst_wr_ptr_bin_sync", "width": "LOG_DEPTH+1"},
+                {"name": "dst_rd_ptr_gray", "width": "LOG_DEPTH+1"},
+                {"name": "dst_rd_ptr_bin", "width": "LOG_DEPTH+1"},
+                {"name": "src_wr_en", "width": 1},
+                {"name": "dst_rd_en", "width": 1},
+                {"name": "fifo_full", "width": 1},
+                {"name": "fifo_empty", "width": 1},
+                {"name": "fifo_mem", "width": "WIDTH", "depth": "2**LOG_DEPTH"},
+                {"name": "src_ready_o", "width": 1},
+                {"name": "dst_valid_o", "width": 1},
+                {"name": "dst_data_o", "width": "WIDTH"}
+            ],
+            "behavior": [
+                "Accept source beats when src_valid_i and src_ready_o are high.",
+                "Deliver destination beats in order.",
+                "Pointers and data that leave their clock domain must remain coherent.",
+                "SYNC_STAGES is an implementation parameter; choose a safe crossing yourself.",
+                "After reset the FIFO is empty.",
+                "Pointers cross as acknowledged binary snapshots, so ready and valid can lag. dst_data_o is one destination-clock sample. dst_valid_o may remain low for multiple destination clocks after an accepted beat even when another word is stored.",
+                "FIFO full condition is derived from source and synchronized destination pointers.",
+                "FIFO empty condition is derived from destination and synchronized source pointers.",
+                "FIFO memory is written on src_wr_en and read on dst_rd_en."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module cdc_fifo_gray #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 2
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+
+    // Internal signals
+    reg [LOG_DEPTH:0]      src_wr_ptr_gray, src_wr_ptr_bin;
+    reg [LOG_DEPTH:0]      src_rd_ptr_gray_sync, src_rd_ptr_bin_sync;
+    reg [LOG_DEPTH:0]      dst_wr_ptr_gray_sync, dst_wr_ptr_bin_sync;
+    reg [LOG_DEPTH:0]      dst_rd_ptr_gray, dst_rd_ptr_bin;
+    reg                    src_wr_en, dst_rd_en;
+    reg                    fifo_full, fifo_empty;
+    reg [WIDTH-1:0]        fifo_mem [0:DEPTH-1];
+
+    // Gray counter for source write pointer
+    gray_counter #(.LOG_DEPTH(LOG_DEPTH))
+    src_gray_counter (
+        .rst_ni(src_rst_ni),
+        .clk_i(src_clk_i),
+        .ptr_gray_o(src_wr_ptr_gray),
+        .ptr_bin_o(src_wr_ptr_bin)
+    );
+
+    // Gray counter for destination read pointer
+    gray_counter #(.LOG_DEPTH(LOG_DEPTH))
+    dst_gray_counter (
+        .rst_ni(dst_rst_ni),
+        .clk_i(dst_clk_i),
+        .ptr_gray_o(dst_rd_ptr_gray),
+        .ptr_bin_o(dst_rd_ptr_bin)
+    );
+
+    // Synchronize source write pointer to destination domain
+    sync_stage #(.WIDTH(LOG_DEPTH+1), .STAGES(SYNC_STAGES))
+    sync_wr_ptr_gray (
+        .clk_i(dst_clk_i),
+        .src_ptr_i(src_wr_ptr_gray),
+        .dst_ptr_o(dst_wr_ptr_gray_sync)
+    );
+
+    // Synchronize destination read pointer to source domain
+    sync_stage #(.WIDTH(LOG_DEPTH+1), .STAGES(SYNC_STAGES))
+    sync_rd_ptr_gray (
+        .clk_i(src_clk_i),
+        .src_ptr_i(dst_rd_ptr_gray),
+        .dst_ptr_o(src_rd_ptr_gray_sync)
+    );
+
+    // FIFO full and empty conditions
+    assign fifo_full = (src_wr_ptr_bin == {1'b1, dst_wr_ptr_bin_sync[LOG_DEPTH-1:0]});
+    assign fifo_empty = (dst_rd_ptr_bin == src_rd_ptr_bin_sync);
+
+    // Source ready and destination valid signals
+    assign src_ready_o = ~fifo_full;
+    assign dst_valid_o = ~fifo_empty;
+
+    // Write enable and read enable signals
+    assign src_wr_en = src_valid_i & src_ready_o;
+    assign dst_rd_en = dst_ready_i & dst_valid_o;
+
+    // FIFO memory write operation
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            fifo_mem <= '{default: 0};
+        end else if (src_wr_en) begin
+            fifo_mem[src_wr_ptr_bin[LOG_DEPTH-1:0]] <= src_data_i;
+        end
+    end
+
+    // FIFO memory read operation
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_data_o <= 0;
+        end else if (dst_rd_en) begin
+            dst_data_o <= fifo_mem[dst_rd_ptr_bin[LOG_DEPTH-1:0]];
+        end
+    end
+
+endmodule
+
+// Gray counter module
+module gray_counter #(
+    parameter LOG_DEPTH = 3
+)(
+    input                  rst_ni,
+    input                  clk_i,
+    output reg [LOG_DEPTH:0] ptr_gray_o,
+    output reg [LOG_DEPTH:0] ptr_bin_o
+);
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            ptr_bin_o <= 0;
+            ptr_gray_o <= 0;
+        end else begin
+            ptr_bin_o <= ptr_bin_o + 1;
+            ptr_gray_o <= (ptr_bin_o >> 1) ^ ptr_bin_o;
+        end
+    end
+
+endmodule
+
+// Synchronization stage module
+module sync_stage #(
+    parameter WIDTH = 5,
+    parameter STAGES = 2
+)(
+    input                  clk_i,
+    input  [WIDTH-1:0]     src_ptr_i,
+    output reg [WIDTH-1:0] dst_ptr_o
+);
+
+    genvar i;
+    generate
+        for (i = 0; i < STAGES; i = i + 1) begin : sync_stages
+            if (i == 0) begin
+                always @(posedge clk_i) begin
+                    dst_ptr_o <= src_ptr_i;
+                end
+            end else begin
+                always @(posedge clk_i) begin
+                    dst_ptr_o <= dst_ptr_o;
+                end
+            end
+        end
+    endgenerate
+
+endmodule
+```

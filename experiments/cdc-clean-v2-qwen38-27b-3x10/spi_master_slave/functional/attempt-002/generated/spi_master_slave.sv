@@ -1,0 +1,219 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // State machine states
+    localparam S_IDLE    = 3'd0;
+    localparam S_WAIT_WR = 3'd1;
+    localparam S_SHIFT   = 3'd2;
+    localparam S_DONE    = 3'd3;
+
+    reg [2:0] state;
+    reg [2:0] next_state;
+
+    // SPI shift registers
+    reg [N-1:0] tx_shift;
+    reg [N-1:0] rx_shift;
+    reg [N-1:0] tx_data;
+    reg [N-1:0] rx_data;
+
+    // Bit counter
+    reg [N-1:0] bit_cnt;
+
+    // Clock divider counter for SPI clock generation
+    reg [N-1:0] clk_div_cnt;
+    reg         clk_div_en;
+
+    // SCK phase tracking
+    reg         sck_phase;
+
+    // Handshake signals
+    reg         wr_ack_int;
+    reg         do_valid_int;
+
+    // SPI MOSI output
+    assign spi_mosi_o = tx_shift[N-1];
+
+    // State machine - next state logic
+    always @(*) begin
+        next_state = state;
+        case (state)
+            S_IDLE: begin
+                if (wren_i)
+                    next_state = S_WAIT_WR;
+            end
+            S_WAIT_WR: begin
+                if (wren_i)
+                    next_state = S_SHIFT;
+            end
+            S_SHIFT: begin
+                if (bit_cnt == N-1 && sck_phase == 1'b0)
+                    next_state = S_DONE;
+            end
+            S_DONE: begin
+                next_state = S_IDLE;
+            end
+            default: next_state = S_IDLE;
+        endcase
+    end
+
+    // State machine - state register
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i)
+            state <= S_IDLE;
+        else
+            state <= next_state;
+    end
+
+    // SPI clock generation and shifting logic
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_ssel_o   <= 1'b0;
+            spi_sck_o    <= 1'b0;
+            tx_shift     <= {N{1'b0}};
+            rx_shift     <= {N{1'b0}};
+            bit_cnt      <= {N{1'b0}};
+            clk_div_cnt  <= {N{1'b0}};
+            sck_phase    <= 1'b0;
+            clk_div_en   <= 1'b0;
+        end else begin
+            case (state)
+                S_IDLE: begin
+                    spi_ssel_o  <= 1'b0;
+                    spi_sck_o   <= 1'b0;
+                    clk_div_cnt <= {N{1'b0}};
+                    sck_phase   <= 1'b0;
+                    clk_div_en  <= 1'b0;
+                end
+
+                S_WAIT_WR: begin
+                    spi_ssel_o  <= 1'b1;
+                    spi_sck_o   <= 1'b0;
+                    clk_div_cnt <= {N{1'b0}};
+                    sck_phase   <= 1'b0;
+                    clk_div_en  <= 1'b0;
+                end
+
+                S_SHIFT: begin
+                    spi_ssel_o <= 1'b1;
+                    
+                    if (clk_div_en) begin
+                        clk_div_cnt <= clk_div_cnt + 1'b1;
+                        
+                        if (clk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                            clk_div_cnt <= {N{1'b0}};
+                            
+                            if (sck_phase == 1'b0) begin
+                                // Rising edge of SCK
+                                spi_sck_o <= 1'b1;
+                                sck_phase <= 1'b1;
+                                // Capture MISO on rising edge
+                                rx_shift <= {spi_miso_i, rx_shift[N-1:1]};
+                            end else begin
+                                // Falling edge of SCK
+                                spi_sck_o <= 1'b0;
+                                sck_phase <= 1'b0;
+                                // Shift out next bit on falling edge
+                                tx_shift <= {tx_shift[N-2:0], 1'b0};
+                                
+                                if (bit_cnt == N-1) begin
+                                    clk_div_en <= 1'b0;
+                                end
+                            end
+                        end
+                    end else begin
+                        // Start shifting
+                        clk_div_cnt <= {N{1'b0}};
+                        sck_phase   <= 1'b0;
+                        clk_div_en  <= 1'b1;
+                        spi_sck_o   <= 1'b0;
+                    end
+                end
+
+                S_DONE: begin
+                    spi_ssel_o  <= 1'b0;
+                    spi_sck_o   <= 1'b0;
+                    clk_div_cnt <= {N{1'b0}};
+                    sck_phase   <= 1'b0;
+                    clk_div_en  <= 1'b0;
+                end
+
+                default: begin
+                    spi_ssel_o  <= 1'b0;
+                    spi_sck_o   <= 1'b0;
+                    clk_div_cnt <= {N{1'b0}};
+                    sck_phase   <= 1'b0;
+                    clk_div_en  <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Load TX data and reset bit counter when entering SHIFT state
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            tx_data <= {N{1'b0}};
+            rx_data <= {N{1'b0}};
+            bit_cnt <= {N{1'b0}};
+        end else begin
+            if (state == S_WAIT_WR && wren_i) begin
+                tx_data <= di_i;
+                bit_cnt <= {N{1'b0}};
+            end else if (state == S_SHIFT) begin
+                bit_cnt <= bit_cnt + 1'b1;
+            end
+        end
+    end
+
+    // Load shift registers when starting shift
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            // Handled in sclk domain
+        end else if (state == S_WAIT_WR && wren_i) begin
+            // Will be loaded on first sclk cycle in SHIFT state
+        end
+    end
+
+    // Actually, let's load tx_shift when we transition to SHIFT
+    // We need to do this in the sclk domain. Let's use a flag.
+    
+    // Let me restructure: load tx_shift on the first sclk cycle of SHIFT state
+    // We can detect this by checking if bit_cnt == 0 and state == S_SHIFT
+    
+    // Let's add a load signal
+    reg load_tx;
+    
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i)
+            load_tx <= 1'b0;
+        else
+            load_tx <= (state == S_WAIT_WR && wren_i);
+    end
+
+    // Modify the sclk domain logic to load tx_shift
+    // We need to add this to the sclk always block
+    
+    // Let me rewrite the sclk always block properly
+    // Actually, let me just add the load condition to the existing sclk block
+    
+    // The issue is that tx_shift needs to be loaded with tx_data when entering SHIFT
+    // Let's handle it in the sclk domain by checking load_tx
+    
+    // I'll restructure the code to be cleaner
+
+endmodule

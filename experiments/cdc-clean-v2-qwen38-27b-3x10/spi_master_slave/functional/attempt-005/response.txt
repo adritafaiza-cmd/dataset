@@ -1,0 +1,172 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // State machine states
+    localparam S_IDLE    = 2'd0;
+    localparam S_SHIFT   = 2'd1;
+    localparam S_DONE    = 2'd2;
+
+    reg [1:0] state;
+    reg [N-1:0] tx_shift;
+    reg [N-1:0] rx_shift;
+    reg [N-1:0] bit_count;
+    reg [N-1:0] tx_data;
+    reg [N-1:0] rx_data;
+
+    // Clock divider for SPI clock generation
+    reg [31:0] clk_div_cnt;
+    reg clk_phase;
+
+    // Asynchronous reset synchronization for pclk domain
+    reg rst_sync1, rst_sync2;
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            rst_sync1 <= 1'b1;
+            rst_sync2 <= 1'b1;
+        end else begin
+            rst_sync1 <= rst_i;
+            rst_sync2 <= rst_sync1;
+        end
+    end
+
+    wire pclk_rst = rst_sync2;
+
+    // SPI clock generation in sclk domain
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            clk_div_cnt <= 0;
+            clk_phase   <= 0;
+        end else begin
+            if (state == S_SHIFT) begin
+                if (clk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                    clk_div_cnt <= 0;
+                    clk_phase   <= ~clk_phase;
+                end else begin
+                    clk_div_cnt <= clk_div_cnt + 1;
+                end
+            end else begin
+                clk_div_cnt <= 0;
+                clk_phase   <= 0;
+            end
+        end
+    end
+
+    // SPI outputs
+    assign spi_mosi_o = tx_shift[N-1];
+
+    // SPI state machine in sclk domain
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state       <= S_IDLE;
+            spi_ssel_o  <= 1'b0;
+            spi_sck_o   <= 1'b0;
+            tx_shift    <= {N{1'b0}};
+            rx_shift    <= {N{1'b0}};
+            bit_count   <= {N{1'b0}};
+            tx_data     <= {N{1'b0}};
+            rx_data     <= {N{1'b0}};
+        end else begin
+            case (state)
+                S_IDLE: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o  <= 1'b0;
+                    if (di_req_o) begin
+                        // Wait for wren to be asserted
+                        if (wren_i) begin
+                            state      <= S_SHIFT;
+                            spi_ssel_o <= 1'b1;
+                            tx_shift   <= di_i;
+                            rx_shift   <= {N{1'b0}};
+                            bit_count  <= {N{1'b0}};
+                            clk_div_cnt <= 0;
+                            clk_phase   <= 0;
+                        end
+                    end
+                end
+
+                S_SHIFT: begin
+                    spi_ssel_o <= 1'b1;
+                    // Toggle SCK on each phase change
+                    if (clk_phase == 1'b1) begin
+                        // On rising edge of SCK, shift in MISO
+                        rx_shift <= {spi_miso_i, rx_shift[N-1:1]};
+                        tx_shift <= {tx_shift[N-2:0], 1'b0};
+                        if (bit_count == N - 1) begin
+                            state     <= S_DONE;
+                            rx_data   <= {spi_miso_i, rx_shift[N-1:1]};
+                        end else begin
+                            bit_count <= bit_count + 1;
+                        end
+                    end
+                    spi_sck_o <= clk_phase;
+                end
+
+                S_DONE: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o  <= 1'b0;
+                    state      <= S_IDLE;
+                end
+
+                default: state <= S_IDLE;
+            endcase
+        end
+    end
+
+    // Parallel interface in pclk domain
+    always @(posedge pclk_i or posedge pclk_rst) begin
+        if (pclk_rst) begin
+            di_req_o   <= 1'b0;
+            wr_ack_o   <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o       <= {N{1'b0}};
+        end else begin
+            // Default: deassert one-cycle pulses
+            wr_ack_o   <= 1'b0;
+            do_valid_o <= 1'b0;
+
+            case (state)
+                S_IDLE: begin
+                    if (wren_i) begin
+                        di_req_o <= 1'b1;
+                        wr_ack_o <= 1'b1;
+                    end else begin
+                        di_req_o <= 1'b0;
+                    end
+                end
+
+                S_SHIFT: begin
+                    di_req_o <= 1'b0;
+                end
+
+                S_DONE: begin
+                    di_req_o   <= 1'b1;
+                    do_valid_o <= 1'b1;
+                    do_o       <= rx_data;
+                end
+
+                default: begin
+                    di_req_o <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+endmodule
+```<|im_end|>

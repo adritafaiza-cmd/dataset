@@ -1,0 +1,116 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  logic valid_sync, ready_sync;
+  logic valid_reg, ready_reg;
+  logic [WIDTH-1:0] data_sync;
+
+  // Synchronize src_valid_i to dst_clk_i
+  ff_sync ff_sync_src_to_dst (
+    .clk_i(src_clk_i),
+    .rst_ni(src_rst_ni),
+    .d_i(src_valid_i),
+    .q_o(valid_sync)
+  );
+
+  // Synchronize dst_ready_i to src_clk_i
+  ff_sync ff_sync_dst_to_src (
+    .clk_i(dst_clk_i),
+    .rst_ni(dst_rst_ni),
+    .d_i(dst_ready_i),
+    .q_o(ready_sync)
+  );
+
+  // Register data from src_clk_i to dst_clk_i
+  data_register data_reg (
+    .clk_i(src_clk_i),
+    .rst_ni(src_rst_ni),
+    .d_i(src_data_i),
+    .en_i(src_valid_i & src_ready_o),
+    .q_o(data_sync)
+  );
+
+  // Register synchronized valid signal
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      valid_reg <= 1'b0;
+    end else begin
+      if (src_valid_i && src_ready_o) begin
+        valid_reg <= 1'b1;
+      end else if (ready_sync) begin
+        valid_reg <= 1'b0;
+      end
+    end
+  end
+
+  // Register synchronized ready signal
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      ready_reg <= 1'b0;
+    end else begin
+      ready_reg <= ready_sync;
+    end
+  end
+
+  // Assign outputs
+  assign src_ready_o = ready_reg;
+  assign dst_data_o = data_sync;
+  assign dst_valid_o = valid_reg;
+
+endmodule
+
+// Synchronizes a single-bit signal from one clock domain to another using two flip-flops
+module ff_sync (
+  input  clk_i,
+  input  rst_ni,
+  input  d_i,
+  output q_o
+);
+
+  logic ff1;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      ff1 <= 1'b0;
+      q_o <= 1'b0;
+    end else begin
+      ff1 <= d_i;
+      q_o <= ff1;
+    end
+  end
+
+endmodule
+
+// Registers a WIDTH-bit data signal from one clock domain to another
+module data_register #(
+  parameter WIDTH = 1
+)(
+  input  clk_i,
+  input  rst_ni,
+  input  [WIDTH-1:0] d_i,
+  input  en_i,
+  output [WIDTH-1:0] q_o
+);
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      q_o <= '0;
+    end else if (en_i) begin
+      q_o <= d_i;
+    end
+  end
+
+endmodule

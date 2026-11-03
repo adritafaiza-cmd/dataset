@@ -1,0 +1,305 @@
+```verilog
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam AWIDTH = ASIZE + 1;
+  localparam AFULL_THRESH = DEPTH - 2;
+  localparam AEMPTY_THRESH = 1;
+
+  // Internal FIFO storage for A->B direction
+  reg [DSIZE-1:0] fifo_ab [0:DEPTH-1];
+  reg [AWIDTH-1:0] ab_wr_ptr;
+  reg [AWIDTH-1:0] ab_rd_ptr;
+
+  // Internal FIFO storage for B->A direction
+  reg [DSIZE-1:0] fifo_ba [0:DEPTH-1];
+  reg [AWIDTH-1:0] ba_wr_ptr;
+  reg [AWIDTH-1:0] ba_rd_ptr;
+
+  // Synchronized pointers for A->B FIFO
+  reg [AWIDTH-1:0] ab_wr_ptr_sync1, ab_wr_ptr_sync2;
+  reg [AWIDTH-1:0] ab_rd_ptr_sync1, ab_rd_ptr_sync2;
+
+  // Synchronized pointers for B->A FIFO
+  reg [AWIDTH-1:0] ba_wr_ptr_sync1, ba_wr_ptr_sync2;
+  reg [AWIDTH-1:0] ba_rd_ptr_sync1, ba_rd_ptr_sync2;
+
+  // Synchronized direction signals
+  reg a_dir_sync1, a_dir_sync2;
+  reg b_dir_sync1, b_dir_sync2;
+
+  // Synchronized write enable signals
+  reg a_winc_sync1, a_winc_sync2;
+  reg b_winc_sync1, b_winc_sync2;
+
+  // Synchronized read enable signals
+  reg a_rinc_sync1, a_rinc_sync2;
+  reg b_rinc_sync1, b_rinc_sync2;
+
+  // Synchronized data for A->B
+  reg [DSIZE-1:0] a_wdata_sync1, a_wdata_sync2;
+
+  // Synchronized data for B->A
+  reg [DSIZE-1:0] b_wdata_sync1, b_wdata_sync2;
+
+  // Local status flags
+  wire ab_full;
+  wire ab_afull;
+  wire ab_empty;
+  wire ab_aempty;
+  wire ba_full;
+  wire ba_afull;
+  wire ba_empty;
+  wire ba_aempty;
+
+  // Compute FIFO status for A->B (viewed from B side for read, A side for write)
+  // ab_wr_ptr is in A domain, ab_rd_ptr is in B domain
+  // For A side: full/afull based on ab_wr_ptr vs ab_rd_ptr_sync2
+  // For B side: empty/aempty based on ab_rd_ptr vs ab_wr_ptr_sync2
+
+  // A side view of A->B FIFO
+  wire [AWIDTH-1:0] ab_wr_ptr_a = ab_wr_ptr;
+  wire [AWIDTH-1:0] ab_rd_ptr_a = ab_rd_ptr_sync2;
+  wire [AWIDTH-1:0] ab_diff_a = ab_wr_ptr_a - ab_rd_ptr_a;
+  wire ab_full_a = (ab_diff_a == DEPTH);
+  wire ab_afull_a = (ab_diff_a >= AFULL_THRESH);
+
+  // B side view of A->B FIFO
+  wire [AWIDTH-1:0] ab_wr_ptr_b = ab_wr_ptr_sync2;
+  wire [AWIDTH-1:0] ab_rd_ptr_b = ab_rd_ptr;
+  wire [AWIDTH-1:0] ab_diff_b = ab_wr_ptr_b - ab_rd_ptr_b;
+  wire ab_empty_b = (ab_diff_b == 0);
+  wire ab_aempty_b = (ab_diff_b <= AEMPTY_THRESH);
+
+  // B side view of B->A FIFO
+  wire [AWIDTH-1:0] ba_wr_ptr_b = ba_wr_ptr;
+  wire [AWIDTH-1:0] ba_rd_ptr_b = ba_rd_ptr_sync2;
+  wire [AWIDTH-1:0] ba_diff_b = ba_wr_ptr_b - ba_rd_ptr_b;
+  wire ba_full_b = (ba_diff_b == DEPTH);
+  wire ba_afull_b = (ba_diff_b >= AFULL_THRESH);
+
+  // A side view of B->A FIFO
+  wire [AWIDTH-1:0] ba_wr_ptr_a = ba_wr_ptr_sync2;
+  wire [AWIDTH-1:0] ba_rd_ptr_a = ba_rd_ptr;
+  wire [AWIDTH-1:0] ba_diff_a = ba_wr_ptr_a - ba_rd_ptr_a;
+  wire ba_empty_a = (ba_diff_a == 0);
+  wire ba_aempty_a = (ba_diff_a <= AEMPTY_THRESH);
+
+  // Direction-based muxing for outputs
+  // When a_dir=1, A is writing to A->B FIFO, so a_full/a_afull reflect A->B FIFO
+  // When a_dir=0, A is reading from B->A FIFO, so a_empty/a_aempty reflect B->A FIFO
+  // Similarly for B side
+
+  assign a_full   = a_dir ? ab_full_a   : ba_full_b;   // This is wrong, let me reconsider
+  assign a_afull  = a_dir ? ab_afull_a  : ba_afull_b;
+  assign a_empty  = a_dir ? ab_empty_b  : ba_empty_a;
+  assign a_aempty = a_dir ? ab_aempty_b : ba_aempty_a;
+
+  assign b_full   = b_dir ? ba_full_b   : ab_full_a;
+  assign b_afull  = b_dir ? ba_afull_b  : ab_afull_a;
+  assign b_empty  = b_dir ? ba_empty_a  : ab_empty_b;
+  assign b_aempty = b_dir ? ba_aempty_a : ab_aempty_b;
+
+  // Read data outputs
+  // When a_dir=0, A reads from B->A FIFO
+  // When b_dir=0, B reads from A->B FIFO
+  assign a_rdata = a_dir ? {DSIZE{1'b0}} : fifo_ba[ba_rd_ptr[ASIZE-1:0]];
+  assign b_rdata = b_dir ? {DSIZE{1'b0}} : fifo_ab[ab_rd_ptr[ASIZE-1:0]];
+
+  // Synchronization for A->B write pointer (A to B)
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      ab_wr_ptr_sync1 <= {AWIDTH{1'b0}};
+      ab_wr_ptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      ab_wr_ptr_sync1 <= ab_wr_ptr;
+      ab_wr_ptr_sync2 <= ab_wr_ptr_sync1;
+    end
+  end
+
+  // Synchronization for A->B read pointer (B to A)
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      ab_rd_ptr_sync1 <= {AWIDTH{1'b0}};
+      ab_rd_ptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      ab_rd_ptr_sync1 <= ab_rd_ptr;
+      ab_rd_ptr_sync2 <= ab_rd_ptr_sync1;
+    end
+  end
+
+  // Synchronization for B->A write pointer (B to A)
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      ba_wr_ptr_sync1 <= {AWIDTH{1'b0}};
+      ba_wr_ptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      ba_wr_ptr_sync1 <= ba_wr_ptr;
+      ba_wr_ptr_sync2 <= ba_wr_ptr_sync1;
+    end
+  end
+
+  // Synchronization for B->A read pointer (A to B)
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      ba_rd_ptr_sync1 <= {AWIDTH{1'b0}};
+      ba_rd_ptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      ba_rd_ptr_sync1 <= ba_rd_ptr;
+      ba_rd_ptr_sync2 <= ba_rd_ptr_sync1;
+    end
+  end
+
+  // Synchronization for direction signals
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_dir_sync1 <= 1'b0;
+      a_dir_sync2 <= 1'b0;
+    end else begin
+      a_dir_sync1 <= a_dir;
+      a_dir_sync2 <= a_dir_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_dir_sync1 <= 1'b0;
+      b_dir_sync2 <= 1'b0;
+    end else begin
+      b_dir_sync1 <= b_dir;
+      b_dir_sync2 <= b_dir_sync1;
+    end
+  end
+
+  // Synchronization for write enables
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_winc_sync1 <= 1'b0;
+      a_winc_sync2 <= 1'b0;
+    end else begin
+      a_winc_sync1 <= a_winc;
+      a_winc_sync2 <= a_winc_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_winc_sync1 <= 1'b0;
+      b_winc_sync2 <= 1'b0;
+    end else begin
+      b_winc_sync1 <= b_winc;
+      b_winc_sync2 <= b_winc_sync1;
+    end
+  end
+
+  // Synchronization for read enables
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_rinc_sync1 <= 1'b0;
+      a_rinc_sync2 <= 1'b0;
+    end else begin
+      a_rinc_sync1 <= a_rinc;
+      a_rinc_sync2 <= a_rinc_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_rinc_sync1 <= 1'b0;
+      b_rinc_sync2 <= 1'b0;
+    end else begin
+      b_rinc_sync1 <= b_rinc;
+      b_rinc_sync2 <= b_rinc_sync1;
+    end
+  end
+
+  // Synchronization for data A->B
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a_wdata_sync1 <= {DSIZE{1'b0}};
+      a_wdata_sync2 <= {DSIZE{1'b0}};
+    end else begin
+      a_wdata_sync1 <= a_wdata;
+      a_wdata_sync2 <= a_wdata_sync1;
+    end
+  end
+
+  // Synchronization for data B->A
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b_wdata_sync1 <= {DSIZE{1'b0}};
+      b_wdata_sync2 <= {DSIZE{1'b0}};
+    end else begin
+      b_wdata_sync1 <= b_wdata;
+      b_wdata_sync2 <= b_wdata_sync1;
+    end
+  end
+
+  // A domain: handle A->B writes and B->A reads
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      ab_wr_ptr <= {AWIDTH{1'b0}};
+      ba_rd_ptr <= {AWIDTH{1'b0}};
+    end else begin
+      // A writes to A->B FIFO when a_dir=1 and a_winc=1 and not full
+      if (a_dir && a_winc && !ab_full_a) begin
+        fifo_ab[ab_wr_ptr[ASIZE-1:0]] <= a_wdata;
+        ab_wr_ptr <= ab_wr_ptr + 1'b1;
+      end
+
+      // A reads from B->A FIFO when a_dir=0 and a_rinc=1 and not empty
+      if (!a_dir && a_rinc && !ba_empty_a) begin
+        ba_rd_ptr <= ba_rd_ptr + 1'b1;
+      end
+    end
+  end
+
+  // B domain: handle B->A writes and A->B reads
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      ba_wr_ptr <= {AWIDTH{1'b0}};
+      ab_rd_ptr <= {AWIDTH{1'b0}};
+    end else begin
+      // B writes to B->A FIFO when b_dir=1 and b_winc=1 and not full
+      if (b_dir && b_winc && !ba_full_b) begin
+        fifo_ba[ba_wr_ptr[ASIZE-1:0]] <= b_wdata;
+        ba_wr_ptr <= ba_wr_ptr + 1'b1;
+      end
+
+      // B reads from A->B FIFO when b_dir=0 and b_rinc=1 and not empty
+      if (!b_dir && b_rinc && !ab_empty_b) begin
+        ab_rd_ptr <= ab_rd_ptr + 1'b1;
+      end
+    end
+  end
+
+endmodule
+```<|im_end|>

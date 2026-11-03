@@ -1,0 +1,186 @@
+```verilog
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	// Internal parameters
+	localparam DEPTH = 1 << LGFIFO;
+	localparam ADDR_W = LGFIFO;
+	localparam CNT_W = LGFIFO + 1;
+
+	// Storage
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+
+	// Write pointer (write clock domain)
+	reg [ADDR_W:0] wptr; // extra bit for Gray code
+
+	// Read pointer (read clock domain)
+	reg [ADDR_W:0] rptr;
+
+	// Gray code conversion
+	function [ADDR_W:0] bin2gray;
+		input [ADDR_W:0] bin;
+		begin
+			bin2gray = bin ^ (bin >> 1);
+		end
+	endfunction
+
+	// Write side
+	wire [ADDR_W:0] wptr_gray = bin2gray(wptr);
+	wire [ADDR_W:0] rptr_gray_sync; // synchronized read pointer in write domain
+
+	// Synchronize read pointer to write clock domain
+	reg [ADDR_W:0] rptr_gray_sync_reg [0:NFF-1];
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			rptr_gray_sync_reg[0] <= {1'b0, {ADDR_W{1'b0}}};
+			rptr_gray_sync_reg[1] <= {1'b0, {ADDR_W{1'b0}}};
+			if (NFF > 2) begin
+				for (int i = 2; i < NFF; i = i + 1)
+					rptr_gray_sync_reg[i] <= {1'b0, {ADDR_W{1'b0}}};
+			end
+		end else begin
+			rptr_gray_sync_reg[0] <= rptr_gray;
+			rptr_gray_sync_reg[1] <= rptr_gray_sync_reg[0];
+			if (NFF > 2) begin
+				for (int i = 2; i < NFF; i = i + 1)
+					rptr_gray_sync_reg[i] <= rptr_gray_sync_reg[i-1];
+			end
+		end
+	end
+	assign rptr_gray_sync = rptr_gray_sync_reg[NFF-1];
+
+	// Write full detection
+	// Full when write pointer has lapped read pointer by DEPTH
+	// In Gray code: MSB differs, rest same
+	wire wr_full_raw = (wptr_gray[ADDR_W] != rptr_gray_sync[ADDR_W]) &&
+					   (wptr_gray[ADDR_W-1:0] == rptr_gray_sync[ADDR_W-1:0]);
+
+	// Write enable
+	wire wr_en = i_wr & ~o_wr_full;
+
+	// Write operation
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wptr <= {1'b0, {ADDR_W{1'b0}}};
+		end else if (WRITE_ON_POSEDGE) begin
+			if (wr_en)
+				wptr <= wptr + 1'b1;
+		end else begin
+			// negedge write
+			if (wr_en)
+				wptr <= wptr + 1'b1;
+		end
+	end
+
+	// Write data
+	always @(posedge i_wclk) begin
+		if (wr_en)
+			mem[wptr[ADDR_W-1:0]] <= i_wr_data;
+	end
+
+	// o_wr_full output
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			o_wr_full <= 1'b0;
+		else
+			o_wr_full <= wr_full_raw;
+	end
+
+	// Read side
+	wire [ADDR_W:0] wptr_gray_sync; // synchronized write pointer in read domain
+
+	// Synchronize write pointer to read clock domain
+	reg [ADDR_W:0] wptr_gray_sync_reg [0:NFF-1];
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			wptr_gray_sync_reg[0] <= {1'b0, {ADDR_W{1'b0}}};
+			wptr_gray_sync_reg[1] <= {1'b0, {ADDR_W{1'b0}}};
+			if (NFF > 2) begin
+				for (int i = 2; i < NFF; i = i + 1)
+					wptr_gray_sync_reg[i] <= {1'b0, {ADDR_W{1'b0}}};
+			end
+		end else begin
+			wptr_gray_sync_reg[0] <= wptr_gray;
+			wptr_gray_sync_reg[1] <= wptr_gray_sync_reg[0];
+			if (NFF > 2) begin
+				for (int i = 2; i < NFF; i = i + 1)
+					wptr_gray_sync_reg[i] <= wptr_gray_sync_reg[i-1];
+			end
+		end
+	end
+	assign wptr_gray_sync = wptr_gray_sync_reg[NFF-1];
+
+	// Read empty detection
+	// Empty when write pointer equals read pointer
+	wire rd_empty_raw = (wptr_gray_sync == rptr_gray);
+
+	// Read enable
+	wire rd_en = i_rd & ~o_rd_empty;
+
+	// Read operation
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rptr <= {1'b0, {ADDR_W{1'b0}}};
+		end else begin
+			if (rd_en)
+				rptr <= rptr + 1'b1;
+		end
+	end
+
+	// o_rd_empty output
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_empty <= 1'b1;
+		else
+			o_rd_empty <= rd_empty_raw;
+	end
+
+	// Read data output
+	// The data is read from memory at the current read pointer
+	// We need to handle OPT_REGISTER_READS
+	// When OPT_REGISTER_READS=1: register the read data
+	// When OPT_REGISTER_READS=0: combinational read (but still synchronized to rclk)
+
+	// The read address is rptr[ADDR_W-1:0]
+	// We read from memory combinationally and then register if needed
+
+	reg [WIDTH-1:0] rd_data_reg;
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_data_reg <= {WIDTH{1'b0}};
+		end else begin
+			if (OPT_REGISTER_READS) begin
+				// Register the read data
+				rd_data_reg <= mem[rptr[ADDR_W-1:0]];
+			end else begin
+				// Still register for destination-clock synchronization
+				// But the spec says "neither setting provides an asynchronous memory bypass"
+				// So we always register
+				rd_data_reg <= mem[rptr[ADDR_W-1:0]];
+			end
+		end
+	end
+
+	// Output assignment
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_data <= {WIDTH{1'b0}};
+		else
+			o_rd_data <= rd_data_reg;
+	end
+
+endmodule
+```<|im_end|>

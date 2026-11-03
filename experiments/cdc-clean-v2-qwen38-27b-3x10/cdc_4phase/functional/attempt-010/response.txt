@@ -1,0 +1,209 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain state
+  reg [WIDTH-1:0] src_data_reg;
+  reg             src_valid_reg;
+  reg             src_ready_reg;
+
+  // Destination domain state
+  reg [WIDTH-1:0] dst_data_reg;
+  reg             dst_valid_reg;
+  reg             dst_ready_reg;
+
+  // Synchronizers for valid signal (src -> dst)
+  reg [1:0] valid_sync;
+
+  // Synchronizers for ready signal (dst -> src)
+  reg [1:0] ready_sync;
+
+  // Synchronizers for data (src -> dst) - use a simple approach:
+  // We'll synchronize the data along with valid using a 2-stage synchronizer
+  // for each bit, but that's expensive. Instead, we'll use a different approach:
+  // We'll use a "data valid" handshake where we only change data when valid is low.
+
+  // Actually, for a 4-phase handshake, we need to be careful. Let's use a simpler
+  // approach: we'll use a 2-stage synchronizer for the valid signal, and we'll
+  // ensure data is stable when valid is asserted.
+
+  // Source domain: generate ready
+  // src_ready_o is high when we can accept new data
+  // We can accept new data when:
+  //   - We are not currently sending (src_valid_reg is low), OR
+  //   - DECOUPLED is set and the destination has acknowledged the previous transfer
+
+  // Let's use a state machine approach for the source side.
+  // States: IDLE, WAIT_ACK
+  // In IDLE: src_ready_o = 1, if src_valid_i, capture data, set src_valid_reg = 1, go to WAIT_ACK
+  // In WAIT_ACK: src_ready_o = 0 (or 1 if DECOUPLED and ack received), wait for ack from dst
+
+  // Actually, let's think about this more carefully. The 4-phase handshake means:
+  // 1. src_valid goes high (with data)
+  // 2. dst sees valid, processes, dst_ready goes high
+  // 3. src sees ready, src_valid goes low
+  // 4. dst sees valid low, dst_ready goes low
+
+  // For CDC, we need to synchronize these signals.
+
+  // Let's use a simpler approach:
+  // Source side:
+  //   - src_ready_o is high when we're not in the middle of a transfer
+  //   - When src_valid_i && src_ready_o, we capture data and assert src_valid_reg
+  //   - We deassert src_valid_reg when we see the synchronized ready from dst
+
+  // Destination side:
+  //   - dst_valid_o is the synchronized src_valid_reg
+  //   - dst_data_o is the synchronized data
+  //   - dst_ready_reg is asserted when dst_valid_o && dst_ready_i
+  //   - We deassert dst_ready_reg when we see the synchronized src_valid_reg go low
+
+  // Synchronizers
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      valid_sync <= 2'b00;
+    end else begin
+      valid_sync <= {valid_sync[0], src_valid_reg};
+    end
+  end
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      ready_sync <= 2'b00;
+    end else begin
+      ready_sync <= {ready_sync[0], dst_ready_reg};
+    end
+  end
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_reg  <= SEND_RESET_MSG ? RESET_MSG : {WIDTH{1'b0}};
+      src_valid_reg <= SEND_RESET_MSG ? 1'b1 : 1'b0;
+      src_ready_reg <= 1'b1;
+    end else begin
+      if (src_valid_reg) begin
+        // We are in the middle of a transfer
+        if (ready_sync[1]) begin
+          // Destination has acknowledged
+          src_valid_reg <= 1'b0;
+          if (DECOUPLED) begin
+            // Can accept new data immediately
+            if (src_valid_i) begin
+              src_data_reg  <= src_data_i;
+              src_valid_reg <= 1'b1;
+            end
+          end
+          src_ready_reg <= 1'b1;
+        end else begin
+          // Still waiting for ack
+          if (DECOUPLED && src_valid_i) begin
+            // In decoupled mode, we can accept new data even before ack
+            // But we need to be careful: we can only do this if we're not
+            // currently sending. Since src_valid_reg is high, we're sending.
+            // So we can't accept new data until we get the ack.
+            // Actually, DECOUPLED means we can pipeline: accept new data
+            // while the previous one is being acknowledged.
+            // But in a 4-phase handshake, we can't have two valids at once.
+            // So DECOUPLED might mean we can start preparing the next data.
+            // Let's keep it simple: don't accept new data until ack.
+          end
+          src_ready_reg <= 1'b0;
+        end
+      end else begin
+        // Not in a transfer
+        src_ready_reg <= 1'b1;
+        if (src_valid_i) begin
+          src_data_reg  <= src_data_i;
+          src_valid_reg <= 1'b1;
+        end
+      end
+    end
+  end
+
+  assign src_ready_o = src_ready_reg;
+
+  // Destination domain logic
+  // We need to synchronize the data as well. Since data changes when valid is low,
+  // we can use a 2-stage synchronizer for each bit, but that's expensive.
+  // Alternative: use a "data latch" that captures data when valid transitions.
+  
+  // Let's use a different approach: synchronize the data using a 2-stage
+  // synchronizer for each bit. This is safe because data is stable when
+  // valid is high.
+
+  // Actually, a simpler approach: use a 2-stage synchronizer for the data
+  // as well. Since data is stable when valid is high, this should work.
+
+  // But we need to be careful: the data might change while valid is low,
+  // and we don't want to capture that. So we should only update the
+  // synchronized data when valid is high.
+
+  // Let's use a "data valid" approach:
+  // - When valid_sync[1] is high, the data is stable and we can capture it.
+  // - We'll use a register that captures the data when valid is high.
+
+  // For simplicity, let's use a 2-stage synchronizer for each bit of data.
+  // This is the safest approach.
+
+  // Generate the synchronized data
+  reg [WIDTH-1:0] data_sync1;
+  reg [WIDTH-1:0] data_sync2;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      data_sync1 <= {WIDTH{1'b0}};
+      data_sync2 <= {WIDTH{1'b0}};
+    end else begin
+      data_sync1 <= src_data_reg;
+      data_sync2 <= data_sync1;
+    end
+  end
+
+  // Destination valid and ready
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= SEND_RESET_MSG ? 1'b1 : 1'b0;
+      dst_ready_reg <= 1'b0;
+      dst_data_reg  <= SEND_RESET_MSG ? RESET_MSG : {WIDTH{1'b0}};
+    end else begin
+      if (dst_valid_reg) begin
+        // We have a valid item
+        if (dst_ready_i) begin
+          // Destination is ready, acknowledge
+          dst_ready_reg <= 1'b1;
+        end else begin
+          dst_ready_reg <= 1'b0;
+        end
+      end else begin
+        // No valid item
+        dst_ready_reg <= 1'b0;
+        if (valid_sync[1]) begin
+          // New valid from source
+          dst_valid_reg <= 1'b1;
+          dst_data_reg  <= data_sync2;
+        end
+      end
+    end
+  end
+
+  assign dst_valid_o = dst_valid_reg;
+  assign dst_data_o  = dst_data_reg;
+
+endmodule
+```<|im_end|>

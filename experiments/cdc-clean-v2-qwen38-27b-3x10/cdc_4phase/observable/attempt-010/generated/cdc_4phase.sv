@@ -1,0 +1,178 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Four-phase handshake signals
+  // req: sender -> receiver (data valid)
+  // ack: receiver -> sender (data accepted)
+  // Both are level signals, synchronized across clock domains.
+
+  // Source side state
+  reg src_req;
+  reg [WIDTH-1:0] src_data_reg;
+  reg src_ack_sync0, src_ack_sync1;
+  reg src_ack;
+
+  // Destination side state
+  reg dst_req_sync0, dst_req_sync1;
+  reg dst_req;
+  reg dst_ack;
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_valid_reg;
+
+  // Synchronize src_ack to source domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_ack_sync0 <= 1'b0;
+      src_ack_sync1 <= 1'b0;
+    end else begin
+      src_ack_sync0 <= dst_ack;
+      src_ack_sync1 <= src_ack_sync0;
+    end
+  end
+  assign src_ack = src_ack_sync1;
+
+  // Synchronize dst_req to destination domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req_sync0 <= 1'b0;
+      dst_req_sync1 <= 1'b0;
+    end else begin
+      dst_req_sync0 <= src_req;
+      dst_req_sync1 <= dst_req_sync0;
+    end
+  end
+  assign dst_req = dst_req_sync1;
+
+  // Source side logic
+  // Four-phase handshake:
+  // State 0: req=0, ack=0 (idle)
+  // State 1: req=1, ack=0 (data sent, waiting for ack)
+  // State 2: req=1, ack=1 (ack received, waiting to deassert req)
+  // State 3: req=0, ack=1 (req deasserted, waiting for ack to deassert)
+  // Back to State 0
+
+  // src_ready_o: can accept new data when in idle state (req=0, ack=0)
+  assign src_ready_o = !src_req && !src_ack;
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_req <= 1'b0;
+      src_data_reg <= SEND_RESET_MSG ? RESET_MSG : {WIDTH{1'b0}};
+    end else begin
+      if (!src_req && !src_ack) begin
+        // Idle state: can send new data
+        if (src_valid_i) begin
+          src_req <= 1'b1;
+          src_data_reg <= src_data_i;
+        end
+      end else if (src_req && src_ack) begin
+        // Ack received: deassert req
+        src_req <= 1'b0;
+      end
+      // When !src_req && src_ack: wait for ack to deassert
+      // When src_req && !src_ack: wait for ack
+    end
+  end
+
+  // Destination side logic
+  // dst_valid_o: data is valid when req is high and we haven't yet acknowledged
+  // In four-phase, the data is stable while req is high.
+  // We present valid when dst_req is high.
+  // We assert dst_ack when we accept the data (dst_req && dst_ready_i).
+  // After asserting dst_ack, we wait for dst_req to deassert, then deassert dst_ack.
+
+  assign dst_valid_o = dst_req;
+  assign dst_data_o = dst_data_reg;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_ack <= 1'b0;
+      dst_data_reg <= SEND_RESET_MSG ? RESET_MSG : {WIDTH{1'b0}};
+    end else begin
+      if (!dst_req && !dst_ack) begin
+        // Idle: wait for req
+      end else if (dst_req && !dst_ack) begin
+        // Data received, waiting to accept
+        if (dst_ready_i) begin
+          dst_ack <= 1'b1;
+          dst_data_reg <= dst_data_reg; // data already captured via req
+        end
+      end else if (dst_req && dst_ack) begin
+        // Ack asserted, waiting for req to deassert
+      end else if (!dst_req && dst_ack) begin
+        // Req deasserted, deassert ack
+        dst_ack <= 1'b0;
+      end
+    end
+  end
+
+  // Capture data when req transitions from 0 to 1
+  // We need to latch the data when dst_req rises
+  reg dst_req_prev;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req_prev <= 1'b0;
+    end else begin
+      dst_req_prev <= dst_req;
+    end
+  end
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_reg <= SEND_RESET_MSG ? RESET_MSG : {WIDTH{1'b0}};
+    end else if (dst_req && !dst_req_prev) begin
+      // Rising edge of dst_req: capture data
+      // But we need the actual data from the source side.
+      // The data is on src_data_reg, which is in the source domain.
+      // We need to synchronize the data as well.
+    end
+  end
+
+  // Actually, we need to synchronize the data too. Let's use a multi-bit synchronizer
+  // or use a gray code / other method. For simplicity, we'll use a 2-flop synchronizer
+  // for each bit, but that's not safe for multi-bit. Instead, we'll use a handshake
+  // to ensure data is stable before sampling.
+
+  // Better approach: synchronize the data using the handshake.
+  // When dst_req rises, the data on src_data_reg is stable. We can sample it
+  // using a few cycles of synchronization.
+
+  // Let's use a different approach: synchronize the data bits with a 2-flop synchronizer
+  // but only sample when dst_req is stable high.
+
+  reg [WIDTH-1:0] dst_data_sync0, dst_data_sync1;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_sync0 <= {WIDTH{1'b0}};
+      dst_data_sync1 <= {WIDTH{1'b0}};
+    end else begin
+      dst_data_sync0 <= src_data_reg;
+      dst_data_sync1 <= dst_data_sync0;
+    end
+  end
+
+  // Update dst_data_reg when dst_req rises
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_reg <= SEND_RESET_MSG ? RESET_MSG : {WIDTH{1'b0}};
+    end else if (dst_req && !dst_req_prev) begin
+      dst_data_reg <= dst_data_sync1;
+    end
+  end
+
+endmodule

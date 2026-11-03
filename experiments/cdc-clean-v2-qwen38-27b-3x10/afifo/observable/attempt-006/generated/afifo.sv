@@ -1,0 +1,146 @@
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam PTR_W = LGFIFO + 1;
+	localparam SYNC_STAGES = 2;
+
+	// Write side
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+	reg [PTR_W-1:0] wr_ptr;
+	reg [PTR_W-1:0] wr_ptr_sync; // synchronized to read clock
+
+	// Read side
+	reg [PTR_W-1:0] rd_ptr;
+	reg [PTR_W-1:0] rd_ptr_sync; // synchronized to write clock
+	reg [WIDTH-1:0] rd_data_reg;
+	reg rd_valid;
+
+	// Synchronizer for write pointer to read clock
+	reg [PTR_W-1:0] wr_ptr_sync_r [0:SYNC_STAGES-1];
+	// Synchronizer for read pointer to write clock
+	reg [PTR_W-1:0] rd_ptr_sync_r [0:SYNC_STAGES-1];
+
+	// Write clock domain
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_ptr <= {PTR_W{1'b0}};
+		end else begin
+			if (i_wr && !o_wr_full) begin
+				mem[wr_ptr[LG FIFO-1:0]] <= i_wr_data;
+				wr_ptr <= wr_ptr + 1'b1;
+			end
+		end
+	end
+
+	// Synchronize write pointer to read clock
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			wr_ptr_sync_r[0] <= {PTR_W{1'b0}};
+			wr_ptr_sync_r[1] <= {PTR_W{1'b0}};
+		end else begin
+			wr_ptr_sync_r[0] <= wr_ptr;
+			wr_ptr_sync_r[1] <= wr_ptr_sync_r[0];
+		end
+	end
+
+	// Synchronize read pointer to write clock
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			rd_ptr_sync_r[0] <= {PTR_W{1'b0}};
+			rd_ptr_sync_r[1] <= {PTR_W{1'b0}};
+		end else begin
+			rd_ptr_sync_r[0] <= rd_ptr;
+			rd_ptr_sync_r[1] <= rd_ptr_sync_r[0];
+		end
+	end
+
+	// Full flag in write clock domain
+	// Full when write pointer has lapped read pointer by DEPTH
+	// Compare upper bits: if wr_ptr[PTR_W-1:LG FIFO] == rd_ptr_sync[PTR_W-1:LG FIFO] + 1 and lower bits equal
+	wire [PTR_W-1:0] rd_ptr_sync_w = rd_ptr_sync_r[1];
+	wire [PTR_W-1:0] wr_ptr_next = wr_ptr + 1'b1;
+	// Full condition: wr_ptr_next == rd_ptr_sync_w + DEPTH, i.e., upper bits differ by 1 and lower bits match
+	// Simpler: full when (wr_ptr[PTR_W-1:LG FIFO] == rd_ptr_sync_w[PTR_W-1:LG FIFO] + 1) && (wr_ptr[LG FIFO-1:0] == rd_ptr_sync_w[LG FIFO-1:0])
+	// Actually, standard: full when wr_ptr_next == rd_ptr_sync_w + DEPTH
+	// Since DEPTH = 2^LG FIFO, adding DEPTH flips the bit at position LG FIFO
+	// So full when wr_ptr_next[PTR_W-1:LG FIFO] == rd_ptr_sync_w[PTR_W-1:LG FIFO] + 1'b1 and wr_ptr_next[LG FIFO-1:0] == rd_ptr_sync_w[LG FIFO-1:0]
+	// But we need to be careful with the +1 on the upper part.
+	// Let's use: full = (wr_ptr_next == rd_ptr_sync_w + DEPTH)
+	// But DEPTH is 2^LG FIFO, so rd_ptr_sync_w + DEPTH just increments the bit at LG FIFO position.
+	// So: full = (wr_ptr_next[PTR_W-1:LG FIFO] == rd_ptr_sync_w[PTR_W-1:LG FIFO] + 1'b1) && (wr_ptr_next[LG FIFO-1:0] == rd_ptr_sync_w[LG FIFO-1:0])
+	// However, if rd_ptr_sync_w[PTR_W-1:LG FIFO] is all 1s, +1 would overflow. But since we have PTR_W = LG FIFO + 1, the upper part is 1 bit wide.
+	// So rd_ptr_sync_w[PTR_W-1:LG FIFO] is 1 bit. +1'b1 would be 0 with carry.
+	// Let's just do a direct comparison: full = (wr_ptr_next == rd_ptr_sync_w + DEPTH)
+	// In Verilog, we can compute this.
+
+	wire [PTR_W-1:0] rd_ptr_sync_w_plus_depth = rd_ptr_sync_w + DEPTH;
+	wire wr_full_raw = (wr_ptr_next == rd_ptr_sync_w_plus_depth);
+
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			o_wr_full <= 1'b0;
+		else
+			o_wr_full <= wr_full_raw;
+	end
+
+	// Read clock domain
+	// Empty flag: rd_ptr == wr_ptr_sync
+	wire [PTR_W-1:0] wr_ptr_sync_r_val = wr_ptr_sync_r[1];
+	wire rd_empty_raw = (rd_ptr == wr_ptr_sync_r_val);
+
+	// Read data and valid
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_ptr <= {PTR_W{1'b0}};
+			rd_data_reg <= {WIDTH{1'b0}};
+			rd_valid <= 1'b0;
+		end else begin
+			if (i_rd && !rd_empty_raw) begin
+				rd_data_reg <= mem[rd_ptr[LG FIFO-1:0]];
+				rd_valid <= 1'b1;
+				rd_ptr <= rd_ptr + 1'b1;
+			end else if (!i_rd) begin
+				// Keep rd_valid as is if not reading
+			end
+		end
+	end
+
+	// Output logic
+	// OPT_REGISTER_READS: if 1, use an additional output register
+	// If 0, direct output from rd_data_reg and rd_valid
+
+	reg [WIDTH-1:0] o_rd_data_reg;
+	reg o_rd_empty_reg;
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			o_rd_data_reg <= {WIDTH{1'b0}};
+			o_rd_empty_reg <= 1'b1;
+		end else begin
+			if (OPT_REGISTER_READS) begin
+				o_rd_data_reg <= rd_data_reg;
+				o_rd_empty_reg <= rd_empty_raw;
+			end else begin
+				o_rd_data_reg <= rd_data_reg;
+				o_rd_empty_reg <= rd_empty_raw;
+			end
+		end
+	end
+
+	assign o_rd_data = o_rd_data_reg;
+	assign o_rd_empty = o_rd_empty_reg;
+
+endmodule

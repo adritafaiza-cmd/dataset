@@ -1,0 +1,306 @@
+module axixclk #(
+		parameter integer C_S_AXI_ID_WIDTH	= 2,
+		parameter integer C_S_AXI_DATA_WIDTH	= 32,
+		parameter integer C_S_AXI_ADDR_WIDTH	= 6,
+		parameter [0:0]	OPT_WRITE_ONLY = 1'b0,
+		parameter [0:0]	OPT_READ_ONLY = 1'b0,
+		parameter	XCLOCK_FFS = 2,
+		parameter	LGFIFO = 5
+	) (
+		input	wire				S_AXI_ACLK,
+		input	wire				S_AXI_ARESETN,
+		input	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_AWID,
+		input	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	S_AXI_AWADDR,
+		input	wire [7 : 0]			S_AXI_AWLEN,
+		input	wire [2 : 0]			S_AXI_AWSIZE,
+		input	wire [1 : 0]			S_AXI_AWBURST,
+		input	wire				S_AXI_AWLOCK,
+		input	wire [3 : 0]			S_AXI_AWCACHE,
+		input	wire [2 : 0]			S_AXI_AWPROT,
+		input	wire [3 : 0]			S_AXI_AWQOS,
+		input	wire				S_AXI_AWVALID,
+		output	wire				S_AXI_AWREADY,
+		input	wire [C_S_AXI_DATA_WIDTH-1 : 0]	S_AXI_WDATA,
+		input	wire [(C_S_AXI_DATA_WIDTH/8)-1 : 0] S_AXI_WSTRB,
+		input	wire				S_AXI_WLAST,
+		input	wire				S_AXI_WVALID,
+		output	wire				S_AXI_WREADY,
+		output	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_BID,
+		output	wire [1 : 0]			S_AXI_BRESP,
+		output	wire				S_AXI_BVALID,
+		input	wire				S_AXI_BREADY,
+		input	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_ARID,
+		input	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	S_AXI_ARADDR,
+		input	wire [7 : 0]			S_AXI_ARLEN,
+		input	wire [2 : 0]			S_AXI_ARSIZE,
+		input	wire [1 : 0]			S_AXI_ARBURST,
+		input	wire				S_AXI_ARLOCK,
+		input	wire [3 : 0]			S_AXI_ARCACHE,
+		input	wire [2 : 0]			S_AXI_ARPROT,
+		input	wire [3 : 0]			S_AXI_ARQOS,
+		input	wire				S_AXI_ARVALID,
+		output	wire				S_AXI_ARREADY,
+		output	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_RID,
+		output	wire [C_S_AXI_DATA_WIDTH-1 : 0]	S_AXI_RDATA,
+		output	wire [1 : 0]			S_AXI_RRESP,
+		output	wire				S_AXI_RLAST,
+		output	wire				S_AXI_RVALID,
+		input	wire				S_AXI_RREADY,
+		input	wire				M_AXI_ACLK,
+		output	wire				M_AXI_ARESETN,
+		output	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_AWID,
+		output	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	M_AXI_AWADDR,
+		output	wire [7 : 0]			M_AXI_AWLEN,
+		output	wire [2 : 0]			M_AXI_AWSIZE,
+		output	wire [1 : 0]			M_AXI_AWBURST,
+		output	wire				M_AXI_AWLOCK,
+		output	wire [3 : 0]			M_AXI_AWCACHE,
+		output	wire [2 : 0]			M_AXI_AWPROT,
+		output	wire [3 : 0]			M_AXI_AWQOS,
+		output	wire				M_AXI_AWVALID,
+		input	wire				M_AXI_AWREADY,
+		output	wire [C_S_AXI_DATA_WIDTH-1 : 0]	M_AXI_WDATA,
+		output	wire [(C_S_AXI_DATA_WIDTH/8)-1 : 0] M_AXI_WSTRB,
+		output	wire				M_AXI_WLAST,
+		output	wire				M_AXI_WVALID,
+		input	wire				M_AXI_WREADY,
+		input	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_BID,
+		input	wire [1 : 0]			M_AXI_BRESP,
+		input	wire				M_AXI_BVALID,
+		output	wire				M_AXI_BREADY,
+		output	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_ARID,
+		output	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	M_AXI_ARADDR,
+		output	wire [7 : 0]			M_AXI_ARLEN,
+		output	wire [2 : 0]			M_AXI_ARSIZE,
+		output	wire [1 : 0]			M_AXI_ARBURST,
+		output	wire				M_AXI_ARLOCK,
+		output	wire [3 : 0]			M_AXI_ARCACHE,
+		output	wire [2 : 0]			M_AXI_ARPROT,
+		output	wire [3 : 0]			M_AXI_ARQOS,
+		output	wire				M_AXI_ARVALID,
+		input	wire				M_AXI_ARREADY,
+		input	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_RID,
+		input	wire [C_S_AXI_DATA_WIDTH-1 : 0]	M_AXI_RDATA,
+		input	wire [1 : 0]			M_AXI_RRESP,
+		input	wire				M_AXI_RLAST,
+		input	wire				M_AXI_RVALID,
+		output	wire				M_AXI_RREADY
+	);
+
+	// Internal signals for CDC FIFOs
+	wire [C_S_AXI_ID_WIDTH + C_S_AXI_ADDR_WIDTH + 15 : 0] aw_din, aw_dout;
+	wire [C_S_AXI_DATA_WIDTH + 3 : 0] w_din, w_dout;
+	wire [C_S_AXI_ID_WIDTH + 1 : 0] b_din, b_dout;
+	wire [C_S_AXI_ID_WIDTH + C_S_AXI_ADDR_WIDTH + 15 : 0] ar_din, ar_dout;
+	wire [C_S_AXI_DATA_WIDTH + 3 : 0] r_din, r_dout;
+
+	wire aw_full, aw_empty, w_full, w_empty, b_full, b_empty, ar_full, ar_empty, r_full, r_empty;
+	wire aw_wr_en, w_wr_en, b_wr_en, ar_wr_en, r_wr_en;
+	wire aw_rd_en, w_rd_en, b_rd_en, ar_rd_en, r_rd_en;
+
+	// AW Channel CDC FIFO
+	cdc_fifo #(
+		.DATA_WIDTH(C_S_AXI_ID_WIDTH + C_S_AXI_ADDR_WIDTH + 16),
+		.DEPTH(LGFIFO)
+	) aw_cdc (
+		.src_clk(S_AXI_ACLK),
+		.src_rst(~S_AXI_ARESETN),
+		.dst_clk(M_AXI_ACLK),
+		.dst_rst(~M_AXI_ARESETN),
+		.din(aw_din),
+		.wr_en(aw_wr_en),
+		.full(aw_full),
+		.dout(aw_dout),
+		.rd_en(aw_rd_en),
+		.empty(aw_empty)
+	);
+
+	// W Channel CDC FIFO
+	cdc_fifo #(
+		.DATA_WIDTH(C_S_AXI_DATA_WIDTH + 4),
+		.DEPTH(LGFIFO)
+	) w_cdc (
+		.src_clk(S_AXI_ACLK),
+		.src_rst(~S_AXI_ARESETN),
+		.dst_clk(M_AXI_ACLK),
+		.dst_rst(~M_AXI_ARESETN),
+		.din(w_din),
+		.wr_en(w_wr_en),
+		.full(w_full),
+		.dout(w_dout),
+		.rd_en(w_rd_en),
+		.empty(w_empty)
+	);
+
+	// B Channel CDC FIFO
+	cdc_fifo #(
+		.DATA_WIDTH(C_S_AXI_ID_WIDTH + 2),
+		.DEPTH(LGFIFO)
+	) b_cdc (
+		.src_clk(M_AXI_ACLK),
+		.src_rst(~M_AXI_ARESETN),
+		.dst_clk(S_AXI_ACLK),
+		.dst_rst(~S_AXI_ARESETN),
+		.din(b_din),
+		.wr_en(b_wr_en),
+		.full(b_full),
+		.dout(b_dout),
+		.rd_en(b_rd_en),
+		.empty(b_empty)
+	);
+
+	// AR Channel CDC FIFO
+	cdc_fifo #(
+		.DATA_WIDTH(C_S_AXI_ID_WIDTH + C_S_AXI_ADDR_WIDTH + 16),
+		.DEPTH(LGFIFO)
+	) ar_cdc (
+		.src_clk(S_AXI_ACLK),
+		.src_rst(~S_AXI_ARESETN),
+		.dst_clk(M_AXI_ACLK),
+		.dst_rst(~M_AXI_ARESETN),
+		.din(ar_din),
+		.wr_en(ar_wr_en),
+		.full(ar_full),
+		.dout(ar_dout),
+		.rd_en(ar_rd_en),
+		.empty(ar_empty)
+	);
+
+	// R Channel CDC FIFO
+	cdc_fifo #(
+		.DATA_WIDTH(C_S_AXI_DATA_WIDTH + 4),
+		.DEPTH(LGFIFO)
+	) r_cdc (
+		.src_clk(M_AXI_ACLK),
+		.src_rst(~M_AXI_ARESETN),
+		.dst_clk(S_AXI_ACLK),
+		.dst_rst(~S_AXI_ARESETN),
+		.din(r_din),
+		.wr_en(r_wr_en),
+		.full(r_full),
+		.dout(r_dout),
+		.rd_en(r_rd_en),
+		.empty(r_empty)
+	);
+
+	// AW Channel Control
+	assign aw_din = {S_AXI_AWID, S_AXI_AWADDR, S_AXI_AWLEN, S_AXI_AWSIZE, S_AXI_AWBURST, S_AXI_AWLOCK, S_AXI_AWCACHE, S_AXI_AWPROT, S_AXI_AWQOS};
+	assign aw_wr_en = S_AXI_AWVALID & ~aw_full;
+	assign S_AXI_AWREADY = ~aw_full;
+
+	// W Channel Control
+	assign w_din = {S_AXI_WDATA, S_AXI_WSTRB, S_AXI_WLAST};
+	assign w_wr_en = S_AXI_WVALID & ~w_full;
+	assign S_AXI_WREADY = ~w_full;
+
+	// B Channel Control
+	assign b_din = {M_AXI_BID, M_AXI_BRESP};
+	assign b_wr_en = M_AXI_BVALID & ~b_full;
+	assign M_AXI_BREADY = ~b_full;
+	assign {S_AXI_BID, S_AXI_BRESP} = b_dout;
+	assign S_AXI_BVALID = ~b_empty;
+	assign b_rd_en = S_AXI_BREADY & ~b_empty;
+
+	// AR Channel Control
+	assign ar_din = {S_AXI_ARID, S_AXI_ARADDR, S_AXI_ARLEN, S_AXI_ARSIZE, S_AXI_ARBURST, S_AXI_ARLOCK, S_AXI_ARCACHE, S_AXI_ARPROT, S_AXI_ARQOS};
+	assign ar_wr_en = S_AXI_ARVALID & ~ar_full;
+	assign S_AXI_ARREADY = ~ar_full;
+
+	// R Channel Control
+	assign r_din = {M_AXI_RDATA, M_AXI_RRESP, M_AXI_RLAST};
+	assign r_wr_en = M_AXI_RVALID & ~r_full;
+	assign M_AXI_RREADY = ~r_full;
+	assign {S_AXI_RDATA, S_AXI_RRESP, S_AXI_RLAST} = r_dout;
+	assign S_AXI_RVALID = ~r_empty;
+	assign r_rd_en = S_AXI_RREADY & ~r_empty;
+
+	// Master Reset
+	assign M_AXI_ARESETN = S_AXI_ARESETN;
+
+endmodule
+
+module cdc_fifo #(
+		parameter DATA_WIDTH = 32,
+		parameter DEPTH = 5
+	) (
+		input	wire				src_clk,
+		input	wire				src_rst,
+		input	wire				dst_clk,
+		input	wire				dst_rst,
+		input	wire [DATA_WIDTH-1 : 0]	din,
+		input	wire				wr_en,
+		output	wire				full,
+		output	wire [DATA_WIDTH-1 : 0]	dout,
+		input	wire				rd_en,
+		output	wire				empty
+	);
+
+	reg [DATA_WIDTH-1 : 0] mem [0:DEPTH-1];
+	reg [$clog2(DEPTH)-1 : 0] wr_ptr, rd_ptr, wr_ptr_gray, rd_ptr_gray, rd_ptr_gray_sync;
+	reg [$clog2(DEPTH)-1 : 0] wr_ptr_gray_sync;
+
+	// Gray code conversion
+	function automatic [$clog2(DEPTH)-1 : 0] bin2gray(input [$clog2(DEPTH)-1 : 0] bin);
+		return bin ^ (bin >> 1);
+	endfunction
+
+	// Write pointer and FIFO memory update
+	always @(posedge src_clk or posedge src_rst) begin
+		if (src_rst) begin
+			wr_ptr <= 0;
+		end else if (wr_en & ~full) begin
+			mem[wr_ptr] <= din;
+			wr_ptr <= wr_ptr + 1;
+		end
+	end
+
+	// Read pointer update
+	always @(posedge dst_clk or posedge dst_rst) begin
+		if (dst_rst) begin
+			rd_ptr <= 0;
+		end else if (rd_en & ~empty) begin
+			rd_ptr <= rd_ptr + 1;
+		end
+	end
+
+	// Gray code conversion and synchronization
+	always @(posedge src_clk or posedge src_rst) begin
+		if (src_rst) begin
+			wr_ptr_gray <= 0;
+		end else begin
+			wr_ptr_gray <= bin2gray(wr_ptr);
+		end
+	end
+
+	always @(posedge dst_clk or posedge dst_rst) begin
+		if (dst_rst) begin
+			wr_ptr_gray_sync <= 0;
+		end else begin
+			wr_ptr_gray_sync <= wr_ptr_gray;
+		end
+	end
+
+	always @(posedge dst_clk or posedge dst_rst) begin
+		if (dst_rst) begin
+			rd_ptr_gray <= 0;
+		end else begin
+			rd_ptr_gray <= bin2gray(rd_ptr);
+		end
+	end
+
+	always @(posedge src_clk or posedge src_rst) begin
+		if (src_rst) begin
+			rd_ptr_gray_sync <= 0;
+		end else begin
+			rd_ptr_gray_sync <= rd_ptr_gray;
+		end
+	end
+
+	// FIFO status
+	assign full = (wr_ptr_gray_sync == (rd_ptr_gray + 1));
+	assign empty = (wr_ptr_gray_sync == rd_ptr_gray_sync);
+
+	// FIFO output
+	assign dout = mem[rd_ptr];
+
+endmodule

@@ -1,0 +1,175 @@
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam ADDR_WIDTH = LOG_DEPTH;
+
+    reg [ADDR_WIDTH:0] src_wr_ptr_gray, src_wr_ptr_bin;
+    reg [ADDR_WIDTH:0] src_rd_ptr_gray, src_rd_ptr_bin;
+    reg [ADDR_WIDTH:0] dst_wr_ptr_gray, dst_wr_ptr_bin;
+    reg [ADDR_WIDTH:0] dst_rd_ptr_gray, dst_rd_ptr_bin;
+
+    reg [WIDTH-1:0] mem [DEPTH-1:0];
+
+    reg src_clear_pending;
+    reg dst_clear_pending;
+
+    // Source domain logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_wr_ptr_gray <= 0;
+            src_wr_ptr_bin <= 0;
+            src_clear_pending <= 0;
+        end else if (src_clear_i) begin
+            src_wr_ptr_gray <= 0;
+            src_wr_ptr_bin <= 0;
+            src_clear_pending <= 1;
+        end else if (src_ready_o && src_valid_i) begin
+            src_wr_ptr_bin <= src_wr_ptr_bin + 1;
+            src_wr_ptr_gray <= src_wr_ptr_bin + 1 ^ (src_wr_ptr_bin + 1 >> 1);
+        end
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_rd_ptr_gray <= 0;
+            src_rd_ptr_bin <= 0;
+        end else if (src_clear_i) begin
+            src_rd_ptr_gray <= 0;
+            src_rd_ptr_bin <= 0;
+        end else if (dst_ready_i && dst_valid_o) begin
+            src_rd_ptr_bin <= src_rd_ptr_bin + 1;
+            src_rd_ptr_gray <= src_rd_ptr_bin + 1 ^ (src_rd_ptr_bin + 1 >> 1);
+        end
+    end
+
+    // Destination domain logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_wr_ptr_gray <= 0;
+            dst_wr_ptr_bin <= 0;
+            dst_clear_pending <= 0;
+        end else if (dst_clear_i) begin
+            dst_wr_ptr_gray <= 0;
+            dst_wr_ptr_bin <= 0;
+            dst_clear_pending <= 1;
+        end else if (src_ready_o && src_valid_i) begin
+            dst_wr_ptr_bin <= dst_wr_ptr_bin + 1;
+            dst_wr_ptr_gray <= dst_wr_ptr_bin + 1 ^ (dst_wr_ptr_bin + 1 >> 1);
+        end
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_rd_ptr_gray <= 0;
+            dst_rd_ptr_bin <= 0;
+        end else if (dst_clear_i) begin
+            dst_rd_ptr_gray <= 0;
+            dst_rd_ptr_bin <= 0;
+        end else if (dst_ready_i && dst_valid_o) begin
+            dst_rd_ptr_bin <= dst_rd_ptr_bin + 1;
+            dst_rd_ptr_gray <= dst_rd_ptr_bin + 1 ^ (dst_rd_ptr_bin + 1 >> 1);
+        end
+    end
+
+    // Gray to binary conversion for source domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_wr_ptr_bin <= 0;
+        end else begin
+            dst_wr_ptr_bin[ADDR_WIDTH] <= dst_wr_ptr_gray[ADDR_WIDTH];
+            for (integer i = ADDR_WIDTH - 1; i >= 0; i = i - 1) begin
+                dst_wr_ptr_bin[i] <= dst_wr_ptr_gray[i] ^ dst_wr_ptr_bin[i + 1];
+            end
+        end
+    end
+
+    // Gray to binary conversion for destination domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_wr_ptr_bin <= 0;
+        end else begin
+            src_wr_ptr_bin[ADDR_WIDTH] <= src_wr_ptr_gray[ADDR_WIDTH];
+            for (integer i = ADDR_WIDTH - 1; i >= 0; i = i - 1) begin
+                src_wr_ptr_bin[i] <= src_wr_ptr_gray[i] ^ src_wr_ptr_bin[i + 1];
+            end
+        end
+    end
+
+    // FIFO memory write
+    always @(posedge src_clk_i) begin
+        if (src_ready_o && src_valid_i) begin
+            mem[src_wr_ptr_bin[ADDR_WIDTH-1:0]] <= src_data_i;
+        end
+    end
+
+    // FIFO memory read
+    reg [WIDTH-1:0] dst_data_reg [SYNC_STAGES-1:0];
+    reg [SYNC_STAGES-1:0] dst_valid_reg;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            for (integer i = 0; i < SYNC_STAGES; i = i + 1) begin
+                dst_data_reg[i] <= 0;
+                dst_valid_reg[i] <= 0;
+            end
+        end else begin
+            dst_data_reg[0] <= mem[dst_wr_ptr_bin[ADDR_WIDTH-1:0]];
+            dst_valid_reg[0] <= (dst_wr_ptr_bin != dst_rd_ptr_bin);
+
+            for (integer i = 1; i < SYNC_STAGES; i = i + 1) begin
+                dst_data_reg[i] <= dst_data_reg[i-1];
+                dst_valid_reg[i] <= dst_valid_reg[i-1];
+            end
+        end
+    end
+
+    assign dst_data_o = dst_data_reg[SYNC_STAGES-1];
+    assign dst_valid_o = dst_valid_reg[SYNC_STAGES-1];
+
+    // Source ready
+    assign src_ready_o = (src_wr_ptr_bin + 1 != src_rd_ptr_bin);
+
+    // Clear pending outputs
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_clear_pending <= 0;
+        end else if (src_clear_i) begin
+            src_clear_pending <= 1;
+        end else if (src_wr_ptr_bin == src_rd_ptr_bin) begin
+            src_clear_pending <= 0;
+        end
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_clear_pending <= 0;
+        end else if (dst_clear_i) begin
+            dst_clear_pending <= 1;
+        end else if (dst_wr_ptr_bin == dst_rd_ptr_bin) begin
+            dst_clear_pending <= 0;
+        end
+    end
+
+    assign src_clear_pending_o = src_clear_pending;
+    assign dst_clear_pending_o = dst_clear_pending;
+
+endmodule

@@ -1,0 +1,234 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "isochronous_spill_register",
+            "function": "A 2-deep valid/ready spill buffer between related clocks.",
+            "parameters": [
+                {
+                    "name": "WIDTH",
+                    "value": "8"
+                }
+            ],
+            "ports": [
+                {
+                    "name": "src_clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "src_clk_i"
+                },
+                {
+                    "name": "src_rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "src_clk_i"
+                },
+                {
+                    "name": "src_valid_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "src_clk_i"
+                },
+                {
+                    "name": "src_ready_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "src_clk_i"
+                },
+                {
+                    "name": "src_data_i",
+                    "direction": "input",
+                    "width": "WIDTH",
+                    "clock_domain": "src_clk_i"
+                },
+                {
+                    "name": "dst_clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "dst_clk_i"
+                },
+                {
+                    "name": "dst_rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "dst_clk_i"
+                },
+                {
+                    "name": "dst_valid_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "dst_clk_i"
+                },
+                {
+                    "name": "dst_ready_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "dst_clk_i"
+                },
+                {
+                    "name": "dst_data_o",
+                    "direction": "output",
+                    "width": "WIDTH",
+                    "clock_domain": "dst_clk_i"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {
+                    "name": "src_buffer_full",
+                    "width": 1
+                },
+                {
+                    "name": "src_buffer_empty",
+                    "width": 1
+                },
+                {
+                    "name": "dst_buffer_full",
+                    "width": 1
+                },
+                {
+                    "name": "dst_buffer_empty",
+                    "width": 1
+                },
+                {
+                    "name": "src_buffer_head",
+                    "width": "WIDTH"
+                },
+                {
+                    "name": "src_buffer_tail",
+                    "width": "WIDTH"
+                },
+                {
+                    "name": "dst_buffer_head",
+                    "width": "WIDTH"
+                },
+                {
+                    "name": "dst_buffer_tail",
+                    "width": "WIDTH"
+                },
+                {
+                    "name": "src_buffer_ptr",
+                    "width": 2
+                },
+                {
+                    "name": "dst_buffer_ptr",
+                    "width": 2
+                },
+                {
+                    "name": "src_buffer_we",
+                    "width": 1
+                },
+                {
+                    "name": "dst_buffer_we",
+                    "width": 1
+                },
+                {
+                    "name": "src_buffer_re",
+                    "width": 1
+                },
+                {
+                    "name": "dst_buffer_re",
+                    "width": 1
+                }
+            ],
+            "behavior": [
+                "After reset, the destination is idle.",
+                "Every accepted source beat appears exactly once at the destination, in order.",
+                "The buffer absorbs a short rate mismatch between the related clocks.",
+                "The buffer has a 2-deep structure.",
+                "The source ready is asserted if there is space in the buffer.",
+                "The destination valid is asserted if there is data in the buffer.",
+                "The buffer uses pointers to manage head and tail positions.",
+                "The buffer has full and empty flags for both source and destination domains."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    reg [WIDTH-1:0] buffer [0:1];
+    reg [1:0] src_buffer_ptr, dst_buffer_ptr;
+    reg src_buffer_full, src_buffer_empty;
+    reg dst_buffer_full, dst_buffer_empty;
+
+    // Source domain logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_buffer_ptr <= 0;
+            src_buffer_full <= 0;
+            src_buffer_empty <= 1;
+        end else begin
+            if (src_valid_i && !src_buffer_full && !src_buffer_empty) begin
+                // Write and read
+                buffer[src_buffer_ptr] <= src_data_i;
+                src_buffer_ptr <= src_buffer_ptr + 1;
+            end else if (src_valid_i && !src_buffer_full) begin
+                // Write only
+                buffer[src_buffer_ptr] <= src_data_i;
+                src_buffer_ptr <= src_buffer_ptr + 1;
+                if (src_buffer_ptr == 1)
+                    src_buffer_full <= 1;
+                src_buffer_empty <= 0;
+            end else if (dst_ready_i && !src_buffer_empty) begin
+                // Read only
+                src_buffer_ptr <= src_buffer_ptr - 1;
+                if (src_buffer_ptr == 0)
+                    src_buffer_empty <= 1;
+                src_buffer_full <= 0;
+            end
+        end
+    end
+
+    // Destination domain logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_buffer_ptr <= 0;
+            dst_buffer_full <= 0;
+            dst_buffer_empty <= 1;
+        end else begin
+            if (dst_ready_i && !dst_buffer_empty && !dst_buffer_full) begin
+                // Read and write
+                dst_buffer_ptr <= dst_buffer_ptr + 1;
+            end else if (dst_ready_i && !dst_buffer_empty) begin
+                // Read only
+                dst_buffer_ptr <= dst_buffer_ptr + 1;
+                if (dst_buffer_ptr == 1)
+                    dst_buffer_empty <= 1;
+                dst_buffer_full <= 0;
+            end else if (src_valid_i && !dst_buffer_full) begin
+                // Write only
+                buffer[dst_buffer_ptr] <= buffer[src_buffer_ptr];
+                dst_buffer_ptr <= dst_buffer_ptr - 1;
+                if (dst_buffer_ptr == 0)
+                    dst_buffer_full <= 1;
+                dst_buffer_empty <= 0;
+            end
+        end
+    end
+
+    // Source ready and destination valid
+    assign src_ready_o = !src_buffer_full;
+    assign dst_valid_o = !dst_buffer_empty;
+    assign dst_data_o = buffer[dst_buffer_ptr];
+
+endmodule
+```

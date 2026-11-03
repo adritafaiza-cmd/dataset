@@ -1,0 +1,103 @@
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam DEPTH = 2**ADDR_WIDTH;
+
+    // Write and read pointers
+    reg [ADDR_WIDTH:0] wptr, rptr;
+    reg [ADDR_WIDTH:0] wptr_gray, rptr_gray;
+    reg [ADDR_WIDTH:0] rptr_gray_sync [SYNC_STAGES-1:0];
+
+    // Memory array
+    reg [DATA_WIDTH-1:0] mem [DEPTH-1:0];
+
+    // Gray code conversion
+    function [ADDR_WIDTH:0] bin_to_gray;
+        input [ADDR_WIDTH:0] bin;
+        bin_to_gray = bin ^ (bin >> 1);
+    endfunction
+
+    // Write domain logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= 0;
+            wptr_gray <= 0;
+        end else if (winc && !wfull) begin
+            wptr <= wptr + 1;
+            wptr_gray <= bin_to_gray(wptr + 1);
+        end
+    end
+
+    // Read domain logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= 0;
+            rptr_gray <= 0;
+            foreach (rptr_gray_sync[i]) begin
+                rptr_gray_sync[i] <= 0;
+            end
+        end else begin
+            // Synchronize read pointer to write domain
+            rptr_gray_sync[0] <= wptr_gray;
+            for (int i = 1; i < SYNC_STAGES; i++) begin
+                rptr_gray_sync[i] <= rptr_gray_sync[i-1];
+            end
+            rptr_gray <= rptr_gray_sync[SYNC_STAGES-1];
+
+            // Convert synchronized gray code back to binary
+            rptr <= gray_to_bin(rptr_gray_sync[SYNC_STAGES-1]);
+
+            // Increment read pointer if read is accepted
+            if (rinc && !rempty) begin
+                rptr <= rptr + 1;
+            end
+        end
+    end
+
+    // Gray to binary conversion
+    function [ADDR_WIDTH:0] gray_to_bin;
+        input [ADDR_WIDTH:0] gray;
+        reg [ADDR_WIDTH:0] bin;
+        integer i;
+        bin[ADDR_WIDTH] = gray[ADDR_WIDTH];
+        for (i = ADDR_WIDTH-1; i >= 0; i = i - 1) begin
+            bin[i] = bin[i+1] ^ gray[i];
+        end
+        gray_to_bin = bin;
+    endfunction
+
+    // Write data to memory
+    always @(posedge wclk) begin
+        if (winc && !wfull) begin
+            mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+        end
+    end
+
+    // Read data from memory
+    assign rdata = mem[rptr[ADDR_WIDTH-1:0]];
+
+    // Full and empty flags
+    assign wfull = (wptr_gray == bin_to_gray(rptr + DEPTH));
+    assign rempty = (wptr_gray == rptr_gray);
+
+    // Debug outputs
+    assign waddr = wptr;
+    assign raddr = rptr;
+
+endmodule

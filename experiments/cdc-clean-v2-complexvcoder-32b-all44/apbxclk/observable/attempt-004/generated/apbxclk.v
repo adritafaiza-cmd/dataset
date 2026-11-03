@@ -1,0 +1,178 @@
+module apbxclk #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		parameter [0:0]	OPT_REGISTERED = 1'b0,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH
+	) (
+		input	wire			S_APB_PCLK, S_PRESETn,
+		input	wire			S_APB_PSEL,
+		input	wire			S_APB_PENABLE,
+		output	reg			S_APB_PREADY,
+		input	wire	[AW-1:0]	S_APB_PADDR,
+		input	wire			S_APB_PWRITE,
+		input	wire	[DW-1:0]	S_APB_PWDATA,
+		input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+		input	wire	[2:0]		S_APB_PPROT,
+		output	wire	[DW-1:0]	S_APB_PRDATA,
+		output	wire			S_APB_PSLVERR,
+		input	wire			M_APB_PCLK,
+		output	reg			M_PRESETn,
+		output	reg			M_APB_PSEL,
+		output	reg			M_APB_PENABLE,
+		input	wire			M_APB_PREADY,
+		output	wire	[AW-1:0]	M_APB_PADDR,
+		output	wire			M_APB_PWRITE,
+		output	wire	[DW-1:0]	M_APB_PWDATA,
+		output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+		output	wire	[2:0]		M_APB_PPROT,
+		input	wire	[DW-1:0]	M_APB_PRDATA,
+		input	wire			M_APB_PSLVERR
+	);
+
+	// Internal signals
+	reg [AW-1:0] s_apb_req_addr;
+	reg s_apb_req_write;
+	reg [DW-1:0] s_apb_req_wdata;
+	reg [DW/8-1:0] s_apb_req_wstrb;
+	reg [2:0] s_apb_req_prot;
+	reg s_apb_req_valid;
+	reg s_apb_req_ready;
+	reg [DW-1:0] s_apb_resp_rdata;
+	reg s_apb_resp_slverr;
+	reg s_apb_resp_valid;
+	reg s_apb_resp_ready;
+
+	reg [AW-1:0] m_apb_req_addr;
+	reg m_apb_req_write;
+	reg [DW-1:0] m_apb_req_wdata;
+	reg [DW/8-1:0] m_apb_req_wstrb;
+	reg [2:0] m_apb_req_prot;
+	reg m_apb_req_valid;
+	reg m_apb_req_ready;
+	reg [DW-1:0] m_apb_resp_rdata;
+	reg m_apb_resp_slverr;
+	reg m_apb_resp_valid;
+	reg m_apb_resp_ready;
+
+	// Clock-domain crossing signals
+	reg s_apb_req_sync;
+	reg m_apb_req_sync;
+
+	// Synchronizers for reset
+	reg s_rst_sync1, s_rst_sync2;
+	reg m_rst_sync1, m_rst_sync2;
+
+	// Synchronize reset to slave clock domain
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_rst_sync1 <= 1'b0;
+			s_rst_sync2 <= 1'b0;
+		end else begin
+			s_rst_sync1 <= 1'b1;
+			s_rst_sync2 <= s_rst_sync1;
+		end
+	end
+
+	// Synchronize reset to master clock domain
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_rst_sync1 <= 1'b0;
+			m_rst_sync2 <= 1'b0;
+		end else begin
+			m_rst_sync1 <= 1'b1;
+			m_rst_sync2 <= m_rst_sync1;
+		end
+	end
+
+	// Slave side logic
+	always @(posedge S_APB_PCLK or negedge s_rst_sync2) begin
+		if (!s_rst_sync2) begin
+			S_APB_PREADY <= 1'b0;
+			s_apb_req_valid <= 1'b0;
+		end else begin
+			S_APB_PREADY <= s_apb_resp_valid & s_apb_resp_ready;
+			if (S_APB_PSEL && S_APB_PENABLE && !s_apb_req_valid) begin
+				s_apb_req_addr <= S_APB_PADDR;
+				s_apb_req_write <= S_APB_PWRITE;
+				s_apb_req_wdata <= S_APB_PWDATA;
+				s_apb_req_wstrb <= S_APB_PWSTRB;
+				s_apb_req_prot <= S_APB_PPROT;
+				s_apb_req_valid <= 1'b1;
+			end else if (s_apb_resp_valid && s_apb_resp_ready) begin
+				s_apb_req_valid <= 1'b0;
+			end
+		end
+	end
+
+	// Synchronize request valid signal to master clock domain
+	always @(posedge M_APB_PCLK or negedge m_rst_sync2) begin
+		if (!m_rst_sync2) begin
+			m_apb_req_sync <= 1'b0;
+		end else begin
+			m_apb_req_sync <= s_apb_req_valid;
+		end
+	end
+
+	// Master side logic
+	always @(posedge M_APB_PCLK or negedge m_rst_sync2) begin
+		if (!m_rst_sync2) begin
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			m_apb_req_valid <= 1'b0;
+			m_apb_resp_ready <= 1'b0;
+			M_PRESETn <= 1'b0;
+		end else begin
+			M_PRESETn <= 1'b1;
+			m_apb_resp_ready <= m_apb_resp_valid;
+			if (m_apb_req_sync && !m_apb_req_valid) begin
+				m_apb_req_addr <= s_apb_req_addr;
+				m_apb_req_write <= s_apb_req_write;
+				m_apb_req_wdata <= s_apb_req_wdata;
+				m_apb_req_wstrb <= s_apb_req_wstrb;
+				m_apb_req_prot <= s_apb_req_prot;
+				m_apb_req_valid <= 1'b1;
+				M_APB_PSEL <= 1'b1;
+				M_APB_PENABLE <= 1'b1;
+			end else if (M_APB_PREADY) begin
+				m_apb_req_valid <= 1'b0;
+				M_APB_PSEL <= 1'b0;
+				M_APB_PENABLE <= 1'b0;
+			end
+		end
+	end
+
+	// Synchronize response ready signal to slave clock domain
+	always @(posedge S_APB_PCLK or negedge s_rst_sync2) begin
+		if (!s_rst_sync2) begin
+			s_apb_req_sync <= 1'b0;
+		end else begin
+			s_apb_req_sync <= m_apb_resp_ready;
+		end
+	end
+
+	// Assign master side outputs
+	assign M_APB_PADDR = m_apb_req_addr;
+	assign M_APB_PWRITE = m_apb_req_write;
+	assign M_APB_PWDATA = m_apb_req_wdata;
+	assign M_APB_PWSTRB = m_apb_req_wstrb;
+	assign M_APB_PPROT = m_apb_req_prot;
+
+	// Synchronize response signals from master to slave clock domain
+	always @(posedge S_APB_PCLK or negedge s_rst_sync2) begin
+		if (!s_rst_sync2) begin
+			s_apb_resp_rdata <= {DW{1'b0}};
+			s_apb_resp_slverr <= 1'b0;
+			s_apb_resp_valid <= 1'b0;
+		end else begin
+			s_apb_resp_rdata <= M_APB_PRDATA;
+			s_apb_resp_slverr <= M_APB_PSLVERR;
+			s_apb_resp_valid <= m_apb_req_valid & M_APB_PREADY;
+		end
+	end
+
+	// Assign slave side outputs
+	assign S_APB_PRDATA = s_apb_resp_rdata;
+	assign S_APB_PSLVERR = s_apb_resp_slverr;
+
+endmodule

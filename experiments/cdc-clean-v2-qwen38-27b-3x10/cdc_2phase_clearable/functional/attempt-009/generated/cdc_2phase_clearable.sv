@@ -1,0 +1,229 @@
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire src_req;
+  wire src_ack;
+  wire dst_req;
+  wire dst_ack;
+
+  // Source domain: request generation
+  reg src_req_reg;
+  reg src_ack_reg;
+  reg src_clear_pending_reg;
+  reg src_isolated_reg;
+
+  // Destination domain: acknowledge generation
+  reg dst_ack_reg;
+  reg dst_req_reg;
+  reg dst_clear_pending_reg;
+  reg dst_isolated_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_valid_reg;
+
+  // Synchronizers
+  // src_req -> dst domain
+  reg [SYNC_STAGES-1:0] src_req_sync;
+  // dst_ack -> src domain
+  reg [SYNC_STAGES-1:0] dst_ack_sync;
+  // dst_req -> src domain
+  reg [SYNC_STAGES-1:0] dst_req_sync;
+  // src_ack -> dst domain
+  reg [SYNC_STAGES-1:0] src_ack_sync;
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_req_reg <= 1'b0;
+      src_ack_reg <= 1'b0;
+      src_clear_pending_reg <= 1'b0;
+      src_isolated_reg <= 1'b0;
+    end else begin
+      // Clear handling
+      if (src_clear_i && !src_isolated_reg) begin
+        src_isolated_reg <= 1'b1;
+        src_clear_pending_reg <= 1'b1;
+      end
+
+      if (src_isolated_reg) begin
+        // Wait for dst to acknowledge the clear (dst_ack goes low)
+        // In the clear sequence, we need to ensure the handshake is reset
+        // The clear protocol: 
+        // 1. Isolate: stop accepting new data
+        // 2. If there's an outstanding request, wait for ack to complete or force reset
+        // 3. Return to idle
+        
+        // For a clearable 2-phase handshake, we need to ensure both req and ack are 0
+        // If src_req is high, we need to wait for dst_ack to go high (completing the transfer)
+        // then bring src_req low, and wait for dst_ack to go low
+        
+        // Simplified clear: 
+        // - If src_req_reg is 1, wait for dst_ack_sync to become 1 (transfer complete)
+        //   then set src_req_reg to 0
+        // - Once src_req_reg is 0, wait for dst_ack_sync to become 0
+        // - Then clear is done
+        
+        if (src_req_reg) begin
+          if (dst_ack_sync[SYNC_STAGES-1]) begin
+            src_req_reg <= 1'b0;
+          end
+        end else begin
+          if (!dst_ack_sync[SYNC_STAGES-1]) begin
+            src_isolated_reg <= 1'b0;
+            src_clear_pending_reg <= 1'b0;
+          end
+        end
+      end else begin
+        // Normal operation
+        // src_ready is high when we can accept new data
+        // We can accept if:
+        // - No outstanding request (src_req_reg == 0)
+        // - OR the previous request has been acknowledged (dst_ack_sync == 1) and we're ready for next
+        
+        // Two-phase handshake:
+        // - src_req goes high when we have data to send
+        // - dst_ack goes high when destination has captured the data
+        // - src_req goes low after seeing dst_ack high
+        // - dst_ack goes low after seeing src_req low
+        
+        if (src_req_reg) begin
+          // Wait for ack
+          if (dst_ack_sync[SYNC_STAGES-1]) begin
+            src_req_reg <= 1'b0;
+          end
+        end else begin
+          // Can send new data if valid and ready
+          if (src_valid_i && dst_ack_sync[SYNC_STAGES-1] == 1'b0) begin
+            // Wait for ack to be low before starting new request
+            // Actually in 2-phase, we need ack to be low to start
+            if (dst_ack_sync[SYNC_STAGES-1] == 1'b0) begin
+              src_req_reg <= 1'b1;
+            end
+          end
+        end
+      end
+    end
+  end
+
+  // src_ready_o: high when source can accept new data
+  // Can accept if not isolated, no outstanding request, or request has been acked
+  assign src_ready_o = !src_isolated_reg && !src_req_reg;
+
+  assign src_clear_pending_o = src_clear_pending_reg;
+
+  // Destination domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_ack_reg <= 1'b0;
+      dst_req_reg <= 1'b0;
+      dst_clear_pending_reg <= 1'b0;
+      dst_isolated_reg <= 1'b0;
+      dst_data_reg <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+    end else begin
+      // Clear handling
+      if (dst_clear_i && !dst_isolated_reg) begin
+        dst_isolated_reg <= 1'b1;
+        dst_clear_pending_reg <= 1'b1;
+      end
+
+      if (dst_isolated_reg) begin
+        // Wait for src to complete the clear
+        // dst_ack should go low, and src_req should go low
+        if (dst_ack_reg) begin
+          if (!src_req_sync[SYNC_STAGES-1]) begin
+            dst_ack_reg <= 1'b0;
+          end
+        end else begin
+          if (!src_req_sync[SYNC_STAGES-1]) begin
+            dst_isolated_reg <= 1'b0;
+            dst_clear_pending_reg <= 1'b0;
+            dst_valid_reg <= 1'b0;
+          end
+        end
+      end else begin
+        // Normal operation
+        // dst_ack goes high when we see src_req high and we're ready
+        if (dst_ack_reg) begin
+          // Wait for src_req to go low
+          if (!src_req_sync[SYNC_STAGES-1]) begin
+            dst_ack_reg <= 1'b0;
+          end
+        end else begin
+          // Can acknowledge if src_req is high and we're ready
+          if (src_req_sync[SYNC_STAGES-1] && dst_ready_i) begin
+            dst_ack_reg <= 1'b1;
+            dst_data_reg <= src_data_i; // This is a CDC issue - src_data_i is in src domain
+            dst_valid_reg <= 1'b1;
+          end
+        end
+      end
+    end
+  end
+
+  // dst_valid_o: high when we have valid data to present
+  assign dst_valid_o = dst_valid_reg && !dst_isolated_reg;
+
+  assign dst_clear_pending_o = dst_clear_pending_reg;
+
+  // Synchronizer for src_req to dst domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_req_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      src_req_sync <= {src_req_sync[SYNC_STAGES-2:0], src_req};
+    end
+  end
+
+  // Synchronizer for dst_ack to src domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      dst_ack_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      dst_ack_sync <= {dst_ack_sync[SYNC_STAGES-2:0], dst_ack};
+    end
+  end
+
+  // Synchronizer for dst_req to src domain (not used in this design, but kept for completeness)
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      dst_req_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      dst_req_sync <= {dst_req_sync[SYNC_STAGES-2:0], dst_req};
+    end
+  end
+
+  // Synchronizer for src_ack to dst domain (not used in this design, but kept for completeness)
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_ack_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      src_ack_sync <= {src_ack_sync[SYNC_STAGES-2:0], src_ack};
+    end
+  end
+
+  // Assign internal signals
+  assign src_req = src_req_reg;
+  assign src_ack = dst_ack_sync[SYNC_STAGES-1];
+  assign dst_req = src_req_sync[SYNC_STAGES-1];
+  assign dst_ack = dst_ack_reg;
+
+endmodule

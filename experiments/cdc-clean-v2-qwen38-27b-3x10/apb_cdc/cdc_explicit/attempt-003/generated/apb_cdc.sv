@@ -1,0 +1,186 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam AW = LOG_DEPTH;
+
+    // Source domain registers
+    reg [ADDR_WIDTH-1:0] src_addr_reg;
+    reg [DATA_WIDTH-1:0] src_wdata_reg;
+    reg [DATA_WIDTH/8-1:0] src_strb_reg;
+    reg [2:0] src_prot_reg;
+    reg src_write_reg;
+    reg src_valid_reg;
+    reg src_done_reg;
+    reg [DATA_WIDTH-1:0] src_rdata_reg;
+    reg src_rerr_reg;
+
+    // Destination domain registers
+    reg [ADDR_WIDTH-1:0] dst_addr_reg;
+    reg [DATA_WIDTH-1:0] dst_wdata_reg;
+    reg [DATA_WIDTH/8-1:0] dst_strb_reg;
+    reg [2:0] dst_prot_reg;
+    reg dst_write_reg;
+    reg dst_valid_reg;
+    reg dst_phase_reg; // 0: setup, 1: access
+    reg dst_done_reg;
+
+    // CDC signals
+    wire src_to_dst_valid;
+    wire dst_to_src_done;
+
+    // Synchronizers
+    reg [1:0] valid_sync;
+    reg [1:0] done_sync;
+
+    // Source domain: valid to destination
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            valid_sync <= 2'b00;
+        end else begin
+            valid_sync <= {valid_sync[0], src_valid_reg};
+        end
+    end
+    assign src_to_dst_valid = valid_sync[1];
+
+    // Destination domain: done to source
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            done_sync <= 2'b00;
+        end else begin
+            done_sync <= {done_sync[0], dst_done_reg};
+        end
+    end
+    assign dst_to_src_done = done_sync[1];
+
+    // Source domain logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_addr_reg <= {ADDR_WIDTH{1'b0}};
+            src_wdata_reg <= {DATA_WIDTH{1'b0}};
+            src_strb_reg <= {(DATA_WIDTH/8){1'b0}};
+            src_prot_reg <= 3'b000;
+            src_write_reg <= 1'b0;
+            src_valid_reg <= 1'b0;
+            src_done_reg <= 1'b0;
+            src_rdata_reg <= {DATA_WIDTH{1'b0}};
+            src_rerr_reg <= 1'b0;
+        end else begin
+            // Capture request during setup phase
+            if (src_psel_i && !src_penable_i && !src_valid_reg) begin
+                src_addr_reg <= src_paddr_i;
+                src_wdata_reg <= src_pwdata_i;
+                src_strb_reg <= src_pstrb_i;
+                src_prot_reg <= src_pprot_i;
+                src_write_reg <= src_pwrite_i;
+                src_valid_reg <= 1'b1;
+                src_done_reg <= 1'b0;
+            end
+
+            // When destination completes, return data and clear valid
+            if (dst_to_src_done && src_valid_reg) begin
+                if (!src_write_reg) begin
+                    src_rdata_reg <= dst_prdata_i;
+                    src_rerr_reg <= dst_pslverr_i;
+                end
+                src_valid_reg <= 1'b0;
+                src_done_reg <= 1'b1;
+            end
+
+            // Clear done flag after one cycle
+            if (src_done_reg && !dst_to_src_done) begin
+                src_done_reg <= 1'b0;
+            end
+        end
+    end
+
+    // Source outputs
+    assign src_pready_o = (src_psel_i && src_penable_i) ? (src_valid_reg && dst_to_src_done) : 1'b0;
+    assign src_prdata_o = src_rdata_reg;
+    assign src_pslverr_o = src_rerr_reg;
+
+    // Destination domain logic
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_addr_reg <= {ADDR_WIDTH{1'b0}};
+            dst_wdata_reg <= {DATA_WIDTH{1'b0}};
+            dst_strb_reg <= {(DATA_WIDTH/8){1'b0}};
+            dst_prot_reg <= 3'b000;
+            dst_write_reg <= 1'b0;
+            dst_valid_reg <= 1'b0;
+            dst_phase_reg <= 1'b0;
+            dst_done_reg <= 1'b0;
+        end else begin
+            // Accept new request from source
+            if (src_to_dst_valid && !dst_valid_reg) begin
+                dst_addr_reg <= src_paddr_i;
+                dst_wdata_reg <= src_pwdata_i;
+                dst_strb_reg <= src_pstrb_i;
+                dst_prot_reg <= src_pprot_i;
+                dst_write_reg <= src_pwrite_i;
+                dst_valid_reg <= 1'b1;
+                dst_phase_reg <= 1'b0;
+                dst_done_reg <= 1'b0;
+            end
+
+            // Advance phase
+            if (dst_valid_reg) begin
+                if (dst_phase_reg == 1'b0) begin
+                    // Setup phase complete, move to access
+                    if (dst_pready_i) begin
+                        dst_phase_reg <= 1'b1;
+                    end
+                end else begin
+                    // Access phase complete
+                    if (dst_pready_i) begin
+                        dst_valid_reg <= 1'b0;
+                        dst_done_reg <= 1'b1;
+                    end
+                end
+            end
+
+            // Clear done flag
+            if (dst_done_reg && !dst_pready_i) begin
+                dst_done_reg <= 1'b0;
+            end
+        end
+    end
+
+    // Destination outputs
+    assign dst_psel_o = dst_valid_reg;
+    assign dst_penable_o = dst_valid_reg && dst_phase_reg;
+    assign dst_pwrite_o = dst_write_reg;
+    assign dst_paddr_o = dst_addr_reg;
+    assign dst_pwdata_o = dst_wdata_reg;
+    assign dst_pstrb_o = dst_strb_reg;
+    assign dst_pprot_o = dst_prot_reg;
+
+endmodule

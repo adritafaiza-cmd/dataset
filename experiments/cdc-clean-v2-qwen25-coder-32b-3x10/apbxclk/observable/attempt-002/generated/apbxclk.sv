@@ -1,0 +1,166 @@
+module apbxclk #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		parameter [0:0]	OPT_REGISTERED = 1'b0,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH
+	) (
+		input	wire			S_APB_PCLK, S_PRESETn,
+		input	wire			S_APB_PSEL,
+		input	wire			S_APB_PENABLE,
+		output	reg			S_APB_PREADY,
+		input	wire	[AW-1:0]	S_APB_PADDR,
+		input	wire			S_APB_PWRITE,
+		input	wire	[DW-1:0]	S_APB_PWDATA,
+		input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+		input	wire	[2:0]		S_APB_PPROT,
+		output	wire	[DW-1:0]	S_APB_PRDATA,
+		output	wire			S_APB_PSLVERR,
+		input	wire			M_APB_PCLK,
+		output	reg			M_PRESETn,
+		output	reg			M_APB_PSEL,
+		output	reg			M_APB_PENABLE,
+		input	wire			M_APB_PREADY,
+		output	wire	[AW-1:0]	M_APB_PADDR,
+		output	wire			M_APB_PWRITE,
+		output	wire	[DW-1:0]	M_APB_PWDATA,
+		output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+		output	wire	[2:0]		M_APB_PPROT,
+		input	wire	[DW-1:0]	M_APB_PRDATA,
+		input	wire			M_APB_PSLVERR
+	);
+
+reg [AW-1:0] addr_reg;
+reg [DW-1:0] wdata_reg;
+reg [DW/8-1:0] wstrb_reg;
+reg [2:0] prot_reg;
+reg write_reg;
+reg req_valid;
+reg req_ready;
+
+reg [DW-1:0] rdata_reg;
+reg slverr_reg;
+reg resp_valid;
+reg resp_ready;
+
+// Synchronizers for request signals
+reg [AW-1:0] addr_sync;
+reg [DW-1:0] wdata_sync;
+reg [DW/8-1:0] wstrb_sync;
+reg [2:0] prot_sync;
+reg write_sync;
+reg req_valid_sync;
+
+always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+	if (!S_PRESETn) begin
+		addr_sync <= 0;
+		wdata_sync <= 0;
+		wstrb_sync <= 0;
+		prot_sync <= 0;
+		write_sync <= 0;
+		req_valid_sync <= 0;
+	end else begin
+		addr_sync <= S_APB_PADDR;
+		wdata_sync <= S_APB_PWDATA;
+		wstrb_sync <= S_APB_PWSTRB;
+		prot_sync <= S_APB_PPROT;
+		write_sync <= S_APB_PWRITE;
+		req_valid_sync <= S_APB_PSEL & S_APB_PENABLE;
+	end
+end
+
+// Master side request handling
+always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+	if (!S_PRESETn) begin
+		addr_reg <= 0;
+		wdata_reg <= 0;
+		wstrb_reg <= 0;
+		prot_reg <= 0;
+		write_reg <= 0;
+		req_valid <= 0;
+		req_ready <= 0;
+	end else begin
+		if (!req_valid && req_valid_sync) begin
+			addr_reg <= addr_sync;
+			wdata_reg <= wdata_sync;
+			wstrb_reg <= wstrb_sync;
+			prot_reg <= prot_sync;
+			write_reg <= write_sync;
+			req_valid <= 1;
+		end
+		if (M_APB_PREADY) begin
+			req_valid <= 0;
+			req_ready <= 1;
+		end else begin
+			req_ready <= 0;
+		end
+	end
+end
+
+// Master side signals
+assign M_APB_PADDR = addr_reg;
+assign M_APB_PWDATA = wdata_reg;
+assign M_APB_PWSTRB = wstrb_reg;
+assign M_APB_PPROT = prot_reg;
+assign M_APB_PWRITE = write_reg;
+assign M_APB_PSEL = req_valid;
+assign M_APB_PENABLE = req_valid;
+
+// Synchronizers for response signals
+reg [DW-1:0] rdata_sync;
+reg slverr_sync;
+reg resp_valid_sync;
+
+always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+	if (!S_PRESETn) begin
+		rdata_sync <= 0;
+		slverr_sync <= 0;
+		resp_valid_sync <= 0;
+	end else begin
+		rdata_sync <= M_APB_PRDATA;
+		slverr_sync <= M_APB_PSLVERR;
+		resp_valid_sync <= M_APB_PREADY;
+	end
+end
+
+// Slave side response handling
+always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+	if (!S_PRESETn) begin
+		rdata_reg <= 0;
+		slverr_reg <= 0;
+		resp_valid <= 0;
+		resp_ready <= 0;
+	end else begin
+		if (!resp_valid && resp_valid_sync) begin
+			rdata_reg <= rdata_sync;
+			slverr_reg <= slverr_sync;
+			resp_valid <= 1;
+		end
+		if (req_ready) begin
+			resp_valid <= 0;
+			resp_ready <= 1;
+		end else begin
+			resp_ready <= 0;
+		end
+	end
+end
+
+// Slave side signals
+assign S_APB_PRDATA = rdata_reg;
+assign S_APB_PSLVERR = slverr_reg;
+assign S_APB_PREADY = resp_ready;
+
+// Master reset synchronization
+reg [1:0] reset_sync;
+
+always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+	if (!S_PRESETn) begin
+		reset_sync <= 2'b00;
+	end else begin
+		reset_sync <= {reset_sync[0], S_PRESETn};
+	end
+end
+
+assign M_PRESETn = reset_sync[1];
+
+endmodule

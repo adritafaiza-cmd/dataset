@@ -1,0 +1,242 @@
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    /*
+     * Write Address Channel
+     */
+    reg [ADDR_WIDTH-1:0] awaddr_s;
+    reg [2:0] awprot_s;
+    reg awvalid_s;
+    wire awready_s;
+
+    sync_fifo #(.WIDTH(ADDR_WIDTH + 3)) aw_fifo (
+        .clk_src(s_clk),
+        .rst_src(s_rst),
+        .clk_dst(m_clk),
+        .rst_dst(m_rst),
+        .data_in({s_axil_awaddr, s_axil_awprot}),
+        .valid_in(s_axil_awvalid),
+        .ready_in(s_axil_awready),
+        .data_out({awaddr_s, awprot_s}),
+        .valid_out(awvalid_s),
+        .ready_out(awready_s)
+    );
+
+    assign s_axil_awready = awready_s;
+    assign m_axil_awaddr = awaddr_s;
+    assign m_axil_awprot = awprot_s;
+    assign m_axil_awvalid = awvalid_s;
+
+    /*
+     * Write Data Channel
+     */
+    reg [DATA_WIDTH-1:0] wdata_s;
+    reg [STRB_WIDTH-1:0] wstrb_s;
+    reg wvalid_s;
+    wire wready_s;
+
+    sync_fifo #(.WIDTH(DATA_WIDTH + STRB_WIDTH)) w_fifo (
+        .clk_src(s_clk),
+        .rst_src(s_rst),
+        .clk_dst(m_clk),
+        .rst_dst(m_rst),
+        .data_in({s_axil_wdata, s_axil_wstrb}),
+        .valid_in(s_axil_wvalid),
+        .ready_in(s_axil_wready),
+        .data_out({wdata_s, wstrb_s}),
+        .valid_out(wvalid_s),
+        .ready_out(wready_s)
+    );
+
+    assign s_axil_wready = wready_s;
+    assign m_axil_wdata = wdata_s;
+    assign m_axil_wstrb = wstrb_s;
+    assign m_axil_wvalid = wvalid_s;
+
+    /*
+     * Write Response Channel
+     */
+    reg [1:0] bresp_m;
+    reg bvalid_m;
+    wire bready_m;
+
+    sync_fifo #(.WIDTH(3)) b_fifo (
+        .clk_src(m_clk),
+        .rst_src(m_rst),
+        .clk_dst(s_clk),
+        .rst_dst(s_rst),
+        .data_in({m_axil_bresp, m_axil_bvalid}),
+        .valid_in(m_axil_bvalid),
+        .ready_in(m_axil_bready),
+        .data_out({bresp_m, bvalid_m}),
+        .valid_out(bvalid_m),
+        .ready_out(bready_m)
+    );
+
+    assign m_axil_bready = bready_m;
+    assign s_axil_bresp = bresp_m;
+    assign s_axil_bvalid = bvalid_m;
+
+    /*
+     * Read Address Channel
+     */
+    reg [ADDR_WIDTH-1:0] araddr_s;
+    reg [2:0] arprot_s;
+    reg arvalid_s;
+    wire arready_s;
+
+    sync_fifo #(.WIDTH(ADDR_WIDTH + 3)) ar_fifo (
+        .clk_src(s_clk),
+        .rst_src(s_rst),
+        .clk_dst(m_clk),
+        .rst_dst(m_rst),
+        .data_in({s_axil_araddr, s_axil_arprot}),
+        .valid_in(s_axil_arvalid),
+        .ready_in(s_axil_arready),
+        .data_out({araddr_s, arprot_s}),
+        .valid_out(arvalid_s),
+        .ready_out(arready_s)
+    );
+
+    assign s_axil_arready = arready_s;
+    assign m_axil_araddr = araddr_s;
+    assign m_axil_arprot = arprot_s;
+    assign m_axil_arvalid = arvalid_s;
+
+    /*
+     * Read Data Channel
+     */
+    reg [DATA_WIDTH-1:0] rdata_m;
+    reg [1:0] rresp_m;
+    reg rvalid_m;
+    wire rready_m;
+
+    sync_fifo #(.WIDTH(DATA_WIDTH + 3)) r_fifo (
+        .clk_src(m_clk),
+        .rst_src(m_rst),
+        .clk_dst(s_clk),
+        .rst_dst(s_rst),
+        .data_in({m_axil_rdata, m_axil_rresp, m_axil_rvalid}),
+        .valid_in(m_axil_rvalid),
+        .ready_in(m_axil_rready),
+        .data_out({rdata_m, rresp_m, rvalid_m}),
+        .valid_out(rvalid_m),
+        .ready_out(rready_m)
+    );
+
+    assign m_axil_rready = rready_m;
+    assign s_axil_rdata = rdata_m;
+    assign s_axil_rresp = rresp_m;
+    assign s_axil_rvalid = rvalid_m;
+
+endmodule
+
+module sync_fifo #
+(
+    parameter WIDTH = 32
+)
+(
+    input wire clk_src,
+    input wire rst_src,
+    input wire clk_dst,
+    input wire rst_dst,
+    input wire [WIDTH-1:0] data_in,
+    input wire valid_in,
+    output wire ready_in,
+    output wire [WIDTH-1:0] data_out,
+    output wire valid_out,
+    input wire ready_out
+);
+
+    reg [WIDTH-1:0] fifo [0:1];
+    reg wr_ptr, rd_ptr, full, empty;
+
+    // Source side
+    assign ready_in = ~full;
+
+    always @(posedge clk_src or posedge rst_src) begin
+        if (rst_src) begin
+            wr_ptr <= 1'b0;
+            full <= 1'b0;
+        end else if (valid_in && ~full) begin
+            fifo[wr_ptr] <= data_in;
+            wr_ptr <= ~wr_ptr;
+            if (wr_ptr == rd_ptr)
+                full <= 1'b1;
+        end
+    end
+
+    // Destination side
+    assign valid_out = ~empty;
+    assign data_out = fifo[rd_ptr];
+
+    always @(posedge clk_dst or posedge rst_dst) begin
+        if (rst_dst) begin
+            rd_ptr <= 1'b0;
+            empty <= 1'b1;
+        end else if (ready_out && ~empty) begin
+            rd_ptr <= ~rd_ptr;
+            if (wr_ptr == rd_ptr)
+                empty <= 1'b1;
+            else
+                empty <= 1'b0;
+        end else if (valid_in && ~full) begin
+            empty <= 1'b0;
+        end
+    end
+
+endmodule

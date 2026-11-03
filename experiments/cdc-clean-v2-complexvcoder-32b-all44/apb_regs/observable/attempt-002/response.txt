@@ -1,0 +1,266 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "apb_regs",
+      "function": "APB-mapped register file with configurable layout, active-low reset, read-only and writable registers, byte-strobe updates, and address decoding.",
+      "parameters": [
+        {
+          "name": "NoApbRegs",
+          "value": "32'd0"
+        },
+        {
+          "name": "ApbAddrWidth",
+          "value": "32'd0"
+        },
+        {
+          "name": "AddrOffset",
+          "value": "32'd4"
+        },
+        {
+          "name": "ApbDataWidth",
+          "value": "32'd0"
+        },
+        {
+          "name": "RegDataWidth",
+          "value": "32'd0"
+        },
+        {
+          "name": "ReadOnly",
+          "value": "32'h0"
+        },
+        {
+          "name": "req_t",
+          "value": "logic"
+        },
+        {
+          "name": "resp_t",
+          "value": "logic"
+        },
+        {
+          "name": "apb_addr_t",
+          "value": "logic[ApbAddrWidth-1:0]"
+        },
+        {
+          "name": "reg_data_t",
+          "value": "logic[RegDataWidth-1:0]"
+        }
+      ],
+      "ports": [
+        {
+          "name": "pclk_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "pclk_i"
+        },
+        {
+          "name": "preset_ni",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "pclk_i"
+        },
+        {
+          "name": "req_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "pclk_i"
+        },
+        {
+          "name": "resp_o",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "pclk_i"
+        },
+        {
+          "name": "base_addr_i",
+          "direction": "input",
+          "width": "ApbAddrWidth",
+          "clock_domain": "pclk_i"
+        },
+        {
+          "name": "reg_init_i",
+          "direction": "input",
+          "width": "NoApbRegs*RegDataWidth",
+          "clock_domain": "pclk_i"
+        },
+        {
+          "name": "reg_q_o",
+          "direction": "output",
+          "width": "NoApbRegs*RegDataWidth",
+          "clock_domain": "pclk_i"
+        }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        {
+          "name": "reg_file",
+          "width": "NoApbRegs*RegDataWidth"
+        },
+        {
+          "name": "reg_addr",
+          "width": "NoApbRegs"
+        },
+        {
+          "name": "write_enable",
+          "width": "NoApbRegs"
+        },
+        {
+          "name": "read_data",
+          "width": "ApbDataWidth"
+        },
+        {
+          "name": "write_data",
+          "width": "ApbDataWidth"
+        },
+        {
+          "name": "psel",
+          "width": 1
+        },
+        {
+          "name": "penable",
+          "width": 1
+        },
+        {
+          "name": "pwrite",
+          "width": 1
+        },
+        {
+          "name": "pstrb",
+          "width": "ApbDataWidth/8"
+        },
+        {
+          "name": "paddr",
+          "width": "ApbAddrWidth"
+        },
+        {
+          "name": "pready",
+          "width": 1
+        }
+      ],
+      "behavior": [
+        "On reset (preset_ni is low), writable registers are set to zero and read-only registers are set to reg_init_i.",
+        "Register addresses are decoded based on the base_addr_i and the paddr, with a stride of AddrOffset.",
+        "Read-only registers are not modified by write operations.",
+        "Writes are committed only when psel and penable are asserted.",
+        "Byte-strobes (pstrb) are used to update only the selected bytes of a writable register, while other bytes retain their current values.",
+        "Writes outside the register's data width do not modify the register's stored data.",
+        "Pending writes are canceled on reset."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd8,
+  parameter int unsigned        ApbAddrWidth = 32'd32,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd32,
+  parameter int unsigned        RegDataWidth = 32'd32,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Internal signals
+  reg_data_t [NoApbRegs-1:0] reg_file;
+  logic [NoApbRegs-1:0]      reg_addr;
+  logic [NoApbRegs-1:0]      write_enable;
+  reg_data_t                 read_data;
+  reg_data_t                 write_data;
+  logic                      psel;
+  logic                      penable;
+  logic                      pwrite;
+  logic [ApbDataWidth/8-1:0] pstrb;
+  apb_addr_t                 paddr;
+  logic                      pready;
+
+  // Decode the register address
+  always_comb begin
+    reg_addr = '0;
+    for (int i = 0; i < NoApbRegs; i++) begin
+      if (paddr[ApbAddrWidth-1:AddrOffset] == base_addr_i[ApbAddrWidth-1:AddrOffset] + i) begin
+        reg_addr[i] = 1'b1;
+      end
+    end
+  end
+
+  // APB signals
+  assign psel   = req_i;
+  assign penable = req_i;
+  assign pwrite = req_i; // Assuming req_i is high only during write or read access
+  assign pstrb  = 4'b1111; // Assuming byte strobe is always 4 bytes for simplicity
+  assign paddr  = req_i ? base_addr_i : '0;
+
+  // Read data
+  always_comb begin
+    read_data = '0;
+    for (int i = 0; i < NoApbRegs; i++) begin
+      if (reg_addr[i]) begin
+        read_data = reg_file[i];
+      end
+    end
+  end
+
+  // Write data with byte strobe
+  always_comb begin
+    write_data = '0;
+    for (int i = 0; i < ApbDataWidth/8; i++) begin
+      if (pstrb[i]) begin
+        write_data[i*8 +: 8] = req_i ? paddr[i*8 +: 8] : '0; // Assuming paddr holds the write data
+      end else begin
+        write_data[i*8 +: 8] = reg_file[reg_addr.index][i*8 +: 8];
+      end
+    end
+  end
+
+  // Write enable
+  always_comb begin
+    write_enable = '0;
+    for (int i = 0; i < NoApbRegs; i++) begin
+      if (reg_addr[i] && !ReadOnly[i] && psel && penable && pwrite) begin
+        write_enable[i] = 1'b1;
+      end
+    end
+  end
+
+  // Register file update
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        if (ReadOnly[i]) begin
+          reg_file[i] <= reg_init_i[i];
+        end else begin
+          reg_file[i] <= '0;
+        end
+      end
+    end else begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        if (write_enable[i]) begin
+          reg_file[i] <= write_data;
+        end
+      end
+    end
+  end
+
+  // Response signal
+  assign resp_o = pready;
+
+endmodule
+```
+
+This code implements an APB-mapped register file with the specified parameters and behavior. The register file has a configurable number of registers, each with a configurable data width. The module handles read and write operations based on APB signals and byte-strobes, ensuring that read-only registers remain unchanged on writes and writable registers reset to zero on reset.

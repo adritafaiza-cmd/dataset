@@ -1,0 +1,200 @@
+module apbxclk #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		parameter [0:0]	OPT_REGISTERED = 1'b0,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH
+	) (
+		input	wire			S_APB_PCLK, S_PRESETn,
+		input	wire			S_APB_PSEL,
+		input	wire			S_APB_PENABLE,
+		output	reg			S_APB_PREADY,
+		input	wire	[AW-1:0]	S_APB_PADDR,
+		input	wire			S_APB_PWRITE,
+		input	wire	[DW-1:0]	S_APB_PWDATA,
+		input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+		input	wire	[2:0]		S_APB_PPROT,
+		output	wire	[DW-1:0]	S_APB_PRDATA,
+		output	wire			S_APB_PSLVERR,
+		input	wire			M_APB_PCLK,
+		output	reg			M_PRESETn,
+		output	reg			M_APB_PSEL,
+		output	reg			M_APB_PENABLE,
+		input	wire			M_APB_PREADY,
+		output	wire	[AW-1:0]	M_APB_PADDR,
+		output	wire			M_APB_PWRITE,
+		output	wire	[DW-1:0]	M_APB_PWDATA,
+		output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+		output	wire	[2:0]		M_APB_PPROT,
+		input	wire	[DW-1:0]	M_APB_PRDATA,
+		input	wire			M_APB_PSLVERR
+	);
+
+	// Synchronous reset for M domain
+	reg [3:0] m_reset_sync;
+	reg m_reset_n;
+
+	always @(posedge M_APB_PCLK or negedge m_reset_n) begin
+		if (!m_reset_n) begin
+			m_reset_sync <= 4'b0000;
+		end else begin
+			m_reset_sync <= {m_reset_sync[2:0], 1'b1};
+		end
+	end
+
+	assign M_PRESETn = m_reset_sync[3];
+
+	// Handshake signals
+	reg s_req_valid;
+	reg m_req_ready;
+	reg m_resp_valid;
+	reg s_resp_ready;
+
+	// M domain: capture request when handshake completes
+	reg [AW-1:0] m_addr;
+	reg m_write;
+	reg [DW-1:0] m_wdata;
+	reg [DW/8-1:0] m_wstrb;
+	reg [2:0] m_pprot;
+	reg m_trans_active;
+	reg m_trans_done;
+
+	// M domain: APB state machine
+	reg m_apb_sel;
+	reg m_apb_enable;
+
+	// M domain: capture response
+	reg [DW-1:0] m_rdata;
+	reg m_rslverr;
+
+	// S domain: hold response
+	reg [DW-1:0] s_rdata;
+	reg s_rslverr;
+
+	// M domain: request capture logic
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_req_ready <= 1'b0;
+			m_trans_active <= 1'b0;
+			m_trans_done <= 1'b0;
+			m_apb_sel <= 1'b0;
+			m_apb_enable <= 1'b0;
+			m_addr <= {AW{1'b0}};
+			m_write <= 1'b0;
+			m_wdata <= {DW{1'b0}};
+			m_wstrb <= {(DW/8){1'b0}};
+			m_pprot <= 3'b000;
+			m_rdata <= {DW{1'b0}};
+			m_rslverr <= 1'b0;
+			m_resp_valid <= 1'b0;
+		end else begin
+			if (m_trans_active) begin
+				// In access phase
+				if (M_APB_PREADY) begin
+					// Transfer complete
+					m_trans_active <= 1'b0;
+					m_trans_done <= 1'b1;
+					m_apb_sel <= 1'b0;
+					m_apb_enable <= 1'b0;
+					m_resp_valid <= 1'b1;
+					m_rdata <= M_APB_PRDATA;
+					m_rslverr <= M_APB_PSLVERR;
+					m_req_ready <= 1'b0;
+				end
+			end else if (m_trans_done) begin
+				// Response was consumed, ready for next
+				m_trans_done <= 1'b0;
+				m_resp_valid <= 1'b0;
+				m_req_ready <= 1'b1;
+			end else begin
+				// Idle, waiting for request
+				if (s_req_valid) begin
+					// Capture request and start APB transfer
+					m_addr <= S_APB_PADDR;
+					m_write <= S_APB_PWRITE;
+					m_wdata <= S_APB_PWDATA;
+					m_wstrb <= S_APB_PWSTRB;
+					m_pprot <= S_APB_PPROT;
+					m_trans_active <= 1'b1;
+					m_apb_sel <= 1'b1;
+					m_apb_enable <= 1'b0;
+					m_req_ready <= 1'b0;
+				end
+			end
+		end
+	end
+
+	// M domain: APB enable phase
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+		end else begin
+			if (m_trans_active) begin
+				if (!m_apb_enable) begin
+					// Setup phase -> Access phase
+					M_APB_PSEL <= 1'b1;
+					M_APB_PENABLE <= 1'b1;
+				end else begin
+					// Access phase, wait for PREADY
+					if (M_APB_PREADY) begin
+						M_APB_PSEL <= 1'b0;
+						M_APB_PENABLE <= 1'b0;
+					end else begin
+						M_APB_PSEL <= 1'b1;
+						M_APB_PENABLE <= 1'b1;
+					end
+				end
+			end else begin
+				M_APB_PSEL <= 1'b0;
+				M_APB_PENABLE <= 1'b0;
+			end
+		end
+	end
+
+	// M domain: output assignments
+	assign M_APB_PADDR = m_addr;
+	assign M_APB_PWRITE = m_write;
+	assign M_APB_PWDATA = m_wdata;
+	assign M_APB_PWSTRB = m_wstrb;
+	assign M_APB_PPROT = m_pprot;
+
+	// S domain: response capture and ready
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			S_APB_PREADY <= 1'b0;
+			s_rdata <= {DW{1'b0}};
+			s_rslverr <= 1'b0;
+			s_req_valid <= 1'b0;
+			s_resp_ready <= 1'b0;
+		end else begin
+			if (m_resp_valid) begin
+				// Response available from M domain
+				s_rdata <= m_rdata;
+				s_rslverr <= m_rslverr;
+				S_APB_PREADY <= 1'b1;
+				s_resp_ready <= 1'b1;
+				s_req_valid <= 1'b0;
+			end else if (S_APB_PSEL && S_APB_PENABLE && S_APB_PREADY) begin
+				// Source transfer complete, ready for next
+				S_APB_PREADY <= 1'b0;
+				s_resp_ready <= 1'b0;
+			end else if (S_APB_PSEL && !S_APB_PENABLE) begin
+				// Setup phase, check if M domain is ready
+				if (m_req_ready) begin
+					s_req_valid <= 1'b1;
+					S_APB_PREADY <= 1'b0;
+				end else begin
+					S_APB_PREADY <= 1'b0;
+				end
+			end else begin
+				S_APB_PREADY <= 1'b0;
+			end
+		end
+	end
+
+	// S domain: output assignments
+	assign S_APB_PRDATA = s_rdata;
+	assign S_APB_PSLVERR = s_rslverr;
+
+endmodule

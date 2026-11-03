@@ -1,0 +1,142 @@
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam ADDR_W = LGFIFO;
+	localparam CNT_W = LGFIFO + 1;
+
+	// Memory
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+
+	// Write pointer
+	reg [ADDR_W:0] wptr;
+	reg [ADDR_W:0] wptr_sync; // synchronized to read clock
+
+	// Read pointer
+	reg [ADDR_W:0] rptr;
+	reg [ADDR_W:0] rptr_sync; // synchronized to write clock
+
+	// Write side
+	wire wr_en = i_wr & ~o_wr_full;
+	wire [ADDR_W-1:0] waddr = wptr[ADDR_W-1:0];
+
+	// Read side
+	wire rd_en = i_rd & ~o_rd_empty;
+	wire [ADDR_W-1:0] raddr = rptr[ADDR_W-1:0];
+
+	// Write clock domain
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wptr <= {(ADDR_W+1){1'b0}};
+		end else if (wr_en) begin
+			wptr <= wptr + 1'b1;
+		end
+	end
+
+	// Write memory
+	always @(posedge i_wclk) begin
+		if (wr_en) begin
+			mem[waddr] <= i_wr_data;
+		end
+	end
+
+	// Synchronize write pointer to read clock
+	reg [ADDR_W:0] wptr_sync_reg [0:NFF-1];
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			wptr_sync_reg[0] <= {(ADDR_W+1){1'b0}};
+			for (integer i = 1; i < NFF; i = i + 1) begin
+				wptr_sync_reg[i] <= {(ADDR_W+1){1'b0}};
+			end
+		end else begin
+			wptr_sync_reg[0] <= wptr;
+			for (integer i = 1; i < NFF; i = i + 1) begin
+				wptr_sync_reg[i] <= wptr_sync_reg[i-1];
+			end
+		end
+	end
+	assign wptr_sync = wptr_sync_reg[NFF-1];
+
+	// Read clock domain
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rptr <= {(ADDR_W+1){1'b0}};
+		end else if (rd_en) begin
+			rptr <= rptr + 1'b1;
+		end
+	end
+
+	// Synchronize read pointer to write clock
+	reg [ADDR_W:0] rptr_sync_reg [0:NFF-1];
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			rptr_sync_reg[0] <= {(ADDR_W+1){1'b0}};
+			for (integer i = 1; i < NFF; i = i + 1) begin
+				rptr_sync_reg[i] <= {(ADDR_W+1){1'b0}};
+			end
+		end else begin
+			rptr_sync_reg[0] <= rptr;
+			for (integer i = 1; i < NFF; i = i + 1) begin
+				rptr_sync_reg[i] <= rptr_sync_reg[i-1];
+			end
+		end
+	end
+	assign rptr_sync = rptr_sync_reg[NFF-1];
+
+	// Full flag: write pointer has lapped read pointer by DEPTH
+	// Compare the upper bits (gray code style)
+	wire [ADDR_W:0] wptr_gray = wptr;
+	wire [ADDR_W:0] rptr_sync_gray = rptr_sync;
+	
+	// For binary counters, full when wptr[ADDR_W] != rptr_sync[ADDR_W] and wptr[ADDR_W-1:0] == rptr_sync[ADDR_W-1:0]
+	wire full_raw = (wptr[ADDR_W] != rptr_sync[ADDR_W]) && (wptr[ADDR_W-1:0] == rptr_sync[ADDR_W-1:0]);
+	
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			o_wr_full <= 1'b0;
+		end else begin
+			o_wr_full <= full_raw;
+		end
+	end
+
+	// Empty flag: write pointer equals read pointer
+	wire empty_raw = (wptr_sync == rptr);
+	
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			o_rd_empty <= 1'b1;
+		end else begin
+			o_rd_empty <= empty_raw;
+		end
+	end
+
+	// Read data
+	reg [WIDTH-1:0] rd_data_reg;
+	always @(posedge i_rclk) begin
+		rd_data_reg <= mem[raddr];
+	end
+
+	// Output registering
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			o_rd_data <= {WIDTH{1'b0}};
+		end else if (OPT_REGISTER_READS) begin
+			o_rd_data <= rd_data_reg;
+		end else begin
+			o_rd_data <= rd_data_reg;
+		end
+	end
+
+endmodule

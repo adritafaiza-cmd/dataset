@@ -1,0 +1,124 @@
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam DEPTH = 1 << ADDR_WIDTH;
+    localparam PTR_WIDTH = ADDR_WIDTH + 1;
+
+    // Write domain
+    reg [PTR_WIDTH-1:0] wptr;
+    reg [DATA_WIDTH-1:0] mem [0:DEPTH-1];
+
+    // Read domain
+    reg [PTR_WIDTH-1:0] rptr;
+
+    // Gray code pointers
+    wire [PTR_WIDTH-1:0] wptr_gray = wptr ^ (wptr >> 1);
+    wire [PTR_WIDTH-1:0] rptr_gray = rptr ^ (rptr >> 1);
+
+    // Synchronize write pointer gray to read domain
+    reg [PTR_WIDTH-1:0] wptr_gray_sync [0:SYNC_STAGES-1];
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_gray_sync[0] <= {PTR_WIDTH{1'b0}};
+            for (int i = 1; i < SYNC_STAGES; i++)
+                wptr_gray_sync[i] <= {PTR_WIDTH{1'b0}};
+        end else begin
+            wptr_gray_sync[0] <= wptr_gray;
+            for (int i = 1; i < SYNC_STAGES; i++)
+                wptr_gray_sync[i] <= wptr_gray_sync[i-1];
+        end
+    end
+
+    // Synchronize read pointer gray to write domain
+    reg [PTR_WIDTH-1:0] rptr_gray_sync [0:SYNC_STAGES-1];
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_sync[0] <= {PTR_WIDTH{1'b0}};
+            for (int i = 1; i < SYNC_STAGES; i++)
+                rptr_gray_sync[i] <= {PTR_WIDTH{1'b0}};
+        end else begin
+            rptr_gray_sync[0] <= rptr_gray;
+            for (int i = 1; i < SYNC_STAGES; i++)
+                rptr_gray_sync[i] <= rptr_gray_sync[i-1];
+        end
+    end
+
+    // Convert synchronized gray to binary
+    function [PTR_WIDTH-1:0] gray2bin;
+        input [PTR_WIDTH-1:0] gray;
+        reg [PTR_WIDTH-1:0] bin;
+        begin
+            bin[PTR_WIDTH-1] = gray[PTR_WIDTH-1];
+            for (int i = PTR_WIDTH-2; i >= 0; i--)
+                bin[i] = bin[i+1] ^ gray[i];
+            gray2bin = bin;
+        end
+    endfunction
+
+    wire [PTR_WIDTH-1:0] wptr_gray_synced = wptr_gray_sync[SYNC_STAGES-1];
+    wire [PTR_WIDTH-1:0] rptr_gray_synced = rptr_gray_sync[SYNC_STAGES-1];
+
+    wire [PTR_WIDTH-1:0] wptr_synced = gray2bin(wptr_gray_synced);
+    wire [PTR_WIDTH-1:0] rptr_synced = gray2bin(rptr_gray_synced);
+
+    // Full condition: write pointer has lapped read pointer by DEPTH
+    // In binary, full when wptr_synced[ADDR_WIDTH] != rptr_synced[ADDR_WIDTH] 
+    // and wptr_synced[ADDR_WIDTH-1:0] == rptr_synced[ADDR_WIDTH-1:0]
+    assign wfull = (wptr_synced[ADDR_WIDTH] != rptr_synced[ADDR_WIDTH]) &&
+                   (wptr_synced[ADDR_WIDTH-1:0] == rptr_synced[ADDR_WIDTH-1:0]);
+
+    // Empty condition: write pointer equals read pointer
+    assign rempty = (wptr_synced == rptr_synced);
+
+    // Write enable
+    wire wenable = winc & ~wfull;
+
+    // Read enable
+    wire renable = rinc & ~rempty;
+
+    // Write pointer update
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            wptr <= {PTR_WIDTH{1'b0}};
+        else if (wenable)
+            wptr <= wptr + 1'b1;
+    end
+
+    // Memory write
+    always @(posedge wclk) begin
+        if (wenable)
+            mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+    end
+
+    // Read pointer update
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            rptr <= {PTR_WIDTH{1'b0}};
+        else if (renable)
+            rptr <= rptr + 1'b1;
+    end
+
+    // Read data
+    assign rdata = mem[rptr[ADDR_WIDTH-1:0]];
+
+    // Debug outputs
+    assign waddr = wptr;
+    assign raddr = rptr;
+
+endmodule

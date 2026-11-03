@@ -1,0 +1,127 @@
+```systemverilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Extract APB signals from req_t
+  wire        psel    = req_i.psel;
+  wire        penable = req_i.penable;
+  wire        pwrite  = req_i.pwrite;
+  wire [ApbDataWidth-1:0] pwdata = req_i.pwdata;
+  wire [ApbDataWidth/8-1:0] pstrb = req_i.pstrb;
+  wire [ApbAddrWidth-1:0] paddr = req_i.paddr;
+
+  // Drive APB response
+  assign resp_o.pready = 1'b1;
+  assign resp_o.pslverr = 1'b0;
+  assign resp_o.prdata = 0;
+
+  // Register storage
+  reg_data_t [NoApbRegs-1:0] regs;
+
+  // Address decoding
+  wire [ApbAddrWidth-1:0] offset_addr = paddr - base_addr_i;
+  wire [ApbAddrWidth-1:0] reg_index_addr = offset_addr / AddrOffset;
+  wire [ApbAddrWidth-1:0] byte_offset = offset_addr % AddrOffset;
+
+  // Determine if address is in range
+  wire addr_in_range = (reg_index_addr < NoApbRegs);
+
+  // Determine if this is a write access during APB transfer
+  wire write_valid = psel & penable & pwrite & addr_in_range;
+
+  // Determine which register index is being accessed
+  wire [ApbAddrWidth-1:0] reg_idx = reg_index_addr;
+
+  // Byte strobe mask for the register
+  // pstrb has ApbDataWidth/8 bits, each corresponding to a byte
+  // We need to map byte_offset to the appropriate strobe bits
+  // The register data width is RegDataWidth, so we have RegDataWidth/8 bytes
+  // The byte_offset tells us which byte within the register is being accessed
+  // But pstrb already encodes which bytes are valid for the APB write
+
+  // For each register, we need to apply byte strobes
+  // The strobe bits correspond to bytes in the APB data bus
+  // byte_offset tells us the starting byte position within the register
+
+  // Generate strobe mask for the target register
+  // pstrb[i] corresponds to byte i of the APB data bus
+  // The register's byte j corresponds to APB data byte (byte_offset + j)
+  // So for register byte j, the strobe is pstrb[byte_offset + j] if (byte_offset + j) < ApbDataWidth/8
+
+  // We'll build the write data and mask for the target register
+  // Since we can't easily do variable indexing in a combinational block for all registers,
+  // we'll use a case statement or generate
+
+  // For simplicity, we'll handle the write in the always block
+  // by checking if the register index matches and applying the appropriate strobes
+
+  // Determine the number of bytes in the register
+  localparam int unsigned RegBytes = RegDataWidth / 8;
+  localparam int unsigned ApbBytes = ApbDataWidth / 8;
+
+  // For the target register, compute the write data and mask
+  // We'll do this in the always block
+
+  // Reset and register update
+  always @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        if (ReadOnly[i])
+          regs[i] <= reg_init_i[i];
+        else
+          regs[i] <= '0;
+      end
+    end else begin
+      if (write_valid) begin
+        // Apply byte strobes to the target register
+        // For each byte in the register, check if the corresponding APB strobe is set
+        for (int b = 0; b < RegBytes; b++) begin
+          // The APB data byte index for this register byte is byte_offset + b
+          // But we need to be careful: byte_offset is in bytes, and pstrb has ApbBytes bits
+          // If byte_offset + b < ApbBytes, then pstrb[byte_offset + b] is the strobe
+          // Otherwise, no strobe applies (shouldn't happen if address is in range)
+          if ((byte_offset + b) < ApbBytes) begin
+            if (pstrb[byte_offset + b]) begin
+              // Update byte b of the register
+              // The APB data byte is pwdata[(byte_offset + b)*8 +: 8]
+              // The register byte b is regs[reg_idx][b*8 +: 8]
+              if (!ReadOnly[reg_idx]) begin
+                regs[reg_idx][b*8 +: 8] <= pwdata[(byte_offset + b)*8 +: 8];
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  // Drive register outputs
+  always @(*) begin
+    for (int i = 0; i < NoApbRegs; i++) begin
+      if (ReadOnly[i])
+        reg_q_o[i] = reg_init_i[i];
+      else
+        reg_q_o[i] = regs[i];
+    end
+  end
+
+endmodule
+```<|im_end|>

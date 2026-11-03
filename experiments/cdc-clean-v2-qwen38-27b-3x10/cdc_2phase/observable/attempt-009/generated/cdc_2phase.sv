@@ -1,0 +1,313 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source side: capture data when valid and ready
+  // Destination side: present data when valid and ready
+  // Use a 2-phase handshake with a toggle bit for CDC
+
+  // Source side registers
+  reg [WIDTH-1:0] src_data_reg;
+  reg             src_valid_reg;
+  reg             src_toggle;
+  reg             src_toggle_sync1;
+  reg             src_toggle_sync2;
+
+  // Destination side registers
+  reg [WIDTH-1:0] dst_data_reg;
+  reg             dst_valid_reg;
+  reg             dst_toggle;
+  reg             dst_toggle_sync1;
+  reg             dst_toggle_sync2;
+
+  // Source side: detect when destination has acknowledged
+  wire src_ack = dst_toggle_sync2;
+
+  // Destination side: detect when source has sent
+  wire dst_req = src_toggle_sync2;
+
+  // Source side logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_reg   <= {WIDTH{1'b0}};
+      src_valid_reg  <= 1'b0;
+      src_toggle     <= 1'b0;
+      src_toggle_sync1 <= 1'b0;
+      src_toggle_sync2 <= 1'b0;
+    end else begin
+      // Synchronize the toggle bit from destination
+      src_toggle_sync1 <= src_toggle;
+      src_toggle_sync2 <= src_toggle_sync1;
+
+      // If we have a pending valid and the destination has acknowledged (toggle changed),
+      // we can accept new data
+      if (src_valid_reg && (src_ack != src_toggle)) begin
+        // Destination has acknowledged our previous transfer
+        // We can now accept new data if valid
+        if (src_valid_i) begin
+          src_data_reg  <= src_data_i;
+          src_valid_reg <= 1'b1;
+          src_toggle    <= ~src_toggle;
+        end else begin
+          src_valid_reg <= 1'b0;
+        end
+      end else if (!src_valid_reg && src_valid_i) begin
+        // No pending valid, accept new data
+        src_data_reg  <= src_data_i;
+        src_valid_reg <= 1'b1;
+        src_toggle    <= ~src_toggle;
+      end
+    end
+  end
+
+  // Source ready: we can accept new data if we don't have a pending valid,
+  // or if we have a pending valid but the destination has acknowledged it
+  assign src_ready_o = !src_valid_reg || (src_ack != src_toggle);
+
+  // Destination side logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_reg   <= {WIDTH{1'b0}};
+      dst_valid_reg  <= 1'b0;
+      dst_toggle     <= 1'b0;
+      dst_toggle_sync1 <= 1'b0;
+      dst_toggle_sync2 <= 1'b0;
+    end else begin
+      // Synchronize the toggle bit from source
+      dst_toggle_sync1 <= dst_toggle;
+      dst_toggle_sync2 <= dst_toggle_sync1;
+
+      // If we have a pending valid and the receiver is ready, complete the transfer
+      if (dst_valid_reg && dst_ready_i) begin
+        // Complete the transfer, acknowledge to source
+        dst_valid_reg <= 1'b0;
+        dst_toggle    <= ~dst_toggle;
+      end else if (!dst_valid_reg && (dst_req != dst_toggle)) begin
+        // No pending valid, and source has sent new data
+        // We need to capture the data. But we don't have the data directly.
+        // We need a different approach.
+      end
+    end
+  end
+
+  // This approach has issues because the destination doesn't have access to the source data.
+  // Let me redesign with a proper 2-phase handshake.
+
+endmodule
+
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source side
+  reg [WIDTH-1:0] src_data_reg;
+  reg             src_valid_reg;
+  reg             src_req;
+  reg             src_ack_sync1;
+  reg             src_ack_sync2;
+
+  // Destination side
+  reg [WIDTH-1:0] dst_data_reg;
+  reg             dst_valid_reg;
+  reg             dst_ack;
+  reg             dst_req_sync1;
+  reg             dst_req_sync2;
+
+  // Source side: synchronize ack from destination
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_ack_sync1 <= 1'b0;
+      src_ack_sync2 <= 1'b0;
+    end else begin
+      src_ack_sync1 <= dst_ack;
+      src_ack_sync2 <= src_ack_sync1;
+    end
+  end
+
+  // Destination side: synchronize req from source
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req_sync1 <= 1'b0;
+      dst_req_sync2 <= dst_req_sync1;
+    end else begin
+      dst_req_sync1 <= src_req;
+      dst_req_sync2 <= dst_req_sync1;
+    end
+  end
+
+  // Source side: manage data and request
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_reg  <= {WIDTH{1'b0}};
+      src_valid_reg <= 1'b0;
+      src_req       <= 1'b0;
+    end else begin
+      // If we have a pending valid and the destination has acknowledged, clear valid
+      if (src_valid_reg && src_ack_sync2) begin
+        src_valid_reg <= 1'b0;
+        src_req       <= 1'b0;
+      end else if (!src_valid_reg && src_valid_i) begin
+        // Accept new data
+        src_data_reg  <= src_data_i;
+        src_valid_reg <= 1'b1;
+        src_req       <= 1'b1;
+      end
+    end
+  end
+
+  // Source ready: can accept new data if no pending valid, or if pending valid is acknowledged
+  assign src_ready_o = !src_valid_reg || src_ack_sync2;
+
+  // Destination side: manage data and valid
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_reg  <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+      dst_ack       <= 1'b0;
+    end else begin
+      // If we have a pending valid and the receiver is ready, complete transfer
+      if (dst_valid_reg && dst_ready_i) begin
+        dst_valid_reg <= 1'b0;
+        dst_ack       <= 1'b1;
+      end else if (!dst_valid_reg && dst_req_sync2) begin
+        // Source has sent new data, capture it
+        dst_data_reg  <= src_data_reg;
+        dst_valid_reg <= 1'b1;
+        dst_ack       <= 1'b1;
+      end
+    end
+  end
+
+  // Destination outputs
+  assign dst_data_o  = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+endmodule
+
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source side
+  reg [WIDTH-1:0] src_data_reg;
+  reg             src_valid_reg;
+  reg             src_req;
+  reg             src_ack_sync1;
+  reg             src_ack_sync2;
+
+  // Destination side
+  reg [WIDTH-1:0] dst_data_reg;
+  reg             dst_valid_reg;
+  reg             dst_ack;
+  reg             dst_req_sync1;
+  reg             dst_req_sync2;
+  reg [WIDTH-1:0] dst_data_sync1;
+  reg [WIDTH-1:0] dst_data_sync2;
+
+  // Source side: synchronize ack from destination
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_ack_sync1 <= 1'b0;
+      src_ack_sync2 <= 1'b0;
+    end else begin
+      src_ack_sync1 <= dst_ack;
+      src_ack_sync2 <= src_ack_sync1;
+    end
+  end
+
+  // Destination side: synchronize req and data from source
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req_sync1  <= 1'b0;
+      dst_req_sync2  <= 1'b0;
+      dst_data_sync1 <= {WIDTH{1'b0}};
+      dst_data_sync2 <= {WIDTH{1'b0}};
+    end else begin
+      dst_req_sync1  <= src_req;
+      dst_req_sync2  <= dst_req_sync1;
+      dst_data_sync1 <= src_data_reg;
+      dst_data_sync2 <= dst_data_sync1;
+    end
+  end
+
+  // Source side: manage data and request
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_reg  <= {WIDTH{1'b0}};
+      src_valid_reg <= 1'b0;
+      src_req       <= 1'b0;
+    end else begin
+      // If we have a pending valid and the destination has acknowledged, clear valid and req
+      if (src_valid_reg && src_ack_sync2) begin
+        src_valid_reg <= 1'b0;
+        src_req       <= 1'b0;
+      end else if (!src_valid_reg && src_valid_i) begin
+        // Accept new data
+        src_data_reg  <= src_data_i;
+        src_valid_reg <= 1'b1;
+        src_req       <= 1'b1;
+      end
+    end
+  end
+
+  // Source ready: can accept new data if no pending valid, or if pending valid is acknowledged
+  assign src_ready_o = !src_valid_reg || src_ack_sync2;
+
+  // Destination side: manage data and valid
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_reg  <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+      dst_ack       <= 1'b0;
+    end else begin
+      // If we have a pending valid and the receiver is ready, complete transfer
+      if (dst_valid_reg && dst_ready_i) begin
+        dst_valid_reg <= 1'b0;
+        dst_ack       <= 1'b1;
+      end else if (!dst_valid_reg && dst_req_sync2) begin
+        // Source has sent new data, capture it
+        dst_data_reg  <= dst_data_sync2;
+        dst_valid_reg <= 1'b1;
+        dst_ack       <= 1'b1;
+      end
+    end
+  end
+
+  // Destination outputs
+  assign dst_data_o  = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+endmodule

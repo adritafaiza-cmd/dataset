@@ -1,0 +1,106 @@
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam DEPTH = 1 << ADDR_WIDTH;
+    localparam PTR_WIDTH = ADDR_WIDTH + 1;
+
+    // Write domain
+    reg [PTR_WIDTH-1:0] wptr;
+    reg [DATA_WIDTH-1:0] mem [0:DEPTH-1];
+
+    // Read domain
+    reg [PTR_WIDTH-1:0] rptr;
+    reg [DATA_WIDTH-1:0] rdata_reg;
+
+    // Gray code pointers
+    wire [ADDR_WIDTH:0] wptr_gray = wptr ^ (wptr >> 1);
+    wire [ADDR_WIDTH:0] rptr_gray = rptr ^ (rptr >> 1);
+
+    // Synchronize write pointer gray to read domain
+    reg [ADDR_WIDTH:0] wptr_gray_r1, wptr_gray_r2;
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_gray_r1 <= {ADDR_WIDTH+1{1'b0}};
+            wptr_gray_r2 <= {ADDR_WIDTH+1{1'b0}};
+        end else begin
+            wptr_gray_r1 <= wptr_gray;
+            wptr_gray_r2 <= wptr_gray_r1;
+        end
+    end
+
+    // Synchronize read pointer gray to write domain
+    reg [ADDR_WIDTH:0] rptr_gray_w1, rptr_gray_w2;
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_w1 <= {ADDR_WIDTH+1{1'b0}};
+            rptr_gray_w2 <= {ADDR_WIDTH+1{1'b0}};
+        end else begin
+            rptr_gray_w1 <= rptr_gray;
+            rptr_gray_w2 <= rptr_gray_w1;
+        end
+    end
+
+    // Convert synchronized gray to binary
+    function [ADDR_WIDTH:0] gray_to_bin;
+        input [ADDR_WIDTH:0] gray;
+        integer i;
+        begin
+            gray_to_bin[ADDR_WIDTH] = gray[ADDR_WIDTH];
+            for (i = ADDR_WIDTH-1; i >= 0; i = i - 1)
+                gray_to_bin[i] = gray_to_bin[i+1] ^ gray[i];
+        end
+    endfunction
+
+    wire [ADDR_WIDTH:0] wptr_gray_synced = gray_to_bin(wptr_gray_r2);
+    wire [ADDR_WIDTH:0] rptr_gray_synced = gray_to_bin(rptr_gray_w2);
+
+    // Full condition: write pointer has lapped read pointer
+    // wptr_gray_synced[ADDR_WIDTH] != rptr_gray[ADDR_WIDTH] && wptr_gray_synced[ADDR_WIDTH-1:0] == rptr_gray[ADDR_WIDTH-1:0]
+    assign wfull = (wptr_gray_synced[ADDR_WIDTH] != rptr_gray[ADDR_WIDTH]) &&
+                   (wptr_gray_synced[ADDR_WIDTH-1:0] == rptr_gray[ADDR_WIDTH-1:0]);
+
+    // Empty condition: read pointer equals write pointer
+    assign rempty = (wptr_gray_r2 == rptr_gray);
+
+    // Write logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {PTR_WIDTH{1'b0}};
+        end else if (winc && !wfull) begin
+            mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+            wptr <= wptr + 1'b1;
+        end
+    end
+
+    // Read logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= {PTR_WIDTH{1'b0}};
+            rdata_reg <= {DATA_WIDTH{1'b0}};
+        end else if (rinc && !rempty) begin
+            rdata_reg <= mem[rptr[ADDR_WIDTH-1:0]];
+            rptr <= rptr + 1'b1;
+        end
+    end
+
+    assign rdata = rdata_reg;
+    assign waddr = wptr;
+    assign raddr = rptr;
+
+endmodule

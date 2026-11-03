@@ -1,0 +1,128 @@
+module wbxclk #(
+	parameter	AW=32,
+			DW=32,
+			LGFIFO = 5
+) (
+	input	wire			i_wb_clk, i_reset,
+	input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+	input	wire	[(AW-1):0]	i_wb_addr,
+	input	wire	[(DW-1):0]	i_wb_data,
+	input	wire	[(DW/8-1):0]	i_wb_sel,
+	output	wire			o_wb_stall,
+	output	reg			o_wb_ack,
+	output	reg	[(DW/8-1):0]	o_wb_data,
+	output	reg			o_wb_err,
+	input	wire			i_xclk_clk,
+	output	reg			o_xclk_cyc,
+	output	reg			o_xclk_stb,
+	output	reg			o_xclk_we,
+	output	reg	[(AW-1):0]	o_xclk_addr,
+	output	reg	[(DW-1):0]	o_xclk_data,
+	output	reg	[(DW/8-1):0]	o_xclk_sel,
+	input	wire			i_xclk_stall,
+	input	wire			i_xclk_ack,
+	input	wire	[(DW-1):0]	i_xclk_data,
+	input	wire			i_xclk_err
+);
+
+	localparam FIFO_DEPTH = 1 << LGFIFO;
+	localparam FIFO_WIDTH = AW + DW + DW/8 + 1; // addr + data + sel + we
+	localparam ACK_FIFO_DEPTH = 1 << LGFIFO;
+	localparam ACK_FIFO_WIDTH = DW + 1; // data + err
+
+	// Request FIFO (Wishbone side -> xclk side)
+	reg [FIFO_WIDTH-1:0] req_fifo [0:FIFO_DEPTH-1];
+	reg [LGFIFO:0] req_wr_ptr, req_rd_ptr;
+	wire req_full = (req_wr_ptr[LGFIFO] != req_rd_ptr[LGFIFO]) &&
+	                 (req_wr_ptr[LGFIFO-1:0] == req_rd_ptr[LGFIFO-1:0]);
+	wire req_empty = (req_wr_ptr == req_rd_ptr);
+
+	// Response FIFO (xclk side -> Wishbone side)
+	reg [ACK_FIFO_WIDTH-1:0] ack_fifo [0:ACK_FIFO_DEPTH-1];
+	reg [LGFIFO:0] ack_wr_ptr, ack_rd_ptr;
+	wire ack_full = (ack_wr_ptr[LGFIFO] != ack_rd_ptr[LGFIFO]) &&
+	                 (ack_wr_ptr[LGFIFO-1:0] == ack_rd_ptr[LGFIFO-1:0]);
+	wire ack_empty = (ack_wr_ptr == ack_rd_ptr);
+
+	// Outstanding request counter
+	reg [LGFIFO:0] outstanding_cnt;
+	wire outstanding_full = (outstanding_cnt == FIFO_DEPTH);
+
+	assign o_wb_stall = outstanding_full;
+
+	// Wishbone side: accept request when not stalled and cyc/stb
+	wire wb_accept = i_wb_cyc && i_wb_stb && !o_wb_stall;
+
+	// Write to request FIFO in Wishbone clock domain
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_wr_ptr <= 0;
+			outstanding_cnt <= 0;
+			o_wb_ack <= 0;
+			o_wb_data <= 0;
+			o_wb_err <= 0;
+		end else begin
+			if (wb_accept) begin
+				req_fifo[req_wr_ptr[LGFIFO-1:0]] <= {i_wb_we, i_wb_addr, i_wb_data, i_wb_sel};
+				req_wr_ptr <= req_wr_ptr + 1;
+				outstanding_cnt <= outstanding_cnt + 1;
+			end
+
+			// Read from ack FIFO to respond on Wishbone side
+			if (!ack_empty) begin
+				o_wb_ack <= 1;
+				o_wb_data <= ack_fifo[ack_rd_ptr[LGFIFO-1:0]][ACK_FIFO_WIDTH-1:1];
+				o_wb_err <= ack_fifo[ack_rd_ptr[LGFIFO-1:0]][0];
+				ack_rd_ptr <= ack_rd_ptr + 1;
+				outstanding_cnt <= outstanding_cnt - 1;
+			end else begin
+				o_wb_ack <= 0;
+			end
+		end
+	end
+
+	// xclk side: read from request FIFO and drive xclk bus
+	reg xclk_active;
+	reg [FIFO_WIDTH-1:0] xclk_req_reg;
+
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_rd_ptr <= 0;
+			ack_wr_ptr <= 0;
+			o_xclk_cyc <= 0;
+			o_xclk_stb <= 0;
+			o_xclk_we <= 0;
+			o_xclk_addr <= 0;
+			o_xclk_data <= 0;
+			o_xclk_sel <= 0;
+			xclk_active <= 0;
+			xclk_req_reg <= 0;
+		end else begin
+			// If not currently active and FIFO not empty, load next request
+			if (!xclk_active && !req_empty) begin
+				xclk_req_reg <= req_fifo[req_rd_ptr[LGFIFO-1:0]];
+				req_rd_ptr <= req_rd_ptr + 1;
+				xclk_active <= 1;
+				o_xclk_cyc <= 1;
+				o_xclk_stb <= 1;
+				o_xclk_we <= xclk_req_reg[0];
+				o_xclk_addr <= xclk_req_reg[FIFO_WIDTH-1:FIFO_WIDTH-DW];
+				o_xclk_data <= xclk_req_reg[FIFO_WIDTH-DW-1:FIFO_WIDTH-DW-DW/8-1];
+				o_xclk_sel <= xclk_req_reg[FIFO_WIDTH-DW/8-1:0];
+			end
+
+			// If active and not stalled, wait for ack
+			if (xclk_active && !i_xclk_stall) begin
+				if (i_xclk_ack) begin
+					// Write response to ack FIFO
+					ack_fifo[ack_wr_ptr[LGFIFO-1:0]] <= {i_xclk_err, i_xclk_data};
+					ack_wr_ptr <= ack_wr_ptr + 1;
+					xclk_active <= 0;
+					o_xclk_cyc <= 0;
+					o_xclk_stb <= 0;
+				end
+			end
+		end
+	end
+
+endmodule

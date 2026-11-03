@@ -1,0 +1,148 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    reg [N-1:0] shift_reg;
+    reg [3:0]   bit_cnt;
+    reg         shift_en;
+    reg         shift_dir;
+    reg [N-1:0] data_in;
+    reg         data_in_valid;
+    reg         data_out_valid;
+    reg [1:0]   sclk_div_cnt;
+
+    // State machine states
+    typedef enum reg [2:0] {
+        IDLE,
+        LOAD_DATA,
+        SHIFT_OUT,
+        SHIFT_IN,
+        FINISH
+    } state_t;
+
+    state_t state, next_state;
+
+    // State machine
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state <= IDLE;
+        end else begin
+            state <= next_state;
+        end
+    end
+
+    // Next state logic
+    always @(*) begin
+        next_state = state;
+        case (state)
+            IDLE: begin
+                if (data_in_valid) begin
+                    next_state = LOAD_DATA;
+                end
+            end
+            LOAD_DATA: begin
+                next_state = SHIFT_OUT;
+            end
+            SHIFT_OUT: begin
+                if (bit_cnt == N-1) begin
+                    next_state = SHIFT_IN;
+                end
+            end
+            SHIFT_IN: begin
+                if (bit_cnt == N-1) begin
+                    next_state = FINISH;
+                end
+            end
+            FINISH: begin
+                next_state = IDLE;
+            end
+        endcase
+    end
+
+    // Output logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_ssel_o <= 1'b1;
+            spi_sck_o <= 1'b0;
+            di_req_o <= 1'b1;
+            wr_ack_o <= 1'b0;
+            do_valid_o <= 1'b0;
+            data_in_valid <= 1'b0;
+            data_out_valid <= 1'b0;
+            bit_cnt <= 4'b0;
+            sclk_div_cnt <= 2'b0;
+        end else begin
+            case (state)
+                IDLE: begin
+                    spi_ssel_o <= 1'b1;
+                    spi_sck_o <= 1'b0;
+                    di_req_o <= 1'b1;
+                    wr_ack_o <= 1'b0;
+                    do_valid_o <= 1'b0;
+                    if (wren_i) begin
+                        data_in <= di_i;
+                        data_in_valid <= 1'b1;
+                        di_req_o <= 1'b0;
+                    end
+                end
+                LOAD_DATA: begin
+                    spi_ssel_o <= 1'b0;
+                    shift_reg <= data_in;
+                    bit_cnt <= 4'b0;
+                    data_in_valid <= 1'b0;
+                    wr_ack_o <= 1'b1;
+                end
+                SHIFT_OUT: begin
+                    if (sclk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                        spi_sck_o <= ~spi_sck_o;
+                        if (spi_sck_o) begin
+                            shift_reg <= {shift_reg[N-2:0], 1'b0};
+                            bit_cnt <= bit_cnt + 1;
+                        end
+                        sclk_div_cnt <= 2'b0;
+                    end else begin
+                        sclk_div_cnt <= sclk_div_cnt + 1;
+                    end
+                end
+                SHIFT_IN: begin
+                    if (sclk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                        spi_sck_o <= ~spi_sck_o;
+                        if (spi_sck_o) begin
+                            shift_reg <= {shift_reg[N-2:0], spi_miso_i};
+                            bit_cnt <= bit_cnt + 1;
+                        end
+                        sclk_div_cnt <= 2'b0;
+                    end else begin
+                        sclk_div_cnt <= sclk_div_cnt + 1;
+                    end
+                end
+                FINISH: begin
+                    spi_ssel_o <= 1'b1;
+                    do_o <= shift_reg;
+                    do_valid_o <= 1'b1;
+                end
+            endcase
+        end
+    end
+
+    // SPI MOSI output
+    assign spi_mosi_o = shift_reg[N-1];
+
+endmodule
+```<|im_end|>

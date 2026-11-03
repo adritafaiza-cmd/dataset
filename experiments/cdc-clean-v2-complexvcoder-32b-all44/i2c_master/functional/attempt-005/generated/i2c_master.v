@@ -1,0 +1,328 @@
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // Internal signals
+    reg [7:0] cmd_fifo;
+    reg [7:0] data_fifo;
+    reg [2:0] bit_counter;
+    reg [7:0] byte_counter;
+    reg [3:0] state;
+    reg [3:0] next_state;
+    reg scl_reg;
+    reg sda_reg;
+    reg scl_t_reg;
+    reg sda_t_reg;
+    reg [15:0] clk_div;
+    reg [15:0] clk_div_counter;
+    reg start_flag;
+    reg stop_flag;
+    reg read_flag;
+    reg write_flag;
+    reg write_multiple_flag;
+    reg cmd_ready;
+    reg data_ready;
+    reg data_valid;
+    reg data_tlast;
+    reg [7:0] data_out;
+    reg ack_received;
+    reg missed_ack_reg;
+    reg busy_reg;
+    reg bus_control_reg;
+    reg bus_active_reg;
+
+    // State definitions
+    localparam IDLE = 4'b0000;
+    localparam START = 4'b0001;
+    localparam ADDRESS = 4'b0010;
+    localparam ACK_ADDRESS = 4'b0011;
+    localparam WRITE = 4'b0100;
+    localparam ACK_WRITE = 4'b0101;
+    localparam READ = 4'b0110;
+    localparam ACK_READ = 4'b0111;
+    localparam STOP = 4'b1000;
+
+    // State transition logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= IDLE;
+        end else begin
+            state <= next_state;
+        end
+    end
+
+    // Next state logic
+    always @(*) begin
+        next_state = state;
+        case (state)
+            IDLE: begin
+                if (start_flag) next_state = START;
+            end
+            START: begin
+                if (clk_div_counter == clk_div) next_state = ADDRESS;
+            end
+            ADDRESS: begin
+                if (clk_div_counter == clk_div) next_state = ACK_ADDRESS;
+            end
+            ACK_ADDRESS: begin
+                if (clk_div_counter == clk_div) next_state = write_flag ? WRITE : read_flag ? READ : STOP;
+            end
+            WRITE: begin
+                if (clk_div_counter == clk_div) next_state = ACK_WRITE;
+            end
+            ACK_WRITE: begin
+                if (clk_div_counter == clk_div) next_state = write_multiple_flag ? WRITE : STOP;
+            end
+            READ: begin
+                if (clk_div_counter == clk_div) next_state = ACK_READ;
+            end
+            ACK_READ: begin
+                if (clk_div_counter == clk_div) next_state = STOP;
+            end
+            STOP: begin
+                if (clk_div_counter == clk_div) next_state = IDLE;
+            end
+        endcase
+    end
+
+    // Clock divider logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            clk_div_counter <= 16'b0;
+        end else begin
+            if (clk_div_counter == clk_div) begin
+                clk_div_counter <= 16'b0;
+            end else begin
+                clk_div_counter <= clk_div_counter + 1;
+            end
+        end
+    end
+
+    // SCL and SDA control logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            scl_reg <= 1'b1;
+            sda_reg <= 1'b1;
+            scl_t_reg <= 1'b1;
+            sda_t_reg <= 1'b1;
+        end else begin
+            case (state)
+                IDLE: begin
+                    scl_reg <= 1'b1;
+                    sda_reg <= 1'b1;
+                    scl_t_reg <= 1'b1;
+                    sda_t_reg <= 1'b1;
+                end
+                START: begin
+                    if (clk_div_counter == clk_div) begin
+                        scl_reg <= 1'b0;
+                        sda_reg <= 1'b0;
+                    end
+                end
+                ADDRESS: begin
+                    if (clk_div_counter == clk_div) begin
+                        sda_reg <= cmd_fifo[7 - bit_counter];
+                    end
+                end
+                ACK_ADDRESS: begin
+                    if (clk_div_counter == clk_div) begin
+                        sda_t_reg <= 1'b1;
+                    end
+                end
+                WRITE: begin
+                    if (clk_div_counter == clk_div) begin
+                        sda_reg <= data_fifo[7 - bit_counter];
+                    end
+                end
+                ACK_WRITE: begin
+                    if (clk_div_counter == clk_div) begin
+                        sda_t_reg <= 1'b1;
+                    end
+                end
+                READ: begin
+                    if (clk_div_counter == clk_div) begin
+                        sda_t_reg <= 1'b1;
+                    end
+                end
+                ACK_READ: begin
+                    if (clk_div_counter == clk_div) begin
+                        sda_reg <= 1'b0;
+                    end
+                end
+                STOP: begin
+                    if (clk_div_counter == clk_div) begin
+                        scl_reg <= 1'b1;
+                        sda_reg <= 1'b1;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Command and data handling
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            cmd_ready <= 1'b0;
+            data_ready <= 1'b0;
+            data_valid <= 1'b0;
+            data_tlast <= 1'b0;
+            data_out <= 8'b0;
+            start_flag <= 1'b0;
+            stop_flag <= 1'b0;
+            read_flag <= 1'b0;
+            write_flag <= 1'b0;
+            write_multiple_flag <= 1'b0;
+            missed_ack_reg <= 1'b0;
+            busy_reg <= 1'b0;
+            bus_control_reg <= 1'b0;
+            bus_active_reg <= 1'b0;
+        end else begin
+            case (state)
+                IDLE: begin
+                    if (s_axis_cmd_valid) begin
+                        cmd_fifo <= {s_axis_cmd_read, s_axis_cmd_write, s_axis_cmd_write_multiple, s_axis_cmd_stop, s_axis_cmd_address};
+                        start_flag <= s_axis_cmd_start;
+                        cmd_ready <= 1'b1;
+                    end else begin
+                        cmd_ready <= 1'b0;
+                    end
+                    if (s_axis_data_valid) begin
+                        data_fifo <= s_axis_data_tdata;
+                        data_ready <= 1'b1;
+                    end else begin
+                        data_ready <= 1'b0;
+                    end
+                    busy_reg <= 1'b0;
+                    bus_active_reg <= 1'b0;
+                end
+                START: begin
+                    busy_reg <= 1'b1;
+                    bus_active_reg <= 1'b1;
+                end
+                ADDRESS: begin
+                    if (clk_div_counter == clk_div) begin
+                        if (bit_counter == 3'b111) begin
+                            bit_counter <= 3'b0;
+                        end else begin
+                            bit_counter <= bit_counter + 1;
+                        end
+                    end
+                end
+                ACK_ADDRESS: begin
+                    if (clk_div_counter == clk_div) begin
+                        ack_received <= sda_i;
+                        if (!ack_received) begin
+                            missed_ack_reg <= 1'b1;
+                        end
+                        read_flag <= cmd_fifo[7];
+                        write_flag <= cmd_fifo[6];
+                        write_multiple_flag <= cmd_fifo[5];
+                        stop_flag <= cmd_fifo[4];
+                    end
+                end
+                WRITE: begin
+                    if (clk_div_counter == clk_div) begin
+                        if (bit_counter == 3'b111) begin
+                            bit_counter <= 3'b0;
+                            byte_counter <= byte_counter + 1;
+                        end else begin
+                            bit_counter <= bit_counter + 1;
+                        end
+                    end
+                end
+                ACK_WRITE: begin
+                    if (clk_div_counter == clk_div) begin
+                        ack_received <= sda_i;
+                        if (!ack_received) begin
+                            missed_ack_reg <= 1'b1;
+                        end
+                    end
+                end
+                READ: begin
+                    if (clk_div_counter == clk_div) begin
+                        if (bit_counter == 3'b111) begin
+                            data_out[7 - bit_counter] <= sda_i;
+                            bit_counter <= 3'b0;
+                            byte_counter <= byte_counter + 1;
+                        end else begin
+                            data_out[7 - bit_counter] <= sda_i;
+                            bit_counter <= bit_counter + 1;
+                        end
+                    end
+                end
+                ACK_READ: begin
+                    if (clk_div_counter == clk_div) begin
+                        sda_reg <= 1'b0;
+                    end
+                end
+                STOP: begin
+                    if (clk_div_counter == clk_div) begin
+                        busy_reg <= 1'b0;
+                        bus_active_reg <= 1'b0;
+                        if (stop_on_idle) begin
+                            start_flag <= 1'b0;
+                        end
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Output assignments
+    assign s_axis_cmd_ready = cmd_ready;
+    assign s_axis_data_tready = data_ready;
+    assign m_axis_data_tdata = data_out;
+    assign m_axis_data_tvalid = data_valid;
+    assign m_axis_data_tlast = data_tlast;
+    assign scl_o = scl_reg;
+    assign scl_t = scl_t_reg;
+    assign sda_o = sda_reg;
+    assign sda_t = sda_t_reg;
+    assign busy = busy_reg;
+    assign bus_control = bus_control_reg;
+    assign bus_active = bus_active_reg;
+    assign missed_ack = missed_ack_reg;
+    assign clk_div = prescale;
+
+endmodule

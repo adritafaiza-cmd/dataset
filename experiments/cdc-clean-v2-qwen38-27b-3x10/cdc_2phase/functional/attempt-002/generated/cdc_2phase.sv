@@ -1,0 +1,134 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain state
+  reg src_valid_reg;
+  reg [WIDTH-1:0] src_data_reg;
+
+  // Destination domain state
+  reg dst_valid_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+
+  // Handshake signals crossing domains
+  // src_to_dst: source has data ready for destination
+  // dst_to_src: destination has accepted data, source can accept new data
+
+  // Source to destination: "I have data"
+  reg src_to_dst_raw;
+  reg src_to_dst_sync1;
+  reg src_to_dst_sync2;
+  wire src_to_dst = src_to_dst_sync2;
+
+  // Destination to source: "I have accepted the data"
+  reg dst_to_src_raw;
+  reg dst_to_src_sync1;
+  reg dst_to_src_sync2;
+  wire dst_to_src = dst_to_src_sync2;
+
+  // Source domain logic
+  // src_ready_o is high when we can accept new data
+  // We can accept new data when:
+  //   - We don't have pending data (src_valid_reg is low), OR
+  //   - The destination has accepted our previous data (dst_to_src is high)
+  // Actually, let's think about this more carefully.
+  
+  // The protocol:
+  // 1. Source has data, asserts src_to_dst
+  // 2. Destination sees src_to_dst, captures data, asserts dst_to_src
+  // 3. Source sees dst_to_src, clears src_to_dst, can accept new data
+  
+  // Let's use a simpler approach with a single outstanding item.
+  
+  // Source domain:
+  // - src_ready_o = ~src_valid_reg (we can accept if we don't have pending data)
+  // - When src_valid_i & src_ready_o: capture data, set src_valid_reg, assert src_to_dst
+  // - When dst_to_src: clear src_valid_reg, deassert src_to_dst
+  
+  // Destination domain:
+  // - When src_to_dst & ~dst_valid_reg: capture data, set dst_valid_reg, assert dst_to_src
+  // - When dst_valid_reg & dst_ready_i: clear dst_valid_reg, deassert dst_to_src
+  
+  // Wait, but src_to_dst and dst_to_src need to be synchronized.
+  
+  // Let me reconsider. The key issue is that src_to_dst is asserted in source domain
+  // and needs to be seen in destination domain. Similarly, dst_to_src is asserted in
+  // destination domain and needs to be seen in source domain.
+  
+  // Source domain:
+  assign src_ready_o = ~src_valid_reg;
+  
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_data_reg  <= {WIDTH{1'b0}};
+      src_to_dst_raw <= 1'b0;
+    end else begin
+      if (src_valid_i & src_ready_o) begin
+        src_valid_reg <= 1'b1;
+        src_data_reg  <= src_data_i;
+        src_to_dst_raw <= 1'b1;
+      end
+      if (dst_to_src) begin
+        src_valid_reg <= 1'b0;
+        src_to_dst_raw <= 1'b0;
+      end
+    end
+  end
+  
+  // Synchronize src_to_dst to destination domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_to_dst_sync1 <= 1'b0;
+      src_to_dst_sync2 <= 1'b0;
+    end else begin
+      src_to_dst_sync1 <= src_to_dst_raw;
+      src_to_dst_sync2 <= src_to_dst_sync1;
+    end
+  end
+  
+  // Destination domain:
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_data_reg  <= {WIDTH{1'b0}};
+      dst_to_src_raw <= 1'b0;
+    end else begin
+      if (src_to_dst & ~dst_valid_reg) begin
+        dst_valid_reg <= 1'b1;
+        dst_data_reg  <= src_data_reg; // This is a problem - src_data_reg is in source domain!
+        dst_to_src_raw <= 1'b1;
+      end
+      if (dst_valid_reg & dst_ready_i) begin
+        dst_valid_reg <= 1'b0;
+        dst_to_src_raw <= 1'b0;
+      end
+    end
+  end
+  
+  // Synchronize dst_to_src to source domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      dst_to_src_sync1 <= 1'b0;
+      dst_to_src_sync2 <= 1'b0;
+    end else begin
+      dst_to_src_sync1 <= dst_to_src_raw;
+      dst_to_src_sync2 <= dst_to_src_sync1;
+    end
+  end
+  
+  assign dst_data_o  = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+endmodule

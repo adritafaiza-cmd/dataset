@@ -1,0 +1,139 @@
+The following Verilog code implements an asynchronous FIFO with 2**ASIZE entries of DSIZE bits. The code includes the necessary clock-domain crossings and resets. The FIFO is designed to honor full, empty, and almost flags without losing or repeating data. Pointers cross as acknowledged binary snapshots, so full and empty can lag. rdata is one read-clock sample, and rempty may remain high for multiple read clocks between stored words. The FIFO starts empty after reset.
+
+```
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    // Internal signals
+    reg [DSIZE-1:0] mem [0:(2**ASIZE)-1];
+    reg [ASIZE-1:0] wptr;
+    reg [ASIZE-1:0] rptr;
+    reg [ASIZE-1:0] wptr_next;
+    reg [ASIZE-1:0] rptr_next;
+    reg [ASIZE-1:0] wptr_cross;
+    reg [ASIZE-1:0] rptr_cross;
+    reg [ASIZE-1:0] wptr_cross_next;
+    reg [ASIZE-1:0] rptr_cross_next;
+    reg [ASIZE-1:0] wptr_cross_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] wptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg [ASIZE-1:0] rptr_cross_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next

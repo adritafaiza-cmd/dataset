@@ -1,0 +1,509 @@
+```verilog
+module axis_async_fifo_adapter #
+(
+    parameter DEPTH = 4096,
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    /*
+     * AXI input
+     */
+    input  wire                     s_clk,
+    input  wire                     s_rst,
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI output
+     */
+    input  wire                     m_clk,
+    input  wire                     m_rst,
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                     s_pause_req,
+    output wire                     s_pause_ack,
+    input  wire                     m_pause_req,
+    output wire                     m_pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0]   s_status_depth,
+    output wire [$clog2(DEPTH):0]   s_status_depth_commit,
+    output wire                     s_status_overflow,
+    output wire                     s_status_bad_frame,
+    output wire                     s_status_good_frame,
+    output wire [$clog2(DEPTH):0]   m_status_depth,
+    output wire [$clog2(DEPTH):0]   m_status_depth_commit,
+    output wire                     m_status_overflow,
+    output wire                     m_status_bad_frame,
+    output wire                     m_status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam S_BEATS = (S_DATA_WIDTH + M_DATA_WIDTH - 1) / M_DATA_WIDTH;
+    localparam M_BEATS = (M_DATA_WIDTH + S_DATA_WIDTH - 1) / S_DATA_WIDTH;
+
+    reg [ADDR_WIDTH:0] s_wr_ptr, s_wr_ptr_next, s_rd_ptr, s_rd_ptr_next;
+    reg [ADDR_WIDTH:0] m_wr_ptr, m_wr_ptr_next, m_rd_ptr, m_rd_ptr_next;
+    reg [ADDR_WIDTH:0] s_depth, s_depth_commit;
+    reg [ADDR_WIDTH:0] m_depth, m_depth_commit;
+    reg s_full, s_empty, m_full, m_empty;
+    reg s_overflow, s_bad_frame, s_good_frame;
+    reg m_overflow, m_bad_frame, m_good_frame;
+    reg s_pause_ack_reg, m_pause_ack_reg;
+    reg [S_DATA_WIDTH-1:0] s_axis_tdata_reg;
+    reg [S_KEEP_WIDTH-1:0] s_axis_tkeep_reg;
+    reg s_axis_tvalid_reg;
+    reg s_axis_tlast_reg;
+    reg [ID_WIDTH-1:0] s_axis_tid_reg;
+    reg [DEST_WIDTH-1:0] s_axis_tdest_reg;
+    reg [USER_WIDTH-1:0] s_axis_tuser_reg;
+    reg [M_DATA_WIDTH-1:0] m_axis_tdata_reg;
+    reg [M_KEEP_WIDTH-1:0] m_axis_tkeep_reg;
+    reg m_axis_tvalid_reg;
+    reg m_axis_tlast_reg;
+    reg [ID_WIDTH-1:0] m_axis_tid_reg;
+    reg [DEST_WIDTH-1:0] m_axis_tdest_reg;
+    reg [USER_WIDTH-1:0] m_axis_tuser_reg;
+    reg [S_BEATS*S_DATA_WIDTH-1:0] mem [DEPTH-1:0];
+    reg [S_BEATS*S_KEEP_WIDTH-1:0] keep_mem [DEPTH-1:0];
+    reg [S_BEATS-1:0] last_mem [DEPTH-1:0];
+    reg [ID_WIDTH-1:0] id_mem [DEPTH-1:0];
+    reg [DEST_WIDTH-1:0] dest_mem [DEPTH-1:0];
+    reg [USER_WIDTH-1:0] user_mem [DEPTH-1:0];
+    reg [S_BEATS-1:0] valid_mem [DEPTH-1:0];
+    reg [S_BEATS-1:0] ready_mem [DEPTH-1:0];
+    reg [S_BEATS-1:0] beat_cnt;
+    reg [S_BEATS-1:0] m_beat_cnt;
+    reg [S_BEATS-1:0] s_beat_cnt;
+    reg [S_BEATS-1:0] s_beat_cnt_next;
+    reg [S_BEATS-1:0] m_beat_cnt_next;
+    reg [S_BEATS-1:0] s_last_beat;
+    reg [S_BEATS-1:0] m_last_beat;
+    reg [S_BEATS-1:0] s_ready;
+    reg [S_BEATS-1:0] m_ready;
+    reg [S_BEATS-1:0] s_valid;
+    reg [S_BEATS-1:0] m_valid;
+    reg [S_BEATS-1:0] s_ready_next;
+    reg [S_BEATS-1:0] m_ready_next;
+    reg [S_BEATS-1:0] s_valid_next;
+    reg [S_BEATS-1:0] m_valid_next;
+    reg [S_BEATS-1:0] s_last_beat_next;
+    reg [S_BEATS-1:0] m_last_beat_next;
+    reg [S_BEATS-1:0] s_beat_cnt_reg;
+    reg [S_BEATS-1:0] m_beat_cnt_reg;
+    reg [S_BEATS-1:0] s_last_beat_reg;
+    reg [S_BEATS-1:0] m_last_beat_reg;
+    reg [S_BEATS-1:0] s_ready_reg;
+    reg [S_BEATS-1:0] m_ready_reg;
+    reg [S_BEATS-1:0] s_valid_reg;
+    reg [S_BEATS-1:0] m_valid_reg;
+    reg [S_BEATS-1:0] s_last_beat_reg_next;
+    reg [S_BEATS-1:0] m_last_beat_reg_next;
+    reg [S_BEATS-1:0] s_ready_reg_next;
+    reg [S_BEATS-1:0] m_ready_reg_next;
+    reg [S_BEATS-1:0] s_valid_reg_next;
+    reg [S_BEATS-1:0] m_valid_reg_next;
+    reg [S_BEATS-1:0] s_last_beat_reg_reg;
+    reg [S_BEATS-1:0] m_last_beat_reg_reg;
+    reg [S_BEATS-1:0] s_ready_reg_reg;
+    reg [S_BEATS-1:0] m_ready_reg_reg;
+    reg [S_BEATS-1:0] s_valid_reg_reg;
+    reg [S_BEATS-1:0] m_valid_reg_reg;
+    reg [S_BEATS-1:0] s_last_beat_reg_reg_next;
+    reg [S_BEATS-1:0] m_last_beat_reg_reg_next;
+    reg [S_BEATS-1:0] s_ready_reg_reg_next;
+    reg [S_BEATS-1:0] m_ready_reg_reg_next;
+    reg [S_BEATS-1:0] s_valid_reg_reg_next;
+    reg [S_BEATS-1:0] m_valid_reg_reg_next;
+    reg [S_BEATS-1:0] s_last_beat_reg_reg_reg;
+    reg [S_BEATS-1:0] m_last_beat_reg_reg_reg;
+    reg [S_BEATS-1:0] s_ready_reg_reg_reg;
+    reg [S_BEATS-1:0] m_ready_reg_reg_reg;
+    reg [S_BEATS-1:0] s_valid_reg_reg_reg;
+    reg [S_BEATS-1:0] m_valid_reg_reg_reg;
+    reg [S_BEATS-1:0] s_last_beat_reg_reg_reg_next;
+    reg [S_BEATS-1:0] m_last_beat_reg_reg_reg_next;
+    reg [S_BEATS-1:0] s_ready_reg_reg_reg_next;
+    reg [S_BEATS-1:0] m_ready_reg_reg_reg_next;
+    reg [S_BEATS-1:0] s_valid_reg_reg_reg_next;
+    reg [S_BEATS-1:0] m_valid_reg_reg_reg_next;
+    reg [S_BEATS-1:0] s_last_beat_reg_reg_reg_reg;
+    reg [S_BEATS-1:0] m_last_beat_reg_reg_reg_reg;
+    reg [S_BEATS-1:0] s_ready_reg_reg_reg_reg;
+    reg [S_BEATS-1:0] m_ready_reg_reg_reg_reg;
+    reg [S_BEATS-1:0] s_valid_reg_reg_reg_reg;
+    reg [S_BEATS-1:0] m_valid_reg_reg_reg_reg;
+    reg [S_BEATS-1:0] s_last_beat_reg_reg_reg_reg_next;
+    reg [S_BEATS-1:0] m_last_beat_reg_reg_reg_reg_next;
+    reg [S_BEATS-1:0] s_ready_reg_reg_reg_reg_next;
+    reg [S_BEATS-1:0] m_ready_reg_reg_reg_reg_next;
+    reg [S_BEATS-1:0] s_valid_reg_reg_reg_reg_next;
+    reg [S_BEATS-1:0] m_valid_reg_reg_reg_reg_next;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_wr_ptr <= 0;
+            s_rd_ptr <= 0;
+            s_depth <= 0;
+            s_depth_commit <= 0;
+            s_full <= 0;
+            s_empty <= 1;
+            s_overflow <= 0;
+            s_bad_frame <= 0;
+            s_good_frame <= 0;
+            s_pause_ack_reg <= 0;
+            s_axis_tdata_reg <= 0;
+            s_axis_tkeep_reg <= 0;
+            s_axis_tvalid_reg <= 0;
+            s_axis_tlast_reg <= 0;
+            s_axis_tid_reg <= 0;
+            s_axis_tdest_reg <= 0;
+            s_axis_tuser_reg <= 0;
+            s_beat_cnt <= 0;
+            s_beat_cnt_next <= 0;
+            s_last_beat <= 0;
+            s_last_beat_next <= 0;
+            s_ready <= 0;
+            s_ready_next <= 0;
+            s_valid <= 0;
+            s_valid_next <= 0;
+            s_last_beat_reg <= 0;
+            s_last_beat_reg_next <= 0;
+            s_ready_reg <= 0;
+            s_ready_reg_next <= 0;
+            s_valid_reg <= 0;
+            s_valid_reg_next <= 0;
+            s_last_beat_reg_reg <= 0;
+            s_last_beat_reg_reg_next <= 0;
+            s_ready_reg_reg <= 0;
+            s_ready_reg_reg_next <= 0;
+            s_valid_reg_reg <= 0;
+            s_valid_reg_reg_next <= 0;
+            s_last_beat_reg_reg_reg <= 0;
+            s_last_beat_reg_reg_reg_next <= 0;
+            s_ready_reg_reg_reg <= 0;
+            s_ready_reg_reg_reg_next <= 0;
+            s_valid_reg_reg_reg <= 0;
+            s_valid_reg_reg_reg_next <= 0;
+            s_last_beat_reg_reg_reg_reg <= 0;
+            s_last_beat_reg_reg_reg_reg_next <= 0;
+            s_ready_reg_reg_reg_reg <= 0;
+            s_ready_reg_reg_reg_reg_next <= 0;
+            s_valid_reg_reg_reg_reg <= 0;
+            s_valid_reg_reg_reg_reg_next <= 0;
+        end else begin
+            s_wr_ptr <= s_wr_ptr_next;
+            s_rd_ptr <= s_rd_ptr_next;
+            s_depth <= s_depth_commit;
+            s_depth_commit <= s_depth_commit + s_axis_tvalid_reg & s_ready_reg_reg_reg_reg & ~s_empty;
+            s_full <= (s_wr_ptr_next == {~s_rd_ptr_next[ADDR_WIDTH-1:0], s_rd_ptr_next[ADDR_WIDTH-1]});
+            s_empty <= (s_wr_ptr_next == s_rd_ptr_next);
+            s_overflow <= s_overflow | (s_axis_tvalid_reg & s_ready_reg_reg_reg_reg & s_full);
+            s_bad_frame <= s_bad_frame | (s_axis_tvalid_reg & s_ready_reg_reg_reg_reg & s_axis_tlast_reg & (s_axis_tuser_reg & USER_BAD_FRAME_MASK) == USER_BAD_FRAME_VALUE);
+            s_good_frame <= s_good_frame | (s_axis_tvalid_reg & s_ready_reg_reg_reg_reg & s_axis_tlast_reg & (s_axis_tuser_reg & USER_BAD_FRAME_MASK) != USER_BAD_FRAME_VALUE);
+            s_pause_ack_reg <= s_pause_req;
+            s_axis_tdata_reg <= s_axis_tdata;
+            s_axis_tkeep_reg <= s_axis_tkeep;
+            s_axis_tvalid_reg <= s_axis_tvalid;
+            s_axis_tlast_reg <= s_axis_tlast;
+            s_axis_tid_reg <= s_axis_tid;
+            s_axis_tdest_reg <= s_axis_tdest;
+            s_axis_tuser_reg <= s_axis_tuser;
+            s_beat_cnt <= s_beat_cnt_next;
+            s_last_beat <= s_last_beat_next;
+            s_ready <= s_ready_next;
+            s_valid <= s_valid_next;
+            s_last_beat_reg <= s_last_beat_reg_next;
+            s_ready_reg <= s_ready_reg_next;
+            s_valid_reg <= s_valid_reg_next;
+            s_last_beat_reg_reg <= s_last_beat_reg_reg_next;
+            s_ready_reg_reg <= s_ready_reg_reg_next;
+            s_valid_reg_reg <= s_valid_reg_reg_next;
+            s_last_beat_reg_reg_reg <= s_last_beat_reg_reg_reg_next;
+            s_ready_reg_reg_reg <= s_ready_reg_reg_reg_next;
+            s_valid_reg_reg_reg <= s_valid_reg_reg_reg_next;
+            s_last_beat_reg_reg_reg_reg <= s_last_beat_reg_reg_reg_reg_next;
+            s_ready_reg_reg_reg_reg <= s_ready_reg_reg_reg_reg_next;
+            s_valid_reg_reg_reg_reg <= s_valid_reg_reg_reg_reg_next;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_wr_ptr <= 0;
+            m_rd_ptr <= 0;
+            m_depth <= 0;
+            m_depth_commit <= 0;
+            m_full <= 0;
+            m_empty <= 1;
+            m_overflow <= 0;
+            m_bad_frame <= 0;
+            m_good_frame <= 0;
+            m_pause_ack_reg <= 0;
+            m_axis_tdata_reg <= 0;
+            m_axis_tkeep_reg <= 0;
+            m_axis_tvalid_reg <= 0;
+            m_axis_tlast_reg <= 0;
+            m_axis_tid_reg <= 0;
+            m_axis_tdest_reg <= 0;
+            m_axis_tuser_reg <= 0;
+            m_beat_cnt <= 0;
+            m_beat_cnt_next <= 0;
+            m_last_beat <= 0;
+            m_last_beat_next <= 0;
+            m_ready <= 0;
+            m_ready_next <= 0;
+            m_valid <= 0;
+            m_valid_next <= 0;
+            m_last_beat_reg <= 0;
+            m_last_beat_reg_next <= 0;
+            m_ready_reg <= 0;
+            m_ready_reg_next <= 0;
+            m_valid_reg <= 0;
+            m_valid_reg_next <= 0;
+            m_last_beat_reg_reg <= 0;
+            m_last_beat_reg_reg_next <= 0;
+            m_ready_reg_reg <= 0;
+            m_ready_reg_reg_next <= 0;
+            m_valid_reg_reg <= 0;
+            m_valid_reg_reg_next <= 0;
+            m_last_beat_reg_reg_reg <= 0;
+            m_last_beat_reg_reg_reg_next <= 0;
+            m_ready_reg_reg_reg <= 0;
+            m_ready_reg_reg_reg_next <= 0;
+            m_valid_reg_reg_reg <= 0;
+            m_valid_reg_reg_reg_next <= 0;
+            m_last_beat_reg_reg_reg_reg <= 0;
+            m_last_beat_reg_reg_reg_reg_next <= 0;
+            m_ready_reg_reg_reg_reg <= 0;
+            m_ready_reg_reg_reg_reg_next <= 0;
+            m_valid_reg_reg_reg_reg <= 0;
+            m_valid_reg_reg_reg_reg_next <= 0;
+        end else begin
+            m_wr_ptr <= m_wr_ptr_next;
+            m_rd_ptr <= m_rd_ptr_next;
+            m_depth <= m_depth_commit;
+            m_depth_commit <= m_depth_commit + m_axis_tvalid_reg & m_ready_reg_reg_reg_reg & ~m_empty;
+            m_full <= (m_wr_ptr_next == {~m_rd_ptr_next[ADDR_WIDTH-1:0], m_rd_ptr_next[ADDR_WIDTH-1]});
+            m_empty <= (m_wr_ptr_next == m_rd_ptr_next);
+            m_overflow <= m_overflow | (m_axis_tvalid_reg & m_ready_reg_reg_reg_reg & m_full);
+            m_bad_frame <= m_bad_frame | (m_axis_tvalid_reg & m_ready_reg_reg_reg_reg & m_axis_tlast_reg & (m_axis_tuser_reg & USER_BAD_FRAME_MASK) == USER_BAD_FRAME_VALUE);
+            m_good_frame <= m_good_frame | (m_axis_tvalid_reg & m_ready_reg_reg_reg_reg & m_axis_tlast_reg & (m_axis_tuser_reg & USER_BAD_FRAME_MASK) != USER_BAD_FRAME_VALUE);
+            m_pause_ack_reg <= m_pause_req;
+            m_axis_tdata_reg <= m_axis_tdata;
+            m_axis_tkeep_reg <= m_axis_tkeep;
+            m_axis_tvalid_reg <= m_axis_tvalid;
+            m_axis_tlast_reg <= m_axis_tlast;
+            m_axis_tid_reg <= m_axis_tid;
+            m_axis_tdest_reg <= m_axis_tdest;
+            m_axis_tuser_reg <= m_axis_tuser;
+            m_beat_cnt <= m_beat_cnt_next;
+            m_last_beat <= m_last_beat_next;
+            m_ready <= m_ready_next;
+            m_valid <= m_valid_next;
+            m_last_beat_reg <= m_last_beat_reg_next;
+            m_ready_reg <= m_ready_reg_next;
+            m_valid_reg <= m_valid_reg_next;
+            m_last_beat_reg_reg <= m_last_beat_reg_reg_next;
+            m_ready_reg_reg <= m_ready_reg_reg_next;
+            m_valid_reg_reg <= m_valid_reg_reg_next;
+            m_last_beat_reg_reg_reg <= m_last_beat_reg_reg_reg_next;
+            m_ready_reg_reg_reg <= m_ready_reg_reg_reg_next;
+            m_valid_reg_reg_reg <= m_valid_reg_reg_reg_next;
+            m_last_beat_reg_reg_reg_reg <= m_last_beat_reg_reg_reg_reg_next;
+            m_ready_reg_reg_reg_reg <= m_ready_reg_reg_reg_reg_next;
+            m_valid_reg_reg_reg_reg <= m_valid_reg_reg_reg_reg_next;
+        end
+    end
+
+    always @(*) begin
+        s_wr_ptr_next = s_wr_ptr;
+        s_rd_ptr_next = s_rd_ptr;
+        s_beat_cnt_next = s_beat_cnt;
+        s_last_beat_next = s_last_beat;
+        s_ready_next = s_ready;
+        s_valid_next = s_valid;
+        s_last_beat_reg_next = s_last_beat_reg;
+        s_ready_reg_next = s_ready_reg;
+        s_valid_reg_next = s_valid_reg;
+        s_last_beat_reg_reg_next = s_last_beat_reg_reg;
+        s_ready_reg_reg_next = s_ready_reg_reg;
+        s_valid_reg_reg_next = s_valid_reg_reg;
+        s_last_beat_reg_reg_reg_next = s_last_beat_reg_reg_reg;
+        s_ready_reg_reg_reg_next = s_ready_reg_reg_reg;
+        s_valid_reg_reg_reg_next = s_valid_reg_reg_reg;
+        s_last_beat_reg_reg_reg_reg_next = s_last_beat_reg_reg_reg_reg;
+        s_ready_reg_reg_reg_reg_next = s_ready_reg_reg_reg_reg;
+        s_valid_reg_reg_reg_reg_next = s_valid_reg_reg_reg_reg;
+
+        if (s_axis_tvalid & s_ready_reg_reg_reg_reg & ~s_empty) begin
+            mem[s_wr_ptr[ADDR_WIDTH-1:0]] = s_axis_tdata;
+            keep_mem[s_wr_ptr[ADDR_WIDTH-1:0]] = s_axis_tkeep;
+            last_mem[s_wr_ptr[ADDR_WIDTH-1:0]] = s_axis_tlast;
+            id_mem[s_wr_ptr[ADDR_WIDTH-1:0]] = s_axis_tid;
+            dest_mem[s_wr_ptr[ADDR_WIDTH-1:0]] = s_axis_tdest;
+            user_mem[s_wr_ptr[ADDR_WIDTH-1:0]] = s_axis_tuser;
+            valid_mem[s_wr_ptr[ADDR_WIDTH-1:0]] = {S_BEATS{s_axis_tvalid}};
+            ready_mem[s_wr_ptr[ADDR_WIDTH-1:0]] = {S_BEATS{s_ready_reg_reg_reg_reg}};
+            s_wr_ptr_next = s_wr_ptr + 1;
+            s_beat_cnt_next = s_beat_cnt + 1;
+            s_last_beat_next = s_last_beat | {S_BEATS-1{s_axis_tlast}};
+            s_ready_next = s_ready | {S_BEATS{s_ready_reg_reg_reg_reg}};
+            s_valid_next = s_valid | {S_BEATS{s_axis_tvalid}};
+            s_last_beat_reg_next = s_last_beat_reg | {S_BEATS-1{s_axis_tlast}};
+            s_ready_reg_next = s_ready_reg | {S_BEATS{s_ready_reg_reg_reg_reg}};
+            s_valid_reg_next = s_valid_reg | {S_BEATS{s_axis_tvalid}};
+            s_last_beat_reg_reg_next = s_last_beat_reg_reg | {S_BEATS-1{s_axis_tlast}};
+            s_ready_reg_reg_next = s_ready_reg_reg | {S_BEATS{s_ready_reg_reg_reg_reg}};
+            s_valid_reg_reg_next = s_valid_reg_reg | {S_BEATS{s_axis_tvalid}};
+            s_last_beat_reg_reg_reg_next = s_last_beat_reg_reg_reg | {S_BEATS-1{s_axis_tlast}};
+            s_ready_reg_reg_reg_next = s_ready_reg_reg_reg | {S_BEATS{s_ready_reg_reg_reg_reg}};
+            s_valid_reg_reg_reg_next = s_valid_reg_reg_reg | {S_BEATS{s_axis_tvalid}};
+            s_last_beat_reg_reg_reg_reg_next = s_last_beat_reg_reg_reg_reg | {S_BEATS-1{s_axis_tlast}};
+            s_ready_reg_reg_reg_reg_next = s_ready_reg_reg_reg_reg | {S_BEATS{s_ready_reg_reg_reg_reg}};
+            s_valid_reg_reg_reg_reg_next = s_valid_reg_reg_reg_reg | {S_BEATS{s_axis_tvalid}};
+        end
+
+        if (m_axis_tready & m_valid_reg_reg_reg_reg & ~m_empty) begin
+            s_rd_ptr_next = s_rd_ptr + 1;
+            s_beat_cnt_next = s_beat_cnt - 1;
+            s_last_beat_next = s_last_beat - {S_BEATS-1{m_axis_tlast}};
+            s_ready_next = s_ready - {S_BEATS-1{m_axis_tready}};
+            s_valid_next = s_valid - {S_BEATS-1{m_axis_tready}};
+            s_last_beat_reg_next = s_last_beat_reg - {S_BEATS-1{m_axis_tlast}};
+            s_ready_reg_next = s_ready_reg - {S_BEATS-1{m_axis_tready}};
+            s_valid_reg_next = s_valid_reg - {S_BEATS-1{m_axis_tready}};
+            s_last_beat_reg_reg_next = s_last_beat_reg_reg - {S_BEATS-1{m_axis_tlast}};
+            s_ready_reg_reg_next = s_ready_reg_reg - {S_BEATS-1{m_axis_tready}};
+            s_valid_reg_reg_next = s_valid_reg_reg - {S_BEATS-1{m_axis_tready}};
+            s_last_beat_reg_reg_reg_next = s_last_beat_reg_reg_reg - {S_BEATS-1{m_axis_tlast}};
+            s_ready_reg_reg_reg_next = s_ready_reg_reg_reg - {S_BEATS-1{m_axis_tready}};
+            s_valid_reg_reg_reg_next = s_valid_reg_reg_reg - {S_BEATS-1{m_axis_tready}};
+            s_last_beat_reg_reg_reg_reg_next = s_last_beat_reg_reg_reg_reg - {S_BEATS-1{m_axis_tlast}};
+            s_ready_reg_reg_reg_reg_next = s_ready_reg_reg_reg_reg - {S_BEATS-1{m_axis_tready}};
+            s_valid_reg_reg_reg_reg_next = s_valid_reg_reg_reg_reg - {S_BEATS-1{m_axis_tready}};
+        end
+    end
+
+    always @(*) begin
+        m_wr_ptr_next = m_wr_ptr;
+        m_rd_ptr_next = m_rd_ptr;
+        m_beat_cnt_next = m_beat_cnt;
+        m_last_beat_next = m_last_beat;
+        m_ready_next = m_ready;
+        m_valid_next = m_valid;
+        m_last_beat_reg_next = m_last_beat_reg;
+        m_ready_reg_next = m_ready_reg;
+        m_valid_reg_next = m_valid_reg;
+        m_last_beat_reg_reg_next = m_last_beat_reg_reg;
+        m_ready_reg_reg_next = m_ready_reg_reg;
+        m_valid_reg_reg_next = m_valid_reg_reg;
+        m_last_beat_reg_reg_reg_next = m_last_beat_reg_reg_reg;
+        m_ready_reg_reg_reg_next = m_ready_reg_reg_reg;
+        m_valid_reg_reg_reg_next = m_valid_reg_reg_reg;
+        m_last_beat_reg_reg_reg_reg_next = m_last_beat_reg_reg_reg_reg;
+        m_ready_reg_reg_reg_reg_next = m_ready_reg_reg_reg_reg;
+        m_valid_reg_reg_reg_reg_next = m_valid_reg_reg_reg_reg;
+
+        if (m_axis_tready & m_valid_reg_reg_reg_reg & ~m_empty) begin
+            m_rd_ptr_next = m_rd_ptr + 1;
+            m_beat_cnt_next = m_beat_cnt - 1;
+            m_last_beat_next = m_last_beat - {S_BEATS-1{m_axis_tlast}};
+            m_ready_next = m_ready - {S_BEATS-1{m_axis_tready}};
+            m_valid_next = m_valid - {S_BEATS-1{m_axis_tready}};
+            m_last_beat_reg_next = m_last_beat_reg - {S_BEATS-1{m_axis_tlast}};
+            m_ready_reg_next = m_ready_reg - {S_BEATS-1{m_axis_tready}};
+            m_valid_reg_next = m_valid_reg - {S_BEATS-1{m_axis_tready}};
+            m_last_beat_reg_reg_next = m_last_beat_reg_reg - {S_BEATS-1{m_axis_tlast}};
+            m_ready_reg_reg_next = m_ready_reg_reg - {S_BEATS-1{m_axis_tready}};
+            m_valid_reg_reg_next = m_valid_reg_reg - {S_BEATS-1{m_axis_tready}};
+            m_last_beat_reg_reg_reg_next = m_last_beat_reg_reg_reg - {S_BEATS-1{m_axis_tlast}};
+            m_ready_reg_reg_reg_next = m_ready_reg_reg_reg - {S_BEATS-1{m_axis_tready}};
+            m_valid_reg_reg_reg_next = m_valid_reg_reg_reg - {S_BEATS-1{m_axis_tready}};
+            m_last_beat_reg_reg_reg_reg_next = m_last_beat_reg_reg_reg_reg - {S_BEATS-1{m_axis_tlast}};
+            m_ready_reg_reg_reg_reg_next = m_ready_reg_reg_reg_reg - {S_BEATS-1{m_axis_tready}};
+            m_valid_reg_reg_reg_reg_next = m_valid_reg_reg_reg_reg - {S_BEATS-1{m_axis_tready}};
+        end
+
+        if (s_axis_tvalid & s_ready_reg_reg_reg_reg & ~s_empty) begin
+            m_wr_ptr_next = m_wr_ptr + 1;
+            m_beat_cnt_next = m_beat_cnt + 1;
+            m_last_beat_next = m_last_beat | {S_BEATS-1{s_axis_tlast}};
+            m_ready_next = m_ready | {S_BEATS{s_ready_reg_reg_reg_reg}};
+            m_valid_next = m_valid | {S_BEATS{s_axis_tvalid}};
+            m_last_beat_reg_next = m_last_beat_reg | {S_BEATS-1{s_axis_tlast}};
+            m_ready_reg_next = m_ready_reg | {S_BEATS{s_ready_reg_reg_reg_reg}};
+            m_valid_reg_next = m_valid_reg | {S_BEATS{s_axis_tvalid}};
+            m_last_beat_reg_reg_next = m_last_beat_reg_reg | {S_BEATS-1{s_axis_tlast}};
+            m_ready_reg_reg_next = m_ready_reg_reg | {S_BEATS{s_ready_reg_reg_reg_reg}};
+            m_valid_reg_reg_next = m_valid_reg_reg | {S_BEATS{s_axis_tvalid}};
+            m_last_beat_reg_reg_reg_next = m_last_beat_reg_reg_reg | {S_BEATS-1{s_axis_tlast}};
+            m_ready_reg_reg_reg_next = m_ready_reg_reg_reg | {S_BEATS{s_ready_reg_reg_reg_reg}};
+            m_valid_reg_reg_reg_next = m_valid_reg_reg_reg | {S_BEATS{s_axis_tvalid}};
+            m_last_beat_reg_reg_reg_reg_next = m_last_beat_reg_reg_reg_reg | {S_BEATS-1{s_axis_tlast}};
+            m_ready_reg_reg_reg_reg_next = m_ready_reg_reg_reg_reg | {S_BEATS{s_ready_reg_reg_reg_reg}};
+            m_valid_reg_reg_reg_reg_next = m_valid_reg_reg_reg_reg | {S_BEATS{s_axis_tvalid}};
+        end
+    end
+
+    assign s_axis_tready = s_ready_reg_reg_reg_reg & ~s_full;
+    assign m_axis_tdata = mem[m_rd_ptr[ADDR_WIDTH-1:0]];
+    assign m_axis_tkeep = keep_mem[m_rd_ptr[ADDR_WIDTH-1:0]];
+    assign m_axis_tvalid = m_valid_reg_reg_reg_reg & ~m_empty;
+    assign m_axis_tlast = m_last_beat_reg_reg_reg_reg;
+    assign m_axis_tid = id_mem[m_rd_ptr[ADDR_WIDTH-1:0]];
+    assign m_axis_tdest = dest_mem[m_rd_ptr[ADDR_WIDTH-1:0]];
+    assign m_axis_tuser = user_mem[m_rd_ptr[ADDR_WIDTH-1:0]];
+
+    assign s_status_depth = s_depth;
+    assign s_status_depth_commit = s_depth_commit;
+    assign s_status_overflow = s_overflow;
+    assign s_status_bad_frame = s_bad_frame;
+    assign s_status_good_frame = s_good_frame;
+    assign m_status_depth = m_depth;
+    assign m_status_depth_commit = m_depth_commit;
+    assign m_status_overflow = m_overflow;
+    assign m_status_bad_frame = m_bad_frame;
+    assign m_status_good_frame = m_good_frame;
+    assign s_pause_ack = s_pause_ack_reg;
+    assign m_pause_ack = m_pause_ack_reg;
+
+endmodule
+```<|im_end|>

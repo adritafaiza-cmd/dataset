@@ -1,0 +1,251 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "spi_master",
+            "function": "SPI Master with parallel-side word interface",
+            "parameters": [
+                {
+                    "name": "N",
+                    "value": 8
+                },
+                {
+                    "name": "SPI_2X_CLK_DIV",
+                    "value": 2
+                }
+            ],
+            "ports": [
+                {
+                    "name": "sclk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "sclk"
+                },
+                {
+                    "name": "pclk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "pclk"
+                },
+                {
+                    "name": "rst_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "pclk"
+                },
+                {
+                    "name": "spi_ssel_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "sclk"
+                },
+                {
+                    "name": "spi_sck_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "sclk"
+                },
+                {
+                    "name": "spi_mosi_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "sclk"
+                },
+                {
+                    "name": "spi_miso_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "sclk"
+                },
+                {
+                    "name": "di_req_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "pclk"
+                },
+                {
+                    "name": "di_i",
+                    "direction": "input",
+                    "width": "N",
+                    "clock_domain": "pclk"
+                },
+                {
+                    "name": "wren_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "pclk"
+                },
+                {
+                    "name": "wr_ack_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "pclk"
+                },
+                {
+                    "name": "do_valid_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "pclk"
+                },
+                {
+                    "name": "do_o",
+                    "direction": "output",
+                    "width": "N",
+                    "clock_domain": "pclk"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {
+                    "name": "shift_reg",
+                    "width": "N"
+                },
+                {
+                    "name": "bit_cnt",
+                    "width": 4
+                },
+                {
+                    "name": "data_out",
+                    "width": "N"
+                },
+                {
+                    "name": "spi_sck_reg",
+                    "width": 1
+                },
+                {
+                    "name": "spi_ssel_reg",
+                    "width": 1
+                },
+                {
+                    "name": "di_req_reg",
+                    "width": 1
+                },
+                {
+                    "name": "wr_ack_reg",
+                    "width": 1
+                },
+                {
+                    "name": "do_valid_reg",
+                    "width": 1
+                },
+                {
+                    "name": "sclk_div_cnt",
+                    "width": "SPI_2X_CLK_DIV"
+                }
+            ],
+            "behavior": [
+                "Reset behavior: After reset, spi_ssel_o, spi_sck_o, and spi_mosi_o are set to 0, di_req_o, wr_ack_o, and do_valid_o are set to 0.",
+                "Parallel data interface: Accept N-bit words on di_i when wren_i is high; wr_ack_o acknowledges the write.",
+                "SPI data transfer: Shift the word out on spi_mosi_o with spi_sck_o and spi_ssel_o.",
+                "Data capture: Capture spi_miso_i and present it on do_o with do_valid_o.",
+                "Request mechanism: di_req_o requests the next word.",
+                "Handshake: wr_ack_o pulses on acceptance; do_valid_o pulses once per completed word.",
+                "Clock domain crossing: Ensure correct clock domain handling for sclk_i and pclk_i.",
+                "SPI clock generation: Generate spi_sck_o from sclk_i with SPI_2X_CLK_DIV as the divisor."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    reg [N-1:0]        shift_reg;
+    reg [3:0]          bit_cnt;
+    reg [N-1:0]        data_out;
+    reg                spi_sck_reg;
+    reg                spi_ssel_reg;
+    reg                di_req_reg;
+    reg                wr_ack_reg;
+    reg                do_valid_reg;
+    reg [SPI_2X_CLK_DIV-1:0] sclk_div_cnt;
+
+    // PCLK domain logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_o <= 0;
+            wr_ack_o <= 0;
+            do_valid_o <= 0;
+            do_o <= 0;
+        end else begin
+            // Request new data
+            if (!spi_ssel_reg && !di_req_reg) begin
+                di_req_o <= 1;
+            end else if (wren_i) begin
+                di_req_o <= 0;
+                wr_ack_o <= 1;
+                data_out <= di_i;
+            end else begin
+                wr_ack_o <= 0;
+            end
+
+            // Validate data output
+            if (bit_cnt == N) begin
+                do_valid_o <= 1;
+                do_o <= shift_reg;
+            end else begin
+                do_valid_o <= 0;
+            end
+        end
+    end
+
+    // SCLK domain logic
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_ssel_o <= 0;
+            spi_sck_o <= 0;
+            spi_mosi_o <= 0;
+            shift_reg <= 0;
+            bit_cnt <= 0;
+            sclk_div_cnt <= 0;
+        end else begin
+            // SPI clock generation
+            if (sclk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                sclk_div_cnt <= 0;
+                spi_sck_o <= ~spi_sck_reg;
+            end else begin
+                sclk_div_cnt <= sclk_div_cnt + 1;
+            end
+
+            // SPI transfer logic
+            if (sclk_div_cnt == 0) begin
+                spi_sck_reg <= spi_sck_o;
+
+                if (!spi_ssel_reg && wren_i) begin
+                    spi_ssel_o <= 1;
+                    bit_cnt <= 0;
+                    shift_reg <= data_out;
+                end else if (bit_cnt < N) begin
+                    spi_mosi_o <= shift_reg[N-1];
+                    shift_reg <= {shift_reg[N-2:0], spi_miso_i};
+                    bit_cnt <= bit_cnt + 1;
+                end else begin
+                    spi_ssel_o <= 0;
+                end
+            end
+        end
+    end
+
+endmodule
+```

@@ -1,0 +1,140 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "edge_propagator",
+      "function": "Propagate a pulse/edge from one asynchronous clock domain to another without duplicating or leaving a stale event after reset.",
+      "parameters": [],
+      "ports": [
+        { "name": "clk_tx_i", "direction": "input", "width": 1, "clock_domain": "clk_tx_i" },
+        { "name": "rstn_tx_i", "direction": "input", "width": 1, "clock_domain": "clk_tx_i" },
+        { "name": "edge_i", "direction": "input", "width": 1, "clock_domain": "clk_tx_i" },
+        { "name": "clk_rx_i", "direction": "input", "width": 1, "clock_domain": "clk_rx_i" },
+        { "name": "rstn_rx_i", "direction": "input", "width": 1, "clock_domain": "clk_rx_i" },
+        { "name": "edge_o", "direction": "output", "width": 1, "clock_domain": "clk_rx_i" }
+      ],
+      "instances": [
+        { "module": "ff_sync", "name": "ff_sync_tx_to_rx", "function": "Synchronizes signal from tx clock domain to rx clock domain", "connections": [
+          { "local": "clk_rx_i", "external": "clk_rx_i" },
+          { "local": "rstn_rx_i", "external": "rstn_rx_i" },
+          { "local": "async_in", "external": "edge_i" },
+          { "local": "sync_out", "external": "edge_synced" }
+        ]},
+        { "module": "ff_sync", "name": "ff_sync_rx", "function": "Detects edge in rx clock domain", "connections": [
+          { "local": "clk_rx_i", "external": "clk_rx_i" },
+          { "local": "rstn_rx_i", "external": "rstn_rx_i" },
+          { "local": "async_in", "external": "edge_synced" },
+          { "local": "sync_out", "external": "edge_synced_ff" }
+        ]}
+      ],
+      "connections": [
+        { "source": "ff_sync_tx_to_rx.sync_out", "destination": "edge_synced" },
+        { "source": "ff_sync_rx.sync_out", "destination": "edge_synced_ff" }
+      ],
+      "internal_signals": [
+        { "name": "edge_synced", "width": 1 },
+        { "name": "edge_synced_ff", "width": 1 },
+        { "name": "edge_detected", "width": 1 }
+      ],
+      "behavior": [
+        "Synchronize the input edge_i from clk_tx_i domain to clk_rx_i domain using two-stage flip-flop synchronization.",
+        "Detect the rising edge of the synchronized signal in the clk_rx_i domain.",
+        "Propagate the detected edge to the output edge_o.",
+        "Ensure no stale events or duplications after reset."
+      ]
+    },
+    {
+      "Top_module_name": "ff_sync",
+      "function": "Two-stage flip-flop synchronization for asynchronous clock domains.",
+      "parameters": [],
+      "ports": [
+        { "name": "clk_i", "direction": "input", "width": 1, "clock_domain": "clk_i" },
+        { "name": "rstn_i", "direction": "input", "width": 1, "clock_domain": "clk_i" },
+        { "name": "async_in", "direction": "input", "width": 1, "clock_domain": "other" },
+        { "name": "sync_out", "direction": "output", "width": 1, "clock_domain": "clk_i" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        { "name": "ff1", "width": 1 },
+        { "name": "ff2", "width": 1 }
+      ],
+      "behavior": [
+        "On each rising edge of clk_i, synchronize the async_in signal through two flip-flops to clk_i domain.",
+        "Ensure the output sync_out reflects the stable value of async_in after two clock cycles."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  logic edge_synced;
+  logic edge_synced_ff;
+  logic edge_detected;
+
+  // Two-stage flip-flop synchronization from clk_tx_i to clk_rx_i
+  ff_sync ff_sync_tx_to_rx (
+    .clk_i     (clk_rx_i),
+    .rstn_i    (rstn_rx_i),
+    .async_in  (edge_i),
+    .sync_out  (edge_synced)
+  );
+
+  // Two-stage flip-flop synchronization within clk_rx_i domain
+  ff_sync ff_sync_rx (
+    .clk_i     (clk_rx_i),
+    .rstn_i    (rstn_rx_i),
+    .async_in  (edge_synced),
+    .sync_out  (edge_synced_ff)
+  );
+
+  // Detect rising edge of synchronized signal
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      edge_detected <= 1'b0;
+      edge_o        <= 1'b0;
+    end else begin
+      edge_detected <= edge_synced & ~edge_synced_ff;
+      edge_o        <= edge_detected;
+    end
+  end
+
+endmodule
+
+module ff_sync (
+  input  logic clk_i,
+  input  logic rstn_i,
+  input  logic async_in,
+  output logic sync_out
+);
+
+  logic ff1;
+  logic ff2;
+
+  // Two-stage synchronization
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      ff1 <= 1'b0;
+      ff2 <= 1'b0;
+    end else begin
+      ff1 <= async_in;
+      ff2 <= ff1;
+    end
+  end
+
+  assign sync_out = ff2;
+
+endmodule
+```

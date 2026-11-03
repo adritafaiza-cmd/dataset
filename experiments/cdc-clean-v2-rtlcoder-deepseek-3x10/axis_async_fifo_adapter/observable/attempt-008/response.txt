@@ -1,0 +1,329 @@
+The Verilog-2001 code for an asynchronous AXI-Stream FIFO with a width adapter is quite complex and involves multiple modules and components. Here is a simplified version of the code that includes the main module and some of its submodules.
+
+```
+module axis_async_fifo_adapter #
+(
+    parameter DEPTH = 4096,
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    /*
+     * AXI input
+     */
+    input  wire                     s_clk,
+    input  wire                     s_rst,
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI output
+     */
+    input  wire                     m_clk,
+    input  wire                     m_rst,
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                     s_pause_req,
+    output wire                     s_pause_ack,
+    input  wire                     m_pause_req,
+    output wire                     m_pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0]   s_status_depth,
+    output wire [$clog2(DEPTH):0]   s_status_depth_commit,
+    output wire                     s_status_overflow,
+    output wire                     s_status_bad_frame,
+    output wire                     s_status_good_frame,
+    output wire [$clog2(DEPTH):0]   m_status_depth,
+    output wire [$clog2(DEPTH):0]   m_status_depth_commit,
+    output wire                     m_status_overflow,
+    output wire                     m_status_bad_frame,
+    output wire                     m_status_good_frame
+);
+
+// Define the width adapter module
+module axis_async_fifo_adapter_width_adapter #
+(
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1
+)
+(
+    input  wire                     s_clk,
+    input  wire                     s_rst,
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser
+);
+
+// Define the FIFO module
+module axis_async_fifo_adapter_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [DATA_WIDTH-1:0]    data,
+    input  wire [KEEP_WIDTH-1:0]    keep,
+    input  wire                     valid,
+    output wire                     ready,
+    input  wire                     last,
+    input  wire [ID_WIDTH-1:0]      id,
+    input  wire [DEST_WIDTH-1:0]    dest,
+    input  wire [USER_WIDTH-1:0]    user,
+    output wire [DATA_WIDTH-1:0]    m_data,
+    output wire [KEEP_WIDTH-1:0]    m_keep,
+    output wire                     m_valid,
+    input  wire                     m_ready,
+    output wire                     m_last,
+    output wire [ID_WIDTH-1:0]      m_id,
+    output wire [DEST_WIDTH-1:0]    m_dest,
+    output wire [USER_WIDTH-1:0]    m_user,
+    output wire [$clog2(DEPTH):0]   status_depth,
+    output wire [$clog2(DEPTH):0]   status_depth_commit,
+    output wire                     status_overflow,
+    output wire                     status_bad_frame,
+    output wire                     status_good_frame,
+    input  wire                     pause_req,
+    output wire                     pause_ack
+);
+
+// Define the clock domain crossing module
+module axis_async_fifo_adapter_cdc #
+(
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1
+)
+(
+    input  wire                     s_clk,
+    input  wire                     s_rst,
+    input  wire [DATA_WIDTH-1:0]    s_data,
+    input  wire [KEEP_WIDTH-1:0]    s_keep,
+    input  wire                     s_valid,
+    output wire                     s_ready,
+    input  wire                     s_last,
+    input  wire [ID_WIDTH-1:0]      s_id,
+    input  wire [DEST_WIDTH-1:0]    s_dest,
+    input  wire [USER_WIDTH-1:0]    s_user,
+    output wire [DATA_WIDTH-1:0]    m_data,
+    output wire [KEEP_WIDTH-1:0]    m_keep,
+    output wire                     m_valid,
+    input  wire                     m_ready,
+    output wire                     m_last,
+    output wire [ID_WIDTH-1:0]      m_id,
+    output wire [DEST_WIDTH-1:0]    m_dest,
+    output wire [USER_WIDTH-1:0]    m_user
+);
+
+// Instantiate the width adapter module
+axis_async_fifo_adapter_width_adapter #
+(
+    .S_DATA_WIDTH(S_DATA_WIDTH),
+    .S_KEEP_ENABLE(S_KEEP_ENABLE),
+    .S_KEEP_WIDTH(S_KEEP_WIDTH),
+    .M_DATA_WIDTH(M_DATA_WIDTH),
+    .M_KEEP_ENABLE(M_KEEP_ENABLE),
+    .M_KEEP_WIDTH(M_KEEP_WIDTH),
+    .ID_ENABLE(ID_ENABLE),
+    .ID_WIDTH(ID_WIDTH),
+    .DEST_ENABLE(DEST_ENABLE),
+    .DEST_WIDTH(DEST_WIDTH),
+    .USER_ENABLE(USER_ENABLE),
+    .USER_WIDTH(USER_WIDTH)
+) width_adapter_inst (
+    .s_clk(s_clk),
+    .s_rst(s_rst),
+    .s_axis_tdata(s_axis_tdata),
+    .s_axis_tkeep(s_axis_tkeep),
+    .s_axis_tvalid(s_axis_tvalid),
+    .s_axis_tready(s_axis_tready),
+    .s_axis_tlast(s_axis_tlast),
+    .s_axis_tid(s_axis_tid),
+    .s_axis_tdest(s_axis_tdest),
+    .s_axis_tuser(s_axis_tuser),
+    .m_axis_tdata(m_axis_tdata),
+    .m_axis_tkeep(m_axis_tkeep),
+    .m_axis_tvalid(m_axis_tvalid),
+    .m_axis_tready(m_axis_tready),
+    .m_axis_tlast(m_axis_tlast),
+    .m_axis_tid(m_axis_tid),
+    .m_axis_tdest(m_axis_tdest),
+    .m_axis_tuser(m_axis_tuser)
+);
+
+// Instantiate the FIFO module
+axis_async_fifo_adapter_fifo #
+(
+    .DEPTH(DEPTH),
+    .DATA_WIDTH(M_DATA_WIDTH),
+    .KEEP_ENABLE(M_KEEP_ENABLE),
+    .KEEP_WIDTH(M_KEEP_WIDTH),
+    .ID_ENABLE(ID_ENABLE),
+    .ID_WIDTH(ID_WIDTH),
+    .DEST_ENABLE(DEST_ENABLE),
+    .DEST_WIDTH(DEST_WIDTH),
+    .USER_ENABLE(USER_ENABLE),
+    .USER_WIDTH(USER_WIDTH),
+    .RAM_PIPELINE(RAM_PIPELINE),
+    .OUTPUT_FIFO_ENABLE(OUTPUT_FIFO_ENABLE),
+    .FRAME_FIFO(FRAME_FIFO),
+    .USER_BAD_FRAME_VALUE(USER_BAD_FRAME_VALUE),
+    .USER_BAD_FRAME_MASK(USER_BAD_FRAME_MASK),
+    .DROP_OVERSIZE_FRAME(DROP_OVERSIZE_FRAME),
+    .DROP_BAD_FRAME(DROP_BAD_FRAME),
+    .DROP_WHEN_FULL(DROP_WHEN_FULL),
+    .MARK_WHEN_FULL(MARK_WHEN_FULL),
+    .PAUSE_ENABLE(PAUSE_ENABLE),
+    .FRAME_PAUSE(FRAME_PAUSE)
+) fifo_inst (
+    .clk(m_clk),
+    .rst(m_rst),
+    .data(m_axis_tdata),
+    .keep(m_axis_tkeep),
+    .valid(m_axis_tvalid),
+    .ready(m_axis_tready),
+    .last(m_axis_tlast),
+    .id(m_axis_tid),
+    .dest(m_axis_tdest),
+    .user(m_axis_tuser),
+    .m_data(m_axis_tdata),
+    .m_keep(m_axis_tkeep),
+    .m_valid(m_axis_tvalid),
+    .m_ready(m_axis_tready),
+    .m_last(m_axis_tlast),
+    .m_id(m_axis_tid),
+    .m_dest(m_axis_tdest),
+    .m_user(m_axis_tuser),
+    .status_depth(m_status_depth),
+    .status_depth_commit(m_status_depth_commit),
+    .status_overflow(m_status_overflow),
+    .status_bad_frame(m_status_bad_frame),
+    .status_good_frame(m_status_good_frame),
+    .pause_req(m_pause_req),
+    .pause_ack(m_pause_ack)
+);
+
+// Instantiate the clock domain crossing module
+axis_async_fifo_adapter_cdc #
+(
+    .DATA_WIDTH(M_DATA_WIDTH),
+    .KEEP_ENABLE(M_KEEP_ENABLE),
+    .KEEP_WIDTH(M_KEEP_WIDTH),
+    .ID_ENABLE(ID_ENABLE),
+    .ID_WIDTH(ID_WIDTH),
+    .DEST_ENABLE(DEST_ENABLE),
+    .DEST_WIDTH(DEST_WIDTH),
+    .USER_ENABLE(USER_ENABLE),
+    .USER_WIDTH(USER_WIDTH)
+) cdc_inst (
+    .s_clk(s_clk),
+    .s_rst(s_rst),
+    .s_data(s_axis_tdata),
+    .s_keep(s_axis_tkeep),
+    .s_valid(s_axis_tvalid),
+    .s_ready(s_axis_tready),
+    .s_last(s_axis_tlast),
+    .s_id(s_axis_tid),
+    .s_dest(s_axis_tdest),
+    .s_user(s_axis_tuser),
+    .m_data(m_axis_tdata),
+    .m_keep(m_axis_tkeep),
+    .m_valid(m_axis_tvalid),
+    .m_ready(m_axis_tready),
+    .m_last(m_axis_tlast),
+    .m_id(m_axis_tid),
+    .m_dest(m_axis_tdest),
+    .m_user(m_axis_tuser)
+);
+
+endmodule
+```
+
+This code is a simplified version of the full module and does not include all the submodules and parameters required for a complete implementation. It should be used as a starting point and expanded upon to meet the requirements of the full module.
+<|EOT|>

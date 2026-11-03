@@ -1,0 +1,39 @@
+module rstgen (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic test_mode_i,
+    output logic rst_no,
+    output logic init_no
+);
+
+    logic sync_rst;
+    logic [1:0] init_cnt;
+
+    // Synchronize rst_ni to clk_i domain unless test_mode_i is high
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            sync_rst <= 1'b0;
+        end else if (!test_mode_i) begin
+            sync_rst <= rst_ni;
+        end
+    end
+
+    // Generate rst_no as the synchronized active-low reset output
+    assign rst_no = sync_rst & rst_ni;
+
+    // Generate init_no as a 2-cycle pulse after reset release
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            init_cnt <= 2'b00;
+        end else begin
+            if (!sync_rst) begin
+                init_cnt <= 2'b01;
+            end else if (init_cnt != 2'b00) begin
+                init_cnt <= init_cnt + 1;
+            end
+        end
+    end
+
+    assign init_no = (init_cnt == 2'b10);
+
+endmodule

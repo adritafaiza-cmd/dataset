@@ -1,0 +1,320 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "edge_propagator",
+      "function": "Propagates a pulse or edge from the TX clock domain to the RX clock domain without losing or double-counting isolated edges.",
+      "parameters": [],
+      "ports": [
+        {
+          "name": "clk_tx_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_tx_i"
+        },
+        {
+          "name": "rstn_tx_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_tx_i"
+        },
+        {
+          "name": "edge_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_tx_i"
+        },
+        {
+          "name": "clk_rx_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_rx_i"
+        },
+        {
+          "name": "rstn_rx_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_rx_i"
+        },
+        {
+          "name": "edge_o",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "clk_rx_i"
+        }
+      ],
+      "instances": [
+        {
+          "module": "async_fifo",
+          "name": "fifo_tx_to_rx",
+          "function": "Transfers edge signals from TX domain to RX domain asynchronously.",
+          "connections": [
+            {
+              "source": "clk_tx_i",
+              "destination": "clk_wr"
+            },
+            {
+              "source": "rstn_tx_i",
+              "destination": "rstn_wr"
+            },
+            {
+              "source": "edge_pulse",
+              "destination": "din"
+            },
+            {
+              "source": "clk_rx_i",
+              "destination": "clk_rd"
+            },
+            {
+              "source": "rstn_rx_i",
+              "destination": "rstn_rd"
+            },
+            {
+              "source": "dout",
+              "destination": "edge_pulse_rx"
+            }
+          ]
+        }
+      ],
+      "connections": [
+        {
+          "source": "edge_i",
+          "destination": "edge_reg"
+        },
+        {
+          "source": "edge_reg",
+          "destination": "edge_last"
+        },
+        {
+          "source": "edge_reg & ~edge_last",
+          "destination": "edge_pulse"
+        }
+      ],
+      "internal_signals": [
+        {
+          "name": "edge_reg",
+          "width": 1,
+          "clock_domain": "clk_tx_i"
+        },
+        {
+          "name": "edge_last",
+          "width": 1,
+          "clock_domain": "clk_tx_i"
+        },
+        {
+          "name": "edge_pulse",
+          "width": 1,
+          "clock_domain": "clk_tx_i"
+        },
+        {
+          "name": "edge_pulse_rx",
+          "width": 1,
+          "clock_domain": "clk_rx_i"
+        },
+        {
+          "name": "edge_o_reg",
+          "width": 1,
+          "clock_domain": "clk_rx_i"
+        },
+        {
+          "name": "edge_o_last",
+          "width": 1,
+          "clock_domain": "clk_rx_i"
+        }
+      ],
+      "behavior": [
+        "On clk_tx_i rising edge, edge_i is registered into edge_reg.",
+        "On clk_tx_i rising edge, edge_reg is registered into edge_last.",
+        "edge_pulse is generated when there is a rising edge on edge_i (edge_reg & ~edge_last).",
+        "edge_pulse is sent to the RX domain via fifo_tx_to_rx.",
+        "On clk_rx_i rising edge, edge_pulse_rx is registered into edge_o_reg.",
+        "On clk_rx_i rising edge, edge_o_reg is registered into edge_o_last.",
+        "edge_o is generated when there is a rising edge on edge_pulse_rx (edge_o_reg & ~edge_o_last)."
+      ]
+    },
+    {
+      "Top_module_name": "async_fifo",
+      "function": "Asynchronous FIFO for crossing clock domains.",
+      "parameters": [],
+      "ports": [
+        {
+          "name": "clk_wr",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_tx_i"
+        },
+        {
+          "name": "rstn_wr",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_tx_i"
+        },
+        {
+          "name": "din",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_tx_i"
+        },
+        {
+          "name": "clk_rd",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_rx_i"
+        },
+        {
+          "name": "rstn_rd",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_rx_i"
+        },
+        {
+          "name": "dout",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "clk_rx_i"
+        }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [],
+      "behavior": [
+        "Asynchronous FIFO that transfers 1-bit data from clk_tx_i to clk_rx_i.",
+        "Resets are active-low in both domains.",
+        "No unsafe CDC/RDC crossings."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module edge_propagator (
+  input  logic clk_tx_i,
+  input  logic rstn_tx_i,
+  input  logic edge_i,
+  input  logic clk_rx_i,
+  input  logic rstn_rx_i,
+  output logic edge_o
+);
+
+  // Internal signals for TX domain
+  logic edge_reg;
+  logic edge_last;
+  logic edge_pulse;
+
+  // Internal signals for RX domain
+  logic edge_pulse_rx;
+  logic edge_o_reg;
+  logic edge_o_last;
+
+  // Register edge_i into edge_reg on rising edge of clk_tx_i
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      edge_reg <= 1'b0;
+    end else begin
+      edge_reg <= edge_i;
+    end
+  end
+
+  // Register edge_reg into edge_last on rising edge of clk_tx_i
+  always_ff @(posedge clk_tx_i or negedge rstn_tx_i) begin
+    if (!rstn_tx_i) begin
+      edge_last <= 1'b0;
+    end else begin
+      edge_last <= edge_reg;
+    end
+  end
+
+  // Generate edge_pulse when there is a rising edge on edge_i
+  assign edge_pulse = edge_reg & ~edge_last;
+
+  // Instantiate the asynchronous FIFO to transfer edge_pulse from TX domain to RX domain
+  async_fifo fifo_tx_to_rx (
+    .clk_wr  (clk_tx_i),
+    .rstn_wr (rstn_tx_i),
+    .din     (edge_pulse),
+    .clk_rd  (clk_rx_i),
+    .rstn_rd (rstn_rx_i),
+    .dout    (edge_pulse_rx)
+  );
+
+  // Register edge_pulse_rx into edge_o_reg on rising edge of clk_rx_i
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      edge_o_reg <= 1'b0;
+    end else begin
+      edge_o_reg <= edge_pulse_rx;
+    end
+  end
+
+  // Register edge_o_reg into edge_o_last on rising edge of clk_rx_i
+  always_ff @(posedge clk_rx_i or negedge rstn_rx_i) begin
+    if (!rstn_rx_i) begin
+      edge_o_last <= 1'b0;
+    end else begin
+      edge_o_last <= edge_o_reg;
+    end
+  end
+
+  // Generate edge_o when there is a rising edge on edge_pulse_rx
+  assign edge_o = edge_o_reg & ~edge_o_last;
+
+endmodule
+
+// Asynchronous FIFO module for crossing clock domains
+module async_fifo (
+  input  logic clk_wr,
+  input  logic rstn_wr,
+  input  logic din,
+  input  logic clk_rd,
+  input  logic rstn_rd,
+  output logic dout
+);
+
+  // FIFO depth and address width
+  localparam DEPTH = 16;
+  localparam AW = $clog2(DEPTH);
+
+  // FIFO memory
+  logic [DEPTH-1:0] mem;
+
+  // Write and read pointers
+  logic [AW:0] wr_ptr;
+  logic [AW:0] rd_ptr;
+
+  // FIFO flags
+  logic full;
+  logic empty;
+
+  // FIFO write logic
+  always_ff @(posedge clk_wr or negedge rstn_wr) begin
+    if (!rstn_wr) begin
+      wr_ptr <= '0;
+      full   <= '0;
+    end else if (!full) begin
+      if (din) begin
+        mem[wr_ptr[AW-1:0]] <= din;
+        wr_ptr <= wr_ptr + 1;
+        full   <= (wr_ptr[AW-1:0] == rd_ptr[AW-1:0]) & wr_ptr[AW] != rd_ptr[AW];
+      end
+    end
+  end
+
+  // FIFO read logic
+  always_ff @(posedge clk_rd or negedge rstn_rd) begin
+    if (!rstn_rd) begin
+      rd_ptr <= '0;
+      empty  <= '1;
+    end else if (!empty) begin
+      rd_ptr <= rd_ptr + 1;
+      empty  <= (wr_ptr[AW-1:0] == rd_ptr[AW-1:0]) & wr_ptr[AW] == rd_ptr[AW];
+    end
+  end
+
+  // FIFO output
+  assign dout = mem[rd_ptr[AW-1:0]];
+
+endmodule
+```

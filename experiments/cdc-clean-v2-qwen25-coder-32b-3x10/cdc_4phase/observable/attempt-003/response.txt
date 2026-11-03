@@ -1,0 +1,112 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source side signals
+  logic [WIDTH-1:0] src_data_sync;
+  logic src_valid_sync;
+  logic src_ready_sync;
+
+  // Destination side signals
+  logic [WIDTH-1:0] dst_data_sync;
+  logic dst_valid_sync;
+  logic dst_ready_sync;
+
+  // Four-phase handshake signals
+  logic [1:0] src_phase;
+  logic [1:0] dst_phase;
+
+  // Synchronization FIFO
+  logic [WIDTH-1:0] fifo [3:0];
+  logic [1:0] fifo_wr_ptr;
+  logic [1:0] fifo_rd_ptr;
+  logic fifo_full;
+  logic fifo_empty;
+
+  // Source side
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_phase <= 2'b00;
+      src_data_sync <= RESET_MSG;
+      src_valid_sync <= 1'b0;
+      src_ready_sync <= 1'b0;
+      fifo_wr_ptr <= 2'b00;
+    end else begin
+      // Update phase
+      if (src_valid_i && src_ready_sync) begin
+        src_phase <= src_phase + 1;
+      end
+
+      // Write to FIFO
+      if (src_valid_i && !fifo_full) begin
+        fifo[fifo_wr_ptr] <= src_data_i;
+        fifo_wr_ptr <= fifo_wr_ptr + 1;
+      end
+
+      // Update valid and ready signals
+      src_valid_sync <= src_valid_i && !fifo_full;
+      src_ready_sync <= !fifo_full;
+    end
+  end
+
+  // Destination side
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_phase <= 2'b00;
+      dst_data_sync <= RESET_MSG;
+      dst_valid_sync <= 1'b0;
+      dst_ready_sync <= 1'b0;
+      fifo_rd_ptr <= 2'b00;
+    end else begin
+      // Update phase
+      if (dst_valid_sync && dst_ready_i) begin
+        dst_phase <= dst_phase + 1;
+      end
+
+      // Read from FIFO
+      if (dst_valid_sync && dst_ready_i && !fifo_empty) begin
+        fifo_rd_ptr <= fifo_rd_ptr + 1;
+      end
+
+      // Update valid and ready signals
+      dst_valid_sync <= !fifo_empty;
+      dst_ready_sync <= dst_ready_i;
+    end
+  end
+
+  // FIFO control
+  always_comb begin
+    fifo_full = (fifo_wr_ptr == fifo_rd_ptr + 2'b10);
+    fifo_empty = (fifo_wr_ptr == fifo_rd_ptr);
+  end
+
+  // Data synchronization
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_o <= RESET_MSG;
+    end else if (dst_valid_sync && dst_ready_i && !fifo_empty) begin
+      dst_data_o <= fifo[fifo_rd_ptr];
+    end
+  end
+
+  // Ready and valid outputs
+  assign src_ready_o = src_ready_sync;
+  assign dst_valid_o = dst_valid_sync;
+
+endmodule
+```<|im_end|>

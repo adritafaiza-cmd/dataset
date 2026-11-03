@@ -1,0 +1,99 @@
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWATERMARK = DEPTH - 2;
+    localparam EWATERMARK = 1;
+
+    reg [DSIZE-1:0] mem [DEPTH-1:0];
+    reg [ASIZE:0] wr_ptr, wr_ptr_gray, wr_ptr_gray_sync;
+    reg [ASIZE:0] rd_ptr, rd_ptr_gray, rd_ptr_gray_sync;
+
+    // Write domain logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wr_ptr <= 0;
+            wr_ptr_gray <= 0;
+        end else if (winc && !wfull) begin
+            mem[wr_ptr[ASIZE-1:0]] <= wdata;
+            wr_ptr <= wr_ptr + 1;
+            wr_ptr_gray <= wr_ptr ^ (wr_ptr >> 1);
+        end
+    end
+
+    // Synchronize write pointer to read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wr_ptr_gray_sync <= 0;
+        end else begin
+            wr_ptr_gray_sync <= wr_ptr_gray;
+        end
+    end
+
+    // Read domain logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rd_ptr <= 0;
+            rd_ptr_gray <= 0;
+        end else if (rinc && !rempty) begin
+            rd_ptr <= rd_ptr + 1;
+            rd_ptr_gray <= rd_ptr ^ (rd_ptr >> 1);
+        end
+    end
+
+    // Synchronize read pointer to write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rd_ptr_gray_sync <= 0;
+        end else begin
+            rd_ptr_gray_sync <= rd_ptr_gray;
+        end
+    end
+
+    // Binary conversion and full/empty flags
+    wire [ASIZE:0] wr_ptr_bin, rd_ptr_bin;
+    wire [ASIZE:0] wr_ptr_gray_sync_bin, rd_ptr_gray_sync_bin;
+
+    assign wr_ptr_bin = wr_ptr_gray ^ (wr_ptr_gray >> 1);
+    assign rd_ptr_bin = rd_ptr_gray ^ (rd_ptr_gray >> 1);
+    assign wr_ptr_gray_sync_bin = wr_ptr_gray_sync ^ (wr_ptr_gray_sync >> 1);
+    assign rd_ptr_gray_sync_bin = rd_ptr_gray_sync ^ (rd_ptr_gray_sync >> 1);
+
+    assign wfull = (wr_ptr_bin[ASIZE:0] == {~rd_ptr_gray_sync_bin[ASIZE], rd_ptr_gray_sync_bin[ASIZE-1:0]});
+    assign awfull = (wr_ptr_bin[ASIZE:0] == {~rd_ptr_gray_sync_bin[ASIZE], rd_ptr_gray_sync_bin[ASIZE-1:0] + AWATERMARK});
+    assign rempty = (rd_ptr_bin[ASIZE:0] == {~wr_ptr_gray_sync_bin[ASIZE], wr_ptr_gray_sync_bin[ASIZE-1:0]});
+    assign arempty = (rd_ptr_bin[ASIZE:0] == {~wr_ptr_gray_sync_bin[ASIZE], wr_ptr_gray_sync_bin[ASIZE-1:0] + EWATERMARK});
+
+    // Read data output
+    reg [DSIZE-1:0] rdata_reg;
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rdata_reg <= 0;
+        end else if (rinc && !rempty) begin
+            rdata_reg <= mem[rd_ptr[ASIZE-1:0]];
+        end else if (FALLTHROUGH && !rempty) begin
+            rdata_reg <= mem[rd_ptr[ASIZE-1:0]];
+        end
+    end
+
+    assign rdata = rdata_reg;
+
+endmodule

@@ -1,0 +1,483 @@
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // Internal signals
+    reg [2:0]          current_state;
+    reg [2:0]          next_state;
+    reg [6:0]          cmd_buffer;
+    reg [7:0]          data_buffer;
+    reg [7:0]          read_data;
+    reg                cmd_valid;
+    reg                cmd_ready;
+    reg                data_valid;
+    reg                data_ready;
+    reg                data_last;
+    reg                data_out_valid;
+    reg                data_out_last;
+    reg                bus_busy;
+    reg                bus_active_int;
+    reg                missed_ack_int;
+    reg                start_bit_bang;
+    reg                stop_bit_bang;
+    reg                read_bit_bang;
+    reg                write_bit_bang;
+    reg [7:0]          data_in_bit_bang;
+    wire [7:0]         data_out_bit_bang;
+    wire               ack_bit_bang;
+    wire               done_bit_bang;
+
+    // State definitions
+    localparam IDLE = 3'b000;
+    localparam CMD_PROCESS = 3'b001;
+    localparam DATA_WRITE = 3'b010;
+    localparam DATA_READ = 3'b011;
+    localparam WAIT_DONE = 3'b100;
+
+    // Next state logic
+    always @(*) begin
+        next_state = current_state;
+        case (current_state)
+            IDLE: begin
+                if (s_axis_cmd_valid && !bus_busy) begin
+                    next_state = CMD_PROCESS;
+                end
+            end
+            CMD_PROCESS: begin
+                if (done_bit_bang) begin
+                    if (s_axis_cmd_read) begin
+                        next_state = DATA_READ;
+                    end else if (s_axis_cmd_write || s_axis_cmd_write_multiple) begin
+                        next_state = DATA_WRITE;
+                    end else begin
+                        next_state = WAIT_DONE;
+                    end
+                end
+            end
+            DATA_WRITE: begin
+                if (done_bit_bang) begin
+                    if (s_axis_cmd_write_multiple && !s_axis_data_tlast) begin
+                        next_state = DATA_WRITE;
+                    end else begin
+                        next_state = WAIT_DONE;
+                    end
+                end
+            end
+            DATA_READ: begin
+                if (done_bit_bang) begin
+                    if (s_axis_cmd_read && !s_axis_data_tlast) begin
+                        next_state = DATA_READ;
+                    end else begin
+                        next_state = WAIT_DONE;
+                    end
+                end
+            end
+            WAIT_DONE: begin
+                if (done_bit_bang) begin
+                    next_state = IDLE;
+                end
+            end
+            default: begin
+                next_state = IDLE;
+            end
+        endcase
+    end
+
+    // State register
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            current_state <= IDLE;
+        end else begin
+            current_state <= next_state;
+        end
+    end
+
+    // Output logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            cmd_buffer <= 7'b0;
+            data_buffer <= 8'b0;
+            read_data <= 8'b0;
+            cmd_valid <= 1'b0;
+            cmd_ready <= 1'b0;
+            data_valid <= 1'b0;
+            data_ready <= 1'b0;
+            data_last <= 1'b0;
+            data_out_valid <= 1'b0;
+            data_out_last <= 1'b0;
+            bus_busy <= 1'b0;
+            bus_active_int <= 1'b0;
+            missed_ack_int <= 1'b0;
+            start_bit_bang <= 1'b0;
+            stop_bit_bang <= 1'b0;
+            read_bit_bang <= 1'b0;
+            write_bit_bang <= 1'b0;
+            data_in_bit_bang <= 8'b0;
+        end else begin
+            case (current_state)
+                IDLE: begin
+                    if (s_axis_cmd_valid && !bus_busy) begin
+                        cmd_buffer <= s_axis_cmd_address;
+                        cmd_valid <= s_axis_cmd_valid;
+                        cmd_ready <= 1'b1;
+                        bus_busy <= 1'b1;
+                        start_bit_bang <= 1'b1;
+                    end else begin
+                        cmd_ready <= 1'b0;
+                    end
+                end
+                CMD_PROCESS: begin
+                    if (done_bit_bang) begin
+                        if (s_axis_cmd_read) begin
+                            read_bit_bang <= 1'b1;
+                            data_out_valid <= 1'b1;
+                            data_out_last <= s_axis_data_tlast;
+                        end else if (s_axis_cmd_write || s_axis_cmd_write_multiple) begin
+                            data_buffer <= s_axis_data_tdata;
+                            data_valid <= s_axis_data_tvalid;
+                            data_ready <= 1'b1;
+                            data_last <= s_axis_data_tlast;
+                            write_bit_bang <= 1'b1;
+                            data_in_bit_bang <= s_axis_data_tdata;
+                        end else if (s_axis_cmd_stop) begin
+                            stop_bit_bang <= 1'b1;
+                        end
+                    end
+                end
+                DATA_WRITE: begin
+                    if (done_bit_bang) begin
+                        if (s_axis_cmd_write_multiple && !s_axis_data_tlast) begin
+                            data_buffer <= s_axis_data_tdata;
+                            data_valid <= s_axis_data_tvalid;
+                            data_ready <= 1'b1;
+                            data_last <= s_axis_data_tlast;
+                            write_bit_bang <= 1'b1;
+                            data_in_bit_bang <= s_axis_data_tdata;
+                        end else begin
+                            stop_bit_bang <= 1'b1;
+                        end
+                    end
+                end
+                DATA_READ: begin
+                    if (done_bit_bang) begin
+                        read_data <= data_out_bit_bang;
+                        data_out_valid <= 1'b1;
+                        data_out_last <= s_axis_data_tlast;
+                        if (s_axis_cmd_read && !s_axis_data_tlast) begin
+                            read_bit_bang <= 1'b1;
+                        end else begin
+                            stop_bit_bang <= 1'b1;
+                        end
+                    end
+                end
+                WAIT_DONE: begin
+                    if (done_bit_bang) begin
+                        bus_busy <= 1'b0;
+                        cmd_ready <= 1'b0;
+                        data_ready <= 1'b0;
+                        data_out_valid <= 1'b0;
+                        start_bit_bang <= 1'b0;
+                        stop_bit_bang <= 1'b0;
+                        read_bit_bang <= 1'b0;
+                        write_bit_bang <= 1'b0;
+                        missed_ack_int <= !ack_bit_bang;
+                    end
+                end
+                default: begin
+                    bus_busy <= 1'b0;
+                    cmd_ready <= 1'b0;
+                    data_ready <= 1'b0;
+                    data_out_valid <= 1'b0;
+                    start_bit_bang <= 1'b0;
+                    stop_bit_bang <= 1'b0;
+                    read_bit_bang <= 1'b0;
+                    write_bit_bang <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Outputs
+    assign s_axis_cmd_ready = cmd_ready;
+    assign s_axis_data_tready = data_ready;
+    assign m_axis_data_tdata = read_data;
+    assign m_axis_data_tvalid = data_out_valid;
+    assign m_axis_data_tlast = data_out_last;
+    assign busy = bus_busy;
+    assign bus_control = bus_busy;
+    assign bus_active = bus_active_int;
+    assign missed_ack = missed_ack_int;
+
+    // Instantiate the i2c_bit_bang module
+    i2c_bit_bang bit_bang_inst (
+        .clk(clk),
+        .rst(rst),
+        .prescale(prescale),
+        .start(start_bit_bang),
+        .stop(stop_bit_bang),
+        .read(read_bit_bang),
+        .write(write_bit_bang),
+        .data_in(data_in_bit_bang),
+        .data_out(data_out_bit_bang),
+        .ack(ack_bit_bang),
+        .done(done_bit_bang),
+        .scl_i(scl_i),
+        .scl_o(scl_o),
+        .scl_t(scl_t),
+        .sda_i(sda_i),
+        .sda_o(sda_o),
+        .sda_t(sda_t)
+    );
+
+endmodule
+
+module i2c_bit_bang (
+    input  wire        clk,
+    input  wire        rst,
+    input  wire        prescale,
+    input  wire        start,
+    input  wire        stop,
+    input  wire        read,
+    input  wire        write,
+    input  wire [7:0]  data_in,
+    output wire [7:0]  data_out,
+    output wire        ack,
+    output wire        done,
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t
+);
+
+    // Internal signals
+    reg [2:0]          current_state;
+    reg [2:0]          next_state;
+    reg [2:0]          bit_count;
+    reg [7:0]          data_shift;
+    reg [15:0]         scl_cnt;
+    reg                scl_out;
+    reg                sda_out;
+    reg                scl_dir;
+    reg                sda_dir;
+    reg                ack_bit;
+
+    // State definitions
+    localparam IDLE = 3'b000;
+    localparam START = 3'b001;
+    localparam DATA_WRITE = 3'b010;
+    localparam ACK_READ = 3'b011;
+    localparam STOP = 3'b100;
+    localparam DATA_READ = 3'b101;
+
+    // Next state logic
+    always @(*) begin
+        next_state = current_state;
+        case (current_state)
+            IDLE: begin
+                if (start) begin
+                    next_state = START;
+                end
+            end
+            START: begin
+                if (scl_cnt == prescale) begin
+                    next_state = DATA_WRITE;
+                end
+            end
+            DATA_WRITE: begin
+                if (scl_cnt == prescale) begin
+                    if (bit_count == 3'b111) begin
+                        next_state = ACK_READ;
+                    end else begin
+                        next_state = DATA_WRITE;
+                    end
+                end
+            end
+            ACK_READ: begin
+                if (scl_cnt == prescale) begin
+                    next_state = STOP;
+                end
+            end
+            STOP: begin
+                if (scl_cnt == prescale) begin
+                    next_state = IDLE;
+                end
+            end
+            DATA_READ: begin
+                if (scl_cnt == prescale) begin
+                    if (bit_count == 3'b111) begin
+                        next_state = STOP;
+                    end else begin
+                        next_state = DATA_READ;
+                    end
+                end
+            end
+            default: begin
+                next_state = IDLE;
+            end
+        endcase
+    end
+
+    // State register
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            current_state <= IDLE;
+        end else begin
+            current_state <= next_state;
+        end
+    end
+
+    // Output logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            bit_count <= 3'b0;
+            data_shift <= 8'b0;
+            scl_cnt <= 16'b0;
+            scl_out <= 1'b1;
+            sda_out <= 1'b1;
+            scl_dir <= 1'b0;
+            sda_dir <= 1'b0;
+            ack_bit <= 1'b0;
+        end else begin
+            case (current_state)
+                IDLE: begin
+                    scl_cnt <= 16'b0;
+                    scl_out <= 1'b1;
+                    sda_out <= 1'b1;
+                    scl_dir <= 1'b0;
+                    sda_dir <= 1'b0;
+                    ack_bit <= 1'b0;
+                    if (start) begin
+                        scl_cnt <= 16'b0;
+                        scl_out <= 1'b0;
+                        sda_out <= 1'b0;
+                        scl_dir <= 1'b1;
+                        sda_dir <= 1'b1;
+                    end
+                end
+                START: begin
+                    scl_cnt <= scl_cnt + 1'b1;
+                    if (scl_cnt == prescale) begin
+                        scl_out <= 1'b1;
+                        scl_dir <= 1'b1;
+                        if (read) begin
+                            sda_out <= 1'b1;
+                            sda_dir <= 1'b0;
+                        end else begin
+                            sda_out <= data_in[7];
+                            sda_dir <= 1'b1;
+                        end
+                    end
+                end
+                DATA_WRITE: begin
+                    scl_cnt <= scl_cnt + 1'b1;
+                    if (scl_cnt == prescale) begin
+                        scl_out <= 1'b0;
+                        scl_dir <= 1'b1;
+                        sda_out <= data_in[7-bit_count];
+                        sda_dir <= 1'b1;
+                        bit_count <= bit_count + 1'b1;
+                    end
+                end
+                ACK_READ: begin
+                    scl_cnt <= scl_cnt + 1'b1;
+                    if (scl_cnt == prescale) begin
+                        scl_out <= 1'b1;
+                        scl_dir <= 1'b1;
+                        sda_dir <= 1'b0;
+                        ack_bit <= sda_i;
+                    end
+                end
+                STOP: begin
+                    scl_cnt <= scl_cnt + 1'b1;
+                    if (scl_cnt == prescale) begin
+                        scl_out <= 1'b0;
+                        scl_dir <= 1'b1;
+                        sda_out <= 1'b0;
+                        sda_dir <= 1'b1;
+                    end
+                    if (scl_cnt == prescale + prescale) begin
+                        scl_out <= 1'b1;
+                        scl_dir <= 1'b1;
+                        sda_out <= 1'b1;
+                        sda_dir <= 1'b1;
+                    end
+                end
+                DATA_READ: begin
+                    scl_cnt <= scl_cnt + 1'b1;
+                    if (scl_cnt == prescale) begin
+                        scl_out <= 1'b0;
+                        scl_dir <= 1'b1;
+                        sda_dir <= 1'b0;
+                    end
+                    if (scl_cnt == prescale + prescale) begin
+                        scl_out <= 1'b1;
+                        scl_dir <= 1'b1;
+                        data_shift <= {data_shift[6:0], sda_i};
+                        bit_count <= bit_count + 1'b1;
+                    end
+                end
+                default: begin
+                    scl_cnt <= 16'b0;
+                    scl_out <= 1'b1;
+                    sda_out <= 1'b1;
+                    scl_dir <= 1'b0;
+                    sda_dir <= 1'b0;
+                    ack_bit <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Outputs
+    assign data_out = data_shift;
+    assign ack = ack_bit;
+    assign done = (current_state == STOP && scl_cnt == prescale + prescale);
+    assign scl_o = scl_out;
+    assign sda_o = sda_out;
+    assign scl_t = scl_dir;
+    assign sda_t = sda_dir;
+
+endmodule

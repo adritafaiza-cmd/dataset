@@ -1,0 +1,114 @@
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd4,
+  parameter int unsigned        ApbAddrWidth = 32'd32,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd32,
+  parameter int unsigned        RegDataWidth = 32'd32,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Internal register file
+  reg_data_t [NoApbRegs-1:0] reg_file;
+
+  // Internal signals
+  logic [NoApbRegs-1:0] reg_addr_match;
+  logic [RegDataWidth/8-1:0] byte_strobe;
+  logic [ApbDataWidth-1:0] write_data;
+  logic [ApbDataWidth-1:0] read_data;
+  logic [ApbDataWidth-1:0] reg_file_out;
+  logic psel;
+  logic penable;
+  logic pwrite;
+  apb_addr_t paddr;
+  logic [ApbDataWidth-1:0] pwdata;
+  logic [ApbDataWidth/1-1:0] pstrb;
+
+  // Decode APB request
+  assign psel = req_i.psel;
+  assign penable = req_i.penable;
+  assign pwrite = req_i.pwrite;
+  assign paddr = req_i.paddr;
+  assign pwdata = req_i.pwdata;
+  assign pstrb = req_i.pstrb;
+
+  // Address decoding
+  genvar i;
+  generate
+    for (i = 0; i < NoApbRegs; i = i + 1) begin : gen_addr_decode
+      assign reg_addr_match[i] = (paddr[ApbAddrWidth-1:AddrOffset] == i);
+    end
+  endgenerate
+
+  // Byte strobe decoding
+  assign byte_strobe = pstrb;
+
+  // Write data generation
+  generate
+    genvar j;
+    for (j = 0; j < RegDataWidth/8; j = j + 1) begin : gen_write_data
+      assign write_data[j*8 +: 8] = byte_strobe[j] ? pwdata[j*8 +: 8] : reg_file_out[j*8 +: 8];
+    end
+  endgenerate
+
+  // Read data selection
+  always_comb begin
+    read_data = '0;
+    for (int k = 0; k < NoApbRegs; k = k + 1) begin
+      if (reg_addr_match[k]) begin
+        read_data = reg_file[k];
+      end
+    end
+  end
+
+  // Register file update
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int l = 0; l < NoApbRegs; l = l + 1) begin
+        if (!ReadOnly[l]) begin
+          reg_file[l] <= '0;
+        end else begin
+          reg_file[l] <= reg_init_i[l];
+        end
+      end
+    end else if (psel && penable) begin
+      for (int m = 0; m < NoApbRegs; m = m + 1) begin
+        if (reg_addr_match[m] && pwrite && !ReadOnly[m]) begin
+          reg_file[m] <= write_data;
+        end
+      end
+    end
+  end
+
+  // Output register file
+  always_ff @(posedge pclk_i) begin
+    reg_file_out <= read_data;
+  end
+
+  // Response generation
+  always_ff @(posedge pclk_i) begin
+    if (psel && penable) begin
+      resp_o.prdata <= reg_file_out;
+      resp_o.pready <= 1'b1;
+      resp_o.pslverr <= 1'b0;
+    end else begin
+      resp_o.pready <= 1'b0;
+      resp_o.pslverr <= 1'b0;
+    end
+  end
+
+  // Output register values
+  assign reg_q_o = reg_file;
+
+endmodule

@@ -1,0 +1,269 @@
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH + 1;
+    localparam GRAY_W = PTR_W;
+
+    // Gray code conversion
+    function [GRAY_W-1:0] bin2gray;
+        input [PTR_W-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    function [PTR_W-1:0] gray2bin;
+        input [GRAY_W-1:0] gray;
+        integer i;
+        begin
+            gray2bin[GRAY_W-1] = gray[GRAY_W-1];
+            for (i = GRAY_W-2; i >= 0; i = i - 1)
+                gray2bin[i] = gray[i] ^ gray2bin[i+1];
+        end
+    endfunction
+
+    // Source domain signals
+    reg [PTR_W-1:0] src_wr_ptr;
+    reg [GRAY_W-1:0] src_wr_gray;
+    reg [GRAY_W-1:0] src_rd_gray_sync;
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg src_clear_pending;
+
+    // Destination domain signals
+    reg [PTR_W-1:0] dst_rd_ptr;
+    reg [GRAY_W-1:0] dst_rd_gray;
+    reg [GRAY_W-1:0] dst_wr_gray_sync;
+    reg [WIDTH-1:0] dst_data_reg;
+    reg dst_valid_reg;
+    reg dst_clear_pending;
+
+    // Synchronizer for src_wr_gray -> dst domain
+    reg [SYNC_STAGES-1:0] src_wr_gray_sync_pipe;
+    wire [GRAY_W-1:0] src_wr_gray_synced = src_wr_gray_sync_pipe[SYNC_STAGES-1];
+
+    // Synchronizer for dst_rd_gray -> src domain
+    reg [SYNC_STAGES-1:0] dst_rd_gray_sync_pipe;
+    wire [GRAY_W-1:0] dst_rd_gray_synced = dst_rd_gray_sync_pipe[SYNC_STAGES-1];
+
+    // Clear pending synchronization
+    // src_clear_pending_o: indicates that a clear has been issued on src side and is propagating
+    // dst_clear_pending_o: indicates that a clear has been issued on dst side and is propagating
+
+    // Source domain: clear pending logic
+    // When src_clear_i is asserted, we set src_clear_pending.
+    // It clears when the dst side has acknowledged the clear (dst_clear_pending_o deasserts after being set by dst)
+    // Actually, let's think about this more carefully.
+
+    // The clear should flush pending data on both sides.
+    // src_clear_i: clear request from source side
+    // dst_clear_i: clear request from destination side
+
+    // Let's define:
+    // src_clear_pending_o: high when a clear is in progress from the source side perspective
+    // dst_clear_pending_o: high when a clear is in progress from the destination side perspective
+
+    // When src_clear_i is asserted:
+    //   - Reset src_wr_ptr and src_wr_gray
+    //   - Set src_clear_pending
+    //   - The clear needs to propagate to dst side to reset dst_rd_ptr and dst_rd_gray
+    //   - src_clear_pending_o should be high until the dst side has completed its reset
+
+    // When dst_clear_i is asserted:
+    //   - Reset dst_rd_ptr and dst_rd_gray
+    //   - Set dst_clear_pending
+    //   - The clear needs to propagate to src side to reset src_wr_ptr and src_wr_gray
+    //   - dst_clear_pending_o should be high until the src side has completed its reset
+
+    // For simplicity, let's have each clear independently reset its local pointers,
+    // and the pending signal indicates that the remote side still needs to be cleared.
+
+    // Actually, re-reading: "A clear request should flush pending data together on both sides so nothing stale appears afterward."
+    // "A clear resets each pointer and the Gray value synchronized from it on the same edge."
+
+    // This suggests that when a clear is asserted, both sides should be reset.
+    // But since they're in different clock domains, we need to coordinate.
+
+    // Let me re-interpret: 
+    // - src_clear_i is a clear request that should clear the FIFO from the source side
+    // - dst_clear_i is a clear request that should clear the FIFO from the destination side
+    // - Both should result in the FIFO being empty
+    // - The pending outputs indicate that the clear is still in progress
+
+    // Let's implement it as:
+    // - When src_clear_i is high, reset src pointers and set src_clear_pending
+    // - When dst_clear_i is high, reset dst pointers and set dst_clear_pending
+    // - The pending signals clear when the remote side's synchronized pointer matches the local reset value
+
+    // Source domain
+    wire src_full = (src_wr_gray == dst_rd_gray_synced) && (src_wr_ptr[PTR_W-1] != dst_rd_gray_synced[PTR_W-1]);
+    wire src_empty = (src_wr_gray == dst_rd_gray_synced);
+
+    // Destination domain
+    wire dst_full = (dst_rd_gray == src_wr_gray_synced) && (dst_rd_ptr[PTR_W-1] != src_wr_gray_synced[PTR_W-1]);
+    wire dst_empty = (dst_rd_gray == src_wr_gray_synced);
+
+    // Source ready: FIFO not full and no clear pending
+    assign src_ready_o = !src_full && !src_clear_pending;
+
+    // Source write
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_wr_ptr <= {PTR_W{1'b0}};
+            src_wr_gray <= {GRAY_W{1'b0}};
+            src_clear_pending <= 1'b0;
+        end else if (src_clear_i) begin
+            src_wr_ptr <= {PTR_W{1'b0}};
+            src_wr_gray <= {GRAY_W{1'b0}};
+            src_clear_pending <= 1'b1;
+        end else if (src_valid_i && src_ready_o) begin
+            mem[src_wr_ptr[LOG_DEPTH-1:0]] <= src_data_i;
+            src_wr_ptr <= src_wr_ptr + 1'b1;
+            src_wr_gray <= bin2gray(src_wr_ptr + 1'b1);
+        end
+    end
+
+    // Clear pending clear condition: when dst side has also been cleared
+    // We need to synchronize the dst_clear_pending to src domain
+    reg [SYNC_STAGES-1:0] dst_clear_pending_sync_pipe;
+    wire dst_clear_pending_synced = dst_clear_pending_sync_pipe[SYNC_STAGES-1];
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_clear_pending_sync_pipe <= {SYNC_STAGES{1'b0}};
+        end else begin
+            dst_clear_pending_sync_pipe[0] <= dst_clear_pending;
+            for (integer i = 1; i < SYNC_STAGES; i = i + 1)
+                dst_clear_pending_sync_pipe[i] <= dst_clear_pending_sync_pipe[i-1];
+        end
+    end
+
+    // src_clear_pending_o: high when src clear is pending
+    // It should clear when the dst side has acknowledged (dst_clear_pending_synced is low and dst pointers are reset)
+    // For simplicity, let's clear src_clear_pending when dst_clear_pending_synced goes low
+    // But we need to be careful about the timing.
+
+    // Actually, let's simplify: src_clear_pending_o is just src_clear_pending
+    assign src_clear_pending_o = src_clear_pending;
+
+    // Clear src_clear_pending when dst side has completed its clear
+    // We'll clear it when dst_clear_pending_synced is low
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_clear_pending <= 1'b0;
+        end else if (src_clear_i) begin
+            src_clear_pending <= 1'b1;
+        end else if (src_clear_pending && !dst_clear_pending_synced) begin
+            src_clear_pending <= 1'b0;
+        end
+    end
+
+    // Destination domain
+    // Synchronize src_wr_gray to dst domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_wr_gray_sync_pipe <= {SYNC_STAGES{1'b0}};
+        end else begin
+            src_wr_gray_sync_pipe[0] <= src_wr_gray;
+            for (integer i = 1; i < SYNC_STAGES; i = i + 1)
+                src_wr_gray_sync_pipe[i] <= src_wr_gray_sync_pipe[i-1];
+        end
+    end
+
+    // Synchronize dst_rd_gray to src domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_rd_gray_sync_pipe <= {SYNC_STAGES{1'b0}};
+        end else begin
+            dst_rd_gray_sync_pipe[0] <= dst_rd_gray;
+            for (integer i = 1; i < SYNC_STAGES; i = i + 1)
+                dst_rd_gray_sync_pipe[i] <= dst_rd_gray_sync_pipe[i-1];
+        end
+    end
+
+    // Synchronize dst_clear_pending to src domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_clear_pending_sync_pipe <= {SYNC_STAGES{1'b0}};
+        end else begin
+            dst_clear_pending_sync_pipe[0] <= dst_clear_pending;
+            for (integer i = 1; i < SYNC_STAGES; i = i + 1)
+                dst_clear_pending_sync_pipe[i] <= dst_clear_pending_sync_pipe[i-1];
+        end
+    end
+
+    // Synchronize src_clear_pending to dst domain
+    reg [SYNC_STAGES-1:0] src_clear_pending_sync_pipe;
+    wire src_clear_pending_synced = src_clear_pending_sync_pipe[SYNC_STAGES-1];
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_clear_pending_sync_pipe <= {SYNC_STAGES{1'b0}};
+        end else begin
+            src_clear_pending_sync_pipe[0] <= src_clear_pending;
+            for (integer i = 1; i < SYNC_STAGES; i = i + 1)
+                src_clear_pending_sync_pipe[i] <= src_clear_pending_sync_pipe[i-1];
+        end
+    end
+
+    // Destination read
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_rd_ptr <= {PTR_W{1'b0}};
+            dst_rd_gray <= {GRAY_W{1'b0}};
+            dst_data_reg <= {WIDTH{1'b0}};
+            dst_valid_reg <= 1'b0;
+            dst_clear_pending <= 1'b0;
+        end else if (dst_clear_i) begin
+            dst_rd_ptr <= {PTR_W{1'b0}};
+            dst_rd_gray <= {GRAY_W{1'b0}};
+            dst_data_reg <= {WIDTH{1'b0}};
+            dst_valid_reg <= 1'b0;
+            dst_clear_pending <= 1'b1;
+        end else if (dst_valid_reg && dst_ready_i) begin
+            dst_valid_reg <= 1'b0;
+            dst_rd_ptr <= dst_rd_ptr + 1'b1;
+            dst_rd_gray <= bin2gray(dst_rd_ptr + 1'b1);
+        end else if (!dst_valid_reg && !dst_empty && !dst_clear_pending) begin
+            dst_data_reg <= mem[dst_rd_ptr[LOG_DEPTH-1:0]];
+            dst_valid_reg <= 1'b1;
+        end
+    end
+
+    // dst_clear_pending_o
+    assign dst_clear_pending_o = dst_clear_pending;
+
+    // Clear dst_clear_pending when src side has completed its clear
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_clear_pending <= 1'b0;
+        end else if (dst_clear_i) begin
+            dst_clear_pending <= 1'b1;
+        end else if (dst_clear_pending && !src_clear_pending_synced) begin
+            dst_clear_pending <= 1'b0;
+        end
+    end
+
+    // Outputs
+    assign dst_data_o = dst_data_reg;
+    assign dst_valid_o = dst_valid_reg;
+
+endmodule

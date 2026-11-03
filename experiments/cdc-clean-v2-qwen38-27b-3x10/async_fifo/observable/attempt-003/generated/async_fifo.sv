@@ -1,0 +1,320 @@
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam AWIDTH = ASIZE + 1;
+    localparam DEPTH  = 1 << ASIZE;
+
+    // Write domain
+    reg  [AWIDTH-1:0] wptr;
+    reg  [ASIZE-1:0]  wptr_gray;
+    reg  [ASIZE-1:0]  wptr_gray_next;
+    reg  [ASIZE-1:0]  wptr_bin;
+    reg  [ASIZE-1:0]  wptr_bin_next;
+    reg  [DSIZE-1:0]  mem [0:DEPTH-1];
+
+    // Read domain
+    reg  [AWIDTH-1:0] rptr;
+    reg  [ASIZE-1:0]  rptr_gray;
+    reg  [ASIZE-1:0]  rptr_gray_next;
+    reg  [ASIZE-1:0]  rptr_bin;
+    reg  [ASIZE-1:0]  rptr_bin_next;
+
+    // Gray-coded pointer synchronization (2-stage)
+    reg  [ASIZE-1:0]  wptr_gray_sync1, wptr_gray_sync2;
+    reg  [ASIZE-1:0]  rptr_gray_sync1, rptr_gray_sync2;
+
+    // Binary snapshots of the other domain's pointer (for full/empty)
+    reg  [ASIZE-1:0]  rptr_bin_sync1, rptr_bin_sync2;
+    reg  [ASIZE-1:0]  wptr_bin_sync1, wptr_bin_sync2;
+
+    // Full/empty logic
+    wire [AWIDTH-1:0] wptr_full;
+    wire [AWIDTH-1:0] rptr_full;
+
+    // Write pointer increment
+    wire winc_eff;
+    wire rinc_eff;
+
+    assign winc_eff = winc & ~wfull;
+    assign rinc_eff = rinc & ~rempty;
+
+    // Write pointer update
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {AWIDTH{1'b0}};
+            wptr_gray <= {ASIZE{1'b0}};
+            wptr_bin <= {ASIZE{1'b0}};
+        end else if (winc_eff) begin
+            wptr <= wptr + 1'b1;
+            wptr_gray <= wptr_gray_next;
+            wptr_bin <= wptr_bin_next;
+        end
+    end
+
+    // Read pointer update
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= {AWIDTH{1'b0}};
+            rptr_gray <= {ASIZE{1'b0}};
+            rptr_bin <= {ASIZE{1'b0}};
+        end else if (rinc_eff) begin
+            rptr <= rptr + 1'b1;
+            rptr_gray <= rptr_gray_next;
+            rptr_bin <= rptr_bin_next;
+        end
+    end
+
+    // Gray code conversion: binary to gray
+    assign wptr_gray_next = wptr_bin ^ (wptr_bin >> 1);
+    assign rptr_gray_next = rptr_bin ^ (rptr_bin >> 1);
+
+    // Gray to binary conversion
+    function [ASIZE-1:0] gray2bin;
+        input [ASIZE-1:0] gray;
+        integer i;
+        begin
+            gray2bin[ASIZE-1] = gray[ASIZE-1];
+            for (i = ASIZE-2; i >= 0; i = i - 1)
+                gray2bin[i] = gray[i] ^ gray2bin[i+1];
+        end
+    endfunction
+
+    // Synchronize gray pointers
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_sync1 <= {ASIZE{1'b0}};
+            rptr_gray_sync2 <= {ASIZE{1'b0}};
+        end else begin
+            rptr_gray_sync1 <= rptr_gray;
+            rptr_gray_sync2 <= rptr_gray_sync1;
+        end
+    end
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_gray_sync1 <= {ASIZE{1'b0}};
+            wptr_gray_sync2 <= {ASIZE{1'b0}};
+        end else begin
+            wptr_gray_sync1 <= wptr_gray;
+            wptr_gray_sync2 <= wptr_gray_sync1;
+        end
+    end
+
+    // Synchronize binary pointers (for full/empty detection)
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_bin_sync1 <= {ASIZE{1'b0}};
+            rptr_bin_sync2 <= {ASIZE{1'b0}};
+        end else begin
+            rptr_bin_sync1 <= rptr_bin;
+            rptr_bin_sync2 <= rptr_bin_sync1;
+        end
+    end
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_bin_sync1 <= {ASIZE{1'b0}};
+            wptr_bin_sync2 <= {ASIZE{1'b0}};
+        end else begin
+            wptr_bin_sync1 <= wptr_bin;
+            wptr_bin_sync2 <= wptr_bin_sync1;
+        end
+    end
+
+    // Full detection: write pointer has lapped read pointer by DEPTH
+    // wptr_full = wptr with MSB inverted (i.e., wptr - DEPTH)
+    assign wptr_full = {~wptr[ASIZE], wptr[ASIZE-1:0]};
+    assign rptr_full = {~rptr[ASIZE], rptr[ASIZE-1:0]};
+
+    // Full: wptr (in write domain) equals rptr_full (synchronized read pointer)
+    // We compare the synchronized read binary pointer with the write pointer's lower bits
+    // and check the MSB condition
+    wire wfull_internal;
+    wire rempty_internal;
+
+    // Full: write pointer has advanced DEPTH ahead of read pointer
+    // This means wptr[ASIZE] != rptr_synced[ASIZE] and wptr[ASIZE-1:0] == rptr_synced[ASIZE-1:0]
+    // But since we're using binary snapshots, let's use the standard approach:
+    // Full when wptr (mod 2*DEPTH) == rptr_synced + DEPTH
+    // i.e., wptr[ASIZE] != rptr_synced[ASIZE] and wptr[ASIZE-1:0] == rptr_synced[ASIZE-1:0]
+
+    // For full in write domain: compare wptr with synchronized rptr
+    // wptr is AWIDTH bits, rptr_bin_sync2 is ASIZE bits (lower bits of rptr)
+    // We need to reconstruct the full rptr from the synchronized binary
+    // Actually, let's use the gray code approach for full/empty which is more standard
+
+    // Standard CDC FIFO full/empty using gray codes:
+    // Full: wptr_gray == rptr_gray_synced with MSB inverted
+    // Empty: rptr_gray == wptr_gray_synced
+
+    // Let me redo this with the standard gray-code-based full/empty
+
+    // Full: write pointer gray == read pointer gray (synced) with MSB flipped
+    wire [ASIZE-1:0] rptr_gray_synced;
+    wire [ASIZE-1:0] wptr_gray_synced;
+
+    assign rptr_gray_synced = rptr_gray_sync2;
+    assign wptr_gray_synced = wptr_gray_sync2;
+
+    // Full: wptr_gray == {~rptr_gray_synced[ASIZE-1], rptr_gray_synced[ASIZE-2:0]}
+    // But wptr_gray is ASIZE bits, and we need to consider the MSB of the full pointer
+    // The full pointer is AWIDTH bits. The gray code of the full pointer...
+    // Let's use the binary approach instead since we have binary snapshots
+
+    // Full: wptr (AWIDTH) == rptr_synced_binary + DEPTH
+    // rptr_synced_binary is ASIZE bits (lower ASIZE bits of rptr)
+    // rptr[ASIZE] is the MSB. We need to sync that too.
+    // Let's sync the full AWIDTH-bit pointer as gray, then convert
+
+    // Actually, the cleanest approach: sync the gray-coded AWIDTH-bit pointers
+    // Let me restructure
+
+    // I'll use the standard approach:
+    // - Keep AWIDTH-bit binary pointers
+    // - Convert to AWIDTH-bit gray
+    // - Sync the gray codes
+    // - Full: wptr_gray == rptr_gray_synced with bit ASIZE inverted
+    // - Empty: rptr_gray == wptr_gray_synced
+
+    // Let me redo the pointer widths
+
+    // Redo: use AWIDTH-bit gray codes
+
+    // Write domain gray pointer (AWIDTH bits)
+    reg  [AWIDTH-1:0] wptr_gray_aw;
+    reg  [AWIDTH-1:0] wptr_gray_aw_next;
+
+    // Read domain gray pointer (AWIDTH bits)
+    reg  [AWIDTH-1:0] rptr_gray_aw;
+    reg  [AWIDTH-1:0] rptr_gray_aw_next;
+
+    // Sync AWIDTH-bit gray pointers
+    reg  [AWIDTH-1:0] wptr_gray_aw_sync1, wptr_gray_aw_sync2;
+    reg  [AWIDTH-1:0] rptr_gray_aw_sync1, rptr_gray_aw_sync2;
+
+    // Update write gray pointer
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr_gray_aw <= {AWIDTH{1'b0}};
+        end else if (winc_eff) begin
+            wptr_gray_aw <= wptr_gray_aw_next;
+        end
+    end
+
+    // Update read gray pointer
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr_gray_aw <= {AWIDTH{1'b0}};
+        end else if (rinc_eff) begin
+            rptr_gray_aw <= rptr_gray_aw_next;
+        end
+    end
+
+    // Gray code next values (AWIDTH bits)
+    assign wptr_gray_aw_next = wptr ^ (wptr >> 1);
+    assign rptr_gray_aw_next = rptr ^ (rptr >> 1);
+
+    // Synchronize AWIDTH-bit gray pointers
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_aw_sync1 <= {AWIDTH{1'b0}};
+            rptr_gray_aw_sync2 <= {AWIDTH{1'b0}};
+        end else begin
+            rptr_gray_aw_sync1 <= rptr_gray_aw;
+            rptr_gray_aw_sync2 <= rptr_gray_aw_sync1;
+        end
+    end
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_gray_aw_sync1 <= {AWIDTH{1'b0}};
+            wptr_gray_aw_sync2 <= {AWIDTH{1'b0}};
+        end else begin
+            wptr_gray_aw_sync1 <= wptr_gray_aw;
+            wptr_gray_aw_sync2 <= wptr_gray_aw_sync1;
+        end
+    end
+
+    // Full: wptr_gray_aw == rptr_gray_aw_sync2 with bit ASIZE inverted
+    assign wfull = (wptr_gray_aw == {~rptr_gray_aw_sync2[ASIZE], rptr_gray_aw_sync2[ASIZE-1:0]});
+
+    // Empty: rptr_gray_aw == wptr_gray_aw_sync2
+    assign rempty = (rptr_gray_aw == wptr_gray_aw_sync2);
+
+    // Almost full: full - 1 entry
+    // awfull: wptr is DEPTH-1 ahead of rptr
+    // This is when wptr_gray_aw == rptr_gray_aw_sync2 with bit ASIZE inverted AND bit ASIZE-1 also inverted? 
+    // Actually, almost full means there's 1 slot left. 
+    // Full is when wptr = rptr + DEPTH
+    // Almost full is when wptr = rptr + DEPTH - 1
+    // In gray code terms, this is trickier. Let's use binary comparison.
+
+    // For almost full/empty, let's use the binary snapshots
+    // awfull: (wptr - rptr_synced) == DEPTH - 1
+    // arempty: (rptr - wptr_synced) == 1
+
+    // Using binary:
+    // awfull: wptr[ASIZE-1:0] == rptr_bin_sync2[ASIZE-1:0] and wptr[ASIZE] != rptr_bin_sync2[ASIZE] (but rptr_bin_sync2 is only ASIZE bits)
+    // We need the MSB of rptr too. Let's sync the full AWIDTH-bit binary pointer.
+
+    // Sync AWIDTH-bit binary pointers
+    reg  [AWIDTH-1:0] rptr_bin_aw_sync1, rptr_bin_aw_sync2;
+    reg  [AWIDTH-1:0] wptr_bin_aw_sync1, wptr_bin_aw_sync2;
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_bin_aw_sync1 <= {AWIDTH{1'b0}};
+            rptr_bin_aw_sync2 <= {AWIDTH{1'b0}};
+        end else begin
+            rptr_bin_aw_sync1 <= rptr;
+            rptr_bin_aw_sync2 <= rptr_bin_aw_sync1;
+        end
+    end
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_bin_aw_sync1 <= {AWIDTH{1'b0}};
+            wptr_bin_aw_sync2 <= {AWIDTH{1'b0}};
+        end else begin
+            wptr_bin_aw_sync1 <= wptr;
+            wptr_bin_aw_sync2 <= wptr_bin_aw_sync1;
+        end
+    end
+
+    // awfull: wptr == rptr_synced + DEPTH - 1
+    // i.e., wptr - rptr_synced == DEPTH - 1
+    // Since both are AWIDTH bits and we're in modulo 2*DEPTH arithmetic:
+    // awfull = (wptr == rptr_bin_aw_sync2 + DEPTH - 1)
+    assign awfull = (wptr == (rptr_bin_aw_sync2 + (DEPTH - 1)));
+
+    // arempty: rptr == wptr_synced + 1
+    assign arempty = (rptr == (wptr_bin_aw_sync2 + 1'b1));
+
+    // Memory write
+    always @(posedge wclk) begin
+        if (winc_eff) begin
+            mem[wptr[ASIZE-1:0]] <= wdata;
+        end
+    end
+
+    // Memory read
+    assign rdata = mem[rptr[ASIZE-1:0]];
+
+endmodule

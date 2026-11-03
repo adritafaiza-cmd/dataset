@@ -1,0 +1,267 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "pulse_sync",
+            "function": "A one-pulse-in, one-pulse-out crossing between asynchronous clocks.",
+            "parameters": [
+                {
+                    "name": "STAGES",
+                    "value": 2
+                }
+            ],
+            "ports": [
+                {
+                    "name": "clk_a",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "rstn_a",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "clk_b",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "rstn_b",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "pulseA_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "pulseB_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "busy_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                }
+            ],
+            "instances": [
+                {
+                    "module": "async_cross",
+                    "name": "cross_inst",
+                    "function": "Asynchronous signal crossing using multiple flip-flops.",
+                    "connections": [
+                        {
+                            "local": "clk_a",
+                            "remote": "clk_a"
+                        },
+                        {
+                            "local": "rstn_a",
+                            "remote": "rstn_a"
+                        },
+                        {
+                            "local": "clk_b",
+                            "remote": "clk_b"
+                        },
+                        {
+                            "local": "rstn_b",
+                            "remote": "rstn_b"
+                        },
+                        {
+                            "local": "pulseA_i",
+                            "remote": "data_in"
+                        },
+                        {
+                            "local": "pulseB_o",
+                            "remote": "data_out"
+                        }
+                    ]
+                }
+            ],
+            "connections": [],
+            "internal_signals": [
+                {
+                    "name": "busy",
+                    "width": 1
+                }
+            ],
+            "behavior": [
+                "A one-cycle pulse on pulseA_i in domain A must produce one pulse on pulseB_o in domain B.",
+                "busy_o is high while a pulse is in flight; ignore additional pulseA_i while busy.",
+                "After reset, pulseB_o and busy_o are low."
+            ]
+        },
+        {
+            "Top_module_name": "async_cross",
+            "function": "Asynchronous signal crossing using multiple flip-flops.",
+            "parameters": [
+                {
+                    "name": "STAGES",
+                    "value": 2
+                }
+            ],
+            "ports": [
+                {
+                    "name": "clk_a",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "rstn_a",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "clk_b",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "rstn_b",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "data_in",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "data_out",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {
+                    "name": "sync_chain",
+                    "width": 1,
+                    "size": "STAGES"
+                }
+            ],
+            "behavior": [
+                "Cross data_in from clk_a domain to clk_b domain using a chain of STAGES flip-flops.",
+                "Ensure proper reset behavior on rstn_a and rstn_b."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    reg busy;
+    reg pulseA_d;
+    reg pulseA_r;
+    reg pulseB_d;
+
+    // Instantiate the asynchronous crosser
+    async_cross #(
+        .STAGES(STAGES)
+    ) cross_inst (
+        .clk_a  (clk_a),
+        .rstn_a (rstn_a),
+        .clk_b  (clk_b),
+        .rstn_b (rstn_b),
+        .data_in(pulseA_r),
+        .data_out(pulseB_d)
+    );
+
+    // Synchronize and detect pulseA_i
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            pulseA_d <= 0;
+            pulseA_r <= 0;
+            busy <= 0;
+        end else begin
+            pulseA_d <= pulseA_i;
+            pulseA_r <= pulseA_d;
+            if (pulseA_r && !busy) begin
+                busy <= 1;
+            end
+        end
+    end
+
+    // Generate pulseB_o and clear busy signal
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            pulseB_o <= 0;
+        end else begin
+            pulseB_o <= pulseB_d;
+            if (pulseB_o) begin
+                busy <= 0;
+            end
+        end
+    end
+
+    // Assign busy output
+    assign busy_o = busy;
+
+endmodule
+
+module async_cross #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  data_in,
+    output data_out
+);
+
+    reg [STAGES-1:0] sync_chain;
+
+    // Cross the signal from clk_a domain to clk_b domain
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            sync_chain <= 0;
+        end else begin
+            sync_chain[0] <= data_in;
+            for (int i = 1; i < STAGES; i = i + 1) begin
+                sync_chain[i] <= sync_chain[i-1];
+            end
+        end
+    end
+
+    // Output the synchronized signal
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            data_out <= 0;
+        end else begin
+            data_out <= sync_chain[STAGES-1];
+        end
+    end
+
+endmodule
+```

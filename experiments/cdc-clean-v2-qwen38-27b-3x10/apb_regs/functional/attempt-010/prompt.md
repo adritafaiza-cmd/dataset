@@ -1,0 +1,73 @@
+Please act as a professional Verilog designer.
+
+Implement an APB-mapped register file.
+
+Module name:
+    apb_regs
+
+Language:
+    SystemVerilog
+
+Clocks:
+    pclk_i: Single clock.
+
+Resets:
+    preset_ni: reset.
+
+Input ports:
+    pclk_i: Register-bank clock.
+    preset_ni: Active-low reset.
+    req_i: APB request, with type req_t.
+    base_addr_i: Base address of the decoded register bank.
+    reg_init_i: Values exposed by read-only registers.
+
+Output ports:
+    resp_o: APB response, with type resp_t.
+    reg_q_o: Current register values; read-only entries expose reg_init_i.
+
+Parameters:
+    NoApbRegs: See Behavior.
+    ApbAddrWidth: See Behavior.
+    AddrOffset: See Behavior.
+    ApbDataWidth: See Behavior.
+    RegDataWidth: See Behavior.
+    ReadOnly: See Behavior.
+    req_t: See Behavior.
+    resp_t: See Behavior.
+    apb_addr_t: See Behavior.
+    reg_data_t: See Behavior.
+
+Behavior:
+    - Map NoApbRegs registers of RegDataWidth, spaced AddrOffset bytes apart, starting at base_addr_i.
+    - req_i / resp_o use the APB request and response types supplied by the testbench.
+    - Drive reg_q_o with current register values; read-only registers expose reg_init_i.
+    - Read-only registers selected by ReadOnly must ignore writes.
+    - Writable registers reset to zero; read-only registers expose reg_init_i.
+
+Revised behavior (benchmark v2):
+    Writes commit only in the APB access phase (psel and penable). Byte strobes update only the selected bytes of a writable register; unstrobed bytes and idle-cycle state are preserved. Writes outside the register width do not change stored data. Each AddrOffset-byte decoded address range maps to its register. Reset cancels pending writes, clears writable registers to zero, and leaves read-only registers exposing reg_init_i.
+
+Give me the complete code in one source file.
+Do not include a testbench, explanation, markdown, vendor primitives,
+or the reference implementation.
+
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);

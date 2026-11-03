@@ -1,0 +1,239 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "sync_wedge",
+            "function": "Destination-clock bit synchronizer with edge detect",
+            "parameters": [
+                {
+                    "name": "STAGES",
+                    "value": 2
+                }
+            ],
+            "ports": [
+                {
+                    "name": "clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "en_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "serial_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "external"
+                },
+                {
+                    "name": "r_edge_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "f_edge_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "serial_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                }
+            ],
+            "instances": [
+                {
+                    "module": "ff_sync_chain",
+                    "name": "sync_chain",
+                    "function": "Synchronize serial_i into clk_i domain",
+                    "connections": [
+                        {
+                            "local": "clk_i",
+                            "remote": "clk_i"
+                        },
+                        {
+                            "local": "rst_ni",
+                            "remote": "rst_ni"
+                        },
+                        {
+                            "local": "serial_i",
+                            "remote": "d_i"
+                        },
+                        {
+                            "local": "sync_serial_o",
+                            "remote": "q_o"
+                        }
+                    ]
+                }
+            ],
+            "connections": [
+                {
+                    "source": "sync_chain.q_o",
+                    "destination": "serial_o"
+                },
+                {
+                    "source": "sync_chain.q_o",
+                    "destination": "d_ff"
+                }
+            ],
+            "internal_signals": [
+                {
+                    "name": "sync_serial_o",
+                    "width": 1
+                },
+                {
+                    "name": "d_ff",
+                    "width": 1
+                }
+            ],
+            "behavior": [
+                "Synchronize serial_i into the clk_i domain using a multi-stage flip-flop chain.",
+                "Detect rising edge when enabled: r_edge_o is high for one clock cycle when serial_o transitions from 0 to 1 and en_i is high.",
+                "Detect falling edge when enabled: f_edge_o is high for one clock cycle when serial_o transitions from 1 to 0 and en_i is high.",
+                "Reset (active-low) clears all flip-flops in the synchronization chain and edge detection logic."
+            ]
+        },
+        {
+            "Top_module_name": "ff_sync_chain",
+            "function": "Multi-stage flip-flop synchronization chain",
+            "parameters": [
+                {
+                    "name": "STAGES",
+                    "value": 2
+                }
+            ],
+            "ports": [
+                {
+                    "name": "clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "d_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "external"
+                },
+                {
+                    "name": "q_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {
+                    "name": "sync_ffs",
+                    "width": 1,
+                    "size": "STAGES"
+                }
+            ],
+            "behavior": [
+                "Create a chain of STAGES flip-flops to synchronize an input signal from an external clock domain to the clk_i domain.",
+                "Reset (active-low) clears all flip-flops in the chain."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module sync_wedge #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    wire sync_serial_o;
+    reg d_ff;
+    reg r_edge_ff;
+    reg f_edge_ff;
+
+    // Instantiate the synchronization chain
+    ff_sync_chain #(
+        .STAGES(STAGES)
+    ) sync_chain (
+        .clk_i(clk_i),
+        .rst_ni(rst_ni),
+        .d_i(serial_i),
+        .q_o(sync_serial_o)
+    );
+
+    // Output the synchronized signal
+    assign serial_o = sync_serial_o;
+
+    // Detect rising and falling edges
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            d_ff <= 1'b0;
+            r_edge_ff <= 1'b0;
+            f_edge_ff <= 1'b0;
+        end else begin
+            d_ff <= sync_serial_o;
+            r_edge_ff <= en_i & ~d_ff & sync_serial_o;
+            f_edge_ff <= en_i & d_ff & ~sync_serial_o;
+        end
+    end
+
+    // Assign edge outputs
+    assign r_edge_o = r_edge_ff;
+    assign f_edge_o = f_edge_ff;
+
+endmodule
+
+module ff_sync_chain #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  d_i,
+    output q_o
+);
+
+    reg [STAGES-1:0] sync_ffs;
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            sync_ffs <= {STAGES{1'b0}};
+        end else begin
+            sync_ffs[0] <= d_i;
+            for (integer i = 1; i < STAGES; i = i + 1) begin
+                sync_ffs[i] <= sync_ffs[i-1];
+            end
+        end
+    end
+
+    assign q_o = sync_ffs[STAGES-1];
+
+endmodule
+```

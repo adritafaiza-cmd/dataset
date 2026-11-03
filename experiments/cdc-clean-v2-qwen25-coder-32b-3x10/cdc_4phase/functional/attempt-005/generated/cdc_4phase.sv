@@ -1,0 +1,140 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain signals
+  logic [WIDTH-1:0] src_data_sync;
+  logic src_valid_sync;
+  logic src_ready_sync;
+
+  // Destination domain signals
+  logic [WIDTH-1:0] dst_data_sync;
+  logic dst_valid_sync;
+  logic dst_ready_sync;
+
+  // Synchronization FIFO
+  logic [WIDTH-1:0] fifo [3:0];
+  logic [1:0] wr_ptr, rd_ptr;
+  logic wr_en, rd_en;
+  logic fifo_full, fifo_empty;
+
+  // Source domain reset synchronization
+  logic [1:0] src_rst_sync;
+  logic src_rst_synced;
+
+  // Destination domain reset synchronization
+  logic [1:0] dst_rst_sync;
+  logic dst_rst_synced;
+
+  // Source domain reset synchronization
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_rst_sync <= 2'b11;
+    end else begin
+      src_rst_sync <= {src_rst_sync[0], src_rst_ni};
+    end
+  end
+
+  assign src_rst_synced = src_rst_sync[1];
+
+  // Destination domain reset synchronization
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_rst_sync <= 2'b11;
+    end else begin
+      dst_rst_sync <= {dst_rst_sync[0], dst_rst_ni};
+    end
+  end
+
+  assign dst_rst_synced = dst_rst_sync[1];
+
+  // Source domain logic
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_sync <= RESET_MSG;
+      src_valid_sync <= 1'b0;
+    end else if (wr_en) begin
+      src_data_sync <= src_data_i;
+      src_valid_sync <= 1'b1;
+    end else if (rd_en) begin
+      src_valid_sync <= 1'b0;
+    end
+  end
+
+  // Destination domain logic
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_sync <= RESET_MSG;
+      dst_valid_sync <= 1'b0;
+    end else if (rd_en) begin
+      dst_data_sync <= fifo[rd_ptr];
+      dst_valid_sync <= 1'b1;
+    end else if (dst_ready_i) begin
+      dst_valid_sync <= 1'b0;
+    end
+  end
+
+  // FIFO write enable
+  assign wr_en = src_valid_i && src_ready_o;
+
+  // FIFO read enable
+  assign rd_en = dst_valid_o && dst_ready_i;
+
+  // FIFO full and empty flags
+  assign fifo_full = (wr_ptr[1:0] == rd_ptr[1:0] && wr_ptr[2] != rd_ptr[2]);
+  assign fifo_empty = (wr_ptr == rd_ptr);
+
+  // FIFO write pointer
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      wr_ptr <= 2'b0;
+    end else if (wr_en && !fifo_full) begin
+      wr_ptr <= wr_ptr + 1;
+    end
+  end
+
+  // FIFO read pointer
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      rd_ptr <= 2'b0;
+    end else if (rd_en && !fifo_empty) begin
+      rd_ptr <= rd_ptr + 1;
+    end
+  end
+
+  // FIFO write logic
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      fifo[0] <= RESET_MSG;
+      fifo[1] <= RESET_MSG;
+      fifo[2] <= RESET_MSG;
+      fifo[3] <= RESET_MSG;
+    end else if (wr_en && !fifo_full) begin
+      fifo[wr_ptr[1:0]] <= src_data_i;
+    end
+  end
+
+  // Source ready output
+  assign src_ready_o = DECOUPLED ? ~fifo_full : ~src_valid_sync;
+
+  // Destination data output
+  assign dst_data_o = dst_data_sync;
+
+  // Destination valid output
+  assign dst_valid_o = dst_valid_sync;
+
+endmodule

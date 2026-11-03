@@ -1,0 +1,449 @@
+```verilog
+module axis_async_fifo_adapter #
+(
+    parameter DEPTH = 4096,
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    /*
+     * AXI input
+     */
+    input  wire                     s_clk,
+    input  wire                     s_rst,
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI output
+     */
+    input  wire                     m_clk,
+    input  wire                     m_rst,
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                     s_pause_req,
+    output wire                     s_pause_ack,
+    input  wire                     m_pause_req,
+    output wire                     m_pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0]   s_status_depth,
+    output wire [$clog2(DEPTH):0]   s_status_depth_commit,
+    output wire                     s_status_overflow,
+    output wire                     s_status_bad_frame,
+    output wire                     s_status_good_frame,
+    output wire [$clog2(DEPTH):0]   m_status_depth,
+    output wire [$clog2(DEPTH):0]   m_status_depth_commit,
+    output wire                     m_status_overflow,
+    output wire                     m_status_bad_frame,
+    output wire                     m_status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam PTR_WIDTH = ADDR_WIDTH + 1;
+    localparam DEPTH_MASK = DEPTH - 1;
+
+    // Internal signal declarations
+    wire s_axis_tready_internal;
+    wire m_axis_tvalid_internal;
+    wire [M_DATA_WIDTH-1:0] m_axis_tdata_internal;
+    wire [M_KEEP_WIDTH-1:0] m_axis_tkeep_internal;
+    wire m_axis_tlast_internal;
+    wire [ID_WIDTH-1:0] m_axis_tid_internal;
+    wire [DEST_WIDTH-1:0] m_axis_tdest_internal;
+    wire [USER_WIDTH-1:0] m_axis_tuser_internal;
+
+    // Assign outputs
+    assign s_axis_tready = s_axis_tready_internal;
+    assign m_axis_tdata = m_axis_tdata_internal;
+    assign m_axis_tkeep = m_axis_tkeep_internal;
+    assign m_axis_tvalid = m_axis_tvalid_internal;
+    assign m_axis_tlast = m_axis_tlast_internal;
+    assign m_axis_tid = m_axis_tid_internal;
+    assign m_axis_tdest = m_axis_tdest_internal;
+    assign m_axis_tuser = m_axis_tuser_internal;
+
+    // Pause logic
+    wire s_pause_active;
+    wire m_pause_active;
+    wire s_pause_ack_internal;
+    wire m_pause_ack_internal;
+
+    assign s_pause_active = PAUSE_ENABLE ? s_pause_req : 1'b0;
+    assign m_pause_active = PAUSE_ENABLE ? m_pause_req : 1'b0;
+    assign s_pause_ack = s_pause_ack_internal;
+    assign m_pause_ack = m_pause_ack_internal;
+
+    // Source domain signals
+    reg [PTR_WIDTH-1:0] s_wr_ptr;
+    reg [PTR_WIDTH-1:0] s_rd_ptr_sync;
+    reg [PTR_WIDTH-1:0] s_rd_ptr_sync2;
+    reg [PTR_WIDTH-1:0] s_rd_ptr_sync3;
+    reg [PTR_WIDTH-1:0] s_rd_ptr_sync4;
+    reg [PTR_WIDTH-1:0] s_rd_ptr_sync5;
+    reg [PTR_WIDTH-1:0] s_rd_ptr_sync6;
+    reg [PTR_WIDTH-1:0] s_rd_ptr_sync7;
+    reg [PTR_WIDTH-1:0] s_rd_ptr_sync8;
+
+    // Destination domain signals
+    reg [PTR_WIDTH-1:0] m_rd_ptr;
+    reg [PTR_WIDTH-1:0] m_wr_ptr_sync;
+    reg [PTR_WIDTH-1:0] m_wr_ptr_sync2;
+    reg [PTR_WIDTH-1:0] m_wr_ptr_sync3;
+    reg [PTR_WIDTH-1:0] m_wr_ptr_sync4;
+    reg [PTR_WIDTH-1:0] m_wr_ptr_sync5;
+    reg [PTR_WIDTH-1:0] m_wr_ptr_sync6;
+    reg [PTR_WIDTH-1:0] m_wr_ptr_sync7;
+    reg [PTR_WIDTH-1:0] m_wr_ptr_sync8;
+
+    // RAM storage
+    reg [S_DATA_WIDTH-1:0] ram_data [0:DEPTH-1];
+    reg [S_KEEP_WIDTH-1:0] ram_keep [0:DEPTH-1];
+    reg ram_last [0:DEPTH-1];
+    reg [ID_WIDTH-1:0] ram_tid [0:DEPTH-1];
+    reg [DEST_WIDTH-1:0] ram_tdest [0:DEPTH-1];
+    reg [USER_WIDTH-1:0] ram_tuser [0:DEPTH-1];
+
+    // Write enable
+    wire s_wr_en;
+    wire s_wr_addr_valid;
+    wire [ADDR_WIDTH-1:0] s_wr_addr;
+
+    assign s_wr_addr = s_wr_ptr[ADDR_WIDTH-1:0];
+    assign s_wr_addr_valid = 1'b1;
+    assign s_wr_en = s_axis_tvalid & s_axis_tready_internal & ~s_pause_active;
+
+    // Read enable
+    wire m_rd_en;
+    wire [ADDR_WIDTH-1:0] m_rd_addr;
+
+    assign m_rd_addr = m_rd_ptr[ADDR_WIDTH-1:0];
+    assign m_rd_en = m_axis_tvalid_internal & m_axis_tready & ~m_pause_active;
+
+    // RAM read
+    wire [S_DATA_WIDTH-1:0] ram_rd_data;
+    wire [S_KEEP_WIDTH-1:0] ram_rd_keep;
+    wire ram_rd_last;
+    wire [ID_WIDTH-1:0] ram_rd_tid;
+    wire [DEST_WIDTH-1:0] ram_rd_tdest;
+    wire [USER_WIDTH-1:0] ram_rd_tuser;
+
+    assign ram_rd_data = ram_data[m_rd_addr];
+    assign ram_rd_keep = ram_keep[m_rd_addr];
+    assign ram_rd_last = ram_last[m_rd_addr];
+    assign ram_rd_tid = ram_tid[m_rd_addr];
+    assign ram_rd_tdest = ram_tdest[m_rd_addr];
+    assign ram_rd_tuser = ram_tuser[m_rd_addr];
+
+    // Width adapter: S_DATA_WIDTH to M_DATA_WIDTH
+    // For simplicity, we assume S_DATA_WIDTH == M_DATA_WIDTH or handle basic cases
+    // In a real implementation, this would be more complex
+    wire [M_DATA_WIDTH-1:0] adapted_data;
+    wire [M_KEEP_WIDTH-1:0] adapted_keep;
+    wire adapted_last;
+    wire [ID_WIDTH-1:0] adapted_tid;
+    wire [DEST_WIDTH-1:0] adapted_tdest;
+    wire [USER_WIDTH-1:0] adapted_tuser;
+
+    // Simple width adapter - direct assignment if widths match, otherwise truncate/extend
+    generate
+        if (S_DATA_WIDTH == M_DATA_WIDTH) begin : gen_width_match
+            assign adapted_data = ram_rd_data;
+            assign adapted_keep = ram_rd_keep;
+            assign adapted_last = ram_rd_last;
+            assign adapted_tid = ram_rd_tid;
+            assign adapted_tdest = ram_rd_tdest;
+            assign adapted_tuser = ram_rd_tuser;
+        end else if (S_DATA_WIDTH > M_DATA_WIDTH) begin : gen_s_wider
+            assign adapted_data = ram_rd_data[M_DATA_WIDTH-1:0];
+            if (S_KEEP_ENABLE && M_KEEP_ENABLE) begin : gen_keep_both
+                assign adapted_keep = ram_rd_keep[M_KEEP_WIDTH-1:0];
+            end else if (M_KEEP_ENABLE) begin : gen_m_keep_only
+                assign adapted_keep = {M_KEEP_WIDTH{1'b1}};
+            end else begin : gen_no_keep
+                assign adapted_keep = {M_KEEP_WIDTH{1'b0}};
+            end
+            assign adapted_last = ram_rd_last;
+            assign adapted_tid = ram_rd_tid;
+            assign adapted_tdest = ram_rd_tdest;
+            assign adapted_tuser = ram_rd_tuser;
+        end else begin : gen_m_wider
+            assign adapted_data = {M_DATA_WIDTH - S_DATA_WIDTH{1'b0}, ram_rd_data};
+            if (S_KEEP_ENABLE && M_KEEP_ENABLE) begin : gen_keep_both_w
+                assign adapted_keep = {M_KEEP_WIDTH - S_KEEP_WIDTH{1'b0}, ram_rd_keep};
+            end else if (M_KEEP_ENABLE) begin : gen_m_keep_only_w
+                assign adapted_keep = {M_KEEP_WIDTH{1'b1}};
+            end else begin : gen_no_keep_w
+                assign adapted_keep = {M_KEEP_WIDTH{1'b0}};
+            end
+            assign adapted_last = ram_rd_last;
+            assign adapted_tid = ram_rd_tid;
+            assign adapted_tdest = ram_rd_tdest;
+            assign adapted_tuser = ram_rd_tuser;
+        end
+    endgenerate
+
+    // Output FIFO (optional)
+    reg [M_DATA_WIDTH-1:0] out_fifo_data [0:DEPTH-1];
+    reg [M_KEEP_WIDTH-1:0] out_fifo_keep [0:DEPTH-1];
+    reg out_fifo_last [0:DEPTH-1];
+    reg [ID_WIDTH-1:0] out_fifo_tid [0:DEPTH-1];
+    reg [DEST_WIDTH-1:0] out_fifo_tdest [0:DEPTH-1];
+    reg [USER_WIDTH-1:0] out_fifo_tuser [0:DEPTH-1];
+    reg [PTR_WIDTH-1:0] out_fifo_wr_ptr;
+    reg [PTR_WIDTH-1:0] out_fifo_rd_ptr;
+
+    wire out_fifo_wr_en;
+    wire out_fifo_rd_en;
+    wire [ADDR_WIDTH-1:0] out_fifo_wr_addr;
+    wire [ADDR_WIDTH-1:0] out_fifo_rd_addr;
+
+    assign out_fifo_wr_addr = out_fifo_wr_ptr[ADDR_WIDTH-1:0];
+    assign out_fifo_rd_addr = out_fifo_rd_ptr[ADDR_WIDTH-1:0];
+    assign out_fifo_wr_en = m_rd_en;
+    assign out_fifo_rd_en = m_axis_tvalid_internal & m_axis_tready & ~m_pause_active;
+
+    // Output FIFO read
+    wire [M_DATA_WIDTH-1:0] out_fifo_rd_data;
+    wire [M_KEEP_WIDTH-1:0] out_fifo_rd_keep;
+    wire out_fifo_rd_last;
+    wire [ID_WIDTH-1:0] out_fifo_rd_tid;
+    wire [DEST_WIDTH-1:0] out_fifo_rd_tdest;
+    wire [USER_WIDTH-1:0] out_fifo_rd_tuser;
+
+    assign out_fifo_rd_data = out_fifo_data[out_fifo_rd_addr];
+    assign out_fifo_rd_keep = out_fifo_keep[out_fifo_rd_addr];
+    assign out_fifo_rd_last = out_fifo_last[out_fifo_rd_addr];
+    assign out_fifo_rd_tid = out_fifo_tid[out_fifo_rd_addr];
+    assign out_fifo_rd_tdest = out_fifo_tdest[out_fifo_rd_addr];
+    assign out_fifo_rd_tuser = out_fifo_tuser[out_fifo_rd_addr];
+
+    // Determine output source
+    wire use_out_fifo;
+    assign use_out_fifo = OUTPUT_FIFO_ENABLE;
+
+    assign m_axis_tdata_internal = use_out_fifo ? out_fifo_rd_data : adapted_data;
+    assign m_axis_tkeep_internal = use_out_fifo ? out_fifo_rd_keep : adapted_keep;
+    assign m_axis_tlast_internal = use_out_fifo ? out_fifo_rd_last : adapted_last;
+    assign m_axis_tid_internal = use_out_fifo ? out_fifo_rd_tid : adapted_tid;
+    assign m_axis_tdest_internal = use_out_fifo ? out_fifo_rd_tdest : adapted_tdest;
+    assign m_axis_tuser_internal = use_out_fifo ? out_fifo_rd_tuser : adapted_tuser;
+
+    // Output valid
+    wire m_out_fifo_not_empty;
+    wire m_main_not_empty;
+    wire m_axis_tvalid_internal_raw;
+
+    assign m_out_fifo_not_empty = (out_fifo_wr_ptr != out_fifo_rd_ptr);
+    assign m_main_not_empty = (m_wr_ptr_sync8 != m_rd_ptr);
+    assign m_axis_tvalid_internal_raw = use_out_fifo ? m_out_fifo_not_empty : m_main_not_empty;
+
+    assign m_axis_tvalid_internal = m_axis_tvalid_internal_raw & ~m_pause_active;
+
+    // Source ready
+    wire s_fifo_not_full;
+    wire s_axis_tready_internal_raw;
+
+    assign s_fifo_not_full = (s_wr_ptr != s_rd_ptr_sync8);
+    assign s_axis_tready_internal_raw = s_fifo_not_full & ~s_pause_active;
+
+    assign s_axis_tready_internal = s_axis_tready_internal_raw;
+
+    // Pause ack
+    assign s_pause_ack_internal = s_pause_active;
+    assign m_pause_ack_internal = m_pause_active;
+
+    // Status signals
+    wire [$clog2(DEPTH):0] s_depth;
+    wire [$clog2(DEPTH):0] m_depth;
+
+    assign s_depth = s_wr_ptr - s_rd_ptr_sync8;
+    assign m_depth = m_wr_ptr_sync8 - m_rd_ptr;
+
+    assign s_status_depth = s_depth;
+    assign s_status_depth_commit = s_depth;
+    assign m_status_depth = m_depth;
+    assign m_status_depth_commit = m_depth;
+
+    // Overflow detection
+    reg s_overflow_flag;
+    reg m_overflow_flag;
+
+    wire s_overflow_event = s_axis_tvalid & ~s_axis_tready_internal;
+    wire m_overflow_event = m_axis_tvalid_internal & ~m_axis_tready;
+
+    // Bad frame detection
+    reg s_bad_frame_flag;
+    reg m_bad_frame_flag;
+
+    wire s_bad_frame_event = s_axis_tvalid & s_axis_tready_internal & (s_axis_tuser & USER_BAD_FRAME_MASK) == USER_BAD_FRAME_VALUE;
+    wire m_bad_frame_event = m_axis_tvalid_internal & m_axis_tready & (m_axis_tuser_internal & USER_BAD_FRAME_MASK) == USER_BAD_FRAME_VALUE;
+
+    // Good frame detection
+    reg s_good_frame_flag;
+    reg m_good_frame_flag;
+
+    wire s_good_frame_event = s_axis_tvalid & s_axis_tready_internal & s_axis_tlast;
+    wire m_good_frame_event = m_axis_tvalid_internal & m_axis_tready & m_axis_tlast_internal;
+
+    // Source clock domain logic
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_wr_ptr <= {PTR_WIDTH{1'b0}};
+            s_rd_ptr_sync <= {PTR_WIDTH{1'b0}};
+            s_rd_ptr_sync2 <= {PTR_WIDTH{1'b0}};
+            s_rd_ptr_sync3 <= {PTR_WIDTH{1'b0}};
+            s_rd_ptr_sync4 <= {PTR_WIDTH{1'b0}};
+            s_rd_ptr_sync5 <= {PTR_WIDTH{1'b0}};
+            s_rd_ptr_sync6 <= {PTR_WIDTH{1'b0}};
+            s_rd_ptr_sync7 <= {PTR_WIDTH{1'b0}};
+            s_rd_ptr_sync8 <= {PTR_WIDTH{1'b0}};
+            s_overflow_flag <= 1'b0;
+            s_bad_frame_flag <= 1'b0;
+            s_good_frame_flag <= 1'b0;
+        end else begin
+            // Synchronize read pointer from destination domain
+            s_rd_ptr_sync <= m_rd_ptr;
+            s_rd_ptr_sync2 <= s_rd_ptr_sync;
+            s_rd_ptr_sync3 <= s_rd_ptr_sync2;
+            s_rd_ptr_sync4 <= s_rd_ptr_sync3;
+            s_rd_ptr_sync5 <= s_rd_ptr_sync4;
+            s_rd_ptr_sync6 <= s_rd_ptr_sync5;
+            s_rd_ptr_sync7 <= s_rd_ptr_sync6;
+            s_rd_ptr_sync8 <= s_rd_ptr_sync7;
+
+            // Update write pointer
+            if (s_wr_en) begin
+                s_wr_ptr <= s_wr_ptr + 1'b1;
+            end
+
+            // Update RAM
+            if (s_wr_en) begin
+                ram_data[s_wr_addr] <= s_axis_tdata;
+                ram_keep[s_wr_addr] <= s_axis_tkeep;
+                ram_last[s_wr_addr] <= s_axis_tlast;
+                ram_tid[s_wr_addr] <= s_axis_tid;
+                ram_tdest[s_wr_addr] <= s_axis_tdest;
+                ram_tuser[s_wr_addr] <= s_axis_tuser;
+            end
+
+            // Status flags
+            if (s_overflow_event) begin
+                s_overflow_flag <= 1'b1;
+            end
+            if (s_bad_frame_event) begin
+                s_bad_frame_flag <= 1'b1;
+            end
+            if (s_good_frame_event) begin
+                s_good_frame_flag <= 1'b1;
+            end
+        end
+    end
+
+    // Destination clock domain logic
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rd_ptr <= {PTR_WIDTH{1'b0}};
+            m_wr_ptr_sync <= {PTR_WIDTH{1'b0}};
+            m_wr_ptr_sync2 <= {PTR_WIDTH{1'b0}};
+            m_wr_ptr_sync3 <= {PTR_WIDTH{1'b0}};
+            m_wr_ptr_sync4 <= {PTR_WIDTH{1'b0}};
+            m_wr_ptr_sync5 <= {PTR_WIDTH{1'b0}};
+            m_wr_ptr_sync6 <= {PTR_WIDTH{1'b0}};
+            m_wr_ptr_sync7 <= {PTR_WIDTH{1'b0}};
+            m_wr_ptr_sync8 <= {PTR_WIDTH{1'b0}};
+            out_fifo_wr_ptr <= {PTR_WIDTH{1'b0}};
+            out_fifo_rd_ptr <= {PTR_WIDTH{1'b0}};
+            m_overflow_flag <= 1'b0;
+            m_bad_frame_flag <= 1'b0;
+            m_good_frame_flag <= 1'b0;
+        end else begin
+            // Synchronize write pointer from source domain
+            m_wr_ptr_sync <= s_wr_ptr;
+            m_wr_ptr_sync2 <= m_wr_ptr_sync;
+            m_wr_ptr_sync3 <= m_wr_ptr_sync2;
+            m_wr_ptr_sync4 <= m_wr_ptr_sync3;
+            m_wr_ptr_sync5 <= m_wr_ptr_sync4;
+            m_wr_ptr_sync6 <= m_wr_ptr_sync5;
+            m_wr_ptr_sync7 <= m_wr_ptr_sync6;
+            m_wr_ptr_sync8 <= m_wr_ptr_sync7;
+
+            // Update read pointer
+            if (m_rd_en) begin
+                m_rd_ptr <= m_rd_ptr + 1'b1;
+            end
+
+            // Update output FIFO
+            if (out_fifo_wr_en) begin
+                out_fifo_data[out_fifo_wr_addr] <= adapted_data;
+                out_fifo_keep[out_fifo_wr_addr] <= adapted_keep;
+                out_fifo_last[out_fifo_wr_addr] <= adapted_last;
+                out_fifo_tid[out_fifo_wr_addr] <= adapted_tid;
+                out_fifo_tdest[out_fifo_wr_addr] <= adapted_tdest;
+                out_fifo_tuser[out_fifo_wr_addr] <= adapted_tuser;
+                out_fifo_wr_ptr <= out_fifo_wr_ptr + 1'b1;
+            end
+
+            if (out_fifo_rd_en) begin
+                out_fifo_rd_ptr <= out_fifo_rd_ptr + 1'b1;
+            end
+
+            // Status flags
+            if (m_overflow_event) begin
+                m_overflow_flag <= 1'b1;
+            end
+            if (m_bad_frame_event) begin
+                m_bad_frame_flag <= 1'b1;
+            end
+            if (m_good_frame_event) begin
+                m_good_frame_flag <= 1'b1;
+            end
+        end
+    end
+
+    // Status outputs
+    assign s_status_overflow = s_overflow_flag;
+    assign s_status_bad_frame = s_bad_frame_flag;
+    assign s_status_good_frame = s_good_frame_flag;
+    assign m_status_overflow = m_overflow_flag;
+    assign m_status_bad_frame = m_bad_frame_flag;
+    assign m_status_good_frame = m_good_frame_flag;
+
+endmodule
+```<|im_end|>

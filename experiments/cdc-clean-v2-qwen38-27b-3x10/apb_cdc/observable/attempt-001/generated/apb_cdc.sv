@@ -1,0 +1,256 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH;
+
+    // Request FIFO (src -> dst)
+    // Each entry: {pwrite, paddr, pwdata, pstrb, pprot}
+    localparam REQ_W = 1 + ADDR_WIDTH + DATA_WIDTH + DATA_WIDTH/8 + 3;
+
+    reg [REQ_W-1:0] req_mem [0:DEPTH-1];
+    reg [PTR_W-1:0] req_wr_ptr;
+    reg [PTR_W-1:0] req_rd_ptr;
+
+    // Response FIFO (dst -> src)
+    // Each entry: {pslverr, prdata}
+    localparam RSP_W = 1 + DATA_WIDTH;
+
+    reg [RSP_W-1:0] rsp_mem [0:DEPTH-1];
+    reg [PTR_W-1:0] rsp_wr_ptr;
+    reg [PTR_W-1:0] rsp_rd_ptr;
+
+    // Gray code pointers for CDC
+    wire [PTR_W-1:0] req_wr_ptr_gray = req_wr_ptr ^ {req_wr_ptr[PTR_W-1:0], 1'b0};
+    wire [PTR_W-1:0] req_rd_ptr_gray = req_rd_ptr ^ {req_rd_ptr[PTR_W-1:0], 1'b0};
+    wire [PTR_W-1:0] rsp_wr_ptr_gray = rsp_wr_ptr ^ {rsp_wr_ptr[PTR_W-1:0], 1'b0};
+    wire [PTR_W-1:0] rsp_rd_ptr_gray = rsp_rd_ptr ^ {rsp_rd_ptr[PTR_W-1:0], 1'b0};
+
+    // Synchronizers for request pointers
+    reg [PTR_W-1:0] req_wr_ptr_gray_sync1, req_wr_ptr_gray_sync2;
+    reg [PTR_W-1:0] req_rd_ptr_gray_sync1, req_rd_ptr_gray_sync2;
+
+    // Synchronizers for response pointers
+    reg [PTR_W-1:0] rsp_wr_ptr_gray_sync1, rsp_wr_ptr_gray_sync2;
+    reg [PTR_W-1:0] rsp_rd_ptr_gray_sync1, rsp_rd_ptr_gray_sync2;
+
+    // Source side: request write logic
+    wire req_full = (req_wr_ptr[PTR_W-1:0] == req_rd_ptr_gray_sync2[PTR_W-1:0]) &&
+                    (req_wr_ptr[PTR_W-1:PTR_W-2] != req_rd_ptr_gray_sync2[PTR_W-1:PTR_W-2]);
+    wire req_empty = (req_wr_ptr_gray_sync2[PTR_W-1:0] == req_rd_ptr[PTR_W-1:0]);
+
+    // Destination side: request read logic
+    wire req_full_dst = (req_wr_ptr_gray_sync2[PTR_W-1:0] == req_rd_ptr[PTR_W-1:0]) &&
+                        (req_wr_ptr_gray_sync2[PTR_W-1:PTR_W-2] != req_rd_ptr[PTR_W-1:PTR_W-2]);
+    wire req_empty_dst = (req_wr_ptr_gray_sync2[PTR_W-1:0] == req_rd_ptr[PTR_W-1:0]);
+
+    // Source side: response read logic
+    wire rsp_full = (rsp_wr_ptr[PTR_W-1:0] == rsp_rd_ptr_gray_sync2[PTR_W-1:0]) &&
+                    (rsp_wr_ptr[PTR_W-1:PTR_W-2] != rsp_rd_ptr_gray_sync2[PTR_W-1:PTR_W-2]);
+    wire rsp_empty = (rsp_wr_ptr_gray_sync2[PTR_W-1:0] == rsp_rd_ptr[PTR_W-1:0]);
+
+    // Destination side: response write logic
+    wire rsp_full_dst = (rsp_wr_ptr_gray_sync2[PTR_W-1:0] == rsp_rd_ptr[PTR_W-1:0]) &&
+                        (rsp_wr_ptr_gray_sync2[PTR_W-1:PTR_W-2] != rsp_rd_ptr[PTR_W-1:PTR_W-2]);
+    wire rsp_empty_dst = (rsp_wr_ptr_gray_sync2[PTR_W-1:0] == rsp_rd_ptr[PTR_W-1:0]);
+
+    // Source side state machine
+    reg src_state;
+    localparam SRC_IDLE = 1'b0;
+    localparam SRC_WAIT = 1'b1;
+
+    reg src_pready_reg;
+    reg [DATA_WIDTH-1:0] src_prdata_reg;
+    reg src_pslverr_reg;
+
+    // Destination side state machine
+    reg dst_state;
+    localparam DST_IDLE = 1'b0;
+    localparam DST_SETUP = 1'b1;
+    localparam DST_ACCESS = 1'b2;
+
+    reg dst_psel_reg;
+    reg dst_penable_reg;
+    reg dst_pwrite_reg;
+    reg [ADDR_WIDTH-1:0] dst_paddr_reg;
+    reg [DATA_WIDTH-1:0] dst_pwdata_reg;
+    reg [DATA_WIDTH/8-1:0] dst_pstrb_reg;
+    reg [2:0] dst_pprot_reg;
+
+    // Source clock domain: synchronizers
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            req_wr_ptr_gray_sync1 <= {PTR_W{1'b0}};
+            req_wr_ptr_gray_sync2 <= {PTR_W{1'b0}};
+            rsp_rd_ptr_gray_sync1 <= {PTR_W{1'b0}};
+            rsp_rd_ptr_gray_sync2 <= {PTR_W{1'b0}};
+        end else begin
+            req_wr_ptr_gray_sync1 <= req_wr_ptr_gray;
+            req_wr_ptr_gray_sync2 <= req_wr_ptr_gray_sync1;
+            rsp_rd_ptr_gray_sync1 <= rsp_rd_ptr_gray;
+            rsp_rd_ptr_gray_sync2 <= rsp_rd_ptr_gray_sync1;
+        end
+    end
+
+    // Destination clock domain: synchronizers
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            req_rd_ptr_gray_sync1 <= {PTR_W{1'b0}};
+            req_rd_ptr_gray_sync2 <= {PTR_W{1'b0}};
+            rsp_wr_ptr_gray_sync1 <= {PTR_W{1'b0}};
+            rsp_wr_ptr_gray_sync2 <= {PTR_W{1'b0}};
+        end else begin
+            req_rd_ptr_gray_sync1 <= req_rd_ptr_gray;
+            req_rd_ptr_gray_sync2 <= req_rd_ptr_gray_sync1;
+            rsp_wr_ptr_gray_sync1 <= rsp_wr_ptr_gray;
+            rsp_wr_ptr_gray_sync2 <= rsp_wr_ptr_gray_sync1;
+        end
+    end
+
+    // Source clock domain: request FIFO write
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            req_wr_ptr <= {PTR_W{1'b0}};
+            src_state <= SRC_IDLE;
+            src_pready_reg <= 1'b0;
+            src_prdata_reg <= {DATA_WIDTH{1'b0}};
+            src_pslverr_reg <= 1'b0;
+        end else begin
+            case (src_state)
+                SRC_IDLE: begin
+                    if (src_psel_i && !req_full) begin
+                        // Write request to FIFO
+                        req_mem[req_wr_ptr[PTR_W-1:0]] <= {src_pwrite_i, src_paddr_i, src_pwdata_i, src_pstrb_i, src_pprot_i};
+                        req_wr_ptr <= req_wr_ptr + 1'b1;
+                        src_state <= SRC_WAIT;
+                        src_pready_reg <= 1'b0;
+                    end else begin
+                        src_pready_reg <= 1'b1;
+                    end
+                end
+                SRC_WAIT: begin
+                    if (!rsp_empty) begin
+                        // Read response from FIFO
+                        src_prdata_reg <= rsp_mem[rsp_rd_ptr[PTR_W-1:0]][RSP_W-1:1];
+                        src_pslverr_reg <= rsp_mem[rsp_rd_ptr[PTR_W-1:0]][RSP_W-1];
+                        rsp_rd_ptr <= rsp_rd_ptr + 1'b1;
+                        src_state <= SRC_IDLE;
+                        src_pready_reg <= 1'b1;
+                    end else begin
+                        src_pready_reg <= 1'b0;
+                    end
+                end
+                default: begin
+                    src_state <= SRC_IDLE;
+                    src_pready_reg <= 1'b1;
+                end
+            endcase
+        end
+    end
+
+    // Source clock domain: response FIFO read pointer
+    // Already handled in the state machine above
+
+    // Destination clock domain: request FIFO read and APB slave drive
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            req_rd_ptr <= {PTR_W{1'b0}};
+            dst_state <= DST_IDLE;
+            dst_psel_reg <= 1'b0;
+            dst_penable_reg <= 1'b0;
+            dst_pwrite_reg <= 1'b0;
+            dst_paddr_reg <= {ADDR_WIDTH{1'b0}};
+            dst_pwdata_reg <= {DATA_WIDTH{1'b0}};
+            dst_pstrb_reg <= {DATA_WIDTH/8{1'b0}};
+            dst_pprot_reg <= 3'b0;
+        end else begin
+            case (dst_state)
+                DST_IDLE: begin
+                    if (!req_empty_dst) begin
+                        // Read request from FIFO
+                        dst_pwrite_reg <= req_mem[req_rd_ptr[PTR_W-1:0]][REQ_W-1];
+                        dst_paddr_reg <= req_mem[req_rd_ptr[PTR_W-1:0]][REQ_W-2:REQ_W-1-ADDR_WIDTH];
+                        dst_pwdata_reg <= req_mem[req_rd_ptr[PTR_W-1:0]][REQ_W-2-ADDR_WIDTH:REQ_W-2-ADDR_WIDTH-DATA_WIDTH+1];
+                        dst_pstrb_reg <= req_mem[req_rd_ptr[PTR_W-1:0]][REQ_W-2-ADDR_WIDTH-DATA_WIDTH:REQ_W-2-ADDR_WIDTH-DATA_WIDTH-DATA_WIDTH/8+1];
+                        dst_pprot_reg <= req_mem[req_rd_ptr[PTR_W-1:0]][REQ_W-2-ADDR_WIDTH-DATA_WIDTH-DATA_WIDTH/8:REQ_W-2-ADDR_WIDTH-DATA_WIDTH-DATA_WIDTH/8-3+1];
+                        req_rd_ptr <= req_rd_ptr + 1'b1;
+                        dst_psel_reg <= 1'b1;
+                        dst_penable_reg <= 1'b0;
+                        dst_state <= DST_SETUP;
+                    end else begin
+                        dst_psel_reg <= 1'b0;
+                        dst_penable_reg <= 1'b0;
+                    end
+                end
+                DST_SETUP: begin
+                    dst_psel_reg <= 1'b1;
+                    dst_penable_reg <= 1'b1;
+                    dst_state <= DST_ACCESS;
+                end
+                DST_ACCESS: begin
+                    if (dst_pready_i) begin
+                        // Write response to FIFO
+                        rsp_mem[rsp_wr_ptr[PTR_W-1:0]] <= {dst_pslverr_i, dst_prdata_i};
+                        rsp_wr_ptr <= rsp_wr_ptr + 1'b1;
+                        dst_psel_reg <= 1'b0;
+                        dst_penable_reg <= 1'b0;
+                        dst_state <= DST_IDLE;
+                    end else begin
+                        dst_psel_reg <= 1'b1;
+                        dst_penable_reg <= 1'b1;
+                    end
+                end
+                default: begin
+                    dst_state <= DST_IDLE;
+                    dst_psel_reg <= 1'b0;
+                    dst_penable_reg <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Destination clock domain: response FIFO write pointer
+    // Already handled in the state machine above
+
+    // Output assignments
+    assign src_pready_o = src_pready_reg;
+    assign src_prdata_o = src_prdata_reg;
+    assign src_pslverr_o = src_pslverr_reg;
+
+    assign dst_psel_o = dst_psel_reg;
+    assign dst_penable_o = dst_penable_reg;
+    assign dst_pwrite_o = dst_pwrite_reg;
+    assign dst_paddr_o = dst_paddr_reg;
+    assign dst_pwdata_o = dst_pwdata_reg;
+    assign dst_pstrb_o = dst_pstrb_reg;
+    assign dst_pprot_o = dst_pprot_reg;
+
+endmodule

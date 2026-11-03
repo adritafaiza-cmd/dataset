@@ -1,0 +1,338 @@
+module axis_async_fifo_adapter #
+(
+    parameter DEPTH = 4096,
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                     s_clk,
+    input  wire                     s_rst,
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    input  wire                     m_clk,
+    input  wire                     m_rst,
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser,
+    input  wire                     s_pause_req,
+    output wire                     s_pause_ack,
+    input  wire                     m_pause_req,
+    output wire                     m_pause_ack,
+    output wire [$clog2(DEPTH):0]   s_status_depth,
+    output wire [$clog2(DEPTH):0]   s_status_depth_commit,
+    output wire                     s_status_overflow,
+    output wire                     s_status_bad_frame,
+    output wire                     s_status_good_frame,
+    output wire [$clog2(DEPTH):0]   m_status_depth,
+    output wire [$clog2(DEPTH):0]   m_status_depth_commit,
+    output wire                     m_status_overflow,
+    output wire                     m_status_bad_frame,
+    output wire                     m_status_good_frame
+);
+
+    wire s_rst_sync_out;
+    wire m_rst_sync_out;
+
+    sync_register s_rst_sync (
+        .clk(s_clk),
+        .rst(s_rst),
+        .d(s_rst),
+        .q(s_rst_sync_out)
+    );
+
+    sync_register m_rst_sync (
+        .clk(m_clk),
+        .rst(m_rst),
+        .d(m_rst),
+        .q(m_rst_sync_out)
+    );
+
+    fifo #(
+        .DEPTH(DEPTH),
+        .DATA_WIDTH(S_DATA_WIDTH),
+        .KEEP_WIDTH(S_KEEP_WIDTH),
+        .ID_WIDTH(ID_WIDTH),
+        .DEST_WIDTH(DEST_WIDTH),
+        .USER_WIDTH(USER_WIDTH),
+        .M_DATA_WIDTH(M_DATA_WIDTH),
+        .M_KEEP_WIDTH(M_KEEP_WIDTH)
+    ) async_fifo (
+        .wclk(s_clk),
+        .wrst(s_rst_sync_out),
+        .wdata(s_axis_tdata),
+        .wkeep(s_axis_tkeep),
+        .wvalid(s_axis_tvalid),
+        .wready(s_axis_tready),
+        .wlast(s_axis_tlast),
+        .wid(s_axis_tid),
+        .wdest(s_axis_tdest),
+        .wuser(s_axis_tuser),
+        .rclk(m_clk),
+        .rrst(m_rst_sync_out),
+        .rdata(m_axis_tdata),
+        .rkeep(m_axis_tkeep),
+        .rvalid(m_axis_tvalid),
+        .rready(m_axis_tready),
+        .rlast(m_axis_tlast),
+        .rid(m_axis_tid),
+        .rdest(m_axis_tdest),
+        .ruser(m_axis_tuser),
+        .status_depth(s_status_depth),
+        .status_depth_commit(s_status_depth_commit),
+        .status_overflow(s_status_overflow),
+        .status_bad_frame(s_status_bad_frame),
+        .status_good_frame(s_status_good_frame),
+        .status_depth_r(m_status_depth),
+        .status_depth_commit_r(m_status_depth_commit),
+        .status_overflow_r(m_status_overflow),
+        .status_bad_frame_r(m_status_bad_frame),
+        .status_good_frame_r(m_status_good_frame)
+    );
+
+    // Pause signals not used in this implementation
+    assign s_pause_ack = 1'b0;
+    assign m_pause_ack = 1'b0;
+
+endmodule
+
+module sync_register (
+    input  wire clk,
+    input  wire rst,
+    input  wire d,
+    output reg  q
+);
+
+    always @(posedge clk or posedge rst) begin
+        if (rst)
+            q <= 1'b0;
+        else
+            q <= d;
+    end
+
+endmodule
+
+module fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_WIDTH = 1,
+    parameter ID_WIDTH = 8,
+    parameter DEST_WIDTH = 8,
+    parameter USER_WIDTH = 1,
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_WIDTH = 1
+)
+(
+    input  wire wclk,
+    input  wire wrst,
+    input  wire [DATA_WIDTH-1:0] wdata,
+    input  wire [KEEP_WIDTH-1:0] wkeep,
+    input  wire wvalid,
+    output wire wready,
+    input  wire wlast,
+    input  wire [ID_WIDTH-1:0] wid,
+    input  wire [DEST_WIDTH-1:0] wdest,
+    input  wire [USER_WIDTH-1:0] wuser,
+    input  wire rclk,
+    input  wire rrst,
+    output wire [M_DATA_WIDTH-1:0] rdata,
+    output wire [M_KEEP_WIDTH-1:0] rkeep,
+    output wire rvalid,
+    input  wire rready,
+    output wire rlast,
+    output wire [ID_WIDTH-1:0] rid,
+    output wire [DEST_WIDTH-1:0] rdest,
+    output wire [USER_WIDTH-1:0] ruser,
+    output wire [$clog2(DEPTH):0] status_depth,
+    output wire [$clog2(DEPTH):0] status_depth_commit,
+    output wire status_overflow,
+    output wire status_bad_frame,
+    output wire status_good_frame,
+    output wire [$clog2(DEPTH):0] status_depth_r,
+    output wire [$clog2(DEPTH):0] status_depth_commit_r,
+    output wire status_overflow_r,
+    output wire status_bad_frame_r,
+    output wire status_good_frame_r
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+
+    reg [ADDR_WIDTH:0] wptr, rptr, wptr_gray, rptr_gray, wptr_gray_sync, rptr_gray_sync;
+    reg [DATA_WIDTH-1:0] mem [0:DEPTH-1];
+    reg [KEEP_WIDTH-1:0] keep_mem [0:DEPTH-1];
+    reg [ID_WIDTH-1:0] id_mem [0:DEPTH-1];
+    reg [DEST_WIDTH-1:0] dest_mem [0:DEPTH-1];
+    reg [USER_WIDTH-1:0] user_mem [0:DEPTH-1];
+    reg wvalid_reg, rvalid_reg, wlast_reg, rlast_reg;
+
+    // Write pointer logic
+    always @(posedge wclk or posedge wrst) begin
+        if (wrst)
+            wptr <= 0;
+        else if (wready && wvalid)
+            wptr <= wptr + 1;
+    end
+
+    // Read pointer logic
+    always @(posedge rclk or posedge rrst) begin
+        if (rrst)
+            rptr <= 0;
+        else if (rready && rvalid_reg)
+            rptr <= rptr + 1;
+    end
+
+    // Gray code conversion
+    assign wptr_gray = (wptr ^ (wptr >> 1));
+    assign rptr_gray = (rptr ^ (rptr >> 1));
+
+    // Synchronize gray pointers
+    sync_register_gray #(.WIDTH(ADDR_WIDTH+1)) wptr_gray_sync_inst (
+        .clk(rclk),
+        .rst(rrst),
+        .d(wptr_gray),
+        .q(wptr_gray_sync)
+    );
+
+    sync_register_gray #(.WIDTH(ADDR_WIDTH+1)) rptr_gray_sync_inst (
+        .clk(wclk),
+        .rst(wrst),
+        .d(rptr_gray),
+        .q(rptr_gray_sync)
+    );
+
+    // Binary conversion
+    binary_gray #(.WIDTH(ADDR_WIDTH+1)) wptr_bin (
+        .gray(wptr_gray_sync),
+        .bin(rptr)
+    );
+
+    binary_gray #(.WIDTH(ADDR_WIDTH+1)) rptr_bin (
+        .gray(rptr_gray_sync),
+        .bin(wptr)
+    );
+
+    // Write enable
+    assign wready = ~((wptr_gray ^ wptr_gray_sync) == {(ADDR_WIDTH+1){1'b1}});
+
+    // Read valid
+    assign rvalid = ~((rptr_gray ^ rptr_gray_sync) == {(ADDR_WIDTH+1){1'b1}});
+
+    // Memory write
+    always @(posedge wclk) begin
+        if (wready && wvalid) begin
+            mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+            keep_mem[wptr[ADDR_WIDTH-1:0]] <= wkeep;
+            id_mem[wptr[ADDR_WIDTH-1:0]] <= wid;
+            dest_mem[wptr[ADDR_WIDTH-1:0]] <= wdest;
+            user_mem[wptr[ADDR_WIDTH-1:0]] <= wuser;
+            wvalid_reg <= wvalid;
+            wlast_reg <= wlast;
+        end
+    end
+
+    // Memory read
+    always @(posedge rclk) begin
+        if (rready && rvalid_reg) begin
+            rdata <= mem[rptr[ADDR_WIDTH-1:0]];
+            rkeep <= keep_mem[rptr[ADDR_WIDTH-1:0]];
+            rid <= id_mem[rptr[ADDR_WIDTH-1:0]];
+            rdest <= dest_mem[rptr[ADDR_WIDTH-1:0]];
+            ruser <= user_mem[rptr[ADDR_WIDTH-1:0]];
+            rvalid_reg <= rvalid;
+            rlast_reg <= wlast_reg;
+        end
+    end
+
+    assign rvalid = rvalid_reg;
+    assign rlast = rlast_reg;
+
+    // Status signals
+    assign status_depth = wptr - rptr;
+    assign status_depth_commit = wptr - rptr;
+    assign status_overflow = 0; // Overflow not handled in this simple implementation
+    assign status_bad_frame = 0; // Bad frame not handled in this simple implementation
+    assign status_good_frame = 0; // Good frame not handled in this simple implementation
+
+    assign status_depth_r = status_depth;
+    assign status_depth_commit_r = status_depth_commit;
+    assign status_overflow_r = status_overflow;
+    assign status_bad_frame_r = status_bad_frame;
+    assign status_good_frame_r = status_good_frame;
+
+endmodule
+
+module sync_register_gray #
+(
+    parameter WIDTH = 4
+)
+(
+    input  wire clk,
+    input  wire rst,
+    input  wire [WIDTH-1:0] d,
+    output reg [WIDTH-1:0] q
+);
+
+    reg [WIDTH-1:0] d_reg;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            d_reg <= 0;
+            q <= 0;
+        end else begin
+            d_reg <= d;
+            q <= d_reg;
+        end
+    end
+
+endmodule
+
+module binary_gray #
+(
+    parameter WIDTH = 4
+)
+(
+    input  wire [WIDTH-1:0] gray,
+    output wire [WIDTH-1:0] bin
+);
+
+    assign bin[WIDTH-1] = gray[WIDTH-1];
+    genvar i;
+    generate
+        for (i = WIDTH-2; i >= 0; i = i - 1) begin : gen_bin_gray
+            assign bin[i] = bin[i+1] ^ gray[i];
+        end
+    endgenerate
+
+endmodule

@@ -1,0 +1,256 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "apbslave",
+      "function": "Single-clock APB slave that handles standard APB setup/access transfers, supporting reads and writes of specified data width using write strobes. It asserts PREADY to complete each access and handles reset and handshake semantics.",
+      "parameters": [
+        {
+          "name": "C_APB_ADDR_WIDTH",
+          "value": 12
+        },
+        {
+          "name": "C_APB_DATA_WIDTH",
+          "value": 32
+        }
+      ],
+      "ports": [
+        {
+          "name": "PCLK",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "single_clock"
+        },
+        {
+          "name": "PRESETn",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "single_clock"
+        },
+        {
+          "name": "PSEL",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "single_clock"
+        },
+        {
+          "name": "PENABLE",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "single_clock"
+        },
+        {
+          "name": "PADDR",
+          "direction": "input",
+          "width": "C_APB_ADDR_WIDTH",
+          "clock_domain": "single_clock"
+        },
+        {
+          "name": "PWRITE",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "single_clock"
+        },
+        {
+          "name": "PWDATA",
+          "direction": "input",
+          "width": "C_APB_DATA_WIDTH",
+          "clock_domain": "single_clock"
+        },
+        {
+          "name": "PWSTRB",
+          "direction": "input",
+          "width": "C_APB_DATA_WIDTH/8",
+          "clock_domain": "single_clock"
+        },
+        {
+          "name": "PPROT",
+          "direction": "input",
+          "width": 3,
+          "clock_domain": "single_clock"
+        },
+        {
+          "name": "PREADY",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "single_clock"
+        },
+        {
+          "name": "PRDATA",
+          "direction": "output",
+          "width": "C_APB_DATA_WIDTH",
+          "clock_domain": "single_clock"
+        },
+        {
+          "name": "PSLVERR",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "single_clock"
+        }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        {
+          "name": "APBLSB",
+          "width": "log2(C_APB_DATA_WIDTH)-3"
+        },
+        {
+          "name": "state",
+          "width": 2
+        },
+        {
+          "name": "next_state",
+          "width": 2
+        },
+        {
+          "name": "addr_latched",
+          "width": "C_APB_ADDR_WIDTH"
+        },
+        {
+          "name": "write_data_latched",
+          "width": "C_APB_DATA_WIDTH"
+        },
+        {
+          "name": "write_strobe_latched",
+          "width": "C_APB_DATA_WIDTH/8"
+        },
+        {
+          "name": "read_data",
+          "width": "C_APB_DATA_WIDTH"
+        },
+        {
+          "name": "slverr",
+          "width": 1
+        }
+      ],
+      "behavior": [
+        "After reset, the slave must be idle.",
+        "On the rising edge of PCLK, if PRESETn is low, all registers are reset to their initial states.",
+        "If PSEL is high and PENABLE is low, the slave captures the address (PADDR), write data (PWDATA), and write strobes (PWSTRB) on the rising edge of PCLK.",
+        "If PSEL and PENABLE are both high, the slave processes the transaction based on the value of PWRITE.",
+        "If PWRITE is high, the slave writes the captured data to the memory location specified by the captured address, using the captured write strobes.",
+        "If PWRITE is low, the slave reads the data from the memory location specified by the captured address.",
+        "After processing the transaction, the slave asserts PREADY on the next rising edge of PCLK.",
+        "PSLVERR is asserted if the access is out of range; otherwise, it remains low.",
+        "The state machine transitions between states to handle the APB protocol states: IDLE, SETUP, and ACCESS.",
+        "The implementation must be safe for clock-domain and reset-domain crossings, and must pass structural CDC/RDC analysis with zero unsafe crossings. Reset release must be safe in each clock domain, and transferred multi-bit data must remain coherent."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module apbslave #(
+        parameter C_APB_ADDR_WIDTH = 12,
+        parameter C_APB_DATA_WIDTH = 32,
+        localparam AW = C_APB_ADDR_WIDTH,
+        localparam DW = C_APB_DATA_WIDTH,
+        localparam APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+    ) (
+        input wire PCLK,
+        input wire PRESETn,
+        input wire PSEL,
+        input wire PENABLE,
+        output reg PREADY,
+        input wire [AW-1:0] PADDR,
+        input wire PWRITE,
+        input wire [DW-1:0] PWDATA,
+        input wire [DW/8-1:0] PWSTRB,
+        input wire [2:0] PPROT,
+        output reg [DW-1:0] PRDATA,
+        output wire PSLVERR
+    );
+
+    // State machine states
+    localparam IDLE = 2'b00;
+    localparam SETUP = 2'b01;
+    localparam ACCESS = 2'b10;
+
+    // Internal signals
+    reg [1:0] state, next_state;
+    reg [AW-1:0] addr_latched;
+    reg [DW-1:0] write_data_latched;
+    reg [DW/8-1:0] write_strobe_latched;
+    reg [DW-1:0] read_data;
+    reg slverr;
+
+    // Memory model
+    reg [DW-1:0] memory [(1<<AW)-1:0];
+
+    // State machine
+    always @(posedge PCLK or negedge PRESETn) begin
+        if (!PRESETn) begin
+            state <= IDLE;
+        end else begin
+            state <= next_state;
+        end
+    end
+
+    // Next state logic
+    always @(*) begin
+        next_state = state;
+        case (state)
+            IDLE: begin
+                if (PSEL && !PENABLE) begin
+                    next_state = SETUP;
+                end
+            end
+            SETUP: begin
+                if (PSEL && PENABLE) begin
+                    next_state = ACCESS;
+                end
+            end
+            ACCESS: begin
+                next_state = IDLE;
+            end
+        endcase
+    end
+
+    // State actions
+    always @(posedge PCLK or negedge PRESETn) begin
+        if (!PRESETn) begin
+            PREADY <= 0;
+            PRDATA <= 0;
+            PSLVERR <= 0;
+        end else begin
+            case (state)
+                IDLE: begin
+                    PREADY <= 0;
+                    PSLVERR <= 0;
+                end
+                SETUP: begin
+                    addr_latched <= PADDR;
+                    write_data_latched <= PWDATA;
+                    write_strobe_latched <= PWSTRB;
+                end
+                ACCESS: begin
+                    if (PWRITE) begin
+                        // Write operation with strobes
+                        for (integer i = 0; i < DW/8; i = i + 1) begin
+                            if (write_strobe_latched[i]) begin
+                                memory[addr_latched][8*i +: 8] <= write_data_latched[8*i +: 8];
+                            end
+                        end
+                    end else begin
+                        // Read operation
+                        read_data <= memory[addr_latched];
+                    end
+                    PRDATA <= read_data;
+                    PREADY <= 1;
+                    // Simple address range check (modify as needed)
+                    if (addr_latched >= (1<<AW)) begin
+                        PSLVERR <= 1;
+                    end else begin
+                        PSLVERR <= 0;
+                    end
+                end
+            endcase
+        end
+    end
+
+endmodule
+```

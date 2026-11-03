@@ -1,0 +1,242 @@
+module apbxclk #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	parameter [0:0]	OPT_REGISTERED = 1'b0,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH
+) (
+	input	wire			S_APB_PCLK, S_PRESETn,
+	input	wire			S_APB_PSEL,
+	input	wire			S_APB_PENABLE,
+	output	reg			S_APB_PREADY,
+	input	wire	[AW-1:0]	S_APB_PADDR,
+	input	wire			S_APB_PWRITE,
+	input	wire	[DW-1:0]	S_APB_PWDATA,
+	input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+	input	wire	[2:0]		S_APB_PPROT,
+	output	wire	[DW-1:0]	S_APB_PRDATA,
+	output	wire			S_APB_PSLVERR,
+	input	wire			M_APB_PCLK,
+	output	reg			M_PRESETn,
+	output	reg			M_APB_PSEL,
+	output	reg			M_APB_PENABLE,
+	input	wire			M_APB_PREADY,
+	output	wire	[AW-1:0]	M_APB_PADDR,
+	output	wire			M_APB_PWRITE,
+	output	wire	[DW-1:0]	M_APB_PWDATA,
+	output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+	output	wire	[2:0]		M_APB_PPROT,
+	input	wire	[DW-1:0]	M_APB_PRDATA,
+	input	wire			M_APB_PSLVERR
+);
+
+	// Synchronous reset synchronizer for M_APB_PCLK domain
+	reg [1:0] m_reset_sync;
+
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn)
+			m_reset_sync <= 2'b00;
+		else
+			m_reset_sync <= {m_reset_sync[0], 1'b1};
+	end
+
+	assign M_PRESETn = m_reset_sync[1];
+
+	// Handshake signals
+	reg s_req_valid;
+	reg m_req_ready;
+	reg m_resp_valid;
+	reg s_resp_ready;
+
+	// S-domain: capture request when S_APB_PSEL & S_APB_PENABLE
+	// and forward valid to M-domain
+	reg [AW-1:0] s_addr_reg;
+	reg s_write_reg;
+	reg [DW-1:0] s_wdata_reg;
+	reg [DW/8-1:0] s_wstrb_reg;
+	reg [2:0] s_pprot_reg;
+
+	// M-domain: hold request fields
+	reg [AW-1:0] m_addr_reg;
+	reg m_write_reg;
+	reg [DW-1:0] m_wdata_reg;
+	reg [DW/8-1:0] m_wstrb_reg;
+	reg [2:0] m_pprot_reg;
+
+	// M-domain: capture response
+	reg [DW-1:0] m_rdata_reg;
+	reg m_pslverr_reg;
+
+	// S-domain: hold response
+	reg [DW-1:0] s_rdata_reg;
+	reg s_pslverr_reg;
+
+	// S-domain: track if a transaction is in progress
+	reg s_txn_active;
+
+	// M-domain: track if a transaction is in progress
+	reg m_txn_active;
+
+	// S-domain: detect setup phase (PSEL=1, PENABLE=0)
+	wire s_setup = S_APB_PSEL & ~S_APB_PENABLE;
+	// S-domain: detect access phase (PSEL=1, PENABLE=1)
+	wire s_access = S_APB_PSEL & S_APB_PENABLE;
+
+	// S-domain: accept a new request during setup phase if not already active
+	wire s_accept = s_setup & ~s_txn_active;
+
+	// S-domain: capture request fields on accept
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_addr_reg <= {AW{1'b0}};
+			s_write_reg <= 1'b0;
+			s_wdata_reg <= {DW{1'b0}};
+			s_wstrb_reg <= {(DW/8){1'b0}};
+			s_pprot_reg <= 3'b000;
+			s_txn_active <= 1'b0;
+			s_rdata_reg <= {DW{1'b0}};
+			s_pslverr_reg <= 1'b0;
+			S_APB_PREADY <= 1'b0;
+		end else begin
+			if (s_accept) begin
+				s_addr_reg <= S_APB_PADDR;
+				s_write_reg <= S_APB_PWRITE;
+				s_wdata_reg <= S_APB_PWDATA;
+				s_wstrb_reg <= S_APB_PWSTRB;
+				s_pprot_reg <= S_APB_PPROT;
+				s_txn_active <= 1'b1;
+			end
+
+			// When response is ready and source is in access phase, complete
+			if (s_txn_active && s_resp_ready && s_access) begin
+				s_txn_active <= 1'b0;
+				S_APB_PREADY <= 1'b1;
+			end else if (s_txn_active) begin
+				S_APB_PREADY <= 1'b0;
+			end else begin
+				S_APB_PREADY <= 1'b0;
+			end
+		end
+	end
+
+	// S-domain: response output
+	assign S_APB_PRDATA = s_rdata_reg;
+	assign S_APB_PSLVERR = s_pslverr_reg;
+
+	// S-domain: response ready when source is in access phase and transaction active
+	assign s_resp_ready = s_txn_active & s_access;
+
+	// S-domain: capture response when m_resp_valid is high
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_rdata_reg <= {DW{1'b0}};
+			s_pslverr_reg <= 1'b0;
+		end else if (m_resp_valid) begin
+			s_rdata_reg <= m_rdata_reg;
+			s_pslverr_reg <= m_pslverr_reg;
+		end
+	end
+
+	// M-domain: request valid from S-domain
+	// s_req_valid is high when S-domain has captured a request and M-domain hasn't accepted yet
+	// We use a simple handshake: S asserts valid, M asserts ready
+
+	// S-domain: request valid
+	// Valid when transaction is active and M-domain hasn't started yet
+	// We need to track whether M-domain has accepted the request
+	reg s_req_pending;
+
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn)
+			s_req_pending <= 1'b0;
+		else begin
+			if (s_accept)
+				s_req_pending <= 1'b1;
+			else if (m_req_ready)
+				s_req_pending <= 1'b0;
+		end
+	end
+
+	assign s_req_valid = s_req_pending;
+
+	// M-domain: request ready
+	// Ready when M-domain is not currently in a transaction
+	assign m_req_ready = ~m_txn_active;
+
+	// M-domain: accept request
+	wire m_accept = s_req_valid & m_req_ready;
+
+	// M-domain: capture request fields
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_addr_reg <= {AW{1'b0}};
+			m_write_reg <= 1'b0;
+			m_wdata_reg <= {DW{1'b0}};
+			m_wstrb_reg <= {(DW/8){1'b0}};
+			m_pprot_reg <= 3'b000;
+			m_txn_active <= 1'b0;
+			m_rdata_reg <= {DW{1'b0}};
+			m_pslverr_reg <= 1'b0;
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			m_resp_valid <= 1'b0;
+		end else begin
+			if (m_accept) begin
+				m_addr_reg <= s_addr_reg;
+				m_write_reg <= s_write_reg;
+				m_wdata_reg <= s_wdata_reg;
+				m_wstrb_reg <= s_wstrb_reg;
+				m_pprot_reg <= s_pprot_reg;
+				m_txn_active <= 1'b1;
+				M_APB_PSEL <= 1'b1;
+				M_APB_PENABLE <= 1'b0;
+				m_resp_valid <= 1'b0;
+			end else if (m_txn_active) begin
+				// In access phase
+				M_APB_PSEL <= 1'b1;
+				M_APB_PENABLE <= 1'b1;
+
+				if (M_APB_PREADY) begin
+					// Transfer complete
+					m_txn_active <= 1'b0;
+					M_APB_PSEL <= 1'b0;
+					M_APB_PENABLE <= 1'b0;
+					m_resp_valid <= 1'b1;
+				end
+			end else begin
+				M_APB_PSEL <= 1'b0;
+				M_APB_PENABLE <= 1'b0;
+			end
+		end
+	end
+
+	// M-domain: output request fields
+	assign M_APB_PADDR = m_addr_reg;
+	assign M_APB_PWRITE = m_write_reg;
+	assign M_APB_PWDATA = m_wdata_reg;
+	assign M_APB_PWSTRB = m_wstrb_reg;
+	assign M_APB_PPROT = m_pprot_reg;
+
+	// M-domain: capture response
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_rdata_reg <= {DW{1'b0}};
+			m_pslverr_reg <= 1'b0;
+		end else if (m_txn_active && M_APB_PREADY) begin
+			m_rdata_reg <= M_APB_PRDATA;
+			m_pslverr_reg <= M_APB_PSLVERR;
+		end
+	end
+
+	// M-domain: response valid
+	// m_resp_valid is set when transfer completes, cleared when S-domain accepts
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn)
+			m_resp_valid <= 1'b0;
+		else if (m_txn_active && M_APB_PREADY)
+			m_resp_valid <= 1'b1;
+		else if (s_resp_ready)
+			m_resp_valid <= 1'b0;
+	end
+
+endmodule

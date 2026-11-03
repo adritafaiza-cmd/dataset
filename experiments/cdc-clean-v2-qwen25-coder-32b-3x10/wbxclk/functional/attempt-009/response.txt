@@ -1,0 +1,130 @@
+```verilog
+module wbxclk #(
+		parameter	AW=32,
+				DW=32,
+				LGFIFO = 5
+	) (
+		input	wire			i_wb_clk, i_reset,
+		input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+		input	wire	[(AW-1):0]	i_wb_addr,
+		input	wire	[(DW-1):0]	i_wb_data,
+		input	wire	[(DW/8-1):0]	i_wb_sel,
+		output	wire			o_wb_stall,
+		output	reg			o_wb_ack,
+		output	reg	[(DW-1):0]	o_wb_data,
+		output	reg			o_wb_err,
+		input	wire			i_xclk_clk,
+		output	reg			o_xclk_cyc,
+		output	reg			o_xclk_stb,
+		output	reg			o_xclk_we,
+		output	reg	[(AW-1):0]	o_xclk_addr,
+		output	reg	[(DW-1):0]	o_xclk_data,
+		output	reg	[(DW/8-1):0]	o_xclk_sel,
+		input	wire			i_xclk_stall,
+		input	wire			i_xclk_ack,
+		input	wire	[(DW-1):0]	i_xclk_data,
+		input	wire			i_xclk_err
+	);
+
+	// FIFO for Wishbone to XCLK
+	reg [(AW-1):0]	fifo_wb_addr [0:(1<<LGFIFO)-1];
+	reg [(DW-1):0]	fifo_wb_data [0:(1<<LGFIFO)-1];
+	reg [(DW/8-1):0]	fifo_wb_sel [0:(1<<LGFIFO)-1];
+	reg			fifo_wb_we [0:(1<<LGFIFO)-1];
+	reg			fifo_wb_cyc [0:(1<<LGFIFO)-1];
+	reg			fifo_wb_stb [0:(1<<LGFIFO)-1];
+	reg [$clog2(1<<LGFIFO)-1:0]	fifo_wb_wr_ptr, fifo_wb_rd_ptr;
+	reg [$clog2(1<<LGFIFO):0]	fifo_wb_count;
+
+	// FIFO for XCLK to Wishbone
+	reg [(DW-1):0]	fifo_xclk_data [0:(1<<LGFIFO)-1];
+	reg			fifo_xclk_err [0:(1<<LGFIFO)-1];
+	reg			fifo_xclk_ack [0:(1<<LGFIFO)-1];
+	reg [$clog2(1<<LGFIFO)-1:0]	fifo_xclk_wr_ptr, fifo_xclk_rd_ptr;
+	reg [$clog2(1<<LGFIFO):0]	fifo_xclk_count;
+
+	// FIFO Write Logic for Wishbone to XCLK
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			fifo_wb_wr_ptr <= 0;
+			fifo_wb_count <= 0;
+		end else if (i_wb_stb && !i_xclk_stall && (fifo_wb_count < (1<<LGFIFO))) begin
+			fifo_wb_addr[fifo_wb_wr_ptr] <= i_wb_addr;
+			fifo_wb_data[fifo_wb_wr_ptr] <= i_wb_data;
+			fifo_wb_sel[fifo_wb_wr_ptr] <= i_wb_sel;
+			fifo_wb_we[fifo_wb_wr_ptr] <= i_wb_we;
+			fifo_wb_cyc[fifo_wb_wr_ptr] <= i_wb_cyc;
+			fifo_wb_stb[fifo_wb_wr_ptr] <= i_wb_stb;
+			fifo_wb_wr_ptr <= fifo_wb_wr_ptr + 1;
+			fifo_wb_count <= fifo_wb_count + 1;
+		end
+	end
+
+	// FIFO Read Logic for Wishbone to XCLK
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			fifo_wb_rd_ptr <= 0;
+			o_xclk_cyc <= 0;
+			o_xclk_stb <= 0;
+			o_xclk_we <= 0;
+			o_xclk_addr <= 0;
+			o_xclk_data <= 0;
+			o_xclk_sel <= 0;
+		end else if (fifo_wb_count > 0) begin
+			o_xclk_cyc <= fifo_wb_cyc[fifo_wb_rd_ptr];
+			o_xclk_stb <= fifo_wb_stb[fifo_wb_rd_ptr];
+			o_xclk_we <= fifo_wb_we[fifo_wb_rd_ptr];
+			o_xclk_addr <= fifo_wb_addr[fifo_wb_rd_ptr];
+			o_xclk_data <= fifo_wb_data[fifo_wb_rd_ptr];
+			o_xclk_sel <= fifo_wb_sel[fifo_wb_rd_ptr];
+			fifo_wb_rd_ptr <= fifo_wb_rd_ptr + 1;
+			fifo_wb_count <= fifo_wb_count - 1;
+		end else begin
+			o_xclk_cyc <= 0;
+			o_xclk_stb <= 0;
+			o_xclk_we <= 0;
+			o_xclk_addr <= 0;
+			o_xclk_data <= 0;
+			o_xclk_sel <= 0;
+		end
+	end
+
+	// FIFO Write Logic for XCLK to Wishbone
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			fifo_xclk_wr_ptr <= 0;
+			fifo_xclk_count <= 0;
+		end else if (i_xclk_ack && (fifo_xclk_count < (1<<LGFIFO))) begin
+			fifo_xclk_data[fifo_xclk_wr_ptr] <= i_xclk_data;
+			fifo_xclk_err[fifo_xclk_wr_ptr] <= i_xclk_err;
+			fifo_xclk_ack[fifo_xclk_wr_ptr] <= i_xclk_ack;
+			fifo_xclk_wr_ptr <= fifo_xclk_wr_ptr + 1;
+			fifo_xclk_count <= fifo_xclk_count + 1;
+		end
+	end
+
+	// FIFO Read Logic for XCLK to Wishbone
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			fifo_xclk_rd_ptr <= 0;
+			o_wb_ack <= 0;
+			o_wb_data <= 0;
+			o_wb_err <= 0;
+		end else if (fifo_xclk_count > 0) begin
+			o_wb_ack <= fifo_xclk_ack[fifo_xclk_rd_ptr];
+			o_wb_data <= fifo_xclk_data[fifo_xclk_rd_ptr];
+			o_wb_err <= fifo_xclk_err[fifo_xclk_rd_ptr];
+			fifo_xclk_rd_ptr <= fifo_xclk_rd_ptr + 1;
+			fifo_xclk_count <= fifo_xclk_count - 1;
+		end else begin
+			o_wb_ack <= 0;
+			o_wb_data <= 0;
+			o_wb_err <= 0;
+		end
+	end
+
+	// Backpressure signal
+	assign o_wb_stall = (fifo_wb_count >= (1<<LGFIFO));
+
+endmodule
+```<|im_end|>

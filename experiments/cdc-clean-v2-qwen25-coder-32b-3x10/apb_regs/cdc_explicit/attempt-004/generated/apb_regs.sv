@@ -1,0 +1,105 @@
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Internal signals
+  logic [ApbAddrWidth-1:0] addr;
+  logic [NoApbRegs-1:0]    reg_sel;
+  logic [RegDataWidth-1:0] reg_data;
+  logic [ApbDataWidth/8-1:0] byte_strobe;
+  logic                      write_enable;
+  logic                      read_enable;
+  logic                      psel;
+  logic                      penable;
+  logic                      pwrite;
+  apb_addr_t                 paddr;
+  logic [ApbDataWidth-1:0]   pwdata;
+  logic [ApbDataWidth-1:0]   prdata;
+  logic                      pready;
+  logic                      pslverr;
+
+  // Decode APB request
+  assign psel    = req_i.psel;
+  assign penable = req_i.penable;
+  assign pwrite  = req_i.pwrite;
+  assign paddr   = req_i.paddr;
+  assign pwdata  = req_i.pwdata;
+
+  // Address decoding
+  addr = paddr - base_addr_i;
+  reg_sel = (addr / AddrOffset) < NoApbRegs ? 1'b1 << (addr / AddrOffset) : '0;
+
+  // Byte strobe
+  byte_strobe = req_i.pstrb;
+
+  // Write enable and read enable
+  write_enable = psel & penable & pwrite;
+  read_enable  = psel & penable & ~pwrite;
+
+  // Register file
+  reg_data_t [NoApbRegs-1:0] reg_file;
+  reg_data_t [NoApbRegs-1:0] reg_next;
+
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        if (ReadOnly[i])
+          reg_file[i] <= reg_init_i[i];
+        else
+          reg_file[i] <= '0;
+      end
+    end else begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        if (reg_sel[i] & write_enable & ~ReadOnly[i]) begin
+          for (int j = 0; j < ApbDataWidth/8; j++) begin
+            if (byte_strobe[j]) begin
+              reg_next[i][j*8 +: 8] = pwdata[j*8 +: 8];
+            end else begin
+              reg_next[i][j*8 +: 8] = reg_file[i][j*8 +: 8];
+            end
+          end
+          reg_file[i] <= reg_next[i];
+        end
+      end
+    end
+  end
+
+  // Read data
+  always_comb begin
+    prdata = '0;
+    for (int i = 0; i < NoApbRegs; i++) begin
+      if (reg_sel[i] & read_enable) begin
+        prdata = ReadOnly[i] ? reg_init_i[i] : reg_file[i];
+      end
+    end
+  end
+
+  // APB response
+  assign pready  = psel;
+  assign pslverr = 1'b0;
+
+  assign resp_o.pready  = pready;
+  assign resp_o.pslverr = pslverr;
+  assign resp_o.prdata  = prdata;
+
+  // Output register values
+  assign reg_q_o = reg_file;
+
+endmodule

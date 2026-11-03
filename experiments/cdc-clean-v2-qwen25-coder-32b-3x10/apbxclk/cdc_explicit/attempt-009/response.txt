@@ -1,0 +1,159 @@
+```verilog
+module apbxclk #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		parameter [0:0]	OPT_REGISTERED = 1'b0,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH
+	) (
+		input	wire			S_APB_PCLK, S_PRESETn,
+		input	wire			S_APB_PSEL,
+		input	wire			S_APB_PENABLE,
+		output	reg			S_APB_PREADY,
+		input	wire	[AW-1:0]	S_APB_PADDR,
+		input	wire			S_APB_PWRITE,
+		input	wire	[DW-1:0]	S_APB_PWDATA,
+		input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+		input	wire	[2:0]		S_APB_PPROT,
+		output	wire	[DW-1:0]	S_APB_PRDATA,
+		output	wire			S_APB_PSLVERR,
+		input	wire			M_APB_PCLK,
+		output	reg			M_PRESETn,
+		output	reg			M_APB_PSEL,
+		output	reg			M_APB_PENABLE,
+		input	wire			M_APB_PREADY,
+		output	wire	[AW-1:0]	M_APB_PADDR,
+		output	wire			M_APB_PWRITE,
+		output	wire	[DW-1:0]	M_APB_PWDATA,
+		output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+		output	wire	[2:0]		M_APB_PPROT,
+		input	wire	[DW-1:0]	M_APB_PRDATA,
+		input	wire			M_APB_PSLVERR
+	);
+
+	// Source to Destination (S2D) signals
+	reg [AW-1:0]	s2d_addr;
+	reg			s2d_write;
+	reg [DW-1:0]	s2d_wdata;
+	reg [DW/8-1:0]	s2d_wstrb;
+	reg [2:0]		s2d_prot;
+	reg			s2d_valid;
+	reg			s2d_ready;
+
+	// Destination to Source (D2S) signals
+	reg [DW-1:0]	d2s_rdata;
+	reg			d2s_slverr;
+	reg			d2s_valid;
+	reg			d2s_ready;
+
+	// S2D Cross-domain synchronization
+	reg [AW-1:0]	s2d_addr_sync [1:0];
+	reg			s2d_write_sync [1:0];
+	reg [DW-1:0]	s2d_wdata_sync [1:0];
+	reg [DW/8-1:0]	s2d_wstrb_sync [1:0];
+	reg [2:0]		s2d_prot_sync [1:0];
+	reg			s2d_valid_sync [1:0];
+
+	// D2S Cross-domain synchronization
+	reg [DW-1:0]	d2s_rdata_sync [1:0];
+	reg			d2s_slverr_sync [1:0];
+	reg			d2s_valid_sync [1:0];
+
+	// Source side logic
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			S_APB_PREADY <= 1'b0;
+			s2d_valid <= 1'b0;
+		end else begin
+			if (S_APB_PSEL && S_APB_PENABLE && !s2d_valid) begin
+				s2d_addr <= S_APB_PADDR;
+				s2d_write <= S_APB_PWRITE;
+				s2d_wdata <= S_APB_PWDATA;
+				s2d_wstrb <= S_APB_PWSTRB;
+				s2d_prot <= S_APB_PPROT;
+				s2d_valid <= 1'b1;
+			end else if (s2d_ready) begin
+				s2d_valid <= 1'b0;
+			end
+			S_APB_PREADY <= s2d_ready;
+		end
+	end
+
+	// Source to Destination synchronization
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s2d_addr_sync <= {AW{1'b0}};
+			s2d_write_sync <= {2{1'b0}};
+			s2d_wdata_sync <= {DW{1'b0}};
+			s2d_wstrb_sync <= {DW/8{1'b0}};
+			s2d_prot_sync <= {3{1'b0}};
+			s2d_valid_sync <= {2{1'b0}};
+		end else begin
+			s2d_addr_sync[0] <= s2d_addr;
+			s2d_write_sync[0] <= s2d_write;
+			s2d_wdata_sync[0] <= s2d_wdata;
+			s2d_wstrb_sync[0] <= s2d_wstrb;
+			s2d_prot_sync[0] <= s2d_prot;
+			s2d_valid_sync[0] <= s2d_valid;
+
+			s2d_addr_sync[1] <= s2d_addr_sync[0];
+			s2d_write_sync[1] <= s2d_write_sync[0];
+			s2d_wdata_sync[1] <= s2d_wdata_sync[0];
+			s2d_wstrb_sync[1] <= s2d_wstrb_sync[0];
+			s2d_prot_sync[1] <= s2d_prot_sync[0];
+			s2d_valid_sync[1] <= s2d_valid_sync[0];
+		end
+	end
+
+	// Destination side logic
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			M_PRESETn <= 1'b0;
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			d2s_valid <= 1'b0;
+		end else begin
+			M_PRESETn <= 1'b1;
+			if (s2d_valid_sync[1] && !d2s_valid) begin
+				M_APB_PSEL <= 1'b1;
+				M_APB_PENABLE <= 1'b1;
+				d2s_valid <= 1'b1;
+			end else if (M_APB_PREADY) begin
+				M_APB_PSEL <= 1'b0;
+				M_APB_PENABLE <= 1'b0;
+				d2s_valid <= 1'b0;
+			end
+		end
+	end
+
+	// Destination to Source synchronization
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			d2s_rdata_sync <= {DW{1'b0}};
+			d2s_slverr_sync <= 1'b0;
+			d2s_valid_sync <= 1'b0;
+		end else begin
+			d2s_rdata_sync[0] <= M_APB_PRDATA;
+			d2s_slverr_sync[0] <= M_APB_PSLVERR;
+			d2s_valid_sync[0] <= d2s_valid;
+
+			d2s_rdata_sync[1] <= d2s_rdata_sync[0];
+			d2s_slverr_sync[1] <= d2s_slverr_sync[0];
+			d2s_valid_sync[1] <= d2s_valid_sync[0];
+		end
+	end
+
+	// Assignments
+	assign M_APB_PADDR = s2d_addr_sync[1];
+	assign M_APB_PWRITE = s2d_write_sync[1];
+	assign M_APB_PWDATA = s2d_wdata_sync[1];
+	assign M_APB_PWSTRB = s2d_wstrb_sync[1];
+	assign M_APB_PPROT = s2d_prot_sync[1];
+	assign s2d_ready = M_APB_PREADY;
+
+	assign S_APB_PRDATA = d2s_rdata_sync[1];
+	assign S_APB_PSLVERR = d2s_slverr_sync[1];
+	assign d2s_ready = S_APB_PREADY;
+
+endmodule
+```<|im_end|>

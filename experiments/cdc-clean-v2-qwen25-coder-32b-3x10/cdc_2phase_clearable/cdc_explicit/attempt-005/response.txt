@@ -1,0 +1,178 @@
+```systemverilog
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain signals
+  logic src_clear_synced;
+  logic src_clear_req;
+  logic src_clear_ack;
+  logic src_clear_pending;
+  logic src_valid_synced;
+  logic [WIDTH-1:0] src_data_synced;
+
+  // Destination domain signals
+  logic dst_clear_synced;
+  logic dst_clear_req;
+  logic dst_clear_ack;
+  logic dst_clear_pending;
+  logic dst_valid_synced;
+  logic [WIDTH-1:0] dst_data_synced;
+
+  // Synchronization FIFO
+  logic [WIDTH-1:0] sync_fifo [0:SYNC_STAGES-1];
+  logic [SYNC_STAGES-1:0] sync_valid;
+  logic [SYNC_STAGES-1:0] sync_ready;
+
+  // Source domain clear logic
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_clear_pending <= 1'b0;
+      src_clear_req <= 1'b0;
+    end else begin
+      if (src_clear_i) begin
+        src_clear_pending <= 1'b1;
+        src_clear_req <= 1'b1;
+      end else if (src_clear_ack) begin
+        src_clear_pending <= 1'b0;
+        src_clear_req <= 1'b0;
+      end
+    end
+  end
+
+  // Source domain clear pending output
+  assign src_clear_pending_o = src_clear_pending;
+
+  // Source domain clear request to destination domain
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_clear_req <= 1'b0;
+    end else begin
+      dst_clear_req <= src_clear_synced;
+    end
+  end
+
+  // Source domain clear acknowledge from destination domain
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_clear_ack <= 1'b0;
+    end else begin
+      src_clear_ack <= dst_clear_ack;
+    end
+  end
+
+  // Destination domain clear logic
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_clear_pending <= 1'b0;
+      dst_clear_ack <= 1'b0;
+    end else begin
+      if (dst_clear_i) begin
+        dst_clear_pending <= 1'b1;
+        dst_clear_ack <= 1'b0;
+      end else if (dst_clear_req) begin
+        dst_clear_pending <= 1'b1;
+        dst_clear_ack <= 1'b1;
+      end else if (dst_clear_ack) begin
+        dst_clear_pending <= 1'b0;
+        dst_clear_ack <= 1'b0;
+      end
+    end
+  end
+
+  // Destination domain clear pending output
+  assign dst_clear_pending_o = dst_clear_pending;
+
+  // Source domain clear request to source domain
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_clear_synced <= 1'b0;
+    end else begin
+      src_clear_synced <= dst_clear_ack;
+    end
+  end
+
+  // Source domain valid and data synchronization
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_synced <= 1'b0;
+      src_data_synced <= '0;
+    end else if (src_valid_i && !src_clear_i) begin
+      src_valid_synced <= 1'b1;
+      src_data_synced <= src_data_i;
+    end else if (sync_ready[0]) begin
+      src_valid_synced <= 1'b0;
+    end
+  end
+
+  // Destination domain valid and data synchronization
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_synced <= 1'b0;
+      dst_data_synced <= '0;
+    end else if (sync_valid[SYNC_STAGES-1]) begin
+      dst_valid_synced <= 1'b1;
+      dst_data_synced <= sync_fifo[SYNC_STAGES-1];
+    end else if (dst_ready_i) begin
+      dst_valid_synced <= 1'b0;
+    end
+  end
+
+  // Synchronization FIFO logic
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      sync_valid <= '0;
+      sync_fifo <= '{default: '0};
+    end else begin
+      for (int i = 0; i < SYNC_STAGES; i++) begin
+        if (i == 0) begin
+          sync_valid[i] <= src_valid_synced && !dst_clear_i;
+          sync_fifo[i] <= src_data_synced;
+        end else begin
+          sync_valid[i] <= sync_valid[i-1];
+          sync_fifo[i] <= sync_fifo[i-1];
+        end
+      end
+    end
+  end
+
+  // Synchronization ready signal
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      sync_ready <= '0;
+    end else begin
+      sync_ready[0] <= sync_valid[SYNC_STAGES-1] ? dst_ready_i : 1'b1;
+      for (int i = 1; i < SYNC_STAGES; i++) begin
+        sync_ready[i] <= sync_ready[i-1];
+      end
+    end
+  end
+
+  // Source domain ready output
+  assign src_ready_o = sync_ready[SYNC_STAGES-1] && !src_clear_i;
+
+  // Destination domain valid output
+  assign dst_valid_o = dst_valid_synced && !dst_clear_i;
+
+  // Destination domain data output
+  assign dst_data_o = dst_data_synced;
+
+endmodule
+```<|im_end|>

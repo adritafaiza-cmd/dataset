@@ -1,0 +1,251 @@
+module wbxclk #(
+	parameter AW=32,
+	parameter DW=32,
+	parameter LGFIFO = 5
+) (
+	input	wire			i_wb_clk, i_reset,
+	input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+	input	wire	[(AW-1):0]	i_wb_addr,
+	input	wire	[(DW-1):0]	i_wb_data,
+	input	wire	[(DW/8-1):0]	i_wb_sel,
+	output	wire			o_wb_stall,
+	output	reg			o_wb_ack,
+	output	reg	[(DW-1):0]	o_wb_data,
+	output	reg			o_wb_err,
+	input	wire			i_xclk_clk,
+	output	reg			o_xclk_cyc,
+	output	reg			o_xclk_stb,
+	output	reg			o_xclk_we,
+	output	reg	[(AW-1):0]	o_xclk_addr,
+	output	reg	[(DW-1):0]	o_xclk_data,
+	output	reg	[(DW/8-1):0]	o_xclk_sel,
+	input	wire			i_xclk_stall,
+	input	wire			i_xclk_ack,
+	input	wire	[(DW-1):0]	i_xclk_data,
+	input	wire			i_xclk_err
+);
+
+	localparam FIFO_DEPTH = 1 << LGFIFO;
+	localparam FIFO_PTR_W = LGFIFO;
+
+	// Request FIFO (wb -> xclk)
+	reg [DW-1:0] req_fifo_data [0:FIFO_DEPTH-1];
+	reg [AW-1:0] req_fifo_addr [0:FIFO_DEPTH-1];
+	reg [DW/8-1:0] req_fifo_sel [0:FIFO_DEPTH-1];
+	reg req_fifo_we [0:FIFO_DEPTH-1];
+	reg [FIFO_PTR_W-1:0] req_wr_ptr, req_rd_ptr;
+	reg [FIFO_PTR_W:0] req_count;
+
+	// Response FIFO (xclk -> wb)
+	reg [DW-1:0] rsp_fifo_data [0:FIFO_DEPTH-1];
+	reg rsp_fifo_err [0:FIFO_DEPTH-1];
+	reg [FIFO_PTR_W-1:0] rsp_wr_ptr, rsp_rd_ptr;
+	reg [FIFO_PTR_W:0] rsp_count;
+
+	// Synchronization signals
+	reg [1:0] req_full_sync, req_empty_sync, rsp_full_sync, rsp_empty_sync;
+	reg req_full, req_empty, rsp_full, rsp_empty;
+
+	// Request FIFO write (wb clock domain)
+	wire req_wr_en = i_wb_cyc & i_wb_stb & ~o_wb_stall;
+	wire req_full_next = req_count == FIFO_DEPTH;
+	wire req_empty_next = req_count == 0;
+
+	// Request FIFO read (xclk clock domain)
+	wire req_rd_en = ~req_empty & ~i_xclk_stall;
+
+	// Response FIFO write (xclk clock domain)
+	wire rsp_wr_en = i_xclk_ack;
+
+	// Response FIFO read (wb clock domain)
+	wire rsp_rd_en = ~rsp_empty;
+
+	// o_wb_stall: high when request FIFO is full
+	assign o_wb_stall = req_full;
+
+	// Request FIFO write pointer (wb clock)
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_wr_ptr <= {FIFO_PTR_W{1'b0}};
+			req_count <= {(FIFO_PTR_W+1){1'b0}};
+		end else begin
+			if (req_wr_en && !req_rd_en) begin
+				req_wr_ptr <= req_wr_ptr + 1'b1;
+				req_count <= req_count + 1'b1;
+			end else if (!req_wr_en && req_rd_en) begin
+				req_wr_ptr <= req_wr_ptr;
+				req_count <= req_count - 1'b1;
+			end
+		end
+	end
+
+	// Request FIFO read pointer (xclk clock)
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_rd_ptr <= {FIFO_PTR_W{1'b0}};
+		end else if (req_rd_en) begin
+			req_rd_ptr <= req_rd_ptr + 1'b1;
+		end
+	end
+
+	// Request FIFO data write (wb clock)
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			// No need to clear data, but clear control
+		end else if (req_wr_en) begin
+			req_fifo_data[req_wr_ptr] <= i_wb_data;
+			req_fifo_addr[req_wr_ptr] <= i_wb_addr;
+			req_fifo_sel[req_wr_ptr] <= i_wb_sel;
+			req_fifo_we[req_wr_ptr] <= i_wb_we;
+		end
+	end
+
+	// Response FIFO write pointer (xclk clock)
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rsp_wr_ptr <= {FIFO_PTR_W{1'b0}};
+			rsp_count <= {(FIFO_PTR_W+1){1'b0}};
+		end else begin
+			if (rsp_wr_en && !rsp_rd_en) begin
+				rsp_wr_ptr <= rsp_wr_ptr + 1'b1;
+				rsp_count <= rsp_count + 1'b1;
+			end else if (!rsp_wr_en && rsp_rd_en) begin
+				rsp_wr_ptr <= rsp_wr_ptr;
+				rsp_count <= rsp_count - 1'b1;
+			end
+		end
+	end
+
+	// Response FIFO read pointer (wb clock)
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rsp_rd_ptr <= {FIFO_PTR_W{1'b0}};
+		end else if (rsp_rd_en) begin
+			rsp_rd_ptr <= rsp_rd_ptr + 1'b1;
+		end
+	end
+
+	// Response FIFO data write (xclk clock)
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			// No need to clear data
+		end else if (rsp_wr_en) begin
+			rsp_fifo_data[rsp_wr_ptr] <= i_xclk_data;
+			rsp_fifo_err[rsp_wr_ptr] <= i_xclk_err;
+		end
+	end
+
+	// Synchronize req_full from wb to xclk
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_full <= 1'b0;
+		end else begin
+			req_full <= req_count == FIFO_DEPTH;
+		end
+	end
+
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_full_sync <= 2'b00;
+		end else begin
+			req_full_sync <= {req_full_sync[0], req_full};
+		end
+	end
+
+	assign req_full = req_full_sync[1];
+
+	// Synchronize req_empty from wb to xclk
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_empty <= 1'b1;
+		end else begin
+			req_empty <= req_count == 0;
+		end
+	end
+
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_empty_sync <= 2'b11;
+		end else begin
+			req_empty_sync <= {req_empty_sync[0], req_empty};
+		end
+	end
+
+	assign req_empty = req_empty_sync[1];
+
+	// Synchronize rsp_full from xclk to wb
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rsp_full <= 1'b0;
+		end else begin
+			rsp_full <= rsp_count == FIFO_DEPTH;
+		end
+	end
+
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rsp_full_sync <= 2'b00;
+		end else begin
+			rsp_full_sync <= {rsp_full_sync[0], rsp_full};
+		end
+	end
+
+	assign rsp_full = rsp_full_sync[1];
+
+	// Synchronize rsp_empty from xclk to wb
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rsp_empty <= 1'b1;
+		end else begin
+			rsp_empty <= rsp_count == 0;
+		end
+	end
+
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rsp_empty_sync <= 2'b11;
+		end else begin
+			rsp_empty_sync <= {rsp_empty_sync[0], rsp_empty};
+		end
+	end
+
+	assign rsp_empty = rsp_empty_sync[1];
+
+	// xclk side: drive o_xclk_* from request FIFO
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			o_xclk_cyc <= 1'b0;
+			o_xclk_stb <= 1'b0;
+			o_xclk_we <= 1'b0;
+			o_xclk_addr <= {AW{1'b0}};
+			o_xclk_data <= {DW{1'b0}};
+			o_xclk_sel <= {(DW/8){1'b0}};
+		end else if (req_rd_en) begin
+			o_xclk_cyc <= 1'b1;
+			o_xclk_stb <= 1'b1;
+			o_xclk_we <= req_fifo_we[req_rd_ptr];
+			o_xclk_addr <= req_fifo_addr[req_rd_ptr];
+			o_xclk_data <= req_fifo_data[req_rd_ptr];
+			o_xclk_sel <= req_fifo_sel[req_rd_ptr];
+		end else begin
+			o_xclk_cyc <= 1'b0;
+			o_xclk_stb <= 1'b0;
+		end
+	end
+
+	// wb side: drive o_wb_ack, o_wb_data, o_wb_err from response FIFO
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			o_wb_ack <= 1'b0;
+			o_wb_data <= {DW{1'b0}};
+			o_wb_err <= 1'b0;
+		end else if (rsp_rd_en) begin
+			o_wb_ack <= 1'b1;
+			o_wb_data <= rsp_fifo_data[rsp_rd_ptr];
+			o_wb_err <= rsp_fifo_err[rsp_rd_ptr];
+		end else begin
+			o_wb_ack <= 1'b0;
+		end
+	end
+
+endmodule

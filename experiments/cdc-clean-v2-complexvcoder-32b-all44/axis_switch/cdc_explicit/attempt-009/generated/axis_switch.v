@@ -1,0 +1,269 @@
+module axis_switch #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter S_ID_WIDTH = 8,
+    parameter M_ID_WIDTH = S_ID_WIDTH+$clog2(S_COUNT),
+    parameter M_DEST_WIDTH = 1,
+    parameter S_DEST_WIDTH = M_DEST_WIDTH+$clog2(M_COUNT),
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter M_BASE = 0,
+    parameter M_TOP = 0,
+    parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
+    parameter UPDATE_TID = 0,
+    parameter S_REG_TYPE = 0,
+    parameter M_REG_TYPE = 2,
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 1
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    /*
+     * AXI Stream inputs
+     */
+    input  wire [S_COUNT*DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [S_COUNT*KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire [S_COUNT-1:0]               s_axis_tvalid,
+    output wire [S_COUNT-1:0]               s_axis_tready,
+    input  wire [S_COUNT-1:0]               s_axis_tlast,
+    input  wire [S_COUNT*S_ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [S_COUNT*USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI Stream outputs
+     */
+    output wire [M_COUNT*DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [M_COUNT*KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire [M_COUNT-1:0]               m_axis_tvalid,
+    input  wire [M_COUNT-1:0]               m_axis_tready,
+    output wire [M_COUNT-1:0]               m_axis_tlast,
+    output wire [M_COUNT*M_ID_WIDTH-1:0]    m_axis_tid,
+    output wire [M_COUNT*M_DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [M_COUNT*USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    /*
+     * Internal signals
+     */
+    reg [S_COUNT-1:0]                       s_axis_tready_int;
+    reg [M_COUNT-1:0]                       m_axis_tvalid_int;
+    reg [M_COUNT*M_ID_WIDTH-1:0]            m_axis_tid_int;
+    reg [M_COUNT*M_DEST_WIDTH-1:0]          m_axis_tdest_int;
+    reg [M_COUNT*USER_WIDTH-1:0]            m_axis_tuser_int;
+    reg [M_COUNT*DATA_WIDTH-1:0]            m_axis_tdata_int;
+    reg [M_COUNT*KEEP_WIDTH-1:0]            m_axis_tkeep_int;
+    reg [M_COUNT-1:0]                       m_axis_tlast_int;
+
+    reg [S_COUNT-1:0] [DATA_WIDTH-1:0]      s_axis_tdata_reg;
+    reg [S_COUNT-1:0] [KEEP_WIDTH-1:0]      s_axis_tkeep_reg;
+    reg [S_COUNT-1:0]                       s_axis_tvalid_reg;
+    reg [S_COUNT-1:0]                       s_axis_tlast_reg;
+    reg [S_COUNT-1:0] [S_ID_WIDTH-1:0]      s_axis_tid_reg;
+    reg [S_COUNT-1:0] [S_DEST_WIDTH-1:0]    s_axis_tdest_reg;
+    reg [S_COUNT-1:0] [USER_WIDTH-1:0]      s_axis_tuser_reg;
+
+    reg [S_COUNT-1:0] [M_COUNT-1:0]         request;
+    reg [M_COUNT-1:0] [S_COUNT-1:0]         grant;
+    reg [M_COUNT-1:0] [S_COUNT-1:0]         grant_ff;
+    reg [M_COUNT-1:0] [S_COUNT-1:0]         grant_next;
+    reg [M_COUNT-1:0] [S_COUNT-1:0]         grant_round_robin;
+    reg [M_COUNT-1:0] [S_COUNT-1:0]         grant_round_robin_next;
+    reg [M_COUNT-1:0] [S_COUNT-1:0]         grant_round_robin_ff;
+    reg [M_COUNT-1:0] [S_COUNT-1:0]         grant_round_robin_shift;
+    reg [M_COUNT-1:0] [$clog2(S_COUNT):0]   grant_round_robin_ptr;
+
+    /*
+     * Register inputs
+     */
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            s_axis_tdata_reg  <= {S_COUNT{DATA_WIDTH'(0)}};
+            s_axis_tkeep_reg  <= {S_COUNT{KEEP_WIDTH'(0)}};
+            s_axis_tvalid_reg <= {S_COUNT{1'b0}};
+            s_axis_tlast_reg  <= {S_COUNT{1'b0}};
+            s_axis_tid_reg    <= {S_COUNT{S_ID_WIDTH'(0)}};
+            s_axis_tdest_reg  <= {S_COUNT{S_DEST_WIDTH'(0)}};
+            s_axis_tuser_reg  <= {S_COUNT{USER_WIDTH'(0)}};
+        end else begin
+            if (S_REG_TYPE == 0) begin
+                s_axis_tdata_reg  <= s_axis_tdata;
+                s_axis_tkeep_reg  <= s_axis_tkeep;
+                s_axis_tvalid_reg <= s_axis_tvalid;
+                s_axis_tlast_reg  <= s_axis_tlast;
+                s_axis_tid_reg    <= s_axis_tid;
+                s_axis_tdest_reg  <= s_axis_tdest;
+                s_axis_tuser_reg  <= s_axis_tuser;
+            end else if (S_REG_TYPE == 1 && s_axis_tready_int == s_axis_tvalid) begin
+                s_axis_tdata_reg  <= s_axis_tdata;
+                s_axis_tkeep_reg  <= s_axis_tkeep;
+                s_axis_tvalid_reg <= s_axis_tvalid;
+                s_axis_tlast_reg  <= s_axis_tlast;
+                s_axis_tid_reg    <= s_axis_tid;
+                s_axis_tdest_reg  <= s_axis_tdest;
+                s_axis_tuser_reg  <= s_axis_tuser;
+            end
+        end
+    end
+
+    /*
+     * Generate request signals
+     */
+    genvar i, j;
+    generate
+        for (i = 0; i < S_COUNT; i = i + 1) begin : gen_request
+            assign request[i] = s_axis_tvalid_reg[i];
+        end
+    endgenerate
+
+    /*
+     * Generate round-robin arbiter
+     */
+    generate
+        for (i = 0; i < M_COUNT; i = i + 1) begin : gen_arbiter
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    grant_round_robin_ff[i] <= {S_COUNT{1'b0}};
+                    grant_round_robin_ptr[i] <= {$clog2(S_COUNT)'(0)};
+                end else begin
+                    grant_round_robin_ff[i] <= grant_round_robin_next[i];
+                    if (grant_round_robin[i] != grant_round_robin_next[i]) begin
+                        grant_round_robin_ptr[i] <= grant_round_robin_ptr[i] + 1;
+                    end
+                end
+            end
+
+            assign grant_round_robin_shift[i] = {grant_round_robin_ff[i][S_COUNT-2:0], grant_round_robin_ff[i][S_COUNT-1]};
+
+            always @(*) begin
+                if (grant_round_robin_ptr[i] == S_COUNT-1) begin
+                    grant_round_robin_next[i] = grant_round_robin_shift[i];
+                end else begin
+                    grant_round_robin_next[i] = grant_round_robin_ff[i];
+                end
+            end
+
+            assign grant_round_robin[i] = grant_round_robin_next[i] & request;
+
+            always @(*) begin
+                grant_next[i] = grant_round_robin[i];
+            end
+
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    grant_ff[i] <= {S_COUNT{1'b0}};
+                end else begin
+                    grant_ff[i] <= grant_next[i];
+                end
+            end
+
+            assign grant[i] = grant_ff[i];
+        end
+    endgenerate
+
+    /*
+     * Route data to outputs
+     */
+    generate
+        for (i = 0; i < M_COUNT; i = i + 1) begin : gen_route
+            reg [S_COUNT-1:0] [DATA_WIDTH-1:0]  m_axis_tdata_route;
+            reg [S_COUNT-1:0] [KEEP_WIDTH-1:0]  m_axis_tkeep_route;
+            reg [S_COUNT-1:0]                   m_axis_tvalid_route;
+            reg [S_COUNT-1:0]                   m_axis_tlast_route;
+            reg [S_COUNT-1:0] [S_ID_WIDTH-1:0]  m_axis_tid_route;
+            reg [S_COUNT-1:0] [S_DEST_WIDTH-1:0]m_axis_tdest_route;
+            reg [S_COUNT-1:0] [USER_WIDTH-1:0]  m_axis_tuser_route;
+
+            assign m_axis_tvalid_int[i] = |m_axis_tvalid_route;
+
+            always @(*) begin
+                m_axis_tdata_route   = {S_COUNT{DATA_WIDTH'(0)}};
+                m_axis_tkeep_route   = {S_COUNT{KEEP_WIDTH'(0)}};
+                m_axis_tvalid_route  = {S_COUNT{1'b0}};
+                m_axis_tlast_route   = {S_COUNT{1'b0}};
+                m_axis_tid_route     = {S_COUNT{S_ID_WIDTH'(0)}};
+                m_axis_tdest_route   = {S_COUNT{S_DEST_WIDTH'(0)}};
+                m_axis_tuser_route   = {S_COUNT{USER_WIDTH'(0)}};
+
+                for (j = 0; j < S_COUNT; j = j + 1) begin
+                    if (grant[i][j] && (s_axis_tdest_reg[j][S_DEST_WIDTH-1:M_DEST_WIDTH] == i)) begin
+                        m_axis_tdata_route[j]   = s_axis_tdata_reg[j];
+                        m_axis_tkeep_route[j]   = s_axis_tkeep_reg[j];
+                        m_axis_tvalid_route[j]  = s_axis_tvalid_reg[j];
+                        m_axis_tlast_route[j]   = s_axis_tlast_reg[j];
+                        m_axis_tid_route[j]     = s_axis_tid_reg[j];
+                        m_axis_tdest_route[j]   = s_axis_tdest_reg[j];
+                        m_axis_tuser_route[j]   = s_axis_tuser_reg[j];
+                    end
+                end
+            end
+
+            assign m_axis_tdata_int[i*DATA_WIDTH+:DATA_WIDTH]   = m_axis_tdata_route[0];
+            assign m_axis_tkeep_int[i*KEEP_WIDTH+:KEEP_WIDTH]   = m_axis_tkeep_route[0];
+            assign m_axis_tlast_int[i]                          = m_axis_tlast_route[0];
+            assign m_axis_tid_int[i*M_ID_WIDTH+:M_ID_WIDTH]     = m_axis_tid_route[0];
+            assign m_axis_tdest_int[i*M_DEST_WIDTH+:M_DEST_WIDTH] = m_axis_tdest_route[0];
+            assign m_axis_tuser_int[i*USER_WIDTH+:USER_WIDTH]   = m_axis_tuser_route[0];
+        end
+    endgenerate
+
+    /*
+     * Generate ready signals
+     */
+    generate
+        for (i = 0; i < S_COUNT; i = i + 1) begin : gen_ready
+            assign s_axis_tready_int[i] = |(grant[*][i] & m_axis_tready);
+        end
+    endgenerate
+
+    /*
+     * Register outputs
+     */
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            m_axis_tdata_int  <= {M_COUNT{DATA_WIDTH'(0)}};
+            m_axis_tkeep_int  <= {M_COUNT{KEEP_WIDTH'(0)}};
+            m_axis_tvalid_int <= {M_COUNT{1'b0}};
+            m_axis_tlast_int  <= {M_COUNT{1'b0}};
+            m_axis_tid_int    <= {M_COUNT{M_ID_WIDTH'(0)}};
+            m_axis_tdest_int  <= {M_COUNT{M_DEST_WIDTH'(0)}};
+            m_axis_tuser_int  <= {M_COUNT{USER_WIDTH'(0)}};
+        end else begin
+            if (M_REG_TYPE == 2) begin
+                m_axis_tdata_int  <= m_axis_tdata_int;
+                m_axis_tkeep_int  <= m_axis_tkeep_int;
+                m_axis_tvalid_int <= m_axis_tvalid_int;
+                m_axis_tlast_int  <= m_axis_tlast_int;
+                m_axis_tid_int    <= m_axis_tid_int;
+                m_axis_tdest_int  <= m_axis_tdest_int;
+                m_axis_tuser_int  <= m_axis_tuser_int;
+            end else if (M_REG_TYPE == 0 && m_axis_tready == m_axis_tvalid_int) begin
+                m_axis_tdata_int  <= m_axis_tdata_int;
+                m_axis_tkeep_int  <= m_axis_tkeep_int;
+                m_axis_tvalid_int <= m_axis_tvalid_int;
+                m_axis_tlast_int  <= m_axis_tlast_int;
+                m_axis_tid_int    <= m_axis_tid_int;
+                m_axis_tdest_int  <= m_axis_tdest_int;
+                m_axis_tuser_int  <= m_axis_tuser_int;
+            end
+        end
+    end
+
+    /*
+     * Assign outputs
+     */
+    assign s_axis_tready = s_axis_tready_int;
+    assign m_axis_tdata  = m_axis_tdata_int;
+    assign m_axis_tkeep  = m_axis_tkeep_int;
+    assign m_axis_tvalid = m_axis_tvalid_int;
+    assign m_axis_tlast  = m_axis_tlast_int;
+    assign m_axis_tid    = m_axis_tid_int;
+    assign m_axis_tdest  = m_axis_tdest_int;
+    assign m_axis_tuser  = m_axis_tuser_int;
+
+endmodule

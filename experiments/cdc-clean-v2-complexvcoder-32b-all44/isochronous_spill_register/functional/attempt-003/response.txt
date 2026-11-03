@@ -1,0 +1,185 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "isochronous_spill_register",
+            "function": "2-deep valid/ready spill buffer between related clocks",
+            "parameters": [
+                {
+                    "name": "WIDTH",
+                    "value": "8"
+                }
+            ],
+            "ports": [
+                {
+                    "name": "src_clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "src_clk_i"
+                },
+                {
+                    "name": "src_rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "src_clk_i"
+                },
+                {
+                    "name": "src_valid_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "src_clk_i"
+                },
+                {
+                    "name": "src_ready_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "src_clk_i"
+                },
+                {
+                    "name": "src_data_i",
+                    "direction": "input",
+                    "width": "WIDTH",
+                    "clock_domain": "src_clk_i"
+                },
+                {
+                    "name": "dst_clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "dst_clk_i"
+                },
+                {
+                    "name": "dst_rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "dst_clk_i"
+                },
+                {
+                    "name": "dst_valid_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "dst_clk_i"
+                },
+                {
+                    "name": "dst_ready_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "dst_clk_i"
+                },
+                {
+                    "name": "dst_data_o",
+                    "direction": "output",
+                    "width": "WIDTH",
+                    "clock_domain": "dst_clk_i"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {
+                    "name": "src_reg_valid",
+                    "width": 1
+                },
+                {
+                    "name": "src_reg_data",
+                    "width": "WIDTH"
+                },
+                {
+                    "name": "dst_reg_valid",
+                    "width": 1
+                },
+                {
+                    "name": "dst_reg_data",
+                    "width": "WIDTH"
+                },
+                {
+                    "name": "src_ready",
+                    "width": 1
+                },
+                {
+                    "name": "dst_valid",
+                    "width": 1
+                }
+            ],
+            "behavior": [
+                "Every accepted source beat appears exactly once at the destination, in order.",
+                "The buffer absorbs a short rate mismatch between the related clocks.",
+                "After reset dest is idle.",
+                "src_ready_o is high when the buffer is not full.",
+                "dst_valid_o is high when there is data to be read from the buffer.",
+                "Data is transferred from source to buffer on the rising edge of src_clk_i when src_valid_i is high and src_ready_o is high.",
+                "Data is transferred from buffer to destination on the rising edge of dst_clk_i when dst_ready_i is high and dst_valid_o is high.",
+                "The buffer is 2-deep, meaning it can hold up to 2 data items.",
+                "Reset semantics: src_rst_ni and dst_rst_ni are active-low, meaning the buffer is reset when they are low."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    reg [WIDTH-1:0] src_reg_data [1:0];
+    reg             src_reg_valid [1:0];
+    reg [1:0]       src_ptr;
+    reg [1:0]       dst_ptr;
+    reg [1:0]       src_count;
+    reg [1:0]       dst_count;
+
+    // Source clock domain logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_reg_valid <= 2'b0;
+            src_ptr <= 2'b0;
+            src_count <= 2'b0;
+        end else if (src_ready_o && src_valid_i) begin
+            src_reg_data[src_ptr] <= src_data_i;
+            src_reg_valid[src_ptr] <= 1'b1;
+            src_ptr <= src_ptr + 1;
+            src_count <= src_count + 1;
+        end else if (dst_valid_o && dst_ready_i) begin
+            src_count <= src_count - 1;
+        end
+    end
+
+    // Destination clock domain logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_reg_valid <= 2'b0;
+            dst_ptr <= 2'b0;
+            dst_count <= 2'b0;
+        end else if (dst_ready_i && dst_valid_o) begin
+            dst_reg_valid[dst_ptr] <= 1'b0;
+            dst_ptr <= dst_ptr + 1;
+            dst_count <= dst_count - 1;
+        end else if (src_ready_o && src_valid_i) begin
+            dst_count <= dst_count + 1;
+        end
+    end
+
+    // Source ready signal
+    assign src_ready_o = (src_count < 2);
+
+    // Destination valid signal
+    assign dst_valid_o = (dst_count > 0);
+
+    // Destination data output
+    assign dst_data_o = src_reg_data[dst_ptr];
+
+endmodule
+```

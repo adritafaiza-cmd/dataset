@@ -1,0 +1,259 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "apbslave",
+      "function": "APB slave that supports ordinary setup and access phases, reads, and byte-strobed writes.",
+      "parameters": [
+        {
+          "name": "C_APB_ADDR_WIDTH",
+          "value": "12"
+        },
+        {
+          "name": "C_APB_DATA_WIDTH",
+          "value": "32"
+        }
+      ],
+      "ports": [
+        {
+          "name": "PCLK",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PRESETn",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PSEL",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PENABLE",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PREADY",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PADDR",
+          "direction": "input",
+          "width": "C_APB_ADDR_WIDTH",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PWRITE",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PWDATA",
+          "direction": "input",
+          "width": "C_APB_DATA_WIDTH",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PWSTRB",
+          "direction": "input",
+          "width": "C_APB_DATA_WIDTH/8",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PPROT",
+          "direction": "input",
+          "width": 3,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PRDATA",
+          "direction": "output",
+          "width": "C_APB_DATA_WIDTH",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PSLVERR",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "PCLK"
+        }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        {
+          "name": "AW",
+          "width": "C_APB_ADDR_WIDTH"
+        },
+        {
+          "name": "DW",
+          "width": "C_APB_DATA_WIDTH"
+        },
+        {
+          "name": "APBLSB",
+          "width": "$clog2(C_APB_DATA_WIDTH)-3"
+        },
+        {
+          "name": "state",
+          "width": 2
+        },
+        {
+          "name": "next_state",
+          "width": 2
+        },
+        {
+          "name": "reg_data",
+          "width": "C_APB_DATA_WIDTH"
+        },
+        {
+          "name": "reg_addr",
+          "width": "C_APB_ADDR_WIDTH"
+        },
+        {
+          "name": "reg_write",
+          "width": 1
+        },
+        {
+          "name": "reg_wstrb",
+          "width": "C_APB_DATA_WIDTH/8"
+        },
+        {
+          "name": "reg_rdata",
+          "width": "C_APB_DATA_WIDTH"
+        },
+        {
+          "name": "reg_slverr",
+          "width": 1
+        }
+      ],
+      "behavior": [
+        "On reset (PRESETn low), the APB slave should be idle.",
+        "When PRESETn is high, the state machine should transition based on the PSEL and PENABLE signals.",
+        "If PSEL is high and PENABLE is low, the slave should enter the SETUP state.",
+        "If PSEL is high and PENABLE is high, the slave should enter the ACCESS state.",
+        "In the SETUP state, the slave should capture the address (PADDR), write enable (PWRITE), write data (PWDATA), and write strobe (PWSTRB) signals.",
+        "In the ACCESS state, the slave should perform a read or write operation based on the captured signals.",
+        "For reads, the slave should output the data from the register file to PRDATA.",
+        "For writes, the slave should update the register file based on the captured write strobe.",
+        "After the ACCESS state, the slave should assert PREADY to indicate that the access is complete.",
+        "The PSLVERR signal should be asserted if there is a protection error (PPROT is not equal to 0), otherwise it should remain low."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module apbslave #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH,
+		localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+	) (
+		input	wire			PCLK, PRESETn,
+		input	wire			PSEL,
+		input	wire			PENABLE,
+		output	reg			PREADY,
+		input	wire	[AW-1:0]	PADDR,
+		input	wire			PWRITE,
+		input	wire	[DW-1:0]	PWDATA,
+		input	wire	[DW/8-1:0]	PWSTRB,
+		input	wire	[2:0]		PPROT,
+		output	reg	[DW-1:0]	PRDATA,
+		output	wire			PSLVERR
+	);
+
+	// Internal signals
+	reg	[AW-1:0]	reg_addr;
+	reg			reg_write;
+	reg	[DW-1:0]	reg_wdata;
+	reg	[DW/8-1:0]	reg_wstrb;
+	reg	[DW-1:0]	reg_rdata;
+	reg			reg_slverr;
+	reg	[1:0]		state;
+	reg	[1:0]		next_state;
+
+	// Define states
+	localparam	IDLE = 2'b00;
+	localparam	SETUP = 2'b01;
+	localparam	ACCESS = 2'b10;
+
+	// State machine
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			state <= IDLE;
+		end else begin
+			state <= next_state;
+		end
+	end
+
+	// Next state logic
+	always @(*) begin
+		next_state = state;
+		case (state)
+			IDLE: begin
+				if (PSEL && !PENABLE) begin
+					next_state = SETUP;
+				end
+			end
+			SETUP: begin
+				if (PSEL && PENABLE) begin
+					next_state = ACCESS;
+				end
+			end
+			ACCESS: begin
+				next_state = IDLE;
+			end
+		endcase
+	end
+
+	// Capture signals in SETUP state
+	always @(posedge PCLK) begin
+		if (state == SETUP) begin
+			reg_addr <= PADDR;
+			reg_write <= PWRITE;
+			reg_wdata <= PWDATA;
+			reg_wstrb <= PWSTRB;
+		end
+	end
+
+	// Register file
+	reg [DW-1:0] register_file [0:(1<<AW)-1];
+
+	// Read/Write operations in ACCESS state
+	always @(posedge PCLK) begin
+		if (state == ACCESS) begin
+			if (reg_write) begin
+				for (integer i = 0; i < DW/8; i = i + 1) begin
+					if (reg_wstrb[i]) begin
+						register_file[reg_addr][8*i +: 8] <= reg_wdata[8*i +: 8];
+					end
+				end
+			end else begin
+				reg_rdata <= register_file[reg_addr];
+			end
+		end
+	end
+
+	// Output data and signals
+	always @(*) begin
+		PRDATA = (state == ACCESS && !reg_write) ? reg_rdata : {DW{1'b0}};
+		PREADY = (state == ACCESS);
+		PSLVERR = (PPROT != 3'b000);
+	end
+
+endmodule
+```

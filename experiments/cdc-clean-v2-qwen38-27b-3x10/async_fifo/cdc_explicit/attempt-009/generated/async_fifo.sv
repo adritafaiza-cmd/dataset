@@ -1,0 +1,151 @@
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWFULL_THRESH = DEPTH - 2;
+    localparam AEMPTY_THRESH = 1;
+
+    // Write domain
+    reg [ASIZE:0] wptr;
+    reg [ASIZE:0] rptr_w;
+    reg [ASIZE:0] rptr_w_sync1;
+    reg [ASIZE:0] rptr_w_sync2;
+
+    // Read domain
+    reg [ASIZE:0] rptr;
+    reg [ASIZE:0] wptr_r;
+    reg [ASIZE:0] wptr_r_sync1;
+    reg [ASIZE:0] wptr_r_sync2;
+
+    // Memory
+    reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+    // Read data pipeline
+    reg [DSIZE-1:0] rdata_pipe1;
+    reg [DSIZE-1:0] rdata_pipe2;
+    reg             rdata_valid1;
+    reg             rdata_valid2;
+
+    // Write enable
+    wire wvalid = winc & ~wfull;
+
+    // Read enable
+    wire rvalid = rinc & ~rempty;
+
+    // Write pointer increment
+    wire wptr_inc = wvalid;
+
+    // Read pointer increment
+    wire rptr_inc = rvalid;
+
+    // Full condition: write pointer catches up to read pointer (mod DEPTH)
+    // wfull = (wptr[ASIZE] != rptr_w_sync2[ASIZE]) && (wptr[ASIZE-1:0] == rptr_w_sync2[ASIZE-1:0])
+    wire wfull_internal = (wptr[ASIZE] != rptr_w_sync2[ASIZE]) && 
+                          (wptr[ASIZE-1:0] == rptr_w_sync2[ASIZE-1:0]);
+
+    // Almost full: distance to full is 2
+    // Number of entries = (wptr - rptr_w_sync2) mod DEPTH
+    // awfull when entries >= DEPTH - 2
+    wire [ASIZE:0] wdiff = wptr - rptr_w_sync2;
+    wire awfull_internal = (wdiff >= AWFULL_THRESH);
+
+    // Empty condition: read pointer catches up to write pointer
+    // rempty = (rptr[ASIZE] != wptr_r_sync2[ASIZE]) && (rptr[ASIZE-1:0] == wptr_r_sync2[ASIZE-1:0])
+    wire rempty_internal = (rptr[ASIZE] != wptr_r_sync2[ASIZE]) && 
+                           (rptr[ASIZE-1:0] == wptr_r_sync2[ASIZE-1:0]);
+
+    // Almost empty: entries <= 1
+    wire [ASIZE:0] rdiff = wptr_r_sync2 - rptr;
+    wire arempty_internal = (rdiff <= AEMPTY_THRESH);
+
+    // Outputs
+    assign wfull = wfull_internal;
+    assign awfull = awfull_internal;
+    assign rempty = rempty_internal;
+    assign arempty = arempty_internal;
+
+    // Write domain logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {1'b0, {ASIZE{1'b0}}};
+            rptr_w <= {1'b0, {ASIZE{1'b0}}};
+            rptr_w_sync1 <= {1'b0, {ASIZE{1'b0}}};
+            rptr_w_sync2 <= {1'b0, {ASIZE{1'b0}}};
+        end else begin
+            if (wptr_inc)
+                wptr <= wptr + 1'b1;
+            rptr_w <= rptr_w_sync1;
+            rptr_w_sync1 <= rptr_w_sync2;
+            rptr_w_sync2 <= rptr_w;
+        end
+    end
+
+    // Memory write
+    always @(posedge wclk) begin
+        if (wvalid)
+            mem[wptr[ASIZE-1:0]] <= wdata;
+    end
+
+    // Read domain logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= {1'b0, {ASIZE{1'b0}}};
+            wptr_r <= {1'b0, {ASIZE{1'b0}}};
+            wptr_r_sync1 <= {1'b0, {ASIZE{1'b0}}};
+            wptr_r_sync2 <= {1'b0, {ASIZE{1'b0}}};
+            rdata_pipe1 <= {DSIZE{1'b0}};
+            rdata_pipe2 <= {DSIZE{1'b0}};
+            rdata_valid1 <= 1'b0;
+            rdata_valid2 <= 1'b0;
+        end else begin
+            if (rptr_inc)
+                rptr <= rptr + 1'b1;
+            wptr_r <= wptr_r_sync1;
+            wptr_r_sync1 <= wptr_r_sync2;
+            wptr_r_sync2 <= wptr_r;
+
+            // Pipeline data
+            if (rvalid) begin
+                rdata_pipe1 <= mem[rptr[ASIZE-1:0]];
+                rdata_valid1 <= 1'b1;
+            end else begin
+                rdata_valid1 <= 1'b0;
+            end
+
+            rdata_pipe2 <= rdata_pipe1;
+            rdata_valid2 <= rdata_valid1;
+        end
+    end
+
+    // Read data output
+    // With FALLTHROUGH, rdata presents the oldest unread word once rempty falls.
+    // The pipeline provides data one cycle after read address is valid.
+    // We need to handle the fall-through behavior carefully.
+    // 
+    // When FALLTHROUGH is TRUE:
+    // - rdata should show the current oldest word as soon as it's available
+    // - The data goes through two destination-clock stages
+    //
+    // Let's use the pipelined data. When a read is accepted, the data is read from memory
+    // and goes through two pipeline stages.
+    
+    assign rdata = rdata_pipe2;
+
+endmodule

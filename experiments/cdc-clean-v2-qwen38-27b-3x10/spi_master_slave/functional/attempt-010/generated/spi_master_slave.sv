@@ -1,0 +1,185 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // State machine states
+    localparam S_IDLE    = 3'd0;
+    localparam S_WAIT_WR = 3'd1;
+    localparam S_SHIFT   = 3'd2;
+    localparam S_DONE    = 3'd3;
+
+    reg [2:0] state;
+    reg [2:0] next_state;
+
+    // SPI shift registers
+    reg [N-1:0] tx_shift;
+    reg [N-1:0] rx_shift;
+    reg [N-1:0] tx_data;
+    reg [N-1:0] rx_data;
+
+    // Bit counter
+    reg [$clog2(N)-1:0] bit_cnt;
+
+    // SCLK divider counter
+    reg [$clog2(SPI_2X_CLK_DIV)-1:0] clk_div_cnt;
+    reg sclk_phase;
+
+    // Handshake signals
+    reg wr_ack_int;
+    reg do_valid_int;
+
+    // SPI outputs
+    assign spi_mosi_o = tx_shift[N-1];
+
+    // State machine - next state logic
+    always @(*) begin
+        next_state = state;
+        case (state)
+            S_IDLE: begin
+                if (wren_i)
+                    next_state = S_WAIT_WR;
+            end
+            S_WAIT_WR: begin
+                if (wren_i)
+                    next_state = S_SHIFT;
+            end
+            S_SHIFT: begin
+                if (bit_cnt == N-1 && sclk_phase == 1'b1)
+                    next_state = S_DONE;
+            end
+            S_DONE: begin
+                next_state = S_IDLE;
+            end
+            default: next_state = S_IDLE;
+        endcase
+    end
+
+    // State machine - state register
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i)
+            state <= S_IDLE;
+        else
+            state <= next_state;
+    end
+
+    // SCLK generation and bit shifting
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            clk_div_cnt <= 0;
+            sclk_phase  <= 1'b0;
+            spi_sck_o   <= 1'b0;
+            spi_ssel_o  <= 1'b0;
+            tx_shift    <= {N{1'b0}};
+            rx_shift    <= {N{1'b0}};
+            bit_cnt     <= 0;
+        end else begin
+            case (state)
+                S_IDLE: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o  <= 1'b0;
+                    clk_div_cnt <= 0;
+                    sclk_phase  <= 1'b0;
+                end
+
+                S_WAIT_WR: begin
+                    spi_ssel_o <= 1'b1;
+                    spi_sck_o  <= 1'b0;
+                    clk_div_cnt <= 0;
+                    sclk_phase  <= 1'b0;
+                    if (wren_i) begin
+                        tx_shift <= di_i;
+                        rx_shift <= {N{1'b0}};
+                        bit_cnt  <= 0;
+                    end
+                end
+
+                S_SHIFT: begin
+                    spi_ssel_o <= 1'b1;
+                    // Generate SCLK with divider
+                    if (clk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                        clk_div_cnt <= 0;
+                        sclk_phase  <= ~sclk_phase;
+                        spi_sck_o   <= ~sclk_phase;
+                        
+                        // On rising edge of SCLK (sclk_phase transitions 0->1), shift
+                        if (sclk_phase == 1'b0) begin
+                            // Rising edge: shift out MSB, shift in MISO
+                            tx_shift <= {tx_shift[N-2:0], 1'b0};
+                            rx_shift <= {spi_miso_i, rx_shift[N-1:0]};
+                            bit_cnt  <= bit_cnt + 1;
+                        end
+                    end else begin
+                        clk_div_cnt <= clk_div_cnt + 1;
+                    end
+                end
+
+                S_DONE: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o  <= 1'b0;
+                    clk_div_cnt <= 0;
+                    sclk_phase  <= 1'b0;
+                    rx_data    <= rx_shift;
+                end
+
+                default: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o  <= 1'b0;
+                    clk_div_cnt <= 0;
+                    sclk_phase  <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Handshake outputs
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_o   <= 1'b0;
+            wr_ack_o   <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o       <= {N{1'b0}};
+        end else begin
+            // Default: deassert one-hot pulses
+            wr_ack_o   <= 1'b0;
+            do_valid_o <= 1'b0;
+
+            case (state)
+                S_IDLE: begin
+                    di_req_o <= 1'b1;
+                end
+                S_WAIT_WR: begin
+                    di_req_o <= 1'b0;
+                    if (wren_i)
+                        wr_ack_o <= 1'b1;
+                end
+                S_SHIFT: begin
+                    di_req_o <= 1'b0;
+                end
+                S_DONE: begin
+                    di_req_o <= 1'b0;
+                    do_valid_o <= 1'b1;
+                    do_o       <= rx_data;
+                end
+                default: begin
+                    di_req_o <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+endmodule

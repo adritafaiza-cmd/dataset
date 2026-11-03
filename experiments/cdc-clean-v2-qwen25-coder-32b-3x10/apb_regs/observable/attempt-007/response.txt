@@ -1,0 +1,104 @@
+```systemverilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd4,
+  parameter int unsigned        ApbAddrWidth = 32'd32,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd32,
+  parameter int unsigned        RegDataWidth = 32'd32,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Internal signals
+  logic [NoApbRegs-1:0]             reg_q [RegDataWidth-1:0];
+  logic [NoApbRegs-1:0]             reg_next [RegDataWidth-1:0];
+  logic [NoApbRegs-1:0]             reg_we;
+  logic [NoApbRegs-1:0]             reg_we_byte [RegDataWidth/8-1:0];
+  logic [ApbAddrWidth-1:0]          addr_offset;
+  logic [NoApbRegs-1:0]             addr_match;
+  logic [RegDataWidth-1:0]          read_data;
+  logic [RegDataWidth-1:0]          write_data;
+  logic [RegDataWidth/8-1:0]        pstrb;
+  logic                             penable;
+  logic                             psel;
+
+  // Extract signals from req_i and resp_o
+  assign psel    = req_i.psel;
+  assign penable = req_i.penable;
+  assign pstrb   = req_i.pstrb;
+  assign write_data = req_i.pwdata;
+
+  // Address decoding
+  assign addr_offset = req_i.paddr - base_addr_i;
+  assign addr_match = (addr_offset < NoApbRegs * AddrOffset) ? (1'b1 << (addr_offset / AddrOffset)) : '0;
+
+  // Byte-wise write enable
+  genvar i;
+  generate
+    for (i = 0; i < RegDataWidth/8; i = i + 1) begin : gen_byte_we
+      assign reg_we_byte[i] = addr_match & pstrb[i];
+    end
+  endgenerate
+
+  // Register write enable
+  assign reg_we = (|reg_we_byte) & psel & penable;
+
+  // Read data multiplexer
+  always_comb begin
+    read_data = '0;
+    for (int j = 0; j < NoApbRegs; j = j + 1) begin
+      if (addr_match[j]) begin
+        read_data = ReadOnly[j] ? reg_init_i[j] : reg_q[0][j];
+      end
+    end
+  end
+
+  // Register file update
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int j = 0; j < NoApbRegs; j = j + 1) begin
+        if (!ReadOnly[j]) begin
+          reg_q[0][j] <= '0;
+        end else begin
+          reg_q[0][j] <= reg_init_i[j];
+        end
+      end
+    end else if (reg_we) begin
+      for (int j = 0; j < NoApbRegs; j = j + 1) begin
+        if (addr_match[j] && !ReadOnly[j]) begin
+          for (int k = 0; k < RegDataWidth/8; k = k + 1) begin
+            if (reg_we_byte[k]) begin
+              reg_next[k*8 +: 8][j] = write_data[k*8 +: 8];
+            end else begin
+              reg_next[k*8 +: 8][j] = reg_q[k*8 +: 8][j];
+            end
+          end
+        end else begin
+          reg_next[0][j] = reg_q[0][j];
+        end
+      end
+      reg_q <= reg_next;
+    end
+  end
+
+  // Response signal
+  assign resp_o.prdata = read_data;
+  assign resp_o.pready = 1'b1;
+  assign resp_o.pslverr = 1'b0;
+
+  // Output register values
+  assign reg_q_o = reg_q[0];
+
+endmodule
+```<|im_end|>

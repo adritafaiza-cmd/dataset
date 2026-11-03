@@ -1,0 +1,115 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire [WIDTH-1:0] src_data_reg;
+  wire src_valid_reg;
+  wire src_ready_int;
+  wire dst_valid_int;
+  wire [WIDTH-1:0] dst_data_int;
+  wire dst_ready_int;
+
+  // Source domain: capture data and valid when handshake occurs
+  // Destination domain: generate valid and ready signals
+
+  // We use a 4-phase handshake:
+  // Phase 0: idle (valid=0, ready=0)
+  // Phase 1: valid asserted (valid=1, ready=0)
+  // Phase 2: ready asserted (valid=1, ready=1)
+  // Phase 3: valid deasserted (valid=0, ready=1)
+  // Back to Phase 0
+
+  // Source side:
+  // - src_ready_o indicates that the source can send
+  // - When src_valid_i && src_ready_o, data is accepted
+  // - We need to synchronize the "ready" signal from destination to source
+
+  // Destination side:
+  // - dst_valid_o indicates data is available
+  // - When dst_valid_o && dst_ready_i, data is consumed
+  // - We need to synchronize the "valid" signal from source to destination
+
+  // Let's use a simpler approach with a FIFO-like structure
+
+  // Source domain registers
+  reg [WIDTH-1:0] src_data_r;
+  reg src_valid_r;
+  reg src_ready_r;
+
+  // Destination domain registers
+  reg [WIDTH-1:0] dst_data_r;
+  reg dst_valid_r;
+  reg dst_ready_r;
+
+  // Synchronization signals
+  // src_to_dst_valid: source tells destination that data is available
+  // dst_to_src_ready: destination tells source that it's ready to accept
+
+  reg src_to_dst_valid_r;
+  reg dst_to_src_ready_r;
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_r <= {WIDTH{1'b0}};
+      src_valid_r <= 1'b0;
+      src_ready_r <= 1'b1;
+      src_to_dst_valid_r <= 1'b0;
+    end else begin
+      if (src_valid_i && src_ready_r) begin
+        // Accept data
+        src_data_r <= src_data_i;
+        src_valid_r <= 1'b1;
+        src_ready_r <= 1'b0;
+        src_to_dst_valid_r <= 1'b1;
+      end else if (!src_valid_r && dst_to_src_ready_r) begin
+        // Previous transfer completed, ready for new data
+        src_ready_r <= 1'b1;
+      end
+    end
+  end
+
+  // Destination domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_r <= {WIDTH{1'b0}};
+      dst_valid_r <= 1'b0;
+      dst_ready_r <= 1'b1;
+      dst_to_src_ready_r <= 1'b1;
+    end else begin
+      if (src_to_dst_valid_r && !dst_valid_r) begin
+        // New data available from source
+        dst_data_r <= src_data_r;
+        dst_valid_r <= 1'b1;
+        dst_ready_r <= 1'b0;
+        dst_to_src_ready_r <= 1'b0;
+      end else if (dst_valid_r && dst_ready_i) begin
+        // Data consumed
+        dst_valid_r <= 1'b0;
+        dst_ready_r <= 1'b1;
+        dst_to_src_ready_r <= 1'b1;
+      end
+    end
+  end
+
+  // Output assignments
+  assign src_ready_o = src_ready_r;
+  assign dst_data_o = dst_data_r;
+  assign dst_valid_o = dst_valid_r;
+
+endmodule

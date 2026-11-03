@@ -1,0 +1,502 @@
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    // Internal signals
+    reg [7:0] cmd_fifo [0:15];
+    reg [3:0] cmd_fifo_wr_ptr;
+    reg [3:0] cmd_fifo_rd_ptr;
+    reg [3:0] cmd_fifo_count;
+    reg [7:0] data_fifo [0:15];
+    reg [3:0] data_fifo_wr_ptr;
+    reg [3:0] data_fifo_rd_ptr;
+    reg [3:0] data_fifo_count;
+    reg [3:0] state;
+    reg [3:0] next_state;
+    reg [2:0] bit_count;
+    reg [7:0] byte_count;
+    reg [6:0] address;
+    reg       scl;
+    reg       sda;
+    reg       scl_oe;
+    reg       sda_oe;
+    reg       scl_out;
+    reg       sda_out;
+    reg       scl_in;
+    reg       sda_in;
+    reg       ack;
+    reg       start_signal;
+    reg       stop_signal;
+    reg       read_signal;
+    reg       write_signal;
+    reg       write_multiple_signal;
+    reg       cmd_valid;
+    reg       cmd_ready;
+    reg       data_valid;
+    reg       data_ready;
+    reg       data_tlast;
+    reg [7:0] data_tdata;
+    reg [6:0] cmd_address;
+    reg       cmd_start;
+    reg       cmd_read;
+    reg       cmd_write;
+    reg       cmd_write_multiple;
+    reg       cmd_stop;
+    reg [15:0] timer;
+    reg [15:0] timer_max;
+
+    // FIFO for commands
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            cmd_fifo_wr_ptr <= 0;
+            cmd_fifo_rd_ptr <= 0;
+            cmd_fifo_count <= 0;
+            cmd_ready <= 1;
+        end else if (cmd_valid && cmd_ready) begin
+            cmd_fifo[cmd_fifo_wr_ptr] <= {s_axis_cmd_start, s_axis_cmd_read, s_axis_cmd_write, s_axis_cmd_write_multiple, s_axis_cmd_stop, s_axis_cmd_address};
+            cmd_fifo_wr_ptr <= cmd_fifo_wr_ptr + 1;
+            cmd_fifo_count <= cmd_fifo_count + 1;
+            cmd_ready <= (cmd_fifo_count < 16);
+        end else if (state == 4'b0010 && cmd_fifo_count > 0) begin
+            cmd_fifo_rd_ptr <= cmd_fifo_rd_ptr + 1;
+            cmd_fifo_count <= cmd_fifo_count - 1;
+        end
+    end
+
+    // FIFO for data
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            data_fifo_wr_ptr <= 0;
+            data_fifo_rd_ptr <= 0;
+            data_fifo_count <= 0;
+            data_ready <= 1;
+        end else if (s_axis_data_tvalid && data_ready) begin
+            data_fifo[data_fifo_wr_ptr] <= s_axis_data_tdata;
+            data_fifo_wr_ptr <= data_fifo_wr_ptr + 1;
+            data_fifo_count <= data_fifo_count + 1;
+            data_ready <= (data_fifo_count < 16);
+        end else if (state == 4'b0110 && data_fifo_count > 0) begin
+            data_fifo_rd_ptr <= data_fifo_rd_ptr + 1;
+            data_fifo_count <= data_fifo_count - 1;
+        end
+    end
+
+    // Command FIFO read
+    assign cmd_valid = (cmd_fifo_count > 0);
+    assign {cmd_start, cmd_read, cmd_write, cmd_write_multiple, cmd_stop, cmd_address} = cmd_fifo[cmd_fifo_rd_ptr];
+
+    // Data FIFO read
+    assign data_valid = (data_fifo_count > 0);
+    assign data_tdata = data_fifo[data_fifo_rd_ptr];
+    assign data_tlast = (data_fifo_count == 1);
+
+    // State machine
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state <= 4'b0000;
+            timer <= 0;
+            timer_max <= prescale;
+            start_signal <= 0;
+            stop_signal <= 0;
+            read_signal <= 0;
+            write_signal <= 0;
+            write_multiple_signal <= 0;
+            bit_count <= 0;
+            byte_count <= 0;
+            address <= 0;
+            scl <= 1;
+            sda <= 1;
+            scl_oe <= 0;
+            sda_oe <= 0;
+            scl_out <= 1;
+            sda_out <= 1;
+            scl_in <= scl_i;
+            sda_in <= sda_i;
+            ack <= 0;
+            missed_ack <= 0;
+            busy <= 0;
+            bus_control <= 0;
+            bus_active <= 0;
+        end else begin
+            state <= next_state;
+            timer_max <= prescale;
+
+            case (state)
+                4'b0000: begin // IDLE
+                    start_signal <= 0;
+                    stop_signal <= 0;
+                    read_signal <= 0;
+                    write_signal <= 0;
+                    write_multiple_signal <= 0;
+                    bit_count <= 0;
+                    byte_count <= 0;
+                    address <= 0;
+                    scl <= 1;
+                    sda <= 1;
+                    scl_oe <= 0;
+                    sda_oe <= 0;
+                    scl_out <= 1;
+                    sda_out <= 1;
+                    scl_in <= scl_i;
+                    sda_in <= sda_i;
+                    ack <= 0;
+                    missed_ack <= 0;
+                    busy <= 0;
+                    bus_control <= 0;
+                    bus_active <= 0;
+                    if (cmd_valid) begin
+                        next_state <= 4'b0010;
+                    end else begin
+                        next_state <= 4'b0000;
+                    end
+                end
+                4'b0010: begin // START
+                    start_signal <= 1;
+                    stop_signal <= 0;
+                    read_signal <= 0;
+                    write_signal <= 0;
+                    write_multiple_signal <= 0;
+                    bit_count <= 0;
+                    byte_count <= 0;
+                    address <= cmd_address;
+                    scl <= 1;
+                    sda <= 1;
+                    scl_oe <= 1;
+                    sda_oe <= 1;
+                    scl_out <= 1;
+                    sda_out <= 0;
+                    scl_in <= scl_i;
+                    sda_in <= sda_i;
+                    ack <= 0;
+                    missed_ack <= 0;
+                    busy <= 1;
+                    bus_control <= 1;
+                    bus_active <= 1;
+                    timer <= timer_max;
+                    if (timer == 0) begin
+                        next_state <= 4'b0011;
+                    end else begin
+                        next_state <= 4'b0010;
+                    end
+                end
+                4'b0011: begin // SEND_ADDRESS
+                    start_signal <= 0;
+                    stop_signal <= 0;
+                    read_signal <= 0;
+                    write_signal <= 0;
+                    write_multiple_signal <= 0;
+                    scl <= 0;
+                    sda <= (address >> (7 - bit_count)) & 1;
+                    scl_oe <= 1;
+                    sda_oe <= 1;
+                    scl_out <= scl;
+                    sda_out <= sda;
+                    scl_in <= scl_i;
+                    sda_in <= sda_i;
+                    ack <= 0;
+                    missed_ack <= 0;
+                    busy <= 1;
+                    bus_control <= 1;
+                    bus_active <= 1;
+                    timer <= timer_max;
+                    if (timer == 0) begin
+                        bit_count <= bit_count + 1;
+                        if (bit_count == 7) begin
+                            next_state <= 4'b0100;
+                        end else begin
+                            next_state <= 4'b0011;
+                        end
+                    end else begin
+                        next_state <= 4'b0011;
+                    end
+                end
+                4'b0100: begin // SEND_R_W
+                    start_signal <= 0;
+                    stop_signal <= 0;
+                    read_signal <= cmd_read;
+                    write_signal <= cmd_write;
+                    write_multiple_signal <= cmd_write_multiple;
+                    scl <= 0;
+                    sda <= cmd_read;
+                    scl_oe <= 1;
+                    sda_oe <= 1;
+                    scl_out <= scl;
+                    sda_out <= sda;
+                    scl_in <= scl_i;
+                    sda_in <= sda_i;
+                    ack <= 0;
+                    missed_ack <= 0;
+                    busy <= 1;
+                    bus_control <= 1;
+                    bus_active <= 1;
+                    timer <= timer_max;
+                    if (timer == 0) begin
+                        next_state <= 4'b0101;
+                    end else begin
+                        next_state <= 4'b0100;
+                    end
+                end
+                4'b0101: begin // WAIT_ACK
+                    start_signal <= 0;
+                    stop_signal <= 0;
+                    read_signal <= cmd_read;
+                    write_signal <= cmd_write;
+                    write_multiple_signal <= cmd_write_multiple;
+                    scl <= 1;
+                    sda <= 1;
+                    scl_oe <= 1;
+                    sda_oe <= 0;
+                    scl_out <= scl;
+                    sda_out <= sda;
+                    scl_in <= scl_i;
+                    sda_in <= sda_i;
+                    ack <= sda_in;
+                    missed_ack <= ~sda_in;
+                    busy <= 1;
+                    bus_control <= 1;
+                    bus_active <= 1;
+                    timer <= timer_max;
+                    if (timer == 0) begin
+                        if (ack) begin
+                            if (cmd_read) begin
+                                next_state <= 4'b0110;
+                            end else if (cmd_write) begin
+                                next_state <= 4'b0111;
+                            end else begin
+                                next_state <= 4'b0100;
+                            end
+                        end else begin
+                            next_state <= 4'b0111;
+                        end
+                    end else begin
+                        next_state <= 4'b0101;
+                    end
+                end
+                4'b0110: begin // READ_BYTE
+                    start_signal <= 0;
+                    stop_signal <= 0;
+                    read_signal <= 1;
+                    write_signal <= 0;
+                    write_multiple_signal <= 0;
+                    scl <= 0;
+                    sda <= 1;
+                    scl_oe <= 1;
+                    sda_oe <= 0;
+                    scl_out <= scl;
+                    sda_out <= sda;
+                    scl_in <= scl_i;
+                    sda_in <= sda_i;
+                    ack <= 0;
+                    missed_ack <= 0;
+                    busy <= 1;
+                    bus_control <= 1;
+                    bus_active <= 1;
+                    timer <= timer_max;
+                    if (timer == 0) begin
+                        bit_count <= bit_count + 1;
+                        if (bit_count == 8) begin
+                            next_state <= 4'b0112;
+                        end else begin
+                            next_state <= 4'b0110;
+                        end
+                    end else begin
+                        next_state <= 4'b0110;
+                    end
+                end
+                4'b0112: begin // SEND_ACK
+                    start_signal <= 0;
+                    stop_signal <= 0;
+                    read_signal <= 1;
+                    write_signal <= 0;
+                    write_multiple_signal <= 0;
+                    scl <= 1;
+                    sda <= 0;
+                    scl_oe <= 1;
+                    sda_oe <= 1;
+                    scl_out <= scl;
+                    sda_out <= sda;
+                    scl_in <= scl_i;
+                    sda_in <= sda_i;
+                    ack <= 0;
+                    missed_ack <= 0;
+                    busy <= 1;
+                    bus_control <= 1;
+                    bus_active <= 1;
+                    timer <= timer_max;
+                    if (timer == 0) begin
+                        byte_count <= byte_count + 1;
+                        if (byte_count == 255 || cmd_stop) begin
+                            next_state <= 4'b0113;
+                        end else begin
+                            next_state <= 4'b0110;
+                        end
+                    end else begin
+                        next_state <= 4'b0112;
+                    end
+                end
+                4'b0113: begin // STOP
+                    start_signal <= 0;
+                    stop_signal <= 1;
+                    read_signal <= 0;
+                    write_signal <= 0;
+                    write_multiple_signal <= 0;
+                    scl <= 0;
+                    sda <= 0;
+                    scl_oe <= 1;
+                    sda_oe <= 1;
+                    scl_out <= scl;
+                    sda_out <= sda;
+                    scl_in <= scl_i;
+                    sda_in <= sda_i;
+                    ack <= 0;
+                    missed_ack <= 0;
+                    busy <= 1;
+                    bus_control <= 1;
+                    bus_active <= 1;
+                    timer <= timer_max;
+                    if (timer == 0) begin
+                        scl <= 1;
+                        sda <= 1;
+                        scl_out <= scl;
+                        sda_out <= sda;
+                        next_state <= 4'b0000;
+                    end else begin
+                        next_state <= 4'b0113;
+                    end
+                end
+                4'b0111: begin // WRITE_BYTE
+                    start_signal <= 0;
+                    stop_signal <= 0;
+                    read_signal <= 0;
+                    write_signal <= 1;
+                    write_multiple_signal <= 0;
+                    scl <= 0;
+                    sda <= (data_tdata >> (7 - bit_count)) & 1;
+                    scl_oe <= 1;
+                    sda_oe <= 1;
+                    scl_out <= scl;
+                    sda_out <= sda;
+                    scl_in <= scl_i;
+                    sda_in <= sda_i;
+                    ack <= 0;
+                    missed_ack <= 0;
+                    busy <= 1;
+                    bus_control <= 1;
+                    bus_active <= 1;
+                    timer <= timer_max;
+                    if (timer == 0) begin
+                        bit_count <= bit_count + 1;
+                        if (bit_count == 8) begin
+                            next_state <= 4'b0114;
+                        end else begin
+                            next_state <= 4'b0111;
+                        end
+                    end else begin
+                        next_state <= 4'b0111;
+                    end
+                end
+                4'b0114: begin // WAIT_ACK
+                    start_signal <= 0;
+                    stop_signal <= 0;
+                    read_signal <= 0;
+                    write_signal <= 1;
+                    write_multiple_signal <= 0;
+                    scl <= 1;
+                    sda <= 1;
+                    scl_oe <= 1;
+                    sda_oe <= 0;
+                    scl_out <= scl;
+                    sda_out <= sda;
+                    scl_in <= scl_i;
+                    sda_in <= sda_i;
+                    ack <= sda_in;
+                    missed_ack <= ~sda_in;
+                    busy <= 1;
+                    bus_control <= 1;
+                    bus_active <= 1;
+                    timer <= timer_max;
+                    if (timer == 0) begin
+                        if (ack) begin
+                            byte_count <= byte_count + 1;
+                            if (byte_count == 255 || cmd_stop) begin
+                                next_state <= 4'b0113;
+                            end else begin
+                                next_state <= 4'b0111;
+                            end
+                        end else begin
+                            next_state <= 4'b0113;
+                        end
+                    end else begin
+                        next_state <= 4'b0114;
+                    end
+                end
+                default: begin
+                    next_state <= 4'b0000;
+                end
+            endcase
+        end
+    end
+
+    // Timer decrement
+    always @(posedge clk) begin
+        if (timer > 0) begin
+            timer <= timer - 1;
+        end
+    end
+
+    // Output assignments
+    assign s_axis_cmd_ready = cmd_ready;
+    assign s_axis_data_tready = data_ready;
+    assign m_axis_data_tdata = data_tdata;
+    assign m_axis_data_tvalid = read_signal && (bit_count == 8);
+    assign m_axis_data_tlast = data_tlast;
+    assign scl_o = scl_out;
+    assign scl_t = ~scl_oe;
+    assign sda_o = sda_out;
+    assign sda_t = ~sda_oe;
+    assign busy = (state != 4'b0000);
+    assign bus_control = (state != 4'b0000);
+    assign bus_active = (state != 4'b0000);
+
+endmodule

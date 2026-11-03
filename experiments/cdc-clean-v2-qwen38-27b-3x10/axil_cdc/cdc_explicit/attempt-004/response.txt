@@ -1,0 +1,526 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ========================================================================
+    // Write Address Channel: S -> M
+    // ========================================================================
+    reg  [ADDR_WIDTH-1:0] s_awaddr_reg;
+    reg  [2:0]            s_awprot_reg;
+    reg                   s_awreq;
+    wire                  m_awack;
+
+    // Synchronizer for request
+    reg [2:0] s_awreq_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_awreq_sync <= 3'b000;
+        else
+            s_awreq_sync <= {s_awreq_sync[1:0], s_awreq};
+    end
+
+    // Synchronizer for acknowledge
+    reg [2:0] m_awack_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_awack_sync <= 3'b000;
+        else
+            m_awack_sync <= {m_awack_sync[1:0], m_awack};
+    end
+
+    // S-domain: capture and hold payload, manage handshake
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_awaddr_reg <= {ADDR_WIDTH{1'b0}};
+            s_awprot_reg <= 3'b000;
+            s_awreq      <= 1'b0;
+        end else begin
+            if (s_axil_awvalid && s_axil_awready) begin
+                s_awaddr_reg <= s_axil_awaddr;
+                s_awprot_reg <= s_axil_awprot;
+                s_awreq      <= 1'b1;
+            end else if (m_awack_sync[2]) begin
+                s_awreq <= 1'b0;
+            end
+        end
+    end
+
+    assign s_axil_awready = ~s_awreq;
+
+    // M-domain: detect rising edge of synchronized request, present to master
+    reg m_awreq_prev;
+    wire m_awreq_edge = s_awreq_sync[2] & ~m_awreq_prev;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_awreq_prev <= 1'b0;
+        else
+            m_awreq_prev <= s_awreq_sync[2];
+    end
+
+    // Synchronizer for payload (address and prot)
+    // We synchronize the held payload. Since payload is stable while s_awreq is high,
+    // we can synchronize it. We use a 2-stage synchronizer for each bit.
+    // To ensure coherence, we synchronize the entire bus.
+    // We'll use a simple 2-stage synchronizer for the address and prot.
+    // However, since the payload is held stable, we can just synchronize it directly.
+    // Let's synchronize the address and prot into m-domain registers.
+    
+    reg [ADDR_WIDTH-1:0] m_awaddr_sync1, m_awaddr_sync2;
+    reg [2:0]            m_awprot_sync1, m_awprot_sync2;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_awaddr_sync1 <= {ADDR_WIDTH{1'b0}};
+            m_awaddr_sync2 <= {ADDR_WIDTH{1'b0}};
+            m_awprot_sync1 <= 3'b000;
+            m_awprot_sync2 <= 3'b000;
+        end else begin
+            m_awaddr_sync1 <= s_awaddr_reg;
+            m_awaddr_sync2 <= m_awaddr_sync1;
+            m_awprot_sync1 <= s_awprot_reg;
+            m_awprot_sync2 <= m_awprot_sync1;
+        end
+    end
+
+    // Present to master when request edge is detected and payload has settled
+    // We need to ensure the payload is stable. Since we synchronize the payload
+    // continuously, and the request edge indicates a new transaction, we can
+    // present the synchronized payload when the edge occurs.
+    // However, the synchronized payload might not be fully settled at the exact
+    // cycle of the edge. To be safe, we can delay the presentation by a few cycles.
+    // Alternatively, we can use the synchronized payload directly, as it is
+    // guaranteed to be stable after 2 cycles of the request being high.
+    // Since the request is held high until acknowledged, and we synchronize
+    // continuously, the payload will be stable in the m-domain after 2 cycles.
+    // We'll present the master interface when the edge is detected, using the
+    // synchronized payload. The AXI protocol allows for some latency.
+    
+    reg m_awvalid_reg;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_awvalid_reg <= 1'b0;
+        else if (m_awreq_edge)
+            m_awvalid_reg <= 1'b1;
+        else if (m_axil_awready)
+            m_awvalid_reg <= 1'b0;
+    end
+
+    assign m_axil_awvalid = m_awvalid_reg;
+    assign m_axil_awaddr  = m_awaddr_sync2;
+    assign m_axil_awprot  = m_awprot_sync2;
+
+    // Acknowledge when master accepts
+    assign m_awack = m_axil_awready & m_awvalid_reg;
+
+    // ========================================================================
+    // Write Data Channel: S -> M
+    // ========================================================================
+    reg  [DATA_WIDTH-1:0] s_wdata_reg;
+    reg  [STRB_WIDTH-1:0] s_wstrb_reg;
+    reg                   s_wreq;
+    wire                  m_wack;
+
+    // Synchronizer for request
+    reg [2:0] s_wreq_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_wreq_sync <= 3'b000;
+        else
+            s_wreq_sync <= {s_wreq_sync[1:0], s_wreq};
+    end
+
+    // Synchronizer for acknowledge
+    reg [2:0] m_wack_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_wack_sync <= 3'b000;
+        else
+            m_wack_sync <= {m_wack_sync[1:0], m_wack};
+    end
+
+    // S-domain: capture and hold payload, manage handshake
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_wdata_reg <= {DATA_WIDTH{1'b0}};
+            s_wstrb_reg <= {STRB_WIDTH{1'b0}};
+            s_wreq      <= 1'b0;
+        end else begin
+            if (s_axil_wvalid && s_axil_wready) begin
+                s_wdata_reg <= s_axil_wdata;
+                s_wstrb_reg <= s_axil_wstrb;
+                s_wreq      <= 1'b1;
+            end else if (m_wack_sync[2]) begin
+                s_wreq <= 1'b0;
+            end
+        end
+    end
+
+    assign s_axil_wready = ~s_wreq;
+
+    // M-domain: detect rising edge of synchronized request, present to master
+    reg m_wreq_prev;
+    wire m_wreq_edge = s_wreq_sync[2] & ~m_wreq_prev;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_wreq_prev <= 1'b0;
+        else
+            m_wreq_prev <= s_wreq_sync[2];
+    end
+
+    // Synchronizer for payload (data and strb)
+    reg [DATA_WIDTH-1:0] m_wdata_sync1, m_wdata_sync2;
+    reg [STRB_WIDTH-1:0] m_wstrb_sync1, m_wstrb_sync2;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_wdata_sync1 <= {DATA_WIDTH{1'b0}};
+            m_wdata_sync2 <= {DATA_WIDTH{1'b0}};
+            m_wstrb_sync1 <= {STRB_WIDTH{1'b0}};
+            m_wstrb_sync2 <= {STRB_WIDTH{1'b0}};
+        end else begin
+            m_wdata_sync1 <= s_wdata_reg;
+            m_wdata_sync2 <= m_wdata_sync1;
+            m_wstrb_sync1 <= s_wstrb_reg;
+            m_wstrb_sync2 <= m_wstrb_sync1;
+        end
+    end
+
+    reg m_wvalid_reg;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_wvalid_reg <= 1'b0;
+        else if (m_wreq_edge)
+            m_wvalid_reg <= 1'b1;
+        else if (m_axil_wready)
+            m_wvalid_reg <= 1'b0;
+    end
+
+    assign m_axil_wvalid = m_wvalid_reg;
+    assign m_axil_wdata  = m_wdata_sync2;
+    assign m_axil_wstrb  = m_wstrb_sync2;
+
+    // Acknowledge when master accepts
+    assign m_wack = m_axil_wready & m_wvalid_reg;
+
+    // ========================================================================
+    // Write Response Channel: M -> S
+    // ========================================================================
+    reg  [1:0] m_bresp_reg;
+    reg        m_breq;
+    wire       s_back;
+
+    // Synchronizer for request
+    reg [2:0] m_breq_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_breq_sync <= 3'b000;
+        else
+            m_breq_sync <= {m_breq_sync[1:0], m_breq};
+    end
+
+    // Synchronizer for acknowledge
+    reg [2:0] s_back_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_back_sync <= 3'b000;
+        else
+            s_back_sync <= {s_back_sync[1:0], s_back};
+    end
+
+    // M-domain: capture and hold payload, manage handshake
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_bresp_reg <= 2'b00;
+            m_breq      <= 1'b0;
+        end else begin
+            if (m_axil_bvalid && m_axil_bready) begin
+                m_bresp_reg <= m_axil_bresp;
+                m_breq      <= 1'b1;
+            end else if (s_back_sync[2]) begin
+                m_breq <= 1'b0;
+            end
+        end
+    end
+
+    assign m_axil_bready = ~m_breq;
+
+    // S-domain: detect rising edge of synchronized request, present to slave
+    reg s_breq_prev;
+    wire s_breq_edge = m_breq_sync[2] & ~s_breq_prev;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_breq_prev <= 1'b0;
+        else
+            s_breq_prev <= m_breq_sync[2];
+    end
+
+    // Synchronizer for payload (bresp)
+    reg [1:0] s_bresp_sync1, s_bresp_sync2;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_bresp_sync1 <= 2'b00;
+            s_bresp_sync2 <= 2'b00;
+        end else begin
+            s_bresp_sync1 <= m_bresp_reg;
+            s_bresp_sync2 <= s_bresp_sync1;
+        end
+    end
+
+    reg s_bvalid_reg;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_bvalid_reg <= 1'b0;
+        else if (s_breq_edge)
+            s_bvalid_reg <= 1'b1;
+        else if (s_axil_bready)
+            s_bvalid_reg <= 1'b0;
+    end
+
+    assign s_axil_bvalid = s_bvalid_reg;
+    assign s_axil_bresp  = s_bresp_sync2;
+
+    // Acknowledge when slave accepts
+    assign s_back = s_axil_bready & s_bvalid_reg;
+
+    // ========================================================================
+    // Read Address Channel: S -> M
+    // ========================================================================
+    reg  [ADDR_WIDTH-1:0] s_araddr_reg;
+    reg  [2:0]            s_arprot_reg;
+    reg                   s_arreq;
+    wire                  m_arack;
+
+    // Synchronizer for request
+    reg [2:0] s_arreq_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_arreq_sync <= 3'b000;
+        else
+            s_arreq_sync <= {s_arreq_sync[1:0], s_arreq};
+    end
+
+    // Synchronizer for acknowledge
+    reg [2:0] m_arack_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_arack_sync <= 3'b000;
+        else
+            m_arack_sync <= {m_arack_sync[1:0], m_arack};
+    end
+
+    // S-domain: capture and hold payload, manage handshake
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_araddr_reg <= {ADDR_WIDTH{1'b0}};
+            s_arprot_reg <= 3'b000;
+            s_arreq      <= 1'b0;
+        end else begin
+            if (s_axil_arvalid && s_axil_arready) begin
+                s_araddr_reg <= s_axil_araddr;
+                s_arprot_reg <= s_axil_arprot;
+                s_arreq      <= 1'b1;
+            end else if (m_arack_sync[2]) begin
+                s_arreq <= 1'b0;
+            end
+        end
+    end
+
+    assign s_axil_arready = ~s_arreq;
+
+    // M-domain: detect rising edge of synchronized request, present to master
+    reg m_arreq_prev;
+    wire m_arreq_edge = s_arreq_sync[2] & ~m_arreq_prev;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_arreq_prev <= 1'b0;
+        else
+            m_arreq_prev <= s_arreq_sync[2];
+    end
+
+    // Synchronizer for payload (address and prot)
+    reg [ADDR_WIDTH-1:0] m_araddr_sync1, m_araddr_sync2;
+    reg [2:0]            m_arprot_sync1, m_arprot_sync2;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_araddr_sync1 <= {ADDR_WIDTH{1'b0}};
+            m_araddr_sync2 <= {ADDR_WIDTH{1'b0}};
+            m_arprot_sync1 <= 3'b000;
+            m_arprot_sync2 <= 3'b000;
+        end else begin
+            m_araddr_sync1 <= s_araddr_reg;
+            m_araddr_sync2 <= m_araddr_sync1;
+            m_arprot_sync1 <= s_arprot_reg;
+            m_arprot_sync2 <= m_arprot_sync1;
+        end
+    end
+
+    reg m_arvalid_reg;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_arvalid_reg <= 1'b0;
+        else if (m_arreq_edge)
+            m_arvalid_reg <= 1'b1;
+        else if (m_axil_arready)
+            m_arvalid_reg <= 1'b0;
+    end
+
+    assign m_axil_arvalid = m_arvalid_reg;
+    assign m_axil_araddr  = m_araddr_sync2;
+    assign m_axil_arprot  = m_arprot_sync2;
+
+    // Acknowledge when master accepts
+    assign m_arack = m_axil_arready & m_arvalid_reg;
+
+    // ========================================================================
+    // Read Data Channel: M -> S
+    // ========================================================================
+    reg  [DATA_WIDTH-1:0] m_rdata_reg;
+    reg  [1:0]            m_rresp_reg;
+    reg                   m_rreq;
+    wire                  s_rack;
+
+    // Synchronizer for request
+    reg [2:0] m_rreq_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_rreq_sync <= 3'b000;
+        else
+            m_rreq_sync <= {m_rreq_sync[1:0], m_rreq};
+    end
+
+    // Synchronizer for acknowledge
+    reg [2:0] s_rack_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_rack_sync <= 3'b000;
+        else
+            s_rack_sync <= {s_rack_sync[1:0], s_rack};
+    end
+
+    // M-domain: capture and hold payload, manage handshake
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rdata_reg <= {DATA_WIDTH{1'b0}};
+            m_rresp_reg <= 2'b00;
+            m_rreq      <= 1'b0;
+        end else begin
+            if (m_axil_rvalid && m_axil_rready) begin
+                m_rdata_reg <= m_axil_rdata;
+                m_rresp_reg <= m_axil_rresp;
+                m_rreq      <= 1'b1;
+            end else if (s_rack_sync[2]) begin
+                m_rreq <= 1'b0;
+            end
+        end
+    end
+
+    assign m_axil_rready = ~m_rreq;
+
+    // S-domain: detect rising edge of synchronized request, present to slave
+    reg s_rreq_prev;
+    wire s_rreq_edge = m_rreq_sync[2] & ~s_rreq_prev;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_rreq_prev <= 1'b0;
+        else
+            s_rreq_prev <= m_rreq_sync[2];
+    end
+
+    // Synchronizer for payload (rdata and rresp)
+    reg [DATA_WIDTH-1:0] s_rdata_sync1, s_rdata_sync2;
+    reg [1:0]            s_rresp_sync1, s_rresp_sync2;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_rdata_sync1 <= {DATA_WIDTH{1'b0}};
+            s_rdata_sync2 <= {DATA_WIDTH{1'b0}};
+            s_rresp_sync1 <= 2'b00;
+            s_rresp_sync2 <= 2'b00;
+        end else begin
+            s_rdata_sync1 <= m_rdata_reg;
+            s_rdata_sync2 <= s_rdata_sync1;
+            s_rresp_sync1 <= m_rresp_reg;
+            s_rresp_sync2 <= s_rresp_sync1;
+        end
+    end
+
+    reg s_rvalid_reg;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_rvalid_reg <= 1'b0;
+        else if (s_rreq_edge)
+            s_rvalid_reg <= 1'b1;
+        else if (s_axil_rready)
+            s_rvalid_reg <= 1'b0;
+    end
+
+    assign s_axil_rvalid = s_rvalid_reg;
+    assign s_axil_rdata  = s_rdata_sync2;
+    assign s_axil_rresp  = s_rresp_sync2;
+
+    // Acknowledge when slave accepts
+    assign s_rack = s_axil_rready & s_rvalid_reg;
+
+endmodule
+```<|im_end|>

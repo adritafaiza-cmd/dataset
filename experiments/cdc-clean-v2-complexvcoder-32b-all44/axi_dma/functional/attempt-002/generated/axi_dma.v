@@ -1,0 +1,756 @@
+```verilog
+module axi_dma #
+(
+    parameter AXI_DATA_WIDTH = 32,
+    parameter AXI_ADDR_WIDTH = 16,
+    parameter AXI_STRB_WIDTH = (AXI_DATA_WIDTH/8),
+    parameter AXI_ID_WIDTH = 8,
+    parameter AXI_MAX_BURST_LEN = 16,
+    parameter AXIS_DATA_WIDTH = AXI_DATA_WIDTH,
+    parameter AXIS_KEEP_ENABLE = (AXIS_DATA_WIDTH>8),
+    parameter AXIS_KEEP_WIDTH = (AXIS_DATA_WIDTH/8),
+    parameter AXIS_LAST_ENABLE = 1,
+    parameter AXIS_ID_ENABLE = 0,
+    parameter AXIS_ID_WIDTH = 8,
+    parameter AXIS_DEST_ENABLE = 0,
+    parameter AXIS_DEST_WIDTH = 8,
+    parameter AXIS_USER_ENABLE = 1,
+    parameter AXIS_USER_WIDTH = 1,
+    parameter LEN_WIDTH = 20,
+    parameter TAG_WIDTH = 8,
+    parameter ENABLE_SG = 0,
+    parameter ENABLE_UNALIGNED = 0
+)
+(
+    input  wire                       clk,
+    input  wire                       rst,
+    /*
+     * AXI read descriptor input
+     */
+    input  wire [AXI_ADDR_WIDTH-1:0]  s_axis_read_desc_addr,
+    input  wire [LEN_WIDTH-1:0]       s_axis_read_desc_len,
+    input  wire [TAG_WIDTH-1:0]       s_axis_read_desc_tag,
+    input  wire [AXIS_ID_WIDTH-1:0]   s_axis_read_desc_id,
+    input  wire [AXIS_DEST_WIDTH-1:0] s_axis_read_desc_dest,
+    input  wire [AXIS_USER_WIDTH-1:0] s_axis_read_desc_user,
+    input  wire                       s_axis_read_desc_valid,
+    output wire                       s_axis_read_desc_ready,
+    /*
+     * AXI read descriptor status output
+     */
+    output wire [TAG_WIDTH-1:0]       m_axis_read_desc_status_tag,
+    output wire [3:0]                 m_axis_read_desc_status_error,
+    output wire                       m_axis_read_desc_status_valid,
+    /*
+     * AXI stream read data output
+     */
+    output wire [AXIS_DATA_WIDTH-1:0] m_axis_read_data_tdata,
+    output wire [AXIS_KEEP_WIDTH-1:0] m_axis_read_data_tkeep,
+    output wire                       m_axis_read_data_tvalid,
+    input  wire                       m_axis_read_data_tready,
+    output wire                       m_axis_read_data_tlast,
+    output wire [AXIS_ID_WIDTH-1:0]   m_axis_read_data_tid,
+    output wire [AXIS_DEST_WIDTH-1:0] m_axis_read_data_tdest,
+    output wire [AXIS_USER_WIDTH-1:0] m_axis_read_data_tuser,
+    /*
+     * AXI write descriptor input
+     */
+    input  wire [AXI_ADDR_WIDTH-1:0]  s_axis_write_desc_addr,
+    input  wire [LEN_WIDTH-1:0]       s_axis_write_desc_len,
+    input  wire [TAG_WIDTH-1:0]       s_axis_write_desc_tag,
+    input  wire                       s_axis_write_desc_valid,
+    output wire                       s_axis_write_desc_ready,
+    /*
+     * AXI write descriptor status output
+     */
+    output wire [LEN_WIDTH-1:0]       m_axis_write_desc_status_len,
+    output wire [TAG_WIDTH-1:0]       m_axis_write_desc_status_tag,
+    output wire [AXIS_ID_WIDTH-1:0]   m_axis_write_desc_status_id,
+    output wire [AXIS_DEST_WIDTH-1:0] m_axis_write_desc_status_dest,
+    output wire [AXIS_USER_WIDTH-1:0] m_axis_write_desc_status_user,
+    output wire [3:0]                 m_axis_write_desc_status_error,
+    output wire                       m_axis_write_desc_status_valid,
+    /*
+     * AXI stream write data input
+     */
+    input  wire [AXIS_DATA_WIDTH-1:0] s_axis_write_data_tdata,
+    input  wire [AXIS_KEEP_WIDTH-1:0] s_axis_write_data_tkeep,
+    input  wire                       s_axis_write_data_tvalid,
+    output wire                       s_axis_write_data_tready,
+    input  wire                       s_axis_write_data_tlast,
+    input  wire [AXIS_ID_WIDTH-1:0]   s_axis_write_data_tid,
+    input  wire [AXIS_DEST_WIDTH-1:0] s_axis_write_data_tdest,
+    input  wire [AXIS_USER_WIDTH-1:0] s_axis_write_data_tuser,
+    /*
+     * AXI master interface
+     */
+    output wire [AXI_ID_WIDTH-1:0]    m_axi_awid,
+    output wire [AXI_ADDR_WIDTH-1:0]  m_axi_awaddr,
+    output wire [7:0]                 m_axi_awlen,
+    output wire [2:0]                 m_axi_awsize,
+    output wire [1:0]                 m_axi_awburst,
+    output wire                       m_axi_awlock,
+    output wire [3:0]                 m_axi_awcache,
+    output wire [2:0]                 m_axi_awprot,
+    output wire                       m_axi_awvalid,
+    input  wire                       m_axi_awready,
+    output wire [AXI_DATA_WIDTH-1:0]  m_axi_wdata,
+    output wire [AXI_STRB_WIDTH-1:0]  m_axi_wstrb,
+    output wire                       m_axi_wlast,
+    output wire                       m_axi_wvalid,
+    input  wire                       m_axi_wready,
+    input  wire [AXI_ID_WIDTH-1:0]    m_axi_bid,
+    input  wire [1:0]                 m_axi_bresp,
+    input  wire                       m_axi_bvalid,
+    output wire                       m_axi_bready,
+    output wire [AXI_ID_WIDTH-1:0]    m_axi_arid,
+    output wire [AXI_ADDR_WIDTH-1:0]  m_axi_araddr,
+    output wire [7:0]                 m_axi_arlen,
+    output wire [2:0]                 m_axi_arsize,
+    output wire [1:0]                 m_axi_arburst,
+    output wire                       m_axi_arlock,
+    output wire [3:0]                 m_axi_arcache,
+    output wire [2:0]                 m_axi_arprot,
+    output wire                       m_axi_arvalid,
+    input  wire                       m_axi_arready,
+    input  wire [AXI_ID_WIDTH-1:0]    m_axi_rid,
+    input  wire [AXI_DATA_WIDTH-1:0]  m_axi_rdata,
+    input  wire [1:0]                 m_axi_rresp,
+    input  wire                       m_axi_rlast,
+    input  wire                       m_axi_rvalid,
+    output wire                       m_axi_rready,
+    /*
+     * Configuration
+     */
+    input  wire                       read_enable,
+    input  wire                       write_enable,
+    input  wire                       write_abort
+);
+
+    wire [AXI_ADDR_WIDTH-1:0] read_addr;
+    wire [LEN_WIDTH-1:0] read_len;
+    wire [TAG_WIDTH-1:0] read_tag;
+    wire [AXIS_ID_WIDTH-1:0] read_id;
+    wire [AXIS_DEST_WIDTH-1:0] read_dest;
+    wire [AXIS_USER_WIDTH-1:0] read_user;
+    wire read_desc_valid;
+    wire read_desc_ready;
+    wire [TAG_WIDTH-1:0] read_status_tag;
+    wire [3:0] read_status_error;
+    wire read_status_valid;
+    wire [AXIS_DATA_WIDTH-1:0] read_data_tdata;
+    wire [AXIS_KEEP_WIDTH-1:0] read_data_tkeep;
+    wire read_data_tvalid;
+    wire read_data_tready;
+    wire read_data_tlast;
+    wire [AXIS_ID_WIDTH-1:0] read_data_tid;
+    wire [AXIS_DEST_WIDTH-1:0] read_data_tdest;
+    wire [AXIS_USER_WIDTH-1:0] read_data_tuser;
+
+    wire [AXI_ADDR_WIDTH-1:0] write_addr;
+    wire [LEN_WIDTH-1:0] write_len;
+    wire [TAG_WIDTH-1:0] write_tag;
+    wire write_desc_valid;
+    wire write_desc_ready;
+    wire [LEN_WIDTH-1:0] write_status_len;
+    wire [TAG_WIDTH-1:0] write_status_tag;
+    wire [AXIS_ID_WIDTH-1:0] write_status_id;
+    wire [AXIS_DEST_WIDTH-1:0] write_status_dest;
+    wire [AXIS_USER_WIDTH-1:0] write_status_user;
+    wire [3:0] write_status_error;
+    wire write_status_valid;
+    wire [AXIS_DATA_WIDTH-1:0] write_data_tdata;
+    wire [AXIS_KEEP_WIDTH-1:0] write_data_tkeep;
+    wire write_data_tvalid;
+    wire write_data_tready;
+    wire write_data_tlast;
+    wire [AXIS_ID_WIDTH-1:0] write_data_tid;
+    wire [AXIS_DEST_WIDTH-1:0] write_data_tdest;
+    wire [AXIS_USER_WIDTH-1:0] write_data_tuser;
+
+    read_desc_controller #(
+        .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH),
+        .LEN_WIDTH(LEN_WIDTH),
+        .TAG_WIDTH(TAG_WIDTH),
+        .AXIS_ID_WIDTH(AXIS_ID_WIDTH),
+        .AXIS_DEST_WIDTH(AXIS_DEST_WIDTH),
+        .AXIS_USER_WIDTH(AXIS_USER_WIDTH)
+    ) read_desc_ctrl (
+        .clk(clk),
+        .rst(rst),
+        .s_axis_read_desc_addr(s_axis_read_desc_addr),
+        .s_axis_read_desc_len(s_axis_read_desc_len),
+        .s_axis_read_desc_tag(s_axis_read_desc_tag),
+        .s_axis_read_desc_id(s_axis_read_desc_id),
+        .s_axis_read_desc_dest(s_axis_read_desc_dest),
+        .s_axis_read_desc_user(s_axis_read_desc_user),
+        .s_axis_read_desc_valid(s_axis_read_desc_valid),
+        .s_axis_read_desc_ready(s_axis_read_desc_ready),
+        .m_axis_read_desc_status_tag(read_status_tag),
+        .m_axis_read_desc_status_error(read_status_error),
+        .m_axis_read_desc_status_valid(read_status_valid),
+        .read_enable(read_enable),
+        .read_addr(read_addr),
+        .read_len(read_len),
+        .read_tag(read_tag),
+        .read_id(read_id),
+        .read_desc_valid(read_desc_valid),
+        .read_desc_ready(read_desc_ready)
+    );
+
+    read_data_manager #(
+        .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
+        .AXIS_DATA_WIDTH(AXIS_DATA_WIDTH),
+        .AXIS_KEEP_WIDTH(AXIS_KEEP_WIDTH),
+        .AXIS_LAST_ENABLE(AXIS_LAST_ENABLE),
+        .AXIS_ID_WIDTH(AXIS_ID_WIDTH),
+        .AXIS_DEST_WIDTH(AXIS_DEST_WIDTH),
+        .AXIS_USER_WIDTH(AXIS_USER_WIDTH),
+        .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH),
+        .AXI_ID_WIDTH(AXI_ID_WIDTH),
+        .AXI_MAX_BURST_LEN(AXI_MAX_BURST_LEN)
+    ) read_data_mgr (
+        .clk(clk),
+        .rst(rst),
+        .m_axi_araddr(m_axi_araddr),
+        .m_axi_arlen(m_axi_arlen),
+        .m_axi_arsize(m_axi_arsize),
+        .m_axi_arburst(m_axi_arburst),
+        .m_axi_arlock(m_axi_arlock),
+        .m_axi_arcache(m_axi_arcache),
+        .m_axi_arprot(m_axi_arprot),
+        .m_axi_arvalid(m_axi_arvalid),
+        .m_axi_arready(m_axi_arready),
+        .m_axi_rid(m_axi_rid),
+        .m_axi_rdata(m_axi_rdata),
+        .m_axi_rresp(m_axi_rresp),
+        .m_axi_rlast(m_axi_rlast),
+        .m_axi_rvalid(m_axi_rvalid),
+        .m_axi_rready(m_axi_rready),
+        .read_addr(read_addr),
+        .read_len(read_len),
+        .read_tag(read_tag),
+        .read_id(read_id),
+        .read_desc_valid(read_desc_valid),
+        .read_desc_ready(read_desc_ready),
+        .m_axis_read_data_tdata(m_axis_read_data_tdata),
+        .m_axis_read_data_tkeep(m_axis_read_data_tkeep),
+        .m_axis_read_data_tvalid(m_axis_read_data_tvalid),
+        .m_axis_read_data_tready(m_axis_read_data_tready),
+        .m_axis_read_data_tlast(m_axis_read_data_tlast),
+        .m_axis_read_data_tid(m_axis_read_data_tid),
+        .m_axis_read_data_tdest(m_axis_read_data_tdest),
+        .m_axis_read_data_tuser(m_axis_read_data_tuser)
+    );
+
+    write_desc_controller #(
+        .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH),
+        .LEN_WIDTH(LEN_WIDTH),
+        .TAG_WIDTH(TAG_WIDTH),
+        .AXIS_ID_WIDTH(AXIS_ID_WIDTH),
+        .AXIS_DEST_WIDTH(AXIS_DEST_WIDTH),
+        .AXIS_USER_WIDTH(AXIS_USER_WIDTH)
+    ) write_desc_ctrl (
+        .clk(clk),
+        .rst(rst),
+        .s_axis_write_desc_addr(s_axis_write_desc_addr),
+        .s_axis_write_desc_len(s_axis_write_desc_len),
+        .s_axis_write_desc_tag(s_axis_write_desc_tag),
+        .s_axis_write_desc_valid(s_axis_write_desc_valid),
+        .s_axis_write_desc_ready(s_axis_write_desc_ready),
+        .m_axis_write_desc_status_len(write_status_len),
+        .m_axis_write_desc_status_tag(write_status_tag),
+        .m_axis_write_desc_status_id(write_status_id),
+        .m_axis_write_desc_status_dest(write_status_dest),
+        .m_axis_write_desc_status_user(write_status_user),
+        .m_axis_write_desc_status_error(write_status_error),
+        .m_axis_write_desc_status_valid(write_status_valid),
+        .write_enable(write_enable),
+        .write_abort(write_abort),
+        .write_addr(write_addr),
+        .write_len(write_len),
+        .write_tag(write_tag),
+        .write_desc_valid(write_desc_valid),
+        .write_desc_ready(write_desc_ready)
+    );
+
+    write_data_manager #(
+        .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
+        .AXIS_DATA_WIDTH(AXIS_DATA_WIDTH),
+        .AXIS_KEEP_WIDTH(AXIS_KEEP_WIDTH),
+        .AXIS_LAST_ENABLE(AXIS_LAST_ENABLE),
+        .AXIS_ID_WIDTH(AXIS_ID_WIDTH),
+        .AXIS_DEST_WIDTH(AXIS_DEST_WIDTH),
+        .AXIS_USER_WIDTH(AXIS_USER_WIDTH),
+        .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH),
+        .AXI_ID_WIDTH(AXI_ID_WIDTH),
+        .AXI_MAX_BURST_LEN(AXI_MAX_BURST_LEN)
+    ) write_data_mgr (
+        .clk(clk),
+        .rst(rst),
+        .m_axi_awid(m_axi_awid),
+        .m_axi_awaddr(m_axi_awaddr),
+        .m_axi_awlen(m_axi_awlen),
+        .m_axi_awsize(m_axi_awsize),
+        .m_axi_awburst(m_axi_awburst),
+        .m_axi_awlock(m_axi_awlock),
+        .m_axi_awcache(m_axi_awcache),
+        .m_axi_awprot(m_axi_awprot),
+        .m_axi_awvalid(m_axi_awvalid),
+        .m_axi_awready(m_axi_awready),
+        .m_axi_wdata(m_axi_wdata),
+        .m_axi_wstrb(m_axi_wstrb),
+        .m_axi_wlast(m_axi_wlast),
+        .m_axi_wvalid(m_axi_wvalid),
+        .m_axi_wready(m_axi_wready),
+        .m_axi_bid(m_axi_bid),
+        .m_axi_bresp(m_axi_bresp),
+        .m_axi_bvalid(m_axi_bvalid),
+        .m_axi_bready(m_axi_bready),
+        .write_addr(write_addr),
+        .write_len(write_len),
+        .write_tag(write_tag),
+        .write_desc_valid(write_desc_valid),
+        .write_desc_ready(write_desc_ready),
+        .s_axis_write_data_tdata(s_axis_write_data_tdata),
+        .s_axis_write_data_tkeep(s_axis_write_data_tkeep),
+        .s_axis_write_data_tvalid(s_axis_write_data_tvalid),
+        .s_axis_write_data_tready(s_axis_write_data_tready),
+        .s_axis_write_data_tlast(s_axis_write_data_tlast),
+        .s_axis_write_data_tid(s_axis_write_data_tid),
+        .s_axis_write_data_tdest(s_axis_write_data_tdest),
+        .s_axis_write_data_tuser(s_axis_write_data_tuser)
+    );
+
+    assign m_axis_read_desc_status_tag = read_status_tag;
+    assign m_axis_read_desc_status_error = read_status_error;
+    assign m_axis_read_desc_status_valid = read_status_valid;
+
+    assign m_axis_write_desc_status_len = write_status_len;
+    assign m_axis_write_desc_status_tag = write_status_tag;
+    assign m_axis_write_desc_status_id = write_status_id;
+    assign m_axis_write_desc_status_dest = write_status_dest;
+    assign m_axis_write_desc_status_user = write_status_user;
+    assign m_axis_write_desc_status_error = write_status_error;
+    assign m_axis_write_desc_status_valid = write_status_valid;
+
+endmodule
+
+module read_desc_controller #(
+    parameter AXI_ADDR_WIDTH = 16,
+    parameter LEN_WIDTH = 20,
+    parameter TAG_WIDTH = 8,
+    parameter AXIS_ID_WIDTH = 8,
+    parameter AXIS_DEST_WIDTH = 8,
+    parameter AXIS_USER_WIDTH = 1
+)
+(
+    input wire clk,
+    input wire rst,
+    input wire [AXI_ADDR_WIDTH-1:0] s_axis_read_desc_addr,
+    input wire [LEN_WIDTH-1:0] s_axis_read_desc_len,
+    input wire [TAG_WIDTH-1:0] s_axis_read_desc_tag,
+    input wire [AXIS_ID_WIDTH-1:0] s_axis_read_desc_id,
+    input wire [AXIS_DEST_WIDTH-1:0] s_axis_read_desc_dest,
+    input wire [AXIS_USER_WIDTH-1:0] s_axis_read_desc_user,
+    input wire s_axis_read_desc_valid,
+    output wire s_axis_read_desc_ready,
+    output wire [TAG_WIDTH-1:0] m_axis_read_desc_status_tag,
+    output wire [3:0] m_axis_read_desc_status_error,
+    output wire m_axis_read_desc_status_valid,
+    input wire read_enable,
+    output wire [AXI_ADDR_WIDTH-1:0] read_addr,
+    output wire [LEN_WIDTH-1:0] read_len,
+    output wire [TAG_WIDTH-1:0] read_tag,
+    output wire [AXIS_ID_WIDTH-1:0] read_id,
+    output wire read_desc_valid,
+    input wire read_desc_ready
+);
+
+    reg s_axis_read_desc_ready_reg;
+    reg [TAG_WIDTH-1:0] m_axis_read_desc_status_tag_reg;
+    reg [3:0] m_axis_read_desc_status_error_reg;
+    reg m_axis_read_desc_status_valid_reg;
+    reg [AXI_ADDR_WIDTH-1:0] read_addr_reg;
+    reg [LEN_WIDTH-1:0] read_len_reg;
+    reg [TAG_WIDTH-1:0] read_tag_reg;
+    reg [AXIS_ID_WIDTH-1:0] read_id_reg;
+    reg read_desc_valid_reg;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            s_axis_read_desc_ready_reg <= 0;
+            m_axis_read_desc_status_tag_reg <= 0;
+            m_axis_read_desc_status_error_reg <= 0;
+            m_axis_read_desc_status_valid_reg <= 0;
+            read_addr_reg <= 0;
+            read_len_reg <= 0;
+            read_tag_reg <= 0;
+            read_id_reg <= 0;
+            read_desc_valid_reg <= 0;
+        end else begin
+            if (read_enable && s_axis_read_desc_valid && !read_desc_valid_reg) begin
+                s_axis_read_desc_ready_reg <= 1;
+                read_addr_reg <= s_axis_read_desc_addr;
+                read_len_reg <= s_axis_read_desc_len;
+                read_tag_reg <= s_axis_read_desc_tag;
+                read_id_reg <= s_axis_read_desc_id;
+                read_desc_valid_reg <= 1;
+            end else if (read_desc_ready) begin
+                read_desc_valid_reg <= 0;
+            end
+
+            if (read_desc_ready) begin
+                s_axis_read_desc_ready_reg <= 0;
+                m_axis_read_desc_status_tag_reg <= read_tag_reg;
+                m_axis_read_desc_status_error_reg <= 0; // Assuming no error for simplicity
+                m_axis_read_desc_status_valid_reg <= 1;
+            end else if (m_axis_read_desc_status_valid_reg) begin
+                m_axis_read_desc_status_valid_reg <= 0;
+            end
+        end
+    end
+
+    assign s_axis_read_desc_ready = s_axis_read_desc_ready_reg;
+    assign m_axis_read_desc_status_tag = m_axis_read_desc_status_tag_reg;
+    assign m_axis_read_desc_status_error = m_axis_read_desc_status_error_reg;
+    assign m_axis_read_desc_status_valid = m_axis_read_desc_status_valid_reg;
+    assign read_addr = read_addr_reg;
+    assign read_len = read_len_reg;
+    assign read_tag = read_tag_reg;
+    assign read_id = read_id_reg;
+    assign read_desc_valid = read_desc_valid_reg;
+
+endmodule
+
+module read_data_manager #(
+    parameter AXI_DATA_WIDTH = 32,
+    parameter AXIS_DATA_WIDTH = 32,
+    parameter AXIS_KEEP_WIDTH = 4,
+    parameter AXIS_LAST_ENABLE = 1,
+    parameter AXIS_ID_WIDTH = 8,
+    parameter AXIS_DEST_WIDTH = 8,
+    parameter AXIS_USER_WIDTH = 1,
+    parameter AXI_ADDR_WIDTH = 16,
+    parameter AXI_ID_WIDTH = 8,
+    parameter AXI_MAX_BURST_LEN = 16
+)
+(
+    input wire clk,
+    input wire rst,
+    output wire [AXI_ADDR_WIDTH-1:0] m_axi_araddr,
+    output wire [7:0] m_axi_arlen,
+    output wire [2:0] m_axi_arsize,
+    output wire [1:0] m_axi_arburst,
+    output wire m_axi_arlock,
+    output wire [3:0] m_axi_arcache,
+    output wire [2:0] m_axi_arprot,
+    output wire m_axi_arvalid,
+    input wire m_axi_arready,
+    input wire [AXI_ID_WIDTH-1:0] m_axi_rid,
+    input wire [AXI_DATA_WIDTH-1:0] m_axi_rdata,
+    input wire [1:0] m_axi_rresp,
+    input wire m_axi_rlast,
+    input wire m_axi_rvalid,
+    output wire m_axi_rready,
+    input wire [AXI_ADDR_WIDTH-1:0] read_addr,
+    input wire [LEN_WIDTH-1:0] read_len,
+    input wire [TAG_WIDTH-1:0] read_tag,
+    input wire [AXIS_ID_WIDTH-1:0] read_id,
+    input wire read_desc_valid,
+    input wire read_desc_ready,
+    output wire [AXIS_DATA_WIDTH-1:0] m_axis_read_data_tdata,
+    output wire [AXIS_KEEP_WIDTH-1:0] m_axis_read_data_tkeep,
+    output wire m_axis_read_data_tvalid,
+    input wire m_axis_read_data_tready,
+    output wire m_axis_read_data_tlast,
+    output wire [AXIS_ID_WIDTH-1:0] m_axis_read_data_tid,
+    output wire [AXIS_DEST_WIDTH-1:0] m_axis_read_data_tdest,
+    output wire [AXIS_USER_WIDTH-1:0] m_axis_read_data_tuser
+);
+
+    reg [AXI_ADDR_WIDTH-1:0] addr_reg;
+    reg [LEN_WIDTH-1:0] len_reg;
+    reg [TAG_WIDTH-1:0] tag_reg;
+    reg [AXIS_ID_WIDTH-1:0] id_reg;
+    reg desc_valid_reg;
+    reg [7:0] burst_len_reg;
+    reg [AXI_ADDR_WIDTH-1:0] araddr_reg;
+    reg arvalid_reg;
+    reg [AXI_DATA_WIDTH-1:0] rdata_reg;
+    reg rlast_reg;
+    reg rvalid_reg;
+    reg [AXIS_DATA_WIDTH-1:0] tdata_reg;
+    reg [AXIS_KEEP_WIDTH-1:0] tkeep_reg;
+    reg tvalid_reg;
+    reg tlast_reg;
+    reg [AXIS_ID_WIDTH-1:0] tid_reg;
+    reg [AXIS_DEST_WIDTH-1:0] tdest_reg;
+    reg [AXIS_USER_WIDTH-1:0] tuser_reg;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            addr_reg <= 0;
+            len_reg <= 0;
+            tag_reg <= 0;
+            id_reg <= 0;
+            desc_valid_reg <= 0;
+            burst_len_reg <= 0;
+            araddr_reg <= 0;
+            arvalid_reg <= 0;
+            rdata_reg <= 0;
+            rlast_reg <= 0;
+            rvalid_reg <= 0;
+            tdata_reg <= 0;
+            tkeep_reg <= 0;
+            tvalid_reg <= 0;
+            tlast_reg <= 0;
+            tid_reg <= 0;
+            tdest_reg <= 0;
+            tuser_reg <= 0;
+        end else begin
+            if (read_desc_valid && read_desc_ready) begin
+                addr_reg <= read_addr;
+                len_reg <= read_len;
+                tag_reg <= read_tag;
+                id_reg <= read_id;
+                desc_valid_reg <= 1;
+            end else if (arvalid_reg && m_axi_arready) begin
+                arvalid_reg <= 0;
+            end
+
+            if (desc_valid_reg && !arvalid_reg) begin
+                araddr_reg <= addr_reg;
+                burst_len_reg <= (len_reg < AXI_MAX_BURST_LEN) ? len_reg - 1 : AXI_MAX_BURST_LEN - 1;
+                arvalid_reg <= 1;
+                desc_valid_reg <= 0;
+            end
+
+            if (m_axi_rvalid) begin
+                rdata_reg <= m_axi_rdata;
+                rlast_reg <= m_axi_rlast;
+                rvalid_reg <= 1;
+            end else if (rvalid_reg && m_axis_read_data_tready) begin
+                rvalid_reg <= 0;
+            end
+
+            if (rvalid_reg && !tvalid_reg) begin
+                tdata_reg <= rdata_reg;
+                tkeep_reg <= {AXIS_KEEP_WIDTH{1'b1}};
+                tvalid_reg <= 1;
+                tlast_reg <= rlast_reg;
+                tid_reg <= id_reg;
+                tdest_reg <= 0; // Assuming no destination ID for simplicity
+                tuser_reg <= 0; // Assuming no user data for simplicity
+            end else if (tvalid_reg && m_axis_read_data_tready) begin
+                tvalid_reg <= 0;
+            end
+        end
+    end
+
+    assign m_axi_araddr = araddr_reg;
+    assign m_axi_arlen = burst_len_reg;
+    assign m_axi_arsize = $clog2(AXI_DATA_WIDTH/8);
+    assign m_axi_arburst = 2'b01; // INCR burst
+    assign m_axi_arlock = 1'b0; // Normal access
+    assign m_axi_arcache = 4'b0011; // Non-cacheable, buffered
+    assign m_axi_arprot = 3'b000; // Normal access
+    assign m_axi_arvalid = arvalid_reg;
+    assign m_axi_rready = 1;
+
+    assign m_axis_read_data_tdata = tdata_reg;
+    assign m_axis_read_data_tkeep = tkeep_reg;
+    assign m_axis_read_data_tvalid = tvalid_reg;
+    assign m_axis_read_data_tlast = tlast_reg;
+    assign m_axis_read_data_tid = tid_reg;
+    assign m_axis_read_data_tdest = tdest_reg;
+    assign m_axis_read_data_tuser = tuser_reg;
+
+endmodule
+
+module write_desc_controller #(
+    parameter AXI_ADDR_WIDTH = 16,
+    parameter LEN_WIDTH = 20,
+    parameter TAG_WIDTH = 8,
+    parameter AXIS_ID_WIDTH = 8,
+    parameter AXIS_DEST_WIDTH = 8,
+    parameter AXIS_USER_WIDTH = 1
+)
+(
+    input wire clk,
+    input wire rst,
+    input wire [AXI_ADDR_WIDTH-1:0] s_axis_write_desc_addr,
+    input wire [LEN_WIDTH-1:0] s_axis_write_desc_len,
+    input wire [TAG_WIDTH-1:0] s_axis_write_desc_tag,
+    input wire s_axis_write_desc_valid,
+    output wire s_axis_write_desc_ready,
+    output wire [LEN_WIDTH-1:0] m_axis_write_desc_status_len,
+    output wire [TAG_WIDTH-1:0] m_axis_write_desc_status_tag,
+    output wire [AXIS_ID_WIDTH-1:0] m_axis_write_desc_status_id,
+    output wire [AXIS_DEST_WIDTH-1:0] m_axis_write_desc_status_dest,
+    output wire [AXIS_USER_WIDTH-1:0] m_axis_write_desc_status_user,
+    output wire [3:0] m_axis_write_desc_status_error,
+    output wire m_axis_write_desc_status_valid,
+    input wire write_enable,
+    input wire write_abort,
+    output wire [AXI_ADDR_WIDTH-1:0] write_addr,
+    output wire [LEN_WIDTH-1:0] write_len,
+    output wire [TAG_WIDTH-1:0] write_tag,
+    output wire write_desc_valid,
+    input wire write_desc_ready
+);
+
+    reg s_axis_write_desc_ready_reg;
+    reg [LEN_WIDTH-1:0] m_axis_write_desc_status_len_reg;
+    reg [TAG_WIDTH-1:0] m_axis_write_desc_status_tag_reg;
+    reg [AXIS_ID_WIDTH-1:0] m_axis_write_desc_status_id_reg;
+    reg [AXIS_DEST_WIDTH-1:0] m_axis_write_desc_status_dest_reg;
+    reg [AXIS_USER_WIDTH-1:0] m_axis_write_desc_status_user_reg;
+    reg [3:0] m_axis_write_desc_status_error_reg;
+    reg m_axis_write_desc_status_valid_reg;
+    reg [AXI_ADDR_WIDTH-1:0] write_addr_reg;
+    reg [LEN_WIDTH-1:0] write_len_reg;
+    reg [TAG_WIDTH-1:0] write_tag_reg;
+    reg write_desc_valid_reg;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            s_axis_write_desc_ready_reg <= 0;
+            m_axis_write_desc_status_len_reg <= 0;
+            m_axis_write_desc_status_tag_reg <= 0;
+            m_axis_write_desc_status_id_reg <= 0;
+            m_axis_write_desc_status_dest_reg <= 0;
+            m_axis_write_desc_status_user_reg <= 0;
+            m_axis_write_desc_status_error_reg <= 0;
+            m_axis_write_desc_status_valid_reg <= 0;
+            write_addr_reg <= 0;
+            write_len_reg <= 0;
+            write_tag_reg <= 0;
+            write_desc_valid_reg <= 0;
+        end else begin
+            if (write_enable && s_axis_write_desc_valid && !write_desc_valid_reg) begin
+                s_axis_write_desc_ready_reg <= 1;
+                write_addr_reg <= s_axis_write_desc_addr;
+                write_len_reg <= s_axis_write_desc_len;
+                write_tag_reg <= s_axis_write_desc_tag;
+                write_desc_valid_reg <= 1;
+            end else if (write_desc_ready) begin
+                write_desc_valid_reg <= 0;
+            end
+
+            if (write_desc_ready) begin
+                s_axis_write_desc_ready_reg <= 0;
+                m_axis_write_desc_status_len_reg <= write_len_reg;
+                m_axis_write_desc_status_tag_reg <= write_tag_reg;
+                m_axis_write_desc_status_id_reg <= 0; // Assuming no ID for simplicity
+                m_axis_write_desc_status_dest_reg <= 0; // Assuming no destination ID for simplicity
+                m_axis_write_desc_status_user_reg <= 0; // Assuming no user data for simplicity
+                m_axis_write_desc_status_error_reg <= 0; // Assuming no error for simplicity
+                m_axis_write_desc_status_valid_reg <= 1;
+            end else if (m_axis_write_desc_status_valid_reg) begin
+                m_axis_write_desc_status_valid_reg <= 0;
+            end
+        end
+    end
+
+    assign s_axis_write_desc_ready = s_axis_write_desc_ready_reg;
+    assign m_axis_write_desc_status_len = m_axis_write_desc_status_len_reg;
+    assign m_axis_write_desc_status_tag = m_axis_write_desc_status_tag_reg;
+    assign m_axis_write_desc_status_id = m_axis_write_desc_status_id_reg;
+    assign m_axis_write_desc_status_dest = m_axis_write_desc_status_dest_reg;
+    assign m_axis_write_desc_status_user = m_axis_write_desc_status_user_reg;
+    assign m_axis_write_desc_status_error = m_axis_write_desc_status_error_reg;
+    assign m_axis_write_desc_status_valid = m_axis_write_desc_status_valid_reg;
+    assign write_addr = write_addr_reg;
+    assign write_len = write_len_reg;
+    assign write_tag = write_tag_reg;
+    assign write_desc_valid = write_desc_valid_reg;
+
+endmodule
+
+module write_data_manager #(
+    parameter AXI_DATA_WIDTH = 32,
+    parameter AXIS_DATA_WIDTH = 32,
+    parameter AXIS_KEEP_WIDTH = 4,
+    parameter AXIS_LAST_ENABLE = 1,
+    parameter AXIS_ID_WIDTH = 8,
+    parameter AXIS_DEST_WIDTH = 8,
+    parameter AXIS_USER_WIDTH = 1,
+    parameter AXI_ADDR_WIDTH = 16,
+    parameter AXI_ID_WIDTH = 8,
+    parameter AXI_MAX_BURST_LEN = 16
+)
+(
+    input wire clk,
+    input wire rst,
+    output wire [AXI_ID_WIDTH-1:0] m_axi_awid,
+    output wire [AXI_ADDR_WIDTH-1:0] m_axi_awaddr,
+    output wire [7:0] m_axi_awlen,
+    output wire [2:0] m_axi_awsize,
+    output wire [1:0] m_axi_awburst,
+    output wire m_axi_awlock,
+    output wire [3:0] m_axi_awcache,
+    output wire [2:0] m_axi_awprot,
+    output wire m_axi_awvalid,
+    input wire m_axi_awready,
+    output wire [AXI_DATA_WIDTH-1:0] m_axi_wdata,
+    output wire [AXI_STRB_WIDTH-1:0] m_axi_wstrb,
+    output wire m_axi_wlast,
+    output wire m_axi_wvalid,
+    input wire m_axi_wready,
+    input wire [AXI_ID_WIDTH-1:0] m_axi_bid,
+    input wire [1:0] m_axi_bresp,
+    input wire m_axi_bvalid,
+    output wire m_axi_bready,
+    input wire [AXI_ADDR_WIDTH-1:0] write_addr,
+    input wire [LEN_WIDTH-1:0] write_len,
+    input wire [TAG_WIDTH-1:0] write_tag,
+    input wire write_desc_valid,
+    input wire write_desc_ready,
+    input wire [AXIS_DATA_WIDTH-1:0] s_axis_write_data_tdata,
+    input wire [AXIS_KEEP_WIDTH-1:0] s_axis_write_data_tkeep,
+    input wire s_axis_write_data_tvalid,
+    output wire s_axis_write_data_tready,
+    input wire s_axis_write_data_tlast,
+    input wire [AXIS_ID_WIDTH-1:0] s_axis_write_data_tid,
+    input wire [AXIS_DEST_WIDTH-1:0] s_axis_write_data_tdest,
+    input wire [AXIS_USER_WIDTH-1:0] s_axis_write_data_tuser
+);
+
+    reg [AXI_ADDR_WIDTH-1:0] addr_reg;
+    reg [LEN_WIDTH-1:0] len_reg;
+    reg [TAG_WIDTH-1:0] tag_reg;
+    reg desc_valid_reg;
+    reg [7:0] burst_len_reg;
+    reg [AXI_ID_WIDTH-1:0] awid_reg;
+    reg [AXI_ADDR_WIDTH-1:0] awaddr_reg;
+    reg awvalid_reg;
+    reg [AXI_DATA_WIDTH-1:0] wdata_reg;
+    reg [AXI_STRB_WIDTH-1:0] wstrb_reg;
+    reg wlast_reg;
+    reg wvalid_reg;
+    reg [AXIS_DATA_WIDTH-1:0] tdata_reg;
+    reg [AXIS_KEEP_WIDTH-1:0] tkeep_reg;
+    reg tvalid_reg;
+    reg tlast_reg;
+    reg [AXIS_ID_WIDTH-1:0] tid_reg;
+    reg [AXIS_DEST_WIDTH-1:0] tdest_reg;
+    reg [AXIS_USER_WIDTH-1:0] tuser_reg;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            addr_reg <= 0;
+            len_reg <= 0;
+            tag_reg <= 0;
+            desc_valid_reg <= 0;
+            burst_len_reg <= 0;
+            awid_reg <= 0;
+            awaddr_reg <= 0;
+            awvalid_reg <= 0;
+            wdata_reg <= 0;
+            wstrb_reg <= 0;
+            wlast_reg <= 0;
+            wvalid_reg <= 0;
+            tdata_reg <= 0;
+            tkeep_reg <= 0;
+            tvalid_reg

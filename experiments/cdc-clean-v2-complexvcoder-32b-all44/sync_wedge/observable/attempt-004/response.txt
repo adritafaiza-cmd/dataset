@@ -1,0 +1,249 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "sync_wedge",
+      "function": "A destination-clock bit synchronizer with edge detect.",
+      "parameters": [
+        {
+          "name": "STAGES",
+          "value": 2
+        }
+      ],
+      "ports": [
+        {
+          "name": "clk_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_i"
+        },
+        {
+          "name": "rst_ni",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_i"
+        },
+        {
+          "name": "en_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_i"
+        },
+        {
+          "name": "serial_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "external"
+        },
+        {
+          "name": "r_edge_o",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "clk_i"
+        },
+        {
+          "name": "f_edge_o",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "clk_i"
+        },
+        {
+          "name": "serial_o",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "clk_i"
+        }
+      ],
+      "instances": [
+        {
+          "module": "sync_stage",
+          "name": "sync_stage_inst",
+          "function": "Synchronizes the incoming bit into the local clock domain.",
+          "connections": [
+            {
+              "local": "clk_i",
+              "external": "clk_i"
+            },
+            {
+              "local": "rst_ni",
+              "external": "rst_ni"
+            },
+            {
+              "local": "data_in",
+              "external": "serial_i"
+            },
+            {
+              "local": "data_out",
+              "external": "synced_serial"
+            }
+          ]
+        }
+      ],
+      "connections": [
+        {
+          "from": "sync_stage_inst.data_out",
+          "to": "serial_o"
+        },
+        {
+          "from": "sync_stage_inst.data_out",
+          "to": "serial_d1"
+        },
+        {
+          "from": "serial_d1",
+          "to": "serial_d2"
+        }
+      ],
+      "internal_signals": [
+        {
+          "name": "synced_serial",
+          "width": 1
+        },
+        {
+          "name": "serial_d1",
+          "width": 1
+        },
+        {
+          "name": "serial_d2",
+          "width": 1
+        }
+      ],
+      "behavior": [
+        "On rising edge of clk_i, if rst_ni is high, reset internal signals to 0.",
+        "On rising edge of clk_i, if en_i is high, update the synchronization stages.",
+        "Detect rising edge on synced_serial: r_edge_o is high for one clk_i cycle if synced_serial rises from 0 to 1.",
+        "Detect falling edge on synced_serial: f_edge_o is high for one clk_i cycle if synced_serial falls from 1 to 0."
+      ]
+    },
+    {
+      "Top_module_name": "sync_stage",
+      "function": "Synchronizes a bit from one clock domain to another.",
+      "parameters": [
+        {
+          "name": "STAGES",
+          "value": 2
+        }
+      ],
+      "ports": [
+        {
+          "name": "clk_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_i"
+        },
+        {
+          "name": "rst_ni",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_i"
+        },
+        {
+          "name": "data_in",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "external"
+        },
+        {
+          "name": "data_out",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "clk_i"
+        }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        {
+          "name": "sync_stage_reg",
+          "width": 1,
+          "array_size": "STAGES"
+        }
+      ],
+      "behavior": [
+        "On rising edge of clk_i, if rst_ni is high, reset sync_stage_reg to 0.",
+        "On rising edge of clk_i, if rst_ni is low, shift data_in through sync_stage_reg.",
+        "data_out is the output of the last stage of sync_stage_reg."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module sync_wedge #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    // Internal signals
+    reg synced_serial;
+    reg serial_d1;
+    reg serial_d2;
+
+    // Instantiate the sync_stage module
+    sync_stage #(
+        .STAGES(STAGES)
+    ) sync_stage_inst (
+        .clk_i(clk_i),
+        .rst_ni(rst_ni),
+        .data_in(serial_i),
+        .data_out(synced_serial)
+    );
+
+    // Assign the output
+    assign serial_o = synced_serial;
+
+    // Detect rising and falling edges
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            serial_d1 <= 0;
+            serial_d2 <= 0;
+            r_edge_o <= 0;
+            f_edge_o <= 0;
+        end else if (en_i) begin
+            serial_d1 <= synced_serial;
+            serial_d2 <= serial_d1;
+            r_edge_o <= synced_serial & ~serial_d1;
+            f_edge_o <= ~synced_serial & serial_d1;
+        end
+    end
+
+endmodule
+
+module sync_stage #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  data_in,
+    output data_out
+);
+
+    // Internal register array for synchronization stages
+    reg [STAGES-1:0] sync_stage_reg;
+
+    // Synchronize the input data through multiple stages
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            sync_stage_reg <= 0;
+        end else begin
+            sync_stage_reg[0] <= data_in;
+            for (int i = 1; i < STAGES; i = i + 1) begin
+                sync_stage_reg[i] <= sync_stage_reg[i-1];
+            end
+        end
+    end
+
+    // Output the last stage of the synchronization register
+    assign data_out = sync_stage_reg[STAGES-1];
+
+endmodule
+```

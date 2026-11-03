@@ -1,0 +1,137 @@
+```verilog
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam ADDR_WIDTH = LOG_DEPTH;
+
+    reg [WIDTH-1:0] mem [DEPTH-1:0];
+
+    // Source side signals
+    reg [ADDR_WIDTH:0] src_wr_ptr;
+    reg [ADDR_WIDTH:0] src_wr_ptr_gray;
+    reg [ADDR_WIDTH:0] dst_rd_ptr_gray_sync;
+
+    // Destination side signals
+    reg [ADDR_WIDTH:0] dst_rd_ptr;
+    reg [ADDR_WIDTH:0] dst_rd_ptr_gray;
+    reg [ADDR_WIDTH:0] src_wr_ptr_gray_sync;
+
+    // Clear signals
+    reg src_clear_sync;
+    reg dst_clear_sync;
+
+    // Synchronization for clear signals
+    reg [SYNC_STAGES-1:0] src_clear_sync_chain;
+    reg [SYNC_STAGES-1:0] dst_clear_sync_chain;
+
+    // Clear pending signals
+    reg src_clear_pending;
+    reg dst_clear_pending;
+
+    // Source side logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_wr_ptr <= 0;
+            src_wr_ptr_gray <= 0;
+            src_clear_sync_chain <= {SYNC_STAGES{1'b1}};
+            src_clear_pending <= 1'b0;
+        end else begin
+            if (src_clear_i) begin
+                src_wr_ptr <= 0;
+                src_wr_ptr_gray <= 0;
+                src_clear_sync_chain <= {SYNC_STAGES{1'b0}};
+                src_clear_pending <= 1'b1;
+            end else begin
+                if (src_valid_i && src_ready_o) begin
+                    mem[src_wr_ptr[ADDR_WIDTH-1:0]] <= src_data_i;
+                    src_wr_ptr <= src_wr_ptr + 1;
+                    src_wr_ptr_gray <= src_wr_ptr + 1;
+                end
+                src_clear_sync_chain <= {src_clear_sync_chain[SYNC_STAGES-2:0], src_clear_i};
+                src_clear_pending <= src_clear_sync_chain[SYNC_STAGES-1];
+            end
+        end
+    end
+
+    assign src_clear_sync = src_clear_sync_chain[SYNC_STAGES-1];
+
+    // Destination side logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_rd_ptr <= 0;
+            dst_rd_ptr_gray <= 0;
+            dst_clear_sync_chain <= {SYNC_STAGES{1'b1}};
+            dst_clear_pending <= 1'b0;
+        end else begin
+            if (dst_clear_i) begin
+                dst_rd_ptr <= 0;
+                dst_rd_ptr_gray <= 0;
+                dst_clear_sync_chain <= {SYNC_STAGES{1'b0}};
+                dst_clear_pending <= 1'b1;
+            end else begin
+                if (dst_valid_o && dst_ready_i) begin
+                    dst_rd_ptr <= dst_rd_ptr + 1;
+                    dst_rd_ptr_gray <= dst_rd_ptr + 1;
+                end
+                dst_clear_sync_chain <= {dst_clear_sync_chain[SYNC_STAGES-2:0], dst_clear_i};
+                dst_clear_pending <= dst_clear_sync_chain[SYNC_STAGES-1];
+            end
+        end
+    end
+
+    assign dst_clear_sync = dst_clear_sync_chain[SYNC_STAGES-1];
+
+    // Gray code synchronization
+    reg [SYNC_STAGES-1:0] [ADDR_WIDTH:0] src_wr_ptr_gray_sync_chain;
+    reg [SYNC_STAGES-1:0] [ADDR_WIDTH:0] dst_rd_ptr_gray_sync_chain;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_wr_ptr_gray_sync_chain <= {SYNC_STAGES{1'b0}};
+            dst_rd_ptr_gray_sync <= 0;
+        end else begin
+            src_wr_ptr_gray_sync_chain <= {src_wr_ptr_gray_sync_chain[SYNC_STAGES-2:0], src_wr_ptr_gray};
+            dst_rd_ptr_gray_sync <= src_wr_ptr_gray_sync_chain[SYNC_STAGES-1];
+        end
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_rd_ptr_gray_sync_chain <= {SYNC_STAGES{1'b0}};
+            src_wr_ptr_gray_sync <= 0;
+        end else begin
+            dst_rd_ptr_gray_sync_chain <= {dst_rd_ptr_gray_sync_chain[SYNC_STAGES-2:0], dst_rd_ptr_gray};
+            src_wr_ptr_gray_sync <= dst_rd_ptr_gray_sync_chain[SYNC_STAGES-1];
+        end
+    end
+
+    // Ready and valid signals
+    assign src_ready_o = (src_wr_ptr_gray[ADDR_WIDTH:ADDR_WIDTH-LOG_DEPTH] != dst_rd_ptr_gray_sync[ADDR_WIDTH:ADDR_WIDTH-LOG_DEPTH]);
+    assign dst_valid_o = (src_wr_ptr_gray_sync[ADDR_WIDTH:ADDR_WIDTH-LOG_DEPTH] != dst_rd_ptr_gray[ADDR_WIDTH:ADDR_WIDTH-LOG_DEPTH]);
+    assign dst_data_o = mem[dst_rd_ptr[ADDR_WIDTH-1:0]];
+
+    // Clear pending outputs
+    assign src_clear_pending_o = src_clear_pending;
+    assign dst_clear_pending_o = dst_clear_pending;
+
+endmodule
+```<|im_end|>

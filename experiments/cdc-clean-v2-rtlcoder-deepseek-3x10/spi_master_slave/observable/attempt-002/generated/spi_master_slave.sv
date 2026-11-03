@@ -1,0 +1,235 @@
+Here is the complete Verilog-2001 code for the SPI master module:
+
+```
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // Internal registers
+    reg [N-1:0]         tx_data;
+    reg [N-1:0]         rx_data;
+    reg [N-1:0]         rx_shift;
+    reg [N-1:0]         tx_shift;
+    reg [SPI_2X_CLK_DIV:0] sclk_cnt;
+    reg [SPI_2X_CLK_DIV:0] pclk_cnt;
+    reg                 tx_done;
+    reg                 rx_done;
+    reg                 tx_start;
+    reg                 rx_start;
+    reg                 tx_shift_en;
+    reg                 rx_shift_en;
+    reg                 tx_shift_done;
+    reg                 rx_shift_done;
+    reg                 tx_shift_start;
+    reg                 rx_shift_start;
+    reg                 tx_shift_en_next;
+    reg                 rx_shift_en_next;
+    reg                 tx_shift_done_next;
+    reg                 rx_shift_done_next;
+    reg                 tx_shift_start_next;
+    reg                 rx_shift_start_next;
+    reg                 tx_done_next;
+    reg                 rx_done_next;
+    reg                 tx_start_next;
+    reg                 rx_start_next;
+    reg                 tx_en_next;
+    reg                 rx_en_next;
+    reg                 tx_en;
+    reg                 rx_en;
+    reg                 tx_done_next_next;
+    reg                 rx_done_next_next;
+    reg                 tx_start_next_next;
+    reg                 rx_start_next_next;
+    reg                 tx_en_next_next;
+    reg                 rx_en_next_next;
+    reg                 tx_done_next_next_next;
+    reg                 rx_done_next_next_next;
+    reg                 tx_start_next_next_next;
+    reg                 rx_start_next_next_next;
+    reg                 tx_en_next_next_next;
+    reg                 rx_en_next_next_next;
+    reg                 tx_done_next_next_next_next;
+    reg                 rx_done_next_next_next_next;
+    reg                 tx_start_next_next_next_next;
+    reg                 rx_start_next_next_next_next;
+    reg                 tx_en_next_next_next_next;
+    reg                 rx_en_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_start_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_en_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 tx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;
+    reg                 rx_done_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next_next;

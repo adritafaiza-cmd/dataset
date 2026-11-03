@@ -1,0 +1,48 @@
+Module afifo: Asynchronous FIFO with 2**LGFIFO entries of WIDTH bits. 5 parameters, 10 ports, 5 submodule instances.
+Port i_wclk: direction input, width 1, clock domain i_wclk.
+Port i_wr_reset_n: direction input, width 1, clock domain i_wclk.
+Port i_wr: direction input, width 1, clock domain i_wclk.
+Port i_wr_data: direction input, width WIDTH, clock domain i_wclk.
+Port o_wr_full: direction output, width 1, clock domain i_wclk.
+Port i_rclk: direction input, width 1, clock domain i_rclk.
+Port i_rd_reset_n: direction input, width 1, clock domain i_rclk.
+Port i_rd: direction input, width 1, clock domain i_rclk.
+Port o_rd_data: direction output, width WIDTH, clock domain i_rclk.
+Port o_rd_empty: direction output, width 1, clock domain i_rclk.
+Parameter LGFIFO = LGFIFO.
+Parameter WIDTH = WIDTH.
+Parameter NFF = NFF.
+Parameter WRITE_ON_POSEDGE = WRITE_ON_POSEDGE.
+Parameter OPT_REGISTER_READS = OPT_REGISTER_READS.
+Instance: {"connections": ["i_wclk", "i_wr_reset_n", "wr_ptr_gray", "wr_ptr_gray_sync"], "function": "Synchronize write pointer", "module": "sync_ff", "name": "wr_ptr_sync"}
+Instance: {"connections": ["i_rclk", "i_rd_reset_n", "rd_ptr_gray_sync", "rd_ptr_gray"], "function": "Synchronize read pointer", "module": "sync_ff", "name": "rd_ptr_sync"}
+Instance: {"connections": ["wr_ptr_gray_sync", "wr_ptr_bin_sync"], "function": "Convert write pointer from gray to binary", "module": "gray_to_bin", "name": "wr_ptr_gray_to_bin"}
+Instance: {"connections": ["rd_ptr_gray", "rd_ptr_bin"], "function": "Convert read pointer from gray to binary", "module": "gray_to_bin", "name": "rd_ptr_gray_to_bin"}
+Instance: {"connections": ["i_wclk", "wr_ptr_bin_sync", "i_wr_data", "i_rclk", "rd_ptr_bin", "o_rd_data"], "function": "FIFO memory array", "module": "fifo_memory", "name": "fifo_mem"}
+connections: ["wr_ptr_gray <= wr_ptr_bin ^ (wr_ptr_bin >> 1)", "rd_ptr_gray_sync <= rd_ptr_bin_sync ^ (rd_ptr_bin_sync >> 1)", "wr_ptr_bin_sync[0] <= i_wr & ~o_wr_full & (WRITE_ON_POSEDGE ? i_wclk : ~i_wclk)", "wr_ptr_bin_sync[1:LGFIFO] <= wr_ptr_bin_sync[0:LGFIFO-1] & (i_wr & ~o_wr_full & (WRITE_ON_POSEDGE ? i_wclk : ~i_wclk))", "rd_ptr_bin[0] <= i_rd & ~o_rd_empty & i_rclk", "rd_ptr_bin[1:LGFIFO] <= rd_ptr_bin[0:LGFIFO-1] & (i_rd & ~o_rd_empty & i_rclk)", "o_wr_full <= (wr_ptr_gray_sync == {1'b1, rd_ptr_gray_sync[LGFIFO-1:0]})", "o_rd_empty <= (wr_ptr_gray == rd_ptr_gray)"]
+internal_signals: [{"name": "wr_ptr_gray", "width": "LGFIFO+1"}, {"name": "wr_ptr_gray_sync", "width": "LGFIFO+1"}, {"name": "wr_ptr_bin", "width": "LGFIFO+1"}, {"name": "wr_ptr_bin_sync", "width": "LGFIFO+1"}, {"name": "rd_ptr_gray", "width": "LGFIFO+1"}, {"name": "rd_ptr_gray_sync", "width": "LGFIFO+1"}, {"name": "rd_ptr_bin", "width": "LGFIFO+1"}, {"name": "rd_ptr_bin_sync", "width": "LGFIFO+1"}]
+behavior: ["Storage accepts 2**LGFIFO writes before any read. o_wr_full is high only when that storage is occupied.", "A write is accepted when i_wr is high and o_wr_full is low, on the edge selected by WRITE_ON_POSEDGE.", "A read is accepted when i_rd is high and o_rd_empty is low.", "A write while full does not change stored data. A read while empty does not change o_rd_data and does not drop a later word.", "Accepted data returns exactly once, in write order.", "While write reset is asserted, o_wr_full is low. While read reset is asserted, o_rd_empty is high.", "o_rd_empty can be high while words remain stored. The read side presents one stored word at a time. After a read, empty may return high until the next stored word becomes visible.", "OPT_REGISTER_READS selects additional output registering; the payload must always have destination-clock synchronization.", "NFF is the synchronizer depth. Use at least 2 stages."]
+Module sync_ff: Synchronize signal across clock domains. 0 parameters, 4 ports, 0 submodule instances.
+Port clk: direction input, width 1, clock domain clk.
+Port reset_n: direction input, width 1, clock domain clk.
+Port d: direction input, width NFF, clock domain other_clk.
+Port q: direction output, width NFF, clock domain clk.
+connections: ["q <= (reset_n ? {NFF{1'b0}} : (clk ? {d[NFF-2:0], d[NFF-1]} : q))"]
+internal_signals: []
+behavior: ["Synchronize signal d from other_clk domain to clk domain with NFF stages of flip-flops."]
+Module gray_to_bin: Convert Gray code to binary. 0 parameters, 2 ports, 0 submodule instances.
+Port gray: direction input, width LGFIFO+1, clock domain clk.
+Port bin: direction output, width LGFIFO+1, clock domain clk.
+connections: ["bin[0] <= gray[0]", "bin[LGFIFO:1] <= gray[LGFIFO:1] ^ gray[LGFIFO:0]"]
+internal_signals: []
+behavior: ["Convert Gray code to binary."]
+Module fifo_memory: FIFO memory array. 0 parameters, 6 ports, 0 submodule instances.
+Port wclk: direction input, width 1, clock domain wclk.
+Port waddr: direction input, width LGFIFO, clock domain wclk.
+Port din: direction input, width WIDTH, clock domain wclk.
+Port rclk: direction input, width 1, clock domain rclk.
+Port raddr: direction input, width LGFIFO, clock domain rclk.
+Port dout: direction output, width WIDTH, clock domain rclk.
+connections: ["memory[waddr] <= (wclk ? din : memory[waddr])", "dout <= memory[raddr]"]
+internal_signals: [{"array_size": "2**LGFIFO", "name": "memory", "width": "WIDTH"}]
+behavior: ["Store data in memory array at write address on write clock edge.", "Output data from memory array at read address on read clock edge."]

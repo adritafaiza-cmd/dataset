@@ -1,0 +1,381 @@
+module axixclk #(
+		parameter integer C_S_AXI_ID_WIDTH	= 2,
+		parameter integer C_S_AXI_DATA_WIDTH	= 32,
+		parameter integer C_S_AXI_ADDR_WIDTH	= 6,
+		parameter [0:0]	OPT_WRITE_ONLY = 1'b0,
+		parameter [0:0]	OPT_READ_ONLY = 1'b0,
+		parameter	XCLOCK_FFS = 2,
+		parameter	LGFIFO = 5
+	) (
+		input	wire				S_AXI_ACLK,
+		input	wire				S_AXI_ARESETN,
+		input	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_AWID,
+		input	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	S_AXI_AWADDR,
+		input	wire [7 : 0]			S_AXI_AWLEN,
+		input	wire [2 : 0]			S_AXI_AWSIZE,
+		input	wire [1 : 0]			S_AXI_AWBURST,
+		input	wire				S_AXI_AWLOCK,
+		input	wire [3 : 0]			S_AXI_AWCACHE,
+		input	wire [2 : 0]			S_AXI_AWPROT,
+		input	wire [3 : 0]			S_AXI_AWQOS,
+		input	wire				S_AXI_AWVALID,
+		output	wire				S_AXI_AWREADY,
+		input	wire [C_S_AXI_DATA_WIDTH-1 : 0]	S_AXI_WDATA,
+		input	wire [(C_S_AXI_DATA_WIDTH/8)-1 : 0] S_AXI_WSTRB,
+		input	wire				S_AXI_WLAST,
+		input	wire				S_AXI_WVALID,
+		output	wire				S_AXI_WREADY,
+		output	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_BID,
+		output	wire [1 : 0]			S_AXI_BRESP,
+		output	wire				S_AXI_BVALID,
+		input	wire				S_AXI_BREADY,
+		input	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_ARID,
+		input	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	S_AXI_ARADDR,
+		input	wire [7 : 0]			S_AXI_ARLEN,
+		input	wire [2 : 0]			S_AXI_ARSIZE,
+		input	wire [1 : 0]			S_AXI_ARBURST,
+		input	wire				S_AXI_ARLOCK,
+		input	wire [3 : 0]			S_AXI_ARCACHE,
+		input	wire [2 : 0]			S_AXI_ARPROT,
+		input	wire [3 : 0]			S_AXI_ARQOS,
+		input	wire				S_AXI_ARVALID,
+		output	wire				S_AXI_ARREADY,
+		output	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_RID,
+		output	wire [C_S_AXI_DATA_WIDTH-1 : 0]	S_AXI_RDATA,
+		output	wire [1 : 0]			S_AXI_RRESP,
+		output	wire				S_AXI_RLAST,
+		output	wire				S_AXI_RVALID,
+		input	wire				S_AXI_RREADY,
+		input	wire				M_AXI_ACLK,
+		output	wire				M_AXI_ARESETN,
+		output	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_AWID,
+		output	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	M_AXI_AWADDR,
+		output	wire [7 : 0]			M_AXI_AWLEN,
+		output	wire [2 : 0]			M_AXI_AWSIZE,
+		output	wire [1 : 0]			M_AXI_AWBURST,
+		output	wire				M_AXI_AWLOCK,
+		output	wire [3 : 0]			M_AXI_AWCACHE,
+		output	wire [2 : 0]			M_AXI_AWPROT,
+		output	wire [3 : 0]			M_AXI_AWQOS,
+		output	wire				M_AXI_AWVALID,
+		input	wire				M_AXI_AWREADY,
+		output	wire [C_S_AXI_DATA_WIDTH-1 : 0]	M_AXI_WDATA,
+		output	wire [(C_S_AXI_DATA_WIDTH/8)-1 : 0] M_AXI_WSTRB,
+		output	wire				M_AXI_WLAST,
+		output	wire				M_AXI_WVALID,
+		input	wire				M_AXI_WREADY,
+		input	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_BID,
+		input	wire [1 : 0]			M_AXI_BRESP,
+		input	wire				M_AXI_BVALID,
+		output	wire				M_AXI_BREADY,
+		output	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_ARID,
+		output	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	M_AXI_ARADDR,
+		output	wire [7 : 0]			M_AXI_ARLEN,
+		output	wire [2 : 0]			M_AXI_ARSIZE,
+		output	wire [1 : 0]			M_AXI_ARBURST,
+		output	wire				M_AXI_ARLOCK,
+		output	wire [3 : 0]			M_AXI_ARCACHE,
+		output	wire [2 : 0]			M_AXI_ARPROT,
+		output	wire [3 : 0]			M_AXI_ARQOS,
+		output	wire				M_AXI_ARVALID,
+		input	wire				M_AXI_ARREADY,
+		input	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_RID,
+		input	wire [C_S_AXI_DATA_WIDTH-1 : 0]	M_AXI_RDATA,
+		input	wire [1 : 0]			M_AXI_RRESP,
+		input	wire				M_AXI_RLAST,
+		input	wire				M_AXI_RVALID,
+		output	wire				M_AXI_RREADY
+	);
+
+	// Internal signals
+	wire m_axi_aresetn;
+	wire s_aw_ready;
+	wire s_w_ready;
+	wire s_b_valid;
+	wire s_b_ready;
+	wire s_ar_ready;
+	wire s_r_valid;
+	wire s_r_ready;
+	wire m_aw_valid;
+	wire m_aw_ready;
+	wire m_w_valid;
+	wire m_w_ready;
+	wire m_b_valid;
+	wire m_b_ready;
+	wire m_ar_valid;
+	wire m_ar_ready;
+	wire m_r_valid;
+	wire m_r_ready;
+
+	// AW channel: S to M
+	// S side: capture AW when valid and ready
+	// M side: release AW when valid and ready
+
+	// AW FIFO
+	reg [C_S_AXI_ID_WIDTH-1:0] aw_id_fifo [0:(1<<LGFIFO)-1];
+	reg [C_S_AXI_ADDR_WIDTH-1:0] aw_addr_fifo [0:(1<<LGFIFO)-1];
+	reg [7:0] aw_len_fifo [0:(1<<LGFIFO)-1];
+	reg [2:0] aw_size_fifo [0:(1<<LGFIFO)-1];
+	reg [1:0] aw_burst_fifo [0:(1<<LGFIFO)-1];
+	reg aw_lock_fifo [0:(1<<LGFIFO)-1];
+	reg [3:0] aw_cache_fifo [0:(1<<LGFIFO)-1];
+	reg [2:0] aw_prot_fifo [0:(1<<LGFIFO)-1];
+	reg [3:0] aw_qos_fifo [0:(1<<LGFIFO)-1];
+	reg [LGFIFO-1:0] aw_wr_ptr, aw_rd_ptr;
+	reg [LGFIFO:0] aw_count;
+
+	// AR channel: S to M
+	reg [C_S_AXI_ID_WIDTH-1:0] ar_id_fifo [0:(1<<LGFIFO)-1];
+	reg [C_S_AXI_ADDR_WIDTH-1:0] ar_addr_fifo [0:(1<<LGFIFO)-1];
+	reg [7:0] ar_len_fifo [0:(1<<LGFIFO)-1];
+	reg [2:0] ar_size_fifo [0:(1<<LGFIFO)-1];
+	reg [1:0] ar_burst_fifo [0:(1<<LGFIFO)-1];
+	reg ar_lock_fifo [0:(1<<LGFIFO)-1];
+	reg [3:0] ar_cache_fifo [0:(1<<LGFIFO)-1];
+	reg [2:0] ar_prot_fifo [0:(1<<LGFIFO)-1];
+	reg [3:0] ar_qos_fifo [0:(1<<LGFIFO)-1];
+	reg [LGFIFO-1:0] ar_wr_ptr, ar_rd_ptr;
+	reg [LGFIFO:0] ar_count;
+
+	// W channel: S to M
+	reg [C_S_AXI_DATA_WIDTH-1:0] w_data_fifo [0:(1<<LGFIFO)-1];
+	reg [(C_S_AXI_DATA_WIDTH/8)-1:0] w_strb_fifo [0:(1<<LGFIFO)-1];
+	reg w_last_fifo [0:(1<<LGFIFO)-1];
+	reg [LGFIFO-1:0] w_wr_ptr, w_rd_ptr;
+	reg [LGFIFO:0] w_count;
+
+	// B channel: M to S
+	reg [C_S_AXI_ID_WIDTH-1:0] b_id_fifo [0:(1<<LGFIFO)-1];
+	reg [1:0] b_resp_fifo [0:(1<<LGFIFO)-1];
+	reg [LGFIFO-1:0] b_wr_ptr, b_rd_ptr;
+	reg [LGFIFO:0] b_count;
+
+	// R channel: M to S
+	reg [C_S_AXI_ID_WIDTH-1:0] r_id_fifo [0:(1<<LGFIFO)-1];
+	reg [C_S_AXI_DATA_WIDTH-1:0] r_data_fifo [0:(1<<LGFIFO)-1];
+	reg [1:0] r_resp_fifo [0:(1<<LGFIFO)-1];
+	reg r_last_fifo [0:(1<<LGFIFO)-1];
+	reg [LGFIFO-1:0] r_wr_ptr, r_rd_ptr;
+	reg [LGFIFO:0] r_count;
+
+	// Reset synchronization for M_AXI_ACLK domain
+	reg [XCLOCK_FFS-1:0] m_reset_sync;
+	always @(posedge M_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN)
+			m_reset_sync <= {XCLOCK_FFS{1'b0}};
+		else
+			m_reset_sync <= {m_reset_sync[XCLOCK_FFS-2:0], 1'b1};
+	end
+	assign M_AXI_ARESETN = m_reset_sync[XCLOCK_FFS-1];
+
+	// AW channel: S side write
+	wire aw_s_write = S_AXI_AWVALID && s_aw_ready;
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			aw_wr_ptr <= {LGFIFO{1'b0}};
+			aw_count <= {(LGFIFO+1){1'b0}};
+		end else if (aw_s_write) begin
+			aw_id_fifo[aw_wr_ptr] <= S_AXI_AWID;
+			aw_addr_fifo[aw_wr_ptr] <= S_AXI_AWADDR;
+			aw_len_fifo[aw_wr_ptr] <= S_AXI_AWLEN;
+			aw_size_fifo[aw_wr_ptr] <= S_AXI_AWSIZE;
+			aw_burst_fifo[aw_wr_ptr] <= S_AXI_AWBURST;
+			aw_lock_fifo[aw_wr_ptr] <= S_AXI_AWLOCK;
+			aw_cache_fifo[aw_wr_ptr] <= S_AXI_AWCACHE;
+			aw_prot_fifo[aw_wr_ptr] <= S_AXI_AWPROT;
+			aw_qos_fifo[aw_wr_ptr] <= S_AXI_AWQOS;
+			aw_wr_ptr <= aw_wr_ptr + 1'b1;
+			aw_count <= aw_count + 1'b1;
+		end
+	end
+
+	// AW channel: M side read
+	wire aw_m_read = m_aw_valid && M_AXI_AWREADY;
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			aw_rd_ptr <= {LGFIFO{1'b0}};
+			aw_count <= {(LGFIFO+1){1'b0}};
+		end else if (aw_m_read) begin
+			aw_rd_ptr <= aw_rd_ptr + 1'b1;
+			aw_count <= aw_count - 1'b1;
+		end
+	end
+
+	assign M_AXI_AWID = aw_id_fifo[aw_rd_ptr];
+	assign M_AXI_AWADDR = aw_addr_fifo[aw_rd_ptr];
+	assign M_AXI_AWLEN = aw_len_fifo[aw_rd_ptr];
+	assign M_AXI_AWSIZE = aw_size_fifo[aw_rd_ptr];
+	assign M_AXI_AWBURST = aw_burst_fifo[aw_rd_ptr];
+	assign M_AXI_AWLOCK = aw_lock_fifo[aw_rd_ptr];
+	assign M_AXI_AWCACHE = aw_cache_fifo[aw_rd_ptr];
+	assign M_AXI_AWPROT = aw_prot_fifo[aw_rd_ptr];
+	assign M_AXI_AWQOS = aw_qos_fifo[aw_rd_ptr];
+	assign M_AXI_AWVALID = (aw_count > 0);
+
+	// AR channel: S side write
+	wire ar_s_write = S_AXI_ARVALID && s_ar_ready;
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			ar_wr_ptr <= {LGFIFO{1'b0}};
+			ar_count <= {(LGFIFO+1){1'b0}};
+		end else if (ar_s_write) begin
+			ar_id_fifo[ar_wr_ptr] <= S_AXI_ARID;
+			ar_addr_fifo[ar_wr_ptr] <= S_AXI_ARADDR;
+			ar_len_fifo[ar_wr_ptr] <= S_AXI_ARLEN;
+			ar_size_fifo[ar_wr_ptr] <= S_AXI_ARSIZE;
+			ar_burst_fifo[ar_wr_ptr] <= S_AXI_ARBURST;
+			ar_lock_fifo[ar_wr_ptr] <= S_AXI_ARLOCK;
+			ar_cache_fifo[ar_wr_ptr] <= S_AXI_ARCACHE;
+			ar_prot_fifo[ar_wr_ptr] <= S_AXI_ARPROT;
+			ar_qos_fifo[ar_wr_ptr] <= S_AXI_ARQOS;
+			ar_wr_ptr <= ar_wr_ptr + 1'b1;
+			ar_count <= ar_count + 1'b1;
+		end
+	end
+
+	// AR channel: M side read
+	wire ar_m_read = m_ar_valid && M_AXI_ARREADY;
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			ar_rd_ptr <= {LGFIFO{1'b0}};
+			ar_count <= {(LGFIFO+1){1'b0}};
+		end else if (ar_m_read) begin
+			ar_rd_ptr <= ar_rd_ptr + 1'b1;
+			ar_count <= ar_count - 1'b1;
+		end
+	end
+
+	assign M_AXI_ARID = ar_id_fifo[ar_rd_ptr];
+	assign M_AXI_ARADDR = ar_addr_fifo[ar_rd_ptr];
+	assign M_AXI_ARLEN = ar_len_fifo[ar_rd_ptr];
+	assign M_AXI_ARSIZE = ar_size_fifo[ar_rd_ptr];
+	assign M_AXI_ARBURST = ar_burst_fifo[ar_rd_ptr];
+	assign M_AXI_ARLOCK = ar_lock_fifo[ar_rd_ptr];
+	assign M_AXI_ARCACHE = ar_cache_fifo[ar_rd_ptr];
+	assign M_AXI_ARPROT = ar_prot_fifo[ar_rd_ptr];
+	assign M_AXI_ARQOS = ar_qos_fifo[ar_rd_ptr];
+	assign M_AXI_ARVALID = (ar_count > 0);
+
+	// W channel: S side write
+	wire w_s_write = S_AXI_WVALID && s_w_ready;
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			w_wr_ptr <= {LGFIFO{1'b0}};
+			w_count <= {(LGFIFO+1){1'b0}};
+		end else if (w_s_write) begin
+			w_data_fifo[w_wr_ptr] <= S_AXI_WDATA;
+			w_strb_fifo[w_wr_ptr] <= S_AXI_WSTRB;
+			w_last_fifo[w_wr_ptr] <= S_AXI_WLAST;
+			w_wr_ptr <= w_wr_ptr + 1'b1;
+			w_count <= w_count + 1'b1;
+		end
+	end
+
+	// W channel: M side read
+	wire w_m_read = m_w_valid && M_AXI_WREADY;
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			w_rd_ptr <= {LGFIFO{1'b0}};
+			w_count <= {(LGFIFO+1){1'b0}};
+		end else if (w_m_read) begin
+			w_rd_ptr <= w_rd_ptr + 1'b1;
+			w_count <= w_count - 1'b1;
+		end
+	end
+
+	assign M_AXI_WDATA = w_data_fifo[w_rd_ptr];
+	assign M_AXI_WSTRB = w_strb_fifo[w_rd_ptr];
+	assign M_AXI_WLAST = w_last_fifo[w_rd_ptr];
+	assign M_AXI_WVALID = (w_count > 0);
+
+	// B channel: M side write
+	wire b_m_write = M_AXI_BVALID && m_b_ready;
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			b_wr_ptr <= {LGFIFO{1'b0}};
+			b_count <= {(LGFIFO+1){1'b0}};
+		end else if (b_m_write) begin
+			b_id_fifo[b_wr_ptr] <= M_AXI_BID;
+			b_resp_fifo[b_wr_ptr] <= M_AXI_BRESP;
+			b_wr_ptr <= b_wr_ptr + 1'b1;
+			b_count <= b_count + 1'b1;
+		end
+	end
+
+	// B channel: S side read
+	wire b_s_read = s_b_valid && S_AXI_BREADY;
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			b_rd_ptr <= {LGFIFO{1'b0}};
+			b_count <= {(LGFIFO+1){1'b0}};
+		end else if (b_s_read) begin
+			b_rd_ptr <= b_rd_ptr + 1'b1;
+			b_count <= b_count - 1'b1;
+		end
+	end
+
+	assign S_AXI_BID = b_id_fifo[b_rd_ptr];
+	assign S_AXI_BRESP = b_resp_fifo[b_rd_ptr];
+	assign S_AXI_BVALID = (b_count > 0);
+
+	// R channel: M side write
+	wire r_m_write = M_AXI_RVALID && m_r_ready;
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			r_wr_ptr <= {LGFIFO{1'b0}};
+			r_count <= {(LGFIFO+1){1'b0}};
+		end else if (r_m_write) begin
+			r_id_fifo[r_wr_ptr] <= M_AXI_RID;
+			r_data_fifo[r_wr_ptr] <= M_AXI_RDATA;
+			r_resp_fifo[r_wr_ptr] <= M_AXI_RRESP;
+			r_last_fifo[r_wr_ptr] <= M_AXI_RLAST;
+			r_wr_ptr <= r_wr_ptr + 1'b1;
+			r_count <= r_count + 1'b1;
+		end
+	end
+
+	// R channel: S side read
+	wire r_s_read = s_r_valid && S_AXI_RREADY;
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			r_rd_ptr <= {LGFIFO{1'b0}};
+			r_count <= {(LGFIFO+1){1'b0}};
+		end else if (r_s_read) begin
+			r_rd_ptr <= r_rd_ptr + 1'b1;
+			r_count <= r_count - 1'b1;
+		end
+	end
+
+	assign S_AXI_RID = r_id_fifo[r_rd_ptr];
+	assign S_AXI_RDATA = r_data_fifo[r_rd_ptr];
+	assign S_AXI_RRESP = r_resp_fifo[r_rd_ptr];
+	assign S_AXI_RLAST = r_last_fifo[r_rd_ptr];
+	assign S_AXI_RVALID = (r_count > 0);
+
+	// Ready signals
+	assign S_AXI_AWREADY = (aw_count < (1<<LGFIFO));
+	assign S_AXI_ARREADY = (ar_count < (1<<LGFIFO));
+	assign S_AXI_WREADY = (w_count < (1<<LGFIFO));
+	assign M_AXI_BREADY = (b_count < (1<<LGFIFO));
+	assign M_AXI_RREADY = (r_count < (1<<LGFIFO));
+
+	// Connect internal signals to outputs
+	assign s_aw_ready = S_AXI_AWREADY;
+	assign s_w_ready = S_AXI_WREADY;
+	assign s_b_valid = S_AXI_BVALID;
+	assign s_b_ready = S_AXI_BREADY;
+	assign s_ar_ready = S_AXI_ARREADY;
+	assign s_r_valid = S_AXI_RVALID;
+	assign s_r_ready = S_AXI_RREADY;
+	assign m_aw_valid = M_AXI_AWVALID;
+	assign m_aw_ready = M_AXI_AWREADY;
+	assign m_w_valid = M_AXI_WVALID;
+	assign m_w_ready = M_AXI_WREADY;
+	assign m_b_valid = M_AXI_BVALID;
+	assign m_b_ready = M_AXI_BREADY;
+	assign m_ar_valid = M_AXI_ARVALID;
+	assign m_ar_ready = M_AXI_ARREADY;
+	assign m_r_valid = M_AXI_RVALID;
+	assign m_r_ready = M_AXI_RREADY;
+
+endmodule

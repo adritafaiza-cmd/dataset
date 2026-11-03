@@ -1,0 +1,298 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "async_fifo_sv",
+            "function": "Asynchronous FIFO with 2**ADDR_WIDTH entries of DATA_WIDTH bits",
+            "parameters": [
+                { "name": "DATA_WIDTH", "value": 8 },
+                { "name": "ADDR_WIDTH", "value": 4 },
+                { "name": "SYNC_STAGES", "value": 2 }
+            ],
+            "ports": [
+                { "name": "wclk", "direction": "input", "width": 1, "clock_domain": "write" },
+                { "name": "wrst_n", "direction": "input", "width": 1, "clock_domain": "write" },
+                { "name": "winc", "direction": "input", "width": 1, "clock_domain": "write" },
+                { "name": "wdata", "direction": "input", "width": "DATA_WIDTH", "clock_domain": "write" },
+                { "name": "wfull", "direction": "output", "width": 1, "clock_domain": "write" },
+                { "name": "waddr", "direction": "output", "width": "ADDR_WIDTH+1", "clock_domain": "write" },
+                { "name": "rclk", "direction": "input", "width": 1, "clock_domain": "read" },
+                { "name": "rrst_n", "direction": "input", "width": 1, "clock_domain": "read" },
+                { "name": "rinc", "direction": "input", "width": 1, "clock_domain": "read" },
+                { "name": "rdata", "direction": "output", "width": "DATA_WIDTH", "clock_domain": "read" },
+                { "name": "rempty", "direction": "output", "width": 1, "clock_domain": "read" },
+                { "name": "raddr", "direction": "output", "width": "ADDR_WIDTH+1", "clock_domain": "read" }
+            ],
+            "instances": [
+                { "module": "fifo_mem", "name": "fifo_memory", "function": "FIFO memory array", "connections": [] },
+                { "module": "gray_counter", "name": "w_gray_counter", "function": "Write gray counter", "connections": [] },
+                { "module": "gray_counter", "name": "r_gray_counter", "function": "Read gray counter", "connections": [] },
+                { "module": "sync_gray_counter", "name": "w_gray_sync", "function": "Write gray counter synchronization", "connections": [] },
+                { "module": "sync_gray_counter", "name": "r_gray_sync", "connections": [] }
+            ],
+            "connections": [
+                { "source": "w_gray_counter", "destination": "fifo_memory.wr_addr" },
+                { "source": "r_gray_counter", "destination": "fifo_memory.rd_addr" },
+                { "source": "w_gray_counter", "destination": "w_gray_sync.data_in" },
+                { "source": "r_gray_counter", "destination": "r_gray_sync.data_in" },
+                { "source": "w_gray_sync.data_out", "destination": "r_gray_sync.wr_gray" },
+                { "source": "r_gray_sync.data_out", "destination": "w_gray_sync.rd_gray" },
+                { "source": "w_gray_sync.wr_gray", "destination": "fifo_memory.wr_gray" },
+                { "source": "r_gray_sync.rd_gray", "destination": "fifo_memory.rd_gray" },
+                { "source": "w_gray_counter", "destination": "waddr" },
+                { "source": "r_gray_counter", "destination": "raddr" },
+                { "source": "fifo_memory.wfull", "destination": "wfull" },
+                { "source": "fifo_memory.rempty", "destination": "rempty" },
+                { "source": "fifo_memory.rdata", "destination": "rdata" },
+                { "source": "winc", "destination": "fifo_memory.winc" },
+                { "source": "wdata", "destination": "fifo_memory.wdata" },
+                { "source": "rinc", "destination": "fifo_memory.rinc" },
+                { "source": "wclk", "destination": "fifo_memory.wclk" },
+                { "source": "wrst_n", "destination": "fifo_memory.wrst_n" },
+                { "source": "rclk", "destination": "fifo_memory.rclk" },
+                { "source": "rrst_n", "destination": "fifo_memory.rrst_n" },
+                { "source": "wclk", "destination": "w_gray_counter.clk" },
+                { "source": "wrst_n", "destination": "w_gray_counter.rst_n" },
+                { "source": "rclk", "destination": "r_gray_counter.clk" },
+                { "source": "rrst_n", "destination": "r_gray_counter.rst_n" },
+                { "source": "wclk", "destination": "w_gray_sync.clk" },
+                { "source": "wrst_n", "destination": "w_gray_sync.rst_n" },
+                { "source": "rclk", "destination": "r_gray_sync.clk" },
+                { "source": "rrst_n", "destination": "r_gray_sync.rst_n" }
+            ],
+            "internal_signals": [
+                { "name": "w_gray_sync.wr_gray", "width": "ADDR_WIDTH+1" },
+                { "name": "w_gray_sync.rd_gray", "width": "ADDR_WIDTH+1" },
+                { "name": "r_gray_sync.wr_gray", "width": "ADDR_WIDTH+1" },
+                { "name": "r_gray_sync.rd_gray", "width": "ADDR_WIDTH+1" }
+            ],
+            "behavior": [
+                "A write is accepted when winc is high and wfull is low.",
+                "A read is accepted when rinc is high and rempty is low.",
+                "Data must return exactly once in write order.",
+                "rdata is a read-clock sample of the word being offered. rempty may remain high for multiple read clocks after an accepted read even when another word is already stored.",
+                "After reset, wfull is low and rempty is high.",
+                "waddr and raddr are debug pointer outputs.",
+                "The implementation must be safe for clock-domain and reset-domain crossings and must pass structural CDC/RDC analysis with zero unsafe crossings. Reset release must be safe in each clock domain, and transferred multi-bit data must remain coherent.",
+                "Payloads pass through two destination-clock stages before they are advertised as valid. Preserve source ownership of each queued word until its accepted destination transfer; synchronization stages alone do not establish multi-bit coherence. Availability may lag and bubbles may span multiple destination clocks. There is no one-beat-per-clock guarantee."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    wire [ADDR_WIDTH:0] wr_addr_gray, wr_addr_gray_sync, rd_addr_gray, rd_addr_gray_sync;
+    wire [ADDR_WIDTH:0] wr_ptr, rd_ptr;
+
+    // FIFO Memory
+    fifo_mem #(
+        .DATA_WIDTH(DATA_WIDTH),
+        .ADDR_WIDTH(ADDR_WIDTH)
+    ) fifo_memory (
+        .wclk     (wclk),
+        .wrst_n   (wrst_n),
+        .winc     (winc),
+        .wdata    (wdata),
+        .rclk     (rclk),
+        .rrst_n   (rrst_n),
+        .rinc     (rinc),
+        .wr_addr  (wr_addr_gray),
+        .rd_addr  (rd_addr_gray),
+        .wr_gray  (wr_addr_gray_sync),
+        .rd_gray  (rd_addr_gray_sync),
+        .rdata    (rdata),
+        .wfull    (wfull),
+        .rempty   (rempty)
+    );
+
+    // Write Gray Counter
+    gray_counter #(
+        .WIDTH(ADDR_WIDTH + 1)
+    ) w_gray_counter (
+        .clk    (wclk),
+        .rst_n  (wrst_n),
+        .inc    (winc & ~wfull),
+        .gray   (wr_addr_gray),
+        .bin    (wr_ptr)
+    );
+
+    // Read Gray Counter
+    gray_counter #(
+        .WIDTH(ADDR_WIDTH + 1)
+    ) r_gray_counter (
+        .clk    (rclk),
+        .rst_n  (rrst_n),
+        .inc    (rinc & ~rempty),
+        .gray   (rd_addr_gray),
+        .bin    (rd_ptr)
+    );
+
+    // Write Gray Counter Synchronization
+    sync_gray_counter #(
+        .WIDTH(ADDR_WIDTH + 1),
+        .STAGES(SYNC_STAGES)
+    ) w_gray_sync (
+        .clk     (rclk),
+        .rst_n   (rrst_n),
+        .data_in (wr_addr_gray),
+        .data_out(wr_addr_gray_sync)
+    );
+
+    // Read Gray Counter Synchronization
+    sync_gray_counter #(
+        .WIDTH(ADDR_WIDTH + 1),
+        .STAGES(SYNC_STAGES)
+    ) r_gray_sync (
+        .clk     (wclk),
+        .rst_n   (wrst_n),
+        .data_in (rd_addr_gray),
+        .data_out(rd_addr_gray_sync)
+    );
+
+    // Output Addresses
+    assign waddr = wr_ptr;
+    assign raddr = rd_ptr;
+
+endmodule
+
+// FIFO Memory Module
+module fifo_mem #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    input  wire [ADDR_WIDTH:0]     wr_addr,
+    input  wire [ADDR_WIDTH:0]     rd_addr,
+    input  wire [ADDR_WIDTH:0]     wr_gray,
+    input  wire [ADDR_WIDTH:0]     rd_gray,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    wfull,
+    output wire                    rempty
+);
+
+    reg [DATA_WIDTH-1:0] mem [0:(1 << ADDR_WIDTH) - 1];
+    reg [ADDR_WIDTH:0] wr_ptr, rd_ptr;
+    reg [ADDR_WIDTH:0] wr_gray_sync, rd_gray_sync;
+
+    // Write Pointer Logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wr_ptr <= 0;
+        end else if (winc & ~wfull) begin
+            wr_ptr <= wr_ptr + 1;
+        end
+    end
+
+    // Read Pointer Logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rd_ptr <= 0;
+        end else if (rinc & ~rempty) begin
+            rd_ptr <= rd_ptr + 1;
+        end
+    end
+
+    // Memory Write
+    always @(posedge wclk) begin
+        if (winc & ~wfull) begin
+            mem[wr_ptr[ADDR_WIDTH-1:0]] <= wdata;
+        end
+    end
+
+    // Memory Read
+    assign rdata = mem[rd_ptr[ADDR_WIDTH-1:0]];
+
+    // Full and Empty Flags
+    assign wfull = (wr_gray_sync[ADDR_WIDTH] != rd_gray[ADDR_WIDTH]) && (wr_gray_sync[ADDR_WIDTH-1:0] == rd_gray[ADDR_WIDTH-1:0]);
+    assign rempty = (wr_gray == rd_gray);
+
+endmodule
+
+// Gray Counter Module
+module gray_counter #(
+    parameter WIDTH = 5
+)(
+    input  wire clk,
+    input  wire rst_n,
+    input  wire inc,
+    output reg [WIDTH-1:0] gray,
+    output wire [WIDTH-1:0] bin
+);
+
+    reg [WIDTH-1:0] count;
+
+    // Binary Counter
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            count <= 0;
+        end else if (inc) begin
+            count <= count + 1;
+        end
+    end
+
+    // Gray Code Conversion
+    assign gray = (count >> 1) ^ count;
+
+    // Output Binary Count
+    assign bin = count;
+
+endmodule
+
+// Sync Gray Counter Module
+module sync_gray_counter #(
+    parameter WIDTH = 5,
+    parameter STAGES = 2
+)(
+    input  wire clk,
+    input  wire rst_n,
+    input  wire [WIDTH-1:0] data_in,
+    output reg [WIDTH-1:0] data_out
+);
+
+    reg [WIDTH-1:0] sync [0:STAGES-1];
+
+    // Synchronization Stages
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            sync <= 0;
+        end else begin
+            sync[0] <= data_in;
+            for (int i = 1; i < STAGES; i = i + 1) begin
+                sync[i] <= sync[i-1];
+            end
+        end
+    end
+
+    // Output Synchronized Data
+    assign data_out = sync[STAGES-1];
+
+endmodule
+```

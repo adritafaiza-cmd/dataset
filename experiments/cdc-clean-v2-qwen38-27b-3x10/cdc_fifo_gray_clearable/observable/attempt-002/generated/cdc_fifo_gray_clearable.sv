@@ -1,0 +1,208 @@
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH + 1;
+
+    // Clear synchronization: src clear -> dst domain
+    reg [SYNC_STAGES-1:0] src_clear_sync;
+    wire src_clear_dst = src_clear_sync[SYNC_STAGES-1];
+
+    // Clear synchronization: dst clear -> src domain
+    reg [SYNC_STAGES-1:0] dst_clear_sync;
+    wire dst_clear_src = dst_clear_sync[SYNC_STAGES-1];
+
+    // Clear pending: clear is pending until it has propagated to the other domain
+    // src_clear_pending_o: high while src_clear_i is asserted or until dst has seen it
+    // We track that the clear has been synchronized to dst
+    reg src_clear_done;
+    reg dst_clear_done;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_clear_done <= 1'b1;
+        else if (src_clear_i)
+            src_clear_done <= 1'b0;
+        else if (!src_clear_done && src_clear_dst)
+            src_clear_done <= 1'b1;
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_clear_done <= 1'b1;
+        else if (dst_clear_i)
+            dst_clear_done <= 1'b0;
+        else if (!dst_clear_done && dst_clear_src)
+            dst_clear_done <= 1'b1;
+    end
+
+    assign src_clear_pending_o = !src_clear_done;
+    assign dst_clear_pending_o = !dst_clear_done;
+
+    // Synchronize clear signals
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            src_clear_sync <= {SYNC_STAGES{1'b0}};
+        else
+            src_clear_sync <= {src_clear_sync[SYNC_STAGES-2:0], src_clear_i};
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            dst_clear_sync <= {SYNC_STAGES{1'b0}};
+        else
+            dst_clear_sync <= {dst_clear_sync[SYNC_STAGES-2:0], dst_clear_i};
+    end
+
+    // FIFO memory
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+
+    // Source domain: write pointer
+    reg [PTR_W-1:0] wptr_bin;
+    reg [PTR_W-1:0] wptr_gray;
+    reg [PTR_W-1:0] rptr_gray_src; // synchronized read pointer in src domain
+
+    // Destination domain: read pointer
+    reg [PTR_W-1:0] rptr_bin;
+    reg [PTR_W-1:0] rptr_gray;
+    reg [PTR_W-1:0] wptr_gray_dst; // synchronized write pointer in dst domain
+
+    // Binary to Gray
+    function [PTR_W-1:0] bin2gray;
+        input [PTR_W-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    // Gray to Binary
+    function [PTR_W-1:0] gray2bin;
+        input [PTR_W-1:0] gray;
+        reg [PTR_W-1:0] bin;
+        integer i;
+        begin
+            bin[PTR_W-1] = gray[PTR_W-1];
+            for (i = PTR_W-2; i >= 0; i = i - 1)
+                bin[i] = gray[i] ^ bin[i+1];
+            gray2bin = bin;
+        end
+    endfunction
+
+    // Synchronize wptr_gray from src to dst
+    reg [SYNC_STAGES-1:0] wptr_gray_sync;
+    wire [PTR_W-1:0] wptr_gray_dst_sync = wptr_gray_sync[SYNC_STAGES-1];
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            wptr_gray_sync <= {SYNC_STAGES{1'b0}};
+        else
+            wptr_gray_sync <= {wptr_gray_sync[SYNC_STAGES-2:0], wptr_gray};
+    end
+
+    // Synchronize rptr_gray from dst to src
+    reg [SYNC_STAGES-1:0] rptr_gray_sync;
+    wire [PTR_W-1:0] rptr_gray_src_sync = rptr_gray_sync[SYNC_STAGES-1];
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            rptr_gray_sync <= {SYNC_STAGES{1'b0}};
+        else
+            rptr_gray_sync <= {rptr_gray_sync[SYNC_STAGES-2:0], rptr_gray};
+    end
+
+    // Update synchronized pointers
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni)
+            rptr_gray_src <= {PTR_W{1'b0}};
+        else
+            rptr_gray_src <= rptr_gray_src_sync;
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni)
+            wptr_gray_dst <= {PTR_W{1'b0}};
+        else
+            wptr_gray_dst <= wptr_gray_dst_sync;
+    end
+
+    // Compute full/empty
+    wire [PTR_W-1:0] rptr_bin_src = gray2bin(rptr_gray_src);
+    wire [PTR_W-1:0] wptr_bin_dst = gray2bin(wptr_gray_dst);
+
+    wire src_full = (wptr_bin == rptr_bin_src) && (wptr_gray != rptr_gray_src);
+    wire dst_empty = (rptr_bin == wptr_bin_dst) && (rptr_gray == wptr_gray_dst);
+
+    // Clear handling: when clear is active in a domain, reset pointers
+    // src_clear_i resets src pointers; dst_clear_i resets dst pointers
+    // Also, when the other domain's clear propagates, we need to reset our pointers too
+
+    wire src_clear_active = src_clear_i || dst_clear_src;
+    wire dst_clear_active = dst_clear_i || src_clear_dst;
+
+    // Write operation
+    wire src_write = src_valid_i && !src_full && !src_clear_active;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            wptr_bin <= {PTR_W{1'b0}};
+            wptr_gray <= {PTR_W{1'b0}};
+        end else if (src_clear_active) begin
+            wptr_bin <= {PTR_W{1'b0}};
+            wptr_gray <= {PTR_W{1'b0}};
+        end else if (src_write) begin
+            wptr_bin <= wptr_bin + 1'b1;
+            wptr_gray <= bin2gray(wptr_bin + 1'b1);
+        end
+    end
+
+    // Read operation
+    wire dst_read = dst_ready_i && !dst_empty && !dst_clear_active;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            rptr_bin <= {PTR_W{1'b0}};
+            rptr_gray <= {PTR_W{1'b0}};
+        end else if (dst_clear_active) begin
+            rptr_bin <= {PTR_W{1'b0}};
+            rptr_gray <= {PTR_W{1'b0}};
+        end else if (dst_read) begin
+            rptr_bin <= rptr_bin + 1'b1;
+            rptr_gray <= bin2gray(rptr_bin + 1'b1);
+        end
+    end
+
+    // Memory write
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            // No action needed for memory
+        end else if (src_write) begin
+            mem[wptr_bin[LOG_DEPTH-1:0]] <= src_data_i;
+        end
+    end
+
+    // Output data and valid
+    assign dst_data_o = mem[rptr_bin[LOG_DEPTH-1:0]];
+    assign dst_valid_o = !dst_empty && !dst_clear_active;
+
+    // Ready signal
+    assign src_ready_o = !src_full && !src_clear_active;
+
+endmodule

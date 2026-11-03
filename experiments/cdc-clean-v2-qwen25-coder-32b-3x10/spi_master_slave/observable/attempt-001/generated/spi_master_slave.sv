@@ -1,0 +1,167 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    reg [N-1:0]       shift_reg;
+    reg [3:0]         bit_cnt;
+    reg               spi_sck;
+    reg               spi_sck_d;
+    reg               spi_ssel;
+    reg [N-1:0]       di_i_sync;
+    reg               wren_i_sync;
+    reg               wren_i_sync_d;
+    reg [1:0]         state;
+    reg [1:0]         next_state;
+    reg [1:0]         state_sync;
+    reg [1:0]         state_sync_d;
+
+    // State definitions
+    localparam IDLE = 2'b00;
+    localparam TRANSFER = 2'b01;
+    localparam DONE = 2'b10;
+
+    // Clock domain crossing for wren_i and di_i
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            wren_i_sync <= 1'b0;
+            wren_i_sync_d <= 1'b0;
+            di_i_sync <= {N{1'b0}};
+        end else begin
+            wren_i_sync <= wren_i;
+            wren_i_sync_d <= wren_i_sync;
+            di_i_sync <= di_i;
+        end
+    end
+
+    // Clock domain crossing for state
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state_sync <= IDLE;
+            state_sync_d <= IDLE;
+        end else begin
+            state_sync <= state;
+            state_sync_d <= state_sync;
+        end
+    end
+
+    // SPI clock generation
+    reg [1:0] sclk_div_cnt;
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sclk_div_cnt <= 2'b00;
+            spi_sck <= 1'b0;
+        end else begin
+            if (sclk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                sclk_div_cnt <= 2'b00;
+                spi_sck <= ~spi_sck;
+            end else begin
+                sclk_div_cnt <= sclk_div_cnt + 1;
+            end
+        end
+    end
+
+    // SPI clock edge detection
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_sck_d <= 1'b0;
+        end else begin
+            spi_sck_d <= spi_sck;
+        end
+    end
+
+    // State machine
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state <= IDLE;
+            bit_cnt <= 4'b0000;
+            spi_ssel <= 1'b1;
+            wr_ack_o <= 1'b0;
+            do_valid_o <= 1'b0;
+            shift_reg <= {N{1'b0}};
+        end else begin
+            state <= next_state;
+
+            case (state)
+                IDLE: begin
+                    wr_ack_o <= 1'b0;
+                    do_valid_o <= 1'b0;
+                    if (wren_i_sync && !wren_i_sync_d && state_sync_d == IDLE) begin
+                        shift_reg <= di_i_sync;
+                        bit_cnt <= N-1;
+                        spi_ssel <= 1'b0;
+                        wr_ack_o <= 1'b1;
+                        next_state <= TRANSFER;
+                    end else begin
+                        next_state <= IDLE;
+                    end
+                end
+
+                TRANSFER: begin
+                    if (spi_sck && !spi_sck_d) begin
+                        spi_mosi_o <= shift_reg[bit_cnt];
+                        if (bit_cnt == 0) begin
+                            next_state <= DONE;
+                        end else begin
+                            bit_cnt <= bit_cnt - 1;
+                        end
+                    end else begin
+                        next_state <= TRANSFER;
+                    end
+                end
+
+                DONE: begin
+                    if (spi_sck && !spi_sck_d) begin
+                        do_o[bit_cnt] <= spi_miso_i;
+                        if (bit_cnt == N-1) begin
+                            spi_ssel <= 1'b1;
+                            do_valid_o <= 1'b1;
+                            next_state <= IDLE;
+                        end else begin
+                            bit_cnt <= bit_cnt + 1;
+                        end
+                    end else begin
+                        next_state <= DONE;
+                    end
+                end
+
+                default: begin
+                    next_state <= IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Request output
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_o <= 1'b1;
+        end else begin
+            if (state_sync == IDLE) begin
+                di_req_o <= 1'b1;
+            end else begin
+                di_req_o <= 1'b0;
+            end
+        end
+    end
+
+    // SPI outputs
+    assign spi_sck_o = spi_sck;
+    assign spi_ssel_o = spi_ssel;
+
+endmodule

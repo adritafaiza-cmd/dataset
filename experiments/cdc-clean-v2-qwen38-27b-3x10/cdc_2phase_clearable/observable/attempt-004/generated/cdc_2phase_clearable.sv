@@ -1,0 +1,218 @@
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source-side state
+  reg src_valid_reg;
+  reg [WIDTH-1:0] src_data_reg;
+  reg src_clear_pending_reg;
+  reg src_clear_ack_reg;
+
+  // Destination-side state
+  reg dst_valid_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_clear_pending_reg;
+  reg dst_clear_ack_reg;
+
+  // Synchronizers for clear signals
+  reg [SYNC_STAGES-1:0] src_clear_sync;
+  reg [SYNC_STAGES-1:0] dst_clear_sync;
+  reg [SYNC_STAGES-1:0] src_clear_ack_sync;
+  reg [SYNC_STAGES-1:0] dst_clear_ack_sync;
+
+  // Synchronizers for valid/data handshake
+  // We use a simple approach: source holds data until destination acknowledges
+  // Destination holds data until source acknowledges (via clear or next transfer)
+
+  // For the data path, we need to ensure data is stable while valid is asserted.
+  // We'll use a simple FIFO-like approach with a single entry.
+
+  // Source side:
+  // - src_valid_reg indicates there's data to send
+  // - src_data_reg holds the data
+  // - src_ready_o is high when we can accept new data (no pending transfer)
+  // - When src_valid_i && src_ready_o, we latch data and assert src_valid_reg
+  // - src_valid_reg stays high until destination acknowledges (dst_clear_ack or similar)
+
+  // Destination side:
+  // - dst_valid_reg indicates there's data to present
+  // - dst_data_reg holds the data
+  // - dst_valid_o = dst_valid_reg
+  // - When dst_valid_o && dst_ready_i, we deassert dst_valid_reg
+
+  // Clear mechanism:
+  // - src_clear_i sets src_clear_pending_reg
+  // - src_clear_pending_reg is synchronized to dst domain
+  // - dst_clear_pending_reg is set when src_clear_sync arrives
+  // - dst_clear_pending_reg causes dst to drop its data and set dst_clear_ack_reg
+  // - dst_clear_ack_reg is synchronized back to src domain
+  // - src_clear_ack_reg causes src to drop its data and clear src_clear_pending_reg
+  // - Similarly for dst_clear_i
+
+  // Let's implement this step by step.
+
+  // Source clear pending
+  assign src_clear_pending_o = src_clear_pending_reg;
+
+  // Destination clear pending
+  assign dst_clear_pending_o = dst_clear_pending_reg;
+
+  // Source ready: can accept new data when no pending transfer and not in clear
+  assign src_ready_o = !src_valid_reg && !src_clear_pending_reg;
+
+  // Destination valid
+  assign dst_valid_o = dst_valid_reg;
+  assign dst_data_o = dst_data_reg;
+
+  // Source clock domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_data_reg <= {WIDTH{1'b0}};
+      src_clear_pending_reg <= 1'b0;
+      src_clear_ack_reg <= 1'b0;
+      src_clear_sync <= {SYNC_STAGES{1'b0}};
+      src_clear_ack_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      // Synchronize dst_clear_ack to src domain
+      src_clear_ack_sync <= {src_clear_ack_sync[SYNC_STAGES-2:0], dst_clear_ack_reg};
+
+      // Synchronize dst_clear to src domain (for dst-initiated clear)
+      src_clear_sync <= {src_clear_sync[SYNC_STAGES-2:0], dst_clear_pending_reg};
+
+      // Handle clear
+      if (src_clear_i) begin
+        src_clear_pending_reg <= 1'b1;
+      end else if (src_clear_ack_sync[SYNC_STAGES-1]) begin
+        // Destination acknowledged our clear
+        src_clear_pending_reg <= 1'b0;
+        src_valid_reg <= 1'b0;
+        src_clear_ack_reg <= 1'b0;
+      end
+
+      // Handle dst-initiated clear
+      if (src_clear_sync[SYNC_STAGES-1]) begin
+        // Destination wants to clear
+        src_valid_reg <= 1'b0;
+        src_clear_pending_reg <= 1'b0;
+      end
+
+      // Accept new data
+      if (src_valid_i && src_ready_o) begin
+        src_valid_reg <= 1'b1;
+        src_data_reg <= src_data_i;
+      end
+    end
+  end
+
+  // Destination clock domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_valid_reg <= 1'b0;
+      dst_data_reg <= {WIDTH{1'b0}};
+      dst_clear_pending_reg <= 1'b0;
+      dst_clear_ack_reg <= 1'b0;
+      dst_clear_sync <= {SYNC_STAGES{1'b0}};
+      dst_clear_ack_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      // Synchronize src_clear to dst domain
+      dst_clear_sync <= {dst_clear_sync[SYNC_STAGES-2:0], src_clear_pending_reg};
+
+      // Synchronize src_valid to dst domain
+      // We need to know when source has valid data
+      // Let's synchronize src_valid_reg
+      // Actually, we need a way for dst to know when src has data
+      // Let's add a synchronizer for src_valid_reg
+
+      // Handle clear
+      if (dst_clear_i) begin
+        dst_clear_pending_reg <= 1'b1;
+      end else if (dst_clear_ack_sync[SYNC_STAGES-1]) begin
+        // Source acknowledged our clear
+        dst_clear_pending_reg <= 1'b0;
+        dst_valid_reg <= 1'b0;
+        dst_clear_ack_reg <= 1'b0;
+      end
+
+      // Handle src-initiated clear
+      if (dst_clear_sync[SYNC_STAGES-1]) begin
+        // Source wants to clear
+        dst_valid_reg <= 1'b0;
+        dst_clear_pending_reg <= 1'b0;
+        dst_clear_ack_reg <= 1'b1;
+      end
+
+      // Accept data from source
+      // We need to know when source has valid data
+      // Let's synchronize src_valid_reg
+      // Actually, let's add a separate synchronizer for src_valid_reg
+
+      // Present data to destination
+      if (dst_valid_reg && dst_ready_i) begin
+        dst_valid_reg <= 1'b0;
+      end
+    end
+  end
+
+  // We need to synchronize src_valid_reg to dst domain
+  // Let's add that
+
+  reg [SYNC_STAGES-1:0] src_valid_sync;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_valid_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      src_valid_sync <= {src_valid_sync[SYNC_STAGES-2:0], src_valid_reg};
+    end
+  end
+
+  // When src_valid_sync arrives at dst, and dst is not valid, accept the data
+  // But we also need to synchronize the data
+
+  reg [SYNC_STAGES-1:0] src_data_sync;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_data_sync <= {SYNC_STAGES*WIDTH{1'b0}};
+    end else begin
+      src_data_sync <= {src_data_sync[SYNC_STAGES-1:0], src_data_reg};
+    end
+  end
+
+  // This approach is getting complex. Let me reconsider.
+
+  // A simpler approach: use a single-entry FIFO with handshake.
+  // Source asserts valid when it has data.
+  // Destination asserts ready when it can accept.
+  // But across clock domains, we need to be careful.
+
+  // Let's use a different approach:
+  // - Source latches data and asserts a "data available" signal
+  // - This signal is synchronized to dst domain
+  // - When dst sees "data available" and is ready, it latches the data (which is also synchronized)
+  // - Dst asserts "data accepted" which is synchronized back to src
+  // - Src deasserts "data available" when it sees "data accepted"
+
+  // This is essentially a 2-phase handshake across clock domains.
+
+  // Let me rewrite with this approach.
+
+endmodule

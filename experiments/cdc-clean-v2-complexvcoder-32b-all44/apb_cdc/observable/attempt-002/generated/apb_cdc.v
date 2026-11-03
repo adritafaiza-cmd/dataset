@@ -1,0 +1,208 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    // Internal signals
+    wire                       req_fifo_wvalid;
+    wire                       req_fifo_wready;
+    wire [ADDR_WIDTH + DATA_WIDTH + DATA_WIDTH/8 + 3:0] req_fifo_wdata;
+    wire                       req_fifo_rvalid;
+    wire                       req_fifo_rready;
+    wire [ADDR_WIDTH + DATA_WIDTH + DATA_WIDTH/8 + 3:0] req_fifo_rdata;
+
+    wire                       resp_fifo_wvalid;
+    wire                       resp_fifo_wready;
+    wire [DATA_WIDTH:0]        resp_fifo_wdata;
+    wire                       resp_fifo_rvalid;
+    wire                       resp_fifo_rready;
+    wire [DATA_WIDTH:0]        resp_fifo_rdata;
+
+    wire                       req_accepted;
+    wire [ADDR_WIDTH-1:0]      req_addr;
+    wire [DATA_WIDTH-1:0]      req_data;
+    wire [DATA_WIDTH/8-1:0]    req_strb;
+    wire [2:0]                 req_prot;
+    wire                       req_write;
+
+    wire [DATA_WIDTH-1:0]      resp_data;
+    wire                       resp_slverr;
+
+    // Request FIFO
+    async_fifo #(
+        .DATA_WIDTH(ADDR_WIDTH + DATA_WIDTH + DATA_WIDTH/8 + 4),
+        .LOG_DEPTH(LOG_DEPTH)
+    ) req_fifo_inst (
+        .wclk(src_pclk_i),
+        .wrst_ni(src_preset_ni),
+        .wvalid(req_fifo_wvalid),
+        .wready(req_fifo_wready),
+        .wdata(req_fifo_wdata),
+        .rclk(dst_pclk_i),
+        .rrst_ni(dst_preset_ni),
+        .rvalid(req_fifo_rvalid),
+        .rready(req_fifo_rready),
+        .rdata(req_fifo_rdata)
+    );
+
+    // Response FIFO
+    async_fifo #(
+        .DATA_WIDTH(DATA_WIDTH + 1),
+        .LOG_DEPTH(LOG_DEPTH)
+    ) resp_fifo_inst (
+        .wclk(dst_pclk_i),
+        .wrst_ni(dst_preset_ni),
+        .wvalid(resp_fifo_wvalid),
+        .wready(resp_fifo_wready),
+        .wdata(resp_fifo_wdata),
+        .rclk(src_pclk_i),
+        .rrst_ni(src_preset_ni),
+        .rvalid(resp_fifo_rvalid),
+        .rready(resp_fifo_rready),
+        .rdata(resp_fifo_rdata)
+    );
+
+    // Request FIFO data packing
+    assign req_fifo_wdata = {src_paddr_i, src_pwdata_i, src_pstrb_i, src_pprot_i, src_pwrite_i};
+
+    // Request FIFO data unpacking
+    assign req_addr   = req_fifo_rdata[ADDR_WIDTH + DATA_WIDTH + DATA_WIDTH/8 + 3 -: ADDR_WIDTH];
+    assign req_data   = req_fifo_rdata[DATA_WIDTH + DATA_WIDTH/8 + 3 -: DATA_WIDTH];
+    assign req_strb   = req_fifo_rdata[DATA_WIDTH/8 + 3 -: DATA_WIDTH/8];
+    assign req_prot   = req_fifo_rdata[3 -: 3];
+    assign req_write  = req_fifo_rdata[0];
+
+    // Request valid and ready logic
+    assign req_fifo_wvalid = src_psel_i && src_penable_i && !req_accepted;
+    assign src_pready_o    = req_fifo_wready;
+
+    // Request accepted flag
+    reg req_accepted_reg;
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            req_accepted_reg <= 1'b0;
+        else if (req_fifo_wvalid && req_fifo_wready)
+            req_accepted_reg <= 1'b1;
+        else if (resp_fifo_rvalid && resp_fifo_rready)
+            req_accepted_reg <= 1'b0;
+    end
+
+    assign req_accepted = req_accepted_reg;
+
+    // Destination side signals
+    assign dst_psel_o     = req_fifo_rvalid;
+    assign dst_penable_o  = req_fifo_rvalid;
+    assign dst_pwrite_o   = req_write;
+    assign dst_paddr_o    = req_addr;
+    assign dst_pwdata_o   = req_data;
+    assign dst_pstrb_o    = req_strb;
+    assign dst_pprot_o    = req_prot;
+
+    // Response FIFO data packing
+    assign resp_fifo_wdata = {dst_prdata_i, dst_pslverr_i};
+
+    // Response FIFO data unpacking
+    assign resp_data   = resp_fifo_rdata[DATA_WIDTH -: DATA_WIDTH];
+    assign resp_slverr = resp_fifo_rdata[0];
+
+    // Response valid and ready logic
+    assign resp_fifo_wvalid = dst_pready_i && req_fifo_rvalid;
+    assign req_fifo_rready  = resp_fifo_wready;
+
+    // Source side response signals
+    assign src_prdata_o   = resp_data;
+    assign src_pslverr_o  = resp_slverr;
+
+endmodule
+
+module async_fifo #(
+    parameter DATA_WIDTH = 36,
+    parameter LOG_DEPTH = 1
+)(
+    input                      wclk,
+    input                      wrst_ni,
+    input                      wvalid,
+    output                     wready,
+    input  [DATA_WIDTH-1:0]    wdata,
+    input                      rclk,
+    input                      rrst_ni,
+    output                     rvalid,
+    input                      rready,
+    output [DATA_WIDTH-1:0]    rdata
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam ADDR_WIDTH = LOG_DEPTH;
+
+    reg [DATA_WIDTH-1:0] mem [DEPTH-1:0];
+    reg [ADDR_WIDTH-1:0] wptr;
+    reg [ADDR_WIDTH-1:0] rptr;
+    reg [ADDR_WIDTH:0]   wptr_gray;
+    reg [ADDR_WIDTH:0]   rptr_gray;
+    reg [ADDR_WIDTH:0]   wptr_gray_r;
+
+    // Write side logic
+    assign wready = (wptr_gray[ADDR_WIDTH] != rptr_gray_r[ADDR_WIDTH]) || (wptr_gray[ADDR_WIDTH-1:0] != rptr_gray_r[ADDR_WIDTH-1:0]);
+
+    always @(posedge wclk or negedge wrst_ni) begin
+        if (!wrst_ni) begin
+            wptr <= 0;
+            wptr_gray <= 0;
+        end else if (wvalid && wready) begin
+            mem[wptr] <= wdata;
+            wptr <= wptr + 1;
+            wptr_gray <= {wptr[ADDR_WIDTH-1:0] ^ (wptr[ADDR_WIDTH-1:0] >> 1), wptr[ADDR_WIDTH-1]};
+        end
+    end
+
+    // Read side logic
+    assign rvalid = (wptr_gray_r[ADDR_WIDTH] != rptr_gray[ADDR_WIDTH]) || (wptr_gray_r[ADDR_WIDTH-1:0] != rptr_gray[ADDR_WIDTH-1:0]);
+
+    always @(posedge rclk or negedge rrst_ni) begin
+        if (!rrst_ni) begin
+            rptr <= 0;
+            rptr_gray <= 0;
+        end else if (rvalid && rready) begin
+            rptr <= rptr + 1;
+            rptr_gray <= {rptr[ADDR_WIDTH-1:0] ^ (rptr[ADDR_WIDTH-1:0] >> 1), rptr[ADDR_WIDTH-1]};
+        end
+    end
+
+    // Gray code conversion for wptr
+    always @(posedge rclk or negedge rrst_ni) begin
+        if (!rrst_ni)
+            wptr_gray_r <= 0;
+        else
+            wptr_gray_r <= wptr_gray;
+    end
+
+    // Data output
+    assign rdata = mem[rptr];
+
+endmodule

@@ -1,0 +1,122 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "areset_deassert_sync",
+            "function": "Destination-clock reset-release synchronizer",
+            "parameters": [
+                { "name": "CHAINS", "value": 2 },
+                { "name": "RST_POL", "value": 1 }
+            ],
+            "ports": [
+                { "name": "clk", "direction": "input", "width": 1, "clock_domain": "clk" },
+                { "name": "async_rst_i", "direction": "input", "width": 1, "clock_domain": "clk" },
+                { "name": "sync_rst_o", "direction": "output", "width": 1, "clock_domain": "clk" }
+            ],
+            "instances": [
+                {
+                    "module": "reset_sync_chain",
+                    "name": "rst_sync_chain_inst",
+                    "function": "Pipeline chain for synchronizing reset",
+                    "connections": [
+                        { "local": "clk", "remote": "clk" },
+                        { "local": "async_rst_i", "remote": "rst_in" },
+                        { "local": "rst_sync_chain_out", "remote": "rst_out" }
+                    ]
+                }
+            ],
+            "connections": [
+                { "source": "rst_sync_chain_inst.rst_out", "destination": "sync_rst_o" }
+            ],
+            "internal_signals": [
+                { "name": "rst_sync_chain_out", "width": 1 }
+            ],
+            "behavior": [
+                "sync_rst_o must follow assertion of async_rst_i immediately.",
+                "sync_rst_o may release only after clk has observed a safe deassert.",
+                "CHAINS is the release-pipeline depth. RST_POL is 1 for active-high async_rst_i.",
+                "After a completed release, sync_rst_o is inactive."
+            ]
+        },
+        {
+            "Top_module_name": "reset_sync_chain",
+            "function": "Pipeline chain for synchronizing reset signals",
+            "parameters": [
+                { "name": "CHAINS", "value": 2 },
+                { "name": "RST_POL", "value": 1 }
+            ],
+            "ports": [
+                { "name": "clk", "direction": "input", "width": 1, "clock_domain": "clk" },
+                { "name": "rst_in", "direction": "input", "width": 1, "clock_domain": "clk" },
+                { "name": "rst_out", "direction": "output", "width": 1, "clock_domain": "clk" }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                { "name": "sync_chain", "width": 1, "size": "CHAINS" }
+            ],
+            "behavior": [
+                "The reset signal rst_in is synchronized using a pipeline chain of length CHAINS.",
+                "The synchronized reset signal rst_out is derived from the last stage of the pipeline.",
+                "The reset polarity RST_POL determines the active state of rst_in and rst_out."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    // Internal signal to capture the output of the reset_sync_chain module
+    wire rst_sync_chain_out;
+
+    // Instantiate the reset_sync_chain module
+    reset_sync_chain #(
+        .CHAINS(CHAINS),
+        .RST_POL(RST_POL)
+    ) rst_sync_chain_inst (
+        .clk(clk),
+        .rst_in(async_rst_i),
+        .rst_out(rst_sync_chain_out)
+    );
+
+    // Assign the output of the reset_sync_chain to the output port
+    assign sync_rst_o = rst_sync_chain_out;
+
+endmodule
+
+module reset_sync_chain #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  rst_in,
+    output rst_out
+);
+
+    // Internal pipeline chain for synchronization
+    reg [CHAINS-1:0] sync_chain;
+
+    // Synchronize the reset signal using a pipeline chain
+    always @(posedge clk) begin
+        sync_chain[0] <= rst_in;
+        for (int i = 1; i < CHAINS; i = i + 1) begin
+            sync_chain[i] <= sync_chain[i-1];
+        end
+    end
+
+    // Assign the last stage of the pipeline chain to the output
+    assign rst_out = sync_chain[CHAINS-1];
+
+endmodule
+```

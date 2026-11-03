@@ -1,0 +1,216 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "sync_multistage",
+            "function": "Single-bit destination-clock synchronizer",
+            "parameters": [
+                {
+                    "name": "STAGES",
+                    "value": "2"
+                },
+                {
+                    "name": "ResetValue",
+                    "value": "1'b0"
+                }
+            ],
+            "ports": [
+                {
+                    "name": "clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "serial_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "async"
+                },
+                {
+                    "name": "serial_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                }
+            ],
+            "instances": [
+                {
+                    "module": "ff_stage",
+                    "name": "ff_stage_0",
+                    "function": "Flip-flop stage",
+                    "connections": [
+                        {
+                            "local": "clk_i",
+                            "remote": "clk_i"
+                        },
+                        {
+                            "local": "rst_ni",
+                            "remote": "rst_ni"
+                        },
+                        {
+                            "local": "serial_i",
+                            "remote": "d"
+                        },
+                        {
+                            "local": "sync_ff_0",
+                            "remote": "q"
+                        }
+                    ]
+                },
+                {
+                    "module": "ff_stage",
+                    "name": "ff_stage_1",
+                    "function": "Flip-flop stage",
+                    "connections": [
+                        {
+                            "local": "clk_i",
+                            "remote": "clk_i"
+                        },
+                        {
+                            "local": "rst_ni",
+                            "remote": "rst_ni"
+                        },
+                        {
+                            "local": "sync_ff_0",
+                            "remote": "d"
+                        },
+                        {
+                            "local": "serial_o",
+                            "remote": "q"
+                        }
+                    ]
+                }
+            ],
+            "connections": [],
+            "internal_signals": [
+                {
+                    "name": "sync_ff_0",
+                    "width": 1
+                }
+            ],
+            "behavior": [
+                "Reset is active-low.",
+                "Asynchronous input serial_i is brought into the clk_i domain using multiple flip-flops for metastability.",
+                "The number of flip-flops used is determined by the STAGES parameter.",
+                "The reset value for the flip-flops is determined by the ResetValue parameter."
+            ]
+        },
+        {
+            "Top_module_name": "ff_stage",
+            "function": "Single stage of flip-flop for synchronization",
+            "parameters": [],
+            "ports": [
+                {
+                    "name": "clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "d",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "q",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [],
+            "behavior": [
+                "On the rising edge of clk_i, if rst_ni is high, q is set to ResetValue.",
+                "On the rising edge of clk_i, if rst_ni is low, q is set to d."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module sync_multistage #(
+    parameter int unsigned STAGES = 2,
+    parameter bit ResetValue = 1'b0
+) (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic serial_i,
+    output logic serial_o
+);
+
+    logic [STAGES-2:0] sync_ff;
+
+    genvar i;
+    generate
+        if (STAGES > 0) begin : gen_sync_stages
+            ff_stage #(.ResetValue(ResetValue)) ff_stage_0 (
+                .clk_i  (clk_i),
+                .rst_ni (rst_ni),
+                .d      (serial_i),
+                .q      (sync_ff[0])
+            );
+
+            for (i = 1; i < STAGES-1; i = i + 1) begin : gen_sync_stage
+                ff_stage #(.ResetValue(ResetValue)) ff_stage_i (
+                    .clk_i  (clk_i),
+                    .rst_ni (rst_ni),
+                    .d      (sync_ff[i-1]),
+                    .q      (sync_ff[i])
+                );
+            end
+
+            if (STAGES > 1) begin : gen_final_stage
+                ff_stage #(.ResetValue(ResetValue)) ff_stage_last (
+                    .clk_i  (clk_i),
+                    .rst_ni (rst_ni),
+                    .d      (sync_ff[STAGES-2]),
+                    .q      (serial_o)
+                );
+            end else begin : gen_single_stage
+                assign serial_o = sync_ff[0];
+            end
+        end else begin : gen_no_stages
+            assign serial_o = serial_i;
+        end
+    endgenerate
+
+endmodule
+
+module ff_stage #(
+    parameter bit ResetValue = 1'b0
+) (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic d,
+    output logic q
+);
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            q <= ResetValue;
+        end else begin
+            q <= d;
+        end
+    end
+
+endmodule
+```

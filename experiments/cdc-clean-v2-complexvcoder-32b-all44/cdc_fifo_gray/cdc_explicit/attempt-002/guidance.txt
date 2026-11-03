@@ -1,0 +1,49 @@
+Module cdc_fifo_gray: Implements a valid/ready asynchronous FIFO with 2**LOG_DEPTH entries of WIDTH bits, ensuring safe clock-domain crossing (CDC) and reset-domain crossing (RDC) with zero unsafe crossings.. 3 parameters, 10 ports, 5 submodule instances.
+Port src_rst_ni: direction input, width 1, clock domain source.
+Port src_clk_i: direction input, width 1, clock domain source.
+Port src_data_i: direction input, width WIDTH, clock domain source.
+Port src_valid_i: direction input, width 1, clock domain source.
+Port src_ready_o: direction output, width 1, clock domain source.
+Port dst_rst_ni: direction input, width 1, clock domain destination.
+Port dst_clk_i: direction input, width 1, clock domain destination.
+Port dst_data_o: direction output, width WIDTH, clock domain destination.
+Port dst_valid_o: direction output, width 1, clock domain destination.
+Port dst_ready_i: direction input, width 1, clock domain destination.
+Parameter WIDTH = 8.
+Parameter LOG_DEPTH = 3.
+Parameter SYNC_STAGES = 2.
+Instance: {"connections": [{"external": "src_rst_ni", "local": "rst_ni"}, {"external": "src_clk_i", "local": "clk_i"}, {"external": "src_valid_i & src_ready_o", "local": "en_i"}, {"external": "src_gray_count", "local": "count_o"}], "function": "Generates a gray-coded counter in the source clock domain.", "module": "gray_counter", "name": "src_gray_counter"}
+Instance: {"connections": [{"external": "dst_rst_ni", "local": "rst_ni"}, {"external": "dst_clk_i", "local": "clk_i"}, {"external": "dst_valid_o & dst_ready_i", "local": "en_i"}, {"external": "dst_gray_count", "local": "count_o"}], "function": "Generates a gray-coded counter in the destination clock domain.", "module": "gray_counter", "name": "dst_gray_counter"}
+Instance: {"connections": [{"external": "dst_rst_ni", "local": "rst_ni"}, {"external": "dst_clk_i", "local": "clk_i"}, {"external": "src_gray_count", "local": "async_i"}, {"external": "src_gray_sync", "local": "sync_o"}], "function": "Synchronizes the gray counter from the source to the destination clock domain.", "module": "cross_domain_sync", "name": "src_gray_sync"}
+Instance: {"connections": [{"external": "src_rst_ni", "local": "rst_ni"}, {"external": "src_clk_i", "local": "clk_i"}, {"external": "dst_gray_count", "local": "async_i"}, {"external": "dst_gray_sync", "local": "sync_o"}], "function": "Synchronizes the gray counter from the destination to the source clock domain.", "module": "cross_domain_sync", "name": "dst_gray_sync"}
+Instance: {"connections": [{"external": "src_rst_ni", "local": "rst_ni"}, {"external": "src_clk_i", "local": "clk_i"}, {"external": "src_valid_i & src_ready_o", "local": "wr_en_i"}, {"external": "src_gray_count", "local": "wr_addr_i"}, {"external": "src_data_i", "local": "wr_data_i"}, {"external": "dst_gray_sync", "local": "rd_addr_i"}, {"external": "dst_data_o", "local": "rd_data_o"}], "function": "Stores FIFO data entries.", "module": "fifo_memory", "name": "fifo_mem"}
+connections: [{"destination": "src_gray_sync", "signal": "src_gray_count", "source": "src_gray_counter"}, {"destination": "dst_gray_sync", "signal": "dst_gray_count", "source": "dst_gray_counter"}, {"destination": "fifo_mem", "signal": "src_gray_sync", "source": "src_gray_sync"}, {"destination": "fifo_mem", "signal": "dst_gray_sync", "source": "dst_gray_sync"}]
+internal_signals: [{"name": "src_gray_count", "width": "LOG_DEPTH + 1"}, {"name": "dst_gray_count", "width": "LOG_DEPTH + 1"}, {"name": "src_gray_sync", "width": "LOG_DEPTH + 1"}, {"name": "dst_gray_sync", "width": "LOG_DEPTH + 1"}]
+behavior: ["Accept source beats when src_valid_i and src_ready_o are high.", "Deliver destination beats in order.", "Pointers and data that leave their clock domain must remain coherent.", "SYNC_STAGES is an implementation parameter; choose a safe crossing.", "After reset the FIFO is empty.", "Pointers cross as acknowledged binary snapshots, so ready and valid can lag.", "dst_data_o is one destination-clock sample.", "dst_valid_o may remain low for multiple destination clocks after an accepted beat even when another word is stored."]
+Module gray_counter: Generates a gray-coded counter.. 0 parameters, 4 ports, 0 submodule instances.
+Port rst_ni: direction input, width 1, clock domain any.
+Port clk_i: direction input, width 1, clock domain any.
+Port en_i: direction input, width 1, clock domain any.
+Port count_o: direction output, width LOG_DEPTH + 1, clock domain any.
+connections: []
+internal_signals: [{"name": "bin_count", "width": "LOG_DEPTH + 1"}, {"name": "gray_count", "width": "LOG_DEPTH + 1"}]
+behavior: ["Generates a binary counter and converts it to a gray code.", "Resets the counter on active-low reset.", "Increments the counter on the rising edge of the clock when enabled."]
+Module cross_domain_sync: Synchronizes a signal from an asynchronous clock domain to another.. 0 parameters, 4 ports, 0 submodule instances.
+Port rst_ni: direction input, width 1, clock domain destination.
+Port clk_i: direction input, width 1, clock domain destination.
+Port async_i: direction input, width LOG_DEPTH + 1, clock domain source.
+Port sync_o: direction output, width LOG_DEPTH + 1, clock domain destination.
+connections: []
+internal_signals: [{"name": "sync_reg", "width": "LOG_DEPTH + 1"}]
+behavior: ["Synchronizes the input signal from the source clock domain to the destination clock domain using a shift register.", "Resets the synchronization register on active-low reset."]
+Module fifo_memory: Stores FIFO data entries.. 0 parameters, 7 ports, 0 submodule instances.
+Port rst_ni: direction input, width 1, clock domain source.
+Port clk_i: direction input, width 1, clock domain source.
+Port wr_en_i: direction input, width 1, clock domain source.
+Port wr_addr_i: direction input, width LOG_DEPTH + 1, clock domain source.
+Port wr_data_i: direction input, width WIDTH, clock domain source.
+Port rd_addr_i: direction input, width LOG_DEPTH + 1, clock domain destination.
+Port rd_data_o: direction output, width WIDTH, clock domain destination.
+connections: []
+internal_signals: [{"depth": "2**LOG_DEPTH", "name": "memory", "width": "WIDTH"}]
+behavior: ["Writes data to memory on the rising edge of the source clock when write enable is high.", "Reads data from memory based on the read address in the destination clock domain.", "Resets memory on active-low reset."]

@@ -1,0 +1,176 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "spi_master",
+            "function": "SPI master with parallel-side word interface",
+            "parameters": [
+                { "name": "N", "value": "8" },
+                { "name": "SPI_2X_CLK_DIV", "value": "2" }
+            ],
+            "ports": [
+                { "name": "sclk_i", "direction": "input", "width": 1, "clock_domain": "sclk_i" },
+                { "name": "pclk_i", "direction": "input", "width": 1, "clock_domain": "pclk_i" },
+                { "name": "rst_i", "direction": "input", "width": 1, "clock_domain": "pclk_i" },
+                { "name": "spi_ssel_o", "direction": "output", "width": 1, "clock_domain": "sclk_i" },
+                { "name": "spi_sck_o", "direction": "output", "width": 1, "clock_domain": "sclk_i" },
+                { "name": "spi_mosi_o", "direction": "output", "width": 1, "clock_domain": "sclk_i" },
+                { "name": "spi_miso_i", "direction": "input", "width": 1, "clock_domain": "sclk_i" },
+                { "name": "di_req_o", "direction": "output", "width": 1, "clock_domain": "pclk_i" },
+                { "name": "di_i", "direction": "input", "width": "N", "clock_domain": "pclk_i" },
+                { "name": "wren_i", "direction": "input", "width": 1, "clock_domain": "pclk_i" },
+                { "name": "wr_ack_o", "direction": "output", "width": 1, "clock_domain": "pclk_i" },
+                { "name": "do_valid_o", "direction": "output", "width": 1, "clock_domain": "pclk_i" },
+                { "name": "do_o", "direction": "output", "width": "N", "clock_domain": "pclk_i" }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                { "name": "bit_cnt", "width": "N" },
+                { "name": "shift_reg", "width": "N" },
+                { "name": "rx_shift_reg", "width": "N" },
+                { "name": "sclk_div_cnt", "width": "log2(SPI_2X_CLK_DIV)" },
+                { "name": "sclk_edge", "width": 1 },
+                { "name": "wren_reg", "width": 1 },
+                { "name": "wren_d1", "width": 1 },
+                { "name": "do_valid_reg", "width": 1 },
+                { "name": "do_valid_d1", "width": 1 }
+            ],
+            "behavior": [
+                "Upon reset, all select lines are inactive, and outputs are idle.",
+                "Accept N-bit words on di_i when wren_i is high; wr_ack_o acknowledges the write.",
+                "Shift the word out on spi_mosi_o with spi_sck_o and spi_ssel_o.",
+                "Capture spi_miso_i and present it on do_o with do_valid_o.",
+                "di_req_o requests the next word.",
+                "di_req_o indicates that the previous request/response handshake has returned to idle and a new word can be accepted.",
+                "wr_ack_o pulses on acceptance; do_valid_o pulses once per completed word.",
+                "Extra turnaround latency is permitted.",
+                "Do not duplicate serial transactions.",
+                "Divide sclk_i by SPI_2X_CLK_DIV to generate spi_sck_o.",
+                "Generate spi_sck_o with a 50% duty cycle.",
+                "On the falling edge of sclk_i, shift out data on spi_mosi_o and shift in data on spi_miso_i.",
+                "Maintain the state of spi_ssel_o during the entire word transfer."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // Internal signals
+    reg [N-1:0]        bit_cnt;
+    reg [N-1:0]        shift_reg;
+    reg [N-1:0]        rx_shift_reg;
+    reg [$clog2(SPI_2X_CLK_DIV)-1:0] sclk_div_cnt;
+    reg              sclk_edge;
+    reg              wren_reg;
+    reg              wren_d1;
+    reg              do_valid_reg;
+    reg              do_valid_d1;
+
+    // SPI clock divider
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sclk_div_cnt <= 0;
+            spi_sck_o <= 0;
+        end else begin
+            if (sclk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                sclk_div_cnt <= 0;
+                spi_sck_o <= ~spi_sck_o;
+            end else begin
+                sclk_div_cnt <= sclk_div_cnt + 1;
+            end
+        end
+    end
+
+    // SPI clock edge detection
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sclk_edge <= 0;
+        end else begin
+            sclk_edge <= ~spi_sck_o;
+        end
+    end
+
+    // Parallel interface handling
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_o <= 1;
+            wr_ack_o <= 0;
+            do_valid_o <= 0;
+            do_o <= 0;
+            wren_reg <= 0;
+            wren_d1 <= 0;
+            do_valid_reg <= 0;
+            do_valid_d1 <= 0;
+        end else begin
+            // Request next word
+            if (di_req_o && !wren_i) begin
+                di_req_o <= 0;
+            end
+
+            // Accept word
+            if (wren_i && !wren_reg) begin
+                shift_reg <= di_i;
+                bit_cnt <= N - 1;
+                spi_ssel_o <= 1;
+                di_req_o <= 1;
+                wr_ack_o <= 1;
+                wren_reg <= 1;
+            end else begin
+                wr_ack_o <= 0;
+            end
+
+            // Shift word
+            if (sclk_edge && spi_ssel_o) begin
+                spi_mosi_o <= shift_reg[N-1];
+                shift_reg <= {shift_reg[N-2:0], 1'b0};
+                rx_shift_reg <= {spi_miso_i, rx_shift_reg[N-1:1]};
+                if (bit_cnt == 0) begin
+                    spi_ssel_o <= 0;
+                    do_o <= rx_shift_reg;
+                    do_valid_reg <= 1;
+                end else begin
+                    bit_cnt <= bit_cnt - 1;
+                end
+            end
+
+            // Update do_valid_o
+            do_valid_d1 <= do_valid_reg;
+            do_valid_o <= do_valid_reg & ~do_valid_d1;
+            do_valid_reg <= 0;
+
+            // Update wren_d1
+            wren_d1 <= wren_reg;
+            wren_reg <= wren_i;
+        end
+    end
+
+    // Assign output
+    assign spi_mosi_o = spi_ssel_o ? shift_reg[N-1] : 1'bz;
+
+endmodule
+```
+
+This Verilog code implements the specified SPI master module with a parallel-side word interface. It handles the SPI communication by dividing the `sclk_i` clock, detecting falling edges, and managing the data shift registers for both transmit and receive operations. The parallel interface logic manages the request for new data, acknowledges writes, and provides valid received data.

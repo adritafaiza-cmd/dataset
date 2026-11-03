@@ -1,0 +1,145 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source side signals
+  logic [WIDTH-1:0] src_data_sync;
+  logic src_valid_sync;
+  logic src_ready_sync;
+
+  // Destination side signals
+  logic [WIDTH-1:0] dst_data_sync;
+  logic dst_valid_sync;
+  logic dst_ready_sync;
+
+  // Four-phase handshake signals
+  logic [1:0] src_phase;
+  logic [1:0] dst_phase;
+
+  // Synchronization FIFO
+  logic [WIDTH-1:0] fifo [3:0];
+  logic [1:0] fifo_wr_ptr;
+  logic [1:0] fifo_rd_ptr;
+  logic fifo_full;
+  logic fifo_empty;
+
+  // Source side synchronization
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_sync <= RESET_MSG;
+      src_valid_sync <= 1'b0;
+    end else begin
+      src_data_sync <= src_data_i;
+      src_valid_sync <= src_valid_i;
+    end
+  end
+
+  // Destination side synchronization
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_sync <= RESET_MSG;
+      dst_valid_sync <= 1'b0;
+    end else begin
+      dst_data_sync <= fifo[fifo_rd_ptr];
+      dst_valid_sync <= !fifo_empty;
+    end
+  end
+
+  // Source side phase management
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_phase <= 2'b00;
+    end else if (src_valid_sync && src_ready_sync) begin
+      src_phase <= src_phase + 1;
+    end
+  end
+
+  // Destination side phase management
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_phase <= 2'b00;
+    end else if (dst_valid_sync && dst_ready_i) begin
+      dst_phase <= dst_phase + 1;
+    end
+  end
+
+  // FIFO write pointer management
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      fifo_wr_ptr <= 2'b00;
+    end else if (src_valid_sync && src_ready_sync) begin
+      fifo_wr_ptr <= fifo_wr_ptr + 1;
+    end
+  end
+
+  // FIFO read pointer management
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      fifo_rd_ptr <= 2'b00;
+    end else if (dst_valid_sync && dst_ready_i) begin
+      fifo_rd_ptr <= fifo_rd_ptr + 1;
+    end
+  end
+
+  // FIFO full and empty flags
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      fifo_full <= 1'b0;
+    end else begin
+      fifo_full <= (fifo_wr_ptr == fifo_rd_ptr + 2'b11);
+    end
+  end
+
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      fifo_empty <= 1'b1;
+    end else begin
+      fifo_empty <= (fifo_wr_ptr == fifo_rd_ptr);
+    end
+  end
+
+  // FIFO write operation
+  always_ff @(posedge src_clk_i) begin
+    if (src_valid_sync && src_ready_sync) begin
+      fifo[fifo_wr_ptr] <= src_data_sync;
+    end
+  end
+
+  // Source side ready signal
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_ready_sync <= 1'b0;
+    end else begin
+      src_ready_sync <= !fifo_full;
+    end
+  end
+
+  // Destination side ready signal
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_ready_sync <= 1'b0;
+    end else begin
+      dst_ready_sync <= dst_ready_i;
+    end
+  end
+
+  // Output assignments
+  assign src_ready_o = src_ready_sync;
+  assign dst_data_o = dst_data_sync;
+  assign dst_valid_o = dst_valid_sync;
+
+endmodule

@@ -1,0 +1,153 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "data_sync",
+      "function": "Multi-bit destination-clock data synchronizer",
+      "parameters": [
+        { "name": "STAGES", "value": 2 },
+        { "name": "DWIDTH", "value": 8 }
+      ],
+      "ports": [
+        { "name": "clk", "direction": "input", "width": 1, "clock_domain": "clk" },
+        { "name": "rstn", "direction": "input", "width": 1, "clock_domain": "clk" },
+        { "name": "din", "direction": "input", "width": "DWIDTH", "clock_domain": "clk" },
+        { "name": "dready_i", "direction": "input", "width": 1, "clock_domain": "clk" },
+        { "name": "dout", "direction": "output", "width": "DWIDTH", "clock_domain": "clk" },
+        { "name": "dready_o", "direction": "output", "width": 1, "clock_domain": "clk" }
+      ],
+      "instances": [
+        {
+          "module": "ff_chain",
+          "name": "sync_ff_chain",
+          "function": "Multi-stage flip-flop chain for clock domain crossing",
+          "connections": [
+            { "local": "din", "remote": "din" },
+            { "local": "dready_i", "remote": "dready_i" },
+            { "local": "sync_out", "remote": "dout" },
+            { "local": "sync_valid", "remote": "dready_o" },
+            { "local": "clk", "remote": "clk" },
+            { "local": "rstn", "remote": "rstn" }
+          ]
+        }
+      ],
+      "connections": [],
+      "internal_signals": [
+        { "name": "sync_out", "width": "DWIDTH" },
+        { "name": "sync_valid", "width": 1 }
+      ],
+      "behavior": [
+        "On reset (active-low), output indication should be idle.",
+        "Each new input value should be brought into the local clock domain coherently.",
+        "Indicate when the new value is ready through the dready_o signal."
+      ]
+    },
+    {
+      "Top_module_name": "ff_chain",
+      "function": "Multi-stage flip-flop chain for synchronizing signals across clock domains",
+      "parameters": [
+        { "name": "STAGES", "value": 2 },
+        { "name": "DWIDTH", "value": 8 }
+      ],
+      "ports": [
+        { "name": "clk", "direction": "input", "width": 1, "clock_domain": "clk" },
+        { "name": "rstn", "direction": "input", "width": 1, "clock_domain": "clk" },
+        { "name": "din", "direction": "input", "width": "DWIDTH", "clock_domain": "clk" },
+        { "name": "dready_i", "direction": "input", "width": 1, "clock_domain": "clk" },
+        { "name": "dout", "direction": "output", "width": "DWIDTH", "clock_domain": "clk" },
+        { "name": "dready_o", "direction": "output", "width": 1, "clock_domain": "clk" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        { "name": "ff_out", "width": "DWIDTH", "count": "STAGES" },
+        { "name": "valid", "width": 1, "count": "STAGES" }
+      ],
+      "behavior": [
+        "On reset (active-low), all flip-flops should be cleared.",
+        "Each stage of the flip-flop chain should synchronize the input data and valid signal.",
+        "The final stage of the flip-flop chain should drive the output data and valid signal."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module data_sync #(
+    parameter STAGES = 2,
+    parameter DWIDTH = 8
+)(
+    input                  clk,
+    input                  rstn,
+    input  [DWIDTH-1:0]    din,
+    input                  dready_i,
+    output reg [DWIDTH-1:0] dout,
+    output reg             dready_o
+);
+
+reg [DWIDTH-1:0] sync_out;
+reg              sync_valid;
+
+ff_chain #(
+    .STAGES(STAGES),
+    .DWIDTH(DWIDTH)
+) sync_ff_chain (
+    .clk      (clk),
+    .rstn     (rstn),
+    .din      (din),
+    .dready_i (dready_i),
+    .dout     (sync_out),
+    .dready_o (sync_valid)
+);
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        dout <= {DWIDTH{1'b0}};
+        dready_o <= 1'b0;
+    end else begin
+        dout <= sync_out;
+        dready_o <= sync_valid;
+    end
+end
+
+endmodule
+
+module ff_chain #(
+    parameter STAGES = 2,
+    parameter DWIDTH = 8
+)(
+    input                  clk,
+    input                  rstn,
+    input  [DWIDTH-1:0]    din,
+    input                  dready_i,
+    output reg [DWIDTH-1:0] dout,
+    output reg             dready_o
+);
+
+reg [DWIDTH-1:0] ff_out [0:STAGES-1];
+reg              valid [0:STAGES-1];
+
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+        for (integer i = 0; i < STAGES; i = i + 1) begin
+            ff_out[i] <= {DWIDTH{1'b0}};
+            valid[i] <= 1'b0;
+        end
+    end else begin
+        ff_out[0] <= din;
+        valid[0] <= dready_i;
+        for (integer i = 1; i < STAGES; i = i + 1) begin
+            ff_out[i] <= ff_out[i-1];
+            valid[i] <= valid[i-1];
+        end
+    end
+end
+
+assign dout = ff_out[STAGES-1];
+assign dready_o = valid[STAGES-1];
+
+endmodule
+```

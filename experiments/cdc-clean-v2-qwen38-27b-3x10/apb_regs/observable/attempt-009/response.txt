@@ -1,0 +1,115 @@
+```systemverilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Extract APB signals from req_t
+  wire        psel    = req_i.psel;
+  wire        penable = req_i.penable;
+  wire        pwrite  = req_i.pwrite;
+  wire [ApbAddrWidth-1:0] paddr = req_i.paddr;
+  wire [ApbDataWidth-1:0] pwdata = req_i.pwdata;
+  wire [ApbDataWidth/8-1:0] pstrb = req_i.pstrb;
+
+  // APB ready is always high (single-cycle slave)
+  assign resp_o.pready = 1'b1;
+  assign resp_o.pslverr = 1'b0;
+
+  // Decode register index from address
+  // Address offset from base
+  wire [ApbAddrWidth-1:0] addr_offset = paddr - base_addr_i;
+  // Register index: divide by AddrOffset
+  wire [ApbAddrWidth-1:0] reg_idx_full = addr_offset / AddrOffset;
+  wire [ApbAddrWidth-1:0] reg_idx = reg_idx_full;
+
+  // Valid register index check
+  wire reg_valid = (reg_idx < NoApbRegs);
+
+  // Write enable: during APB write access (psel & penable & pwrite) and valid register
+  wire write_en = psel & penable & pwrite & reg_valid;
+
+  // Byte strobe mapping: map APB data bytes to register data bytes
+  // RegDataWidth may be smaller than ApbDataWidth
+  localparam int unsigned NumApbBytes  = ApbDataWidth / 8;
+  localparam int unsigned NumRegBytes  = RegDataWidth / 8;
+
+  // For each byte of the register, determine if it should be updated
+  // A register byte b is updated if:
+  //   - b < NumRegBytes
+  //   - The corresponding APB byte strobe is set
+  //   - The APB byte index maps to the same byte position in the register
+  // Since we assume aligned mapping, APB byte i maps to register byte i (if i < NumRegBytes)
+
+  // Build the write data for the register with byte strobes applied
+  // We need to combine existing register value with new data for strobed bytes
+
+  // For each register, compute the new value if written
+  // We'll use a combinational approach: for the selected register, apply byte strobes
+
+  // Determine which register is being accessed
+  // We'll generate the new value for the target register
+
+  // Helper: apply byte strobes to a register value
+  // For a given register index, compute new value
+  function automatic reg_data_t apply_strobes(
+    input reg_data_t old_val,
+    input [ApbDataWidth-1:0] new_val,
+    input [ApbDataWidth/8-1:1:0] strobes
+  );
+    reg_data_t result;
+    integer i;
+    begin
+      result = old_val;
+      for (i = 0; i < NumRegBytes; i = i + 1) begin
+        if (i < NumApbBytes && strobes[i]) begin
+          result[i*8 +: 8] = new_val[i*8 +: 8];
+        end
+      end
+    end
+  endfunction
+
+  // Compute the new value for the target register
+  reg_data_t new_reg_val;
+  assign new_reg_val = apply_strobes(
+    reg_q_o[reg_idx],
+    pwdata,
+    pstrb
+  );
+
+  // Register file
+  always @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i = i + 1) begin
+        if (ReadOnly[i])
+          reg_q_o[i] <= reg_init_i[i];
+        else
+          reg_q_o[i] <= '0;
+      end
+    end else begin
+      if (write_en) begin
+        if (!ReadOnly[reg_idx]) begin
+          reg_q_o[reg_idx] <= new_reg_val;
+        end
+      end
+    end
+  end
+
+endmodule
+```<|im_end|>

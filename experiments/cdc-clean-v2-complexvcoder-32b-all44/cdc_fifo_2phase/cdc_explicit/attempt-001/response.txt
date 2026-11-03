@@ -1,0 +1,272 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "cdc_fifo_2phase",
+            "function": "Asynchronous FIFO with two-phase handshake for CDC",
+            "parameters": [
+                {"name": "WIDTH", "value": "8"},
+                {"name": "LOG_DEPTH", "value": "3"}
+            ],
+            "ports": [
+                {"name": "src_rst_ni", "direction": "input", "width": "1", "clock_domain": "source"},
+                {"name": "src_clk_i", "direction": "input", "width": "1", "clock_domain": "source"},
+                {"name": "src_data_i", "direction": "input", "width": "WIDTH", "clock_domain": "source"},
+                {"name": "src_valid_i", "direction": "input", "width": "1", "clock_domain": "source"},
+                {"name": "src_ready_o", "direction": "output", "width": "1", "clock_domain": "source"},
+                {"name": "dst_rst_ni", "direction": "input", "width": "1", "clock_domain": "destination"},
+                {"name": "dst_clk_i", "direction": "input", "width": "1", "clock_domain": "destination"},
+                {"name": "dst_data_o", "direction": "output", "width": "WIDTH", "clock_domain": "destination"},
+                {"name": "dst_valid_o", "direction": "output", "width": "1", "clock_domain": "destination"},
+                {"name": "dst_ready_i", "direction": "input", "width": "1", "clock_domain": "destination"}
+            ],
+            "instances": [
+                {
+                    "module": "async_fifo_core",
+                    "name": "fifo_core_inst",
+                    "function": "Core FIFO functionality",
+                    "connections": [
+                        {"src_rst_ni": "src_rst_ni"},
+                        {"src_clk_i": "src_clk_i"},
+                        {"src_data_i": "src_data_i"},
+                        {"src_valid_i": "src_valid_i"},
+                        {"src_ready_o": "src_ready_o"},
+                        {"dst_rst_ni": "dst_rst_ni"},
+                        {"dst_clk_i": "dst_clk_i"},
+                        {"dst_data_o": "dst_data_o"},
+                        {"dst_valid_o": "dst_valid_o"},
+                        {"dst_ready_i": "dst_ready_i"}
+                    ]
+                }
+            ],
+            "connections": [],
+            "internal_signals": [],
+            "behavior": [
+                "Accept source beats when src_valid_i and src_ready_o are high.",
+                "Deliver destination beats in order when dst_valid_o and dst_ready_i are high.",
+                "src_ready_o must be low when the FIFO cannot accept another item.",
+                "After reset the FIFO is empty and dest is idle.",
+                "The destination word is a registered sample. dst_valid_o may remain low for multiple destination clocks after an accepted beat even when another word is already stored.",
+                "Payloads pass through two destination-clock stages before they are advertised as valid.",
+                "Preserve source ownership of each queued word until its accepted destination transfer; synchronization stages alone do not establish multi-bit coherence.",
+                "Availability may lag and bubbles may span multiple destination clocks.",
+                "There is no one-beat-per-clock guarantee."
+            ]
+        },
+        {
+            "Top_module_name": "async_fifo_core",
+            "function": "Core FIFO functionality with CDC",
+            "parameters": [
+                {"name": "WIDTH", "value": "WIDTH"},
+                {"name": "LOG_DEPTH", "value": "LOG_DEPTH"}
+            ],
+            "ports": [
+                {"name": "src_rst_ni", "direction": "input", "width": "1", "clock_domain": "source"},
+                {"name": "src_clk_i", "direction": "input", "width": "1", "clock_domain": "source"},
+                {"name": "src_data_i", "direction": "input", "width": "WIDTH", "clock_domain": "source"},
+                {"name": "src_valid_i", "direction": "input", "width": "1", "clock_domain": "source"},
+                {"name": "src_ready_o", "direction": "output", "width": "1", "clock_domain": "source"},
+                {"name": "dst_rst_ni", "direction": "input", "width": "1", "clock_domain": "destination"},
+                {"name": "dst_clk_i", "direction": "input", "width": "1", "clock_domain": "destination"},
+                {"name": "dst_data_o", "direction": "output", "width": "WIDTH", "clock_domain": "destination"},
+                {"name": "dst_valid_o", "direction": "output", "width": "1", "clock_domain": "destination"},
+                {"name": "dst_ready_i", "direction": "input", "width": "1", "clock_domain": "destination"}
+            ],
+            "instances": [
+                {
+                    "module": "cdc_gray_counter",
+                    "name": "src_gray_counter_inst",
+                    "function": "Gray counter for source domain",
+                    "connections": [
+                        {"clk": "src_clk_i"},
+                        {"rst_ni": "src_rst_ni"},
+                        {"count": "src_gray_count"}
+                    ]
+                },
+                {
+                    "module": "cdc_gray_counter",
+                    "name": "dst_gray_counter_inst",
+                    "function": "Gray counter for destination domain",
+                    "connections": [
+                        {"clk": "dst_clk_i"},
+                        {"rst_ni": "dst_rst_ni"},
+                        {"count": "dst_gray_count"}
+                    ]
+                }
+            ],
+            "connections": [
+                {"src_gray_count_synced": "dst_gray_count_synced"},
+                {"dst_gray_count_synced": "src_gray_count_synced"}
+            ],
+            "internal_signals": [
+                {"name": "src_gray_count", "width": "LOG_DEPTH+1"},
+                {"name": "dst_gray_count", "width": "LOG_DEPTH+1"},
+                {"name": "src_gray_count_synced", "width": "LOG_DEPTH+1"},
+                {"name": "dst_gray_count_synced", "width": "LOG_DEPTH+1"},
+                {"name": "fifo_mem", "width": "WIDTH", "size": "2**LOG_DEPTH"},
+                {"name": "write_ptr", "width": "LOG_DEPTH"},
+                {"name": "read_ptr", "width": "LOG_DEPTH"},
+                {"name": "src_ready", "width": "1"},
+                {"name": "dst_valid", "width": "1"},
+                {"name": "dst_data", "width": "WIDTH"}
+            ],
+            "behavior": [
+                "Synchronize src_gray_count to destination domain as src_gray_count_synced.",
+                "Synchronize dst_gray_count to source domain as dst_gray_count_synced.",
+                "Calculate write_ptr from src_gray_count_synced.",
+                "Calculate read_ptr from dst_gray_count_synced.",
+                "Accept source beats when src_valid_i is high and src_ready is high, write to fifo_mem.",
+                "Deliver destination beats in order when dst_valid is high and dst_ready_i is high, read from fifo_mem.",
+                "src_ready is high when there is space in the FIFO.",
+                "dst_valid is high when there is data available in the FIFO.",
+                "Preserve source ownership of each queued word until its accepted destination transfer.",
+                "Ensure two-phase handshake for CDC safety.",
+                "Reset FIFO and counters on active-low reset."
+            ]
+        },
+        {
+            "Top_module_name": "cdc_gray_counter",
+            "function": "Gray counter for CDC",
+            "parameters": [],
+            "ports": [
+                {"name": "clk", "direction": "input", "width": "1", "clock_domain": "local"},
+                {"name": "rst_ni", "direction": "input", "width": "1", "clock_domain": "local"},
+                {"name": "count", "direction": "output", "width": "LOG_DEPTH+1", "clock_domain": "local"}
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {"name": "binary_count", "width": "LOG_DEPTH+1"},
+                {"name": "gray_count", "width": "LOG_DEPTH+1"}
+            ],
+            "behavior": [
+                "Implement a Gray counter.",
+                "Increment binary_count on each rising edge of clk.",
+                "Convert binary_count to gray_count using binary to Gray conversion formula.",
+                "Reset binary_count and gray_count on active-low reset."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module cdc_fifo_2phase #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    // Internal signals
+    wire [LOG_DEPTH:0] src_gray_count;
+    wire [LOG_DEPTH:0] dst_gray_count;
+    reg  [LOG_DEPTH:0] src_gray_count_synced;
+    reg  [LOG_DEPTH:0] dst_gray_count_synced;
+    reg  [WIDTH-1:0] fifo_mem [0:(1<<LOG_DEPTH)-1];
+    reg  [LOG_DEPTH-1:0] write_ptr;
+    reg  [LOG_DEPTH-1:0] read_ptr;
+    reg                  src_ready;
+    reg                  dst_valid;
+    reg  [WIDTH-1:0] dst_data;
+
+    // Gray counters for CDC
+    cdc_gray_counter #(.LOG_DEPTH(LOG_DEPTH)) src_gray_counter_inst (
+        .clk(src_clk_i),
+        .rst_ni(src_rst_ni),
+        .count(src_gray_count)
+    );
+
+    cdc_gray_counter #(.LOG_DEPTH(LOG_DEPTH)) dst_gray_counter_inst (
+        .clk(dst_clk_i),
+        .rst_ni(dst_rst_ni),
+        .count(dst_gray_count)
+    );
+
+    // Synchronize counters
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_gray_count_synced <= {(LOG_DEPTH+1){1'b0}};
+        end else begin
+            src_gray_count_synced <= src_gray_count;
+        end
+    end
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_gray_count_synced <= {(LOG_DEPTH+1){1'b0}};
+        end else begin
+            dst_gray_count_synced <= dst_gray_count;
+        end
+    end
+
+    // Calculate pointers
+    assign write_ptr = src_gray_count_synced[LOG_DEPTH-1:0];
+    assign read_ptr = dst_gray_count_synced[LOG_DEPTH-1:0];
+
+    // FIFO write logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_ready <= 1'b1;
+        end else if (src_valid_i && src_ready) begin
+            fifo_mem[write_ptr] <= src_data_i;
+            src_ready <= (write_ptr != (dst_gray_count_synced[LOG_DEPTH-1:0] - 1'b1));
+        end
+    end
+
+    assign src_ready_o = src_ready;
+
+    // FIFO read logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_valid <= 1'b0;
+            dst_data <= {(WIDTH){1'b0}};
+        end else if (dst_ready_i && dst_valid) begin
+            dst_valid <= (read_ptr != src_gray_count_synced[LOG_DEPTH-1:0]);
+        end else if (!dst_valid && (read_ptr != src_gray_count_synced[LOG_DEPTH-1:0])) begin
+            dst_data <= fifo_mem[read_ptr];
+            dst_valid <= 1'b1;
+        end
+    end
+
+    assign dst_data_o = dst_data;
+    assign dst_valid_o = dst_valid;
+
+endmodule
+
+module cdc_gray_counter #(
+    parameter LOG_DEPTH = 3
+)(
+    input                  clk,
+    input                  rst_ni,
+    output [LOG_DEPTH:0] count
+);
+
+    reg [LOG_DEPTH:0] binary_count;
+    reg [LOG_DEPTH:0] gray_count;
+
+    always @(posedge clk or negedge rst_ni) begin
+        if (!rst_ni) begin
+            binary_count <= {(LOG_DEPTH+1){1'b0}};
+            gray_count <= {(LOG_DEPTH+1){1'b0}};
+        end else begin
+            binary_count <= binary_count + 1;
+            gray_count <= (binary_count >> 1) ^ binary_count;
+        end
+    end
+
+    assign count = gray_count;
+
+endmodule
+```

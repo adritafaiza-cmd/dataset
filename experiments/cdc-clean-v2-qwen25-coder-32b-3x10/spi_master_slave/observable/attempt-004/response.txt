@@ -1,0 +1,133 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // Internal signals
+    reg [N-1:0]        di_sync;
+    reg                wren_sync;
+    reg [N-1:0]        shift_reg;
+    reg [3:0]          bit_cnt;
+    reg                spi_sck;
+    reg                spi_sck_d;
+    reg                spi_ssel;
+    reg [1:0]          state;
+    reg [1:0]          next_state;
+    reg [1:0]          pclk_cnt;
+
+    // State definitions
+    localparam IDLE = 2'b00;
+    localparam TRANSFER = 2'b01;
+    localparam DONE = 2'b10;
+
+    // Clock domain crossing for di_i and wren_i
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_sync <= 0;
+            wren_sync <= 0;
+        end else begin
+            di_sync <= di_i;
+            wren_sync <= wren_i;
+        end
+    end
+
+    // SPI clock generation
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_sck <= 0;
+            pclk_cnt <= 0;
+        end else begin
+            if (pclk_cnt == SPI_2X_CLK_DIV - 1) begin
+                spi_sck <= ~spi_sck;
+                pclk_cnt <= 0;
+            end else begin
+                pclk_cnt <= pclk_cnt + 1;
+            end
+        end
+    end
+
+    // SPI clock edge detection
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_sck_d <= 0;
+        end else begin
+            spi_sck_d <= spi_sck;
+        end
+    end
+
+    // State machine
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state <= IDLE;
+            spi_ssel <= 1;
+            di_req_o <= 1;
+            wr_ack_o <= 0;
+            do_valid_o <= 0;
+            bit_cnt <= 0;
+            shift_reg <= 0;
+        end else begin
+            state <= next_state;
+            case (state)
+                IDLE: begin
+                    spi_ssel <= 1;
+                    di_req_o <= 1;
+                    wr_ack_o <= 0;
+                    do_valid_o <= 0;
+                    if (wren_sync) begin
+                        spi_ssel <= 0;
+                        di_req_o <= 0;
+                        wr_ack_o <= 1;
+                        shift_reg <= di_sync;
+                        bit_cnt <= N - 1;
+                        next_state <= TRANSFER;
+                    end else begin
+                        next_state <= IDLE;
+                    end
+                end
+                TRANSFER: begin
+                    if (spi_sck_d && !spi_sck) begin // Falling edge of SPI clock
+                        spi_mosi_o = shift_reg[bit_cnt];
+                        if (bit_cnt == 0) begin
+                            next_state <= DONE;
+                        end else begin
+                            bit_cnt <= bit_cnt - 1;
+                        end
+                    end else if (!spi_sck_d && spi_sck) begin // Rising edge of SPI clock
+                        do_o[bit_cnt] = spi_miso_i;
+                    end else begin
+                        next_state <= TRANSFER;
+                    end
+                end
+                DONE: begin
+                    spi_ssel <= 1;
+                    do_valid_o <= 1;
+                    next_state <= IDLE;
+                end
+                default: begin
+                    next_state <= IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Assign SPI signals
+    assign spi_ssel_o = spi_ssel;
+    assign spi_sck_o = spi_sck;
+
+endmodule
+```<|im_end|>

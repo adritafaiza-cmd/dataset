@@ -1,0 +1,214 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "cdc_2phase",
+      "function": "A two-phase valid/ready channel that transfers WIDTH-bit data between asynchronous clocks.",
+      "parameters": [
+        {
+          "name": "WIDTH",
+          "value": "1"
+        }
+      ],
+      "ports": [
+        {
+          "name": "src_rst_ni",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "src_clk_i"
+        },
+        {
+          "name": "src_clk_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "src_clk_i"
+        },
+        {
+          "name": "src_data_i",
+          "direction": "input",
+          "width": "WIDTH",
+          "clock_domain": "src_clk_i"
+        },
+        {
+          "name": "src_valid_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "src_clk_i"
+        },
+        {
+          "name": "src_ready_o",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "src_clk_i"
+        },
+        {
+          "name": "dst_rst_ni",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "dst_clk_i"
+        },
+        {
+          "name": "dst_clk_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "dst_clk_i"
+        },
+        {
+          "name": "dst_data_o",
+          "direction": "output",
+          "width": "WIDTH",
+          "clock_domain": "dst_clk_i"
+        },
+        {
+          "name": "dst_valid_o",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "dst_clk_i"
+        },
+        {
+          "name": "dst_ready_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "dst_clk_i"
+        }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        {
+          "name": "src_reg_valid",
+          "width": 1
+        },
+        {
+          "name": "src_reg_data",
+          "width": "WIDTH"
+        },
+        {
+          "name": "dst_reg_valid",
+          "width": 1
+        },
+        {
+          "name": "dst_reg_data",
+          "width": "WIDTH"
+        },
+        {
+          "name": "sync_src_to_dst_valid",
+          "width": 1
+        },
+        {
+          "name": "sync_src_to_dst_data",
+          "width": "WIDTH"
+        },
+        {
+          "name": "sync_dst_to_src_ack",
+          "width": 1
+        }
+      ],
+      "behavior": [
+        "On rising src_clk_i edge, if src_valid_i and src_ready_o are high, accept the source item and store it in src_reg_valid and src_reg_data.",
+        "Synchronize src_reg_valid and src_reg_data to the dst_clk_i domain using a two-stage synchronizer.",
+        "On rising dst_clk_i edge, if sync_src_to_dst_valid is high and sync_dst_to_src_ack is low, accept the item and store it in dst_reg_valid and dst_reg_data.",
+        "Drive dst_valid_o and dst_data_o from dst_reg_valid and dst_reg_data.",
+        "Drive src_ready_o high if sync_dst_to_src_ack is low and there is no outstanding item (sync_src_to_dst_valid is low).",
+        "Synchronize dst_ready_i to the src_clk_i domain using a single-stage synchronizer.",
+        "On rising src_clk_i edge, if dst_ready_i is high and sync_src_to_dst_valid is high, drive sync_dst_to_src_ack high to acknowledge the item.",
+        "On rising src_clk_i edge, if sync_dst_to_src_ack is high, drive sync_dst_to_src_ack low.",
+        "On rising dst_clk_i edge, if dst_ready_i is high and sync_src_to_dst_valid is high, drive sync_dst_to_src_ack high to acknowledge the item.",
+        "On rising dst_clk_i edge, if sync_dst_to_src_ack is high, drive sync_dst_to_src_ack low.",
+        "On reset (src_rst_ni low), clear src_reg_valid and src_reg_data.",
+        "On reset (dst_rst_ni low), clear dst_reg_valid and dst_reg_data."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  reg src_reg_valid;
+  reg [WIDTH-1:0] src_reg_data;
+  reg dst_reg_valid;
+  reg [WIDTH-1:0] dst_reg_data;
+  reg sync_src_to_dst_valid;
+  reg [WIDTH-1:0] sync_src_to_dst_data;
+  reg sync_dst_to_src_ack;
+  reg sync_dst_to_src_ack_reg;
+
+  // Two-stage synchronizer for src_valid_i and src_data_i
+  reg sync_stage1_src_valid;
+  reg sync_stage1_src_data [WIDTH-1:0];
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      sync_stage1_src_valid <= 1'b0;
+      sync_stage1_src_data <= '0;
+      sync_src_to_dst_valid <= 1'b0;
+      sync_src_to_dst_data <= '0;
+      src_reg_valid <= 1'b0;
+      src_reg_data <= '0;
+    end else begin
+      sync_stage1_src_valid <= src_valid_i;
+      sync_stage1_src_data <= src_data_i;
+      sync_src_to_dst_valid <= sync_stage1_src_valid;
+      sync_src_to_dst_data <= sync_stage1_src_data;
+      if (src_ready_o && src_valid_i) begin
+        src_reg_valid <= 1'b1;
+        src_reg_data <= src_data_i;
+      end
+    end
+  end
+
+  // Single-stage synchronizer for dst_ready_i
+  reg sync_dst_ready;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      sync_dst_ready <= 1'b0;
+    end else begin
+      sync_dst_ready <= dst_ready_i;
+    end
+  end
+
+  // Destination-side logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_reg_valid <= 1'b0;
+      dst_reg_data <= '0;
+      sync_dst_to_src_ack <= 1'b0;
+      sync_dst_to_src_ack_reg <= 1'b0;
+    end else begin
+      if (sync_src_to_dst_valid && !sync_dst_to_src_ack) begin
+        dst_reg_valid <= 1'b1;
+        dst_reg_data <= sync_src_to_dst_data;
+      end else if (dst_ready_i && dst_valid_o) begin
+        dst_reg_valid <= 1'b0;
+      end
+      sync_dst_to_src_ack_reg <= sync_dst_to_src_ack;
+      sync_dst_to_src_ack <= dst_ready_i && dst_valid_o;
+    end
+  end
+
+  // Output assignments
+  assign src_ready_o = !sync_dst_to_src_ack && !sync_src_to_dst_valid;
+  assign dst_data_o = dst_reg_data;
+  assign dst_valid_o = dst_reg_valid;
+
+endmodule
+```

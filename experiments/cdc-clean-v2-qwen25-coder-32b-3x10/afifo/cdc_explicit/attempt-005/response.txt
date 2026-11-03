@@ -1,0 +1,166 @@
+```verilog
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam ADDR_WIDTH = LGFIFO;
+
+	reg [ADDR_WIDTH-1:0] wr_ptr, wr_ptr_gray, wr_ptr_gray_sync;
+	reg [ADDR_WIDTH-1:0] rd_ptr, rd_ptr_gray, rd_ptr_gray_sync;
+	reg [WIDTH-1:0] mem [DEPTH-1:0];
+	reg [WIDTH-1:0] rd_data_sync [NFF-1:0];
+	reg [WIDTH-1:0] rd_data_reg;
+
+	// Write Pointer Logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_ptr <= 0;
+			wr_ptr_gray <= 0;
+		end else if (i_wr && !o_wr_full) begin
+			if (WRITE_ON_POSEDGE)
+				wr_ptr <= wr_ptr + 1;
+			else
+				wr_ptr <= wr_ptr;
+		end
+	end
+
+	// Gray Code Conversion for Write Pointer
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			wr_ptr_gray <= 0;
+		else
+			wr_ptr_gray <= (wr_ptr >> 1) ^ wr_ptr;
+	end
+
+	// Synchronize Write Pointer Gray Code to Read Clock Domain
+	generate
+		genvar i;
+		for (i = 0; i < NFF; i = i + 1) begin : sync_wr_ptr_gray
+			always @(posedge i_rclk or negedge i_rd_reset_n) begin
+				if (!i_rd_reset_n)
+					wr_ptr_gray_sync <= 0;
+				else
+					wr_ptr_gray_sync <= wr_ptr_gray_sync[i-1];
+			end
+		end
+	endgenerate
+
+	// Read Pointer Logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_ptr <= 0;
+			rd_ptr_gray <= 0;
+		end else if (i_rd && !o_rd_empty) begin
+			rd_ptr <= rd_ptr + 1;
+		end
+	end
+
+	// Gray Code Conversion for Read Pointer
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			rd_ptr_gray <= 0;
+		else
+			rd_ptr_gray <= (rd_ptr >> 1) ^ rd_ptr;
+	end
+
+	// Synchronize Read Pointer Gray Code to Write Clock Domain
+	generate
+		genvar j;
+		for (j = 0; j < NFF; j = j + 1) begin : sync_rd_ptr_gray
+			always @(posedge i_wclk or negedge i_wr_reset_n) begin
+				if (!i_wr_reset_n)
+					rd_ptr_gray_sync <= 0;
+				else
+					rd_ptr_gray_sync <= rd_ptr_gray_sync[j-1];
+			end
+		end
+	endgenerate
+
+	// Binary Conversion for Synchronized Write Pointer Gray Code
+	function [ADDR_WIDTH-1:0] gray_to_bin;
+		input [ADDR_WIDTH-1:0] gray;
+		integer k;
+		begin
+			gray_to_bin = gray[ADDR_WIDTH-1];
+			for (k = ADDR_WIDTH-2; k >= 0; k = k - 1)
+				gray_to_bin[k] = gray_to_bin[k+1] ^ gray[k];
+		end
+	endfunction
+
+	// Binary Conversion for Synchronized Read Pointer Gray Code
+	function [ADDR_WIDTH-1:0] gray_to_bin_rd;
+		input [ADDR_WIDTH-1:0] gray;
+		integer k;
+		begin
+			gray_to_bin_rd = gray[ADDR_WIDTH-1];
+			for (k = ADDR_WIDTH-2; k >= 0; k = k - 1)
+				gray_to_bin_rd[k] = gray_to_bin_rd[k+1] ^ gray[k];
+		end
+	endfunction
+
+	// Write Data to Memory
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			mem[wr_ptr] <= 0;
+		else if (i_wr && !o_wr_full) begin
+			if (WRITE_ON_POSEDGE)
+				mem[wr_ptr] <= i_wr_data;
+			else
+				mem[wr_ptr] <= mem[wr_ptr];
+		end
+	end
+
+	// Read Data from Memory
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			rd_data_sync[0] <= 0;
+		else if (i_rd && !o_rd_empty)
+			rd_data_sync[0] <= mem[rd_ptr];
+	end
+
+	// Additional Stages for Read Data Synchronization
+	generate
+		if (NFF > 1) begin : sync_rd_data
+			genvar l;
+			for (l = 1; l < NFF; l = l + 1) begin : sync_stage
+				always @(posedge i_rclk or negedge i_rd_reset_n) begin
+					if (!i_rd_reset_n)
+						rd_data_sync[l] <= 0;
+					else
+						rd_data_sync[l] <= rd_data_sync[l-1];
+				end
+			end
+		end
+	endgenerate
+
+	// Register Read Data if OPT_REGISTER_READS is set
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			rd_data_reg <= 0;
+		else if (OPT_REGISTER_READS)
+			rd_data_reg <= rd_data_sync[NFF-1];
+	end
+
+	// Assign Output Read Data
+	assign o_rd_data = OPT_REGISTER_READS ? rd_data_reg : rd_data_sync[NFF-1];
+
+	// Full Flag Logic
+	assign o_wr_full = (wr_ptr_gray_sync == (gray_to_bin(wr_ptr) + 1));
+
+	// Empty Flag Logic
+	assign o_rd_empty = (rd_ptr_gray_sync == gray_to_bin_rd(rd_ptr));
+
+endmodule
+```<|im_end|>

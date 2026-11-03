@@ -1,0 +1,380 @@
+module i2c_master (
+    input  wire        clk,
+    input  wire        rst,
+    /*
+     * Host interface
+     */
+    input  wire [6:0]  s_axis_cmd_address,
+    input  wire        s_axis_cmd_start,
+    input  wire        s_axis_cmd_read,
+    input  wire        s_axis_cmd_write,
+    input  wire        s_axis_cmd_write_multiple,
+    input  wire        s_axis_cmd_stop,
+    input  wire        s_axis_cmd_valid,
+    output wire        s_axis_cmd_ready,
+    input  wire [7:0]  s_axis_data_tdata,
+    input  wire        s_axis_data_tvalid,
+    output wire        s_axis_data_tready,
+    input  wire        s_axis_data_tlast,
+    output wire [7:0]  m_axis_data_tdata,
+    output wire        m_axis_data_tvalid,
+    input  wire        m_axis_data_tready,
+    output wire        m_axis_data_tlast,
+    /*
+     * I2C interface
+     */
+    input  wire        scl_i,
+    output wire        scl_o,
+    output wire        scl_t,
+    input  wire        sda_i,
+    output wire        sda_o,
+    output wire        sda_t,
+    /*
+     * Status
+     */
+    output wire        busy,
+    output wire        bus_control,
+    output wire        bus_active,
+    output wire        missed_ack,
+    /*
+     * Configuration
+     */
+    input  wire [15:0] prescale,
+    input  wire        stop_on_idle
+);
+
+    reg [6:0]  cmd_address;
+    reg        cmd_start;
+    reg        cmd_read;
+    reg        cmd_write;
+    reg        cmd_write_multiple;
+    reg        cmd_stop;
+    reg        cmd_valid;
+    reg        cmd_ready;
+    reg [7:0]  data_tdata;
+    reg        data_tvalid;
+    reg        data_tready;
+    reg        data_tlast;
+    reg [7:0]  m_data_tdata;
+    reg        m_data_tvalid;
+    reg        m_data_tready;
+    reg        m_data_tlast;
+    reg        scl_o_reg;
+    reg        scl_t_reg;
+    reg        sda_o_reg;
+    reg        sda_t_reg;
+    reg        busy_reg;
+    reg        bus_control_reg;
+    reg        bus_active_reg;
+    reg        missed_ack_reg;
+    reg [15:0] prescale_reg;
+    reg [15:0] clk_counter;
+    reg [2:0]  bit_counter;
+    reg [7:0]  byte_counter;
+    reg [3:0]  state;
+    reg [3:0]  next_state;
+    reg        scl_o_next;
+    reg        scl_t_next;
+    reg        sda_o_next;
+    reg        sda_t_next;
+    reg        busy_next;
+    reg        bus_control_next;
+    reg        bus_active_next;
+    reg        missed_ack_next;
+    reg        cmd_ready_next;
+    reg        data_tready_next;
+    reg        m_data_tvalid_next;
+    reg        m_data_tlast_next;
+    reg        scl_i_prev;
+    reg        sda_i_prev;
+    reg        ack_received;
+    reg [7:0]  shift_reg;
+
+    localparam IDLE = 4'b0000;
+    localparam START = 4'b0001;
+    localparam ADDR = 4'b0010;
+    localparam ADDR_ACK = 4'b0011;
+    localparam WRITE = 4'b0100;
+    localparam WRITE_ACK = 4'b0101;
+    localparam READ = 4'b0110;
+    localparam READ_ACK = 4'b0111;
+    localparam STOP = 4'b1000;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            cmd_address <= 7'b0;
+            cmd_start <= 1'b0;
+            cmd_read <= 1'b0;
+            cmd_write <= 1'b0;
+            cmd_write_multiple <= 1'b0;
+            cmd_stop <= 1'b0;
+            cmd_valid <= 1'b0;
+            cmd_ready <= 1'b0;
+            data_tdata <= 8'b0;
+            data_tvalid <= 1'b0;
+            data_tready <= 1'b0;
+            data_tlast <= 1'b0;
+            m_data_tdata <= 8'b0;
+            m_data_tvalid <= 1'b0;
+            m_data_tlast <= 1'b0;
+            scl_o_reg <= 1'b1;
+            scl_t_reg <= 1'b1;
+            sda_o_reg <= 1'b1;
+            sda_t_reg <= 1'b1;
+            busy_reg <= 1'b0;
+            bus_control_reg <= 1'b0;
+            bus_active_reg <= 1'b0;
+            missed_ack_reg <= 1'b0;
+            prescale_reg <= 16'b0;
+            clk_counter <= 16'b0;
+            bit_counter <= 3'b0;
+            byte_counter <= 8'b0;
+            state <= IDLE;
+            next_state <= IDLE;
+            scl_o_next <= 1'b1;
+            scl_t_next <= 1'b1;
+            sda_o_next <= 1'b1;
+            sda_t_next <= 1'b1;
+            busy_next <= 1'b0;
+            bus_control_next <= 1'b0;
+            bus_active_next <= 1'b0;
+            missed_ack_next <= 1'b0;
+            cmd_ready_next <= 1'b0;
+            data_tready_next <= 1'b0;
+            m_data_tvalid_next <= 1'b0;
+            m_data_tlast_next <= 1'b0;
+            scl_i_prev <= 1'b0;
+            sda_i_prev <= 1'b0;
+            ack_received <= 1'b0;
+            shift_reg <= 8'b0;
+        end else begin
+            cmd_address <= s_axis_cmd_address;
+            cmd_start <= s_axis_cmd_start;
+            cmd_read <= s_axis_cmd_read;
+            cmd_write <= s_axis_cmd_write;
+            cmd_write_multiple <= s_axis_cmd_write_multiple;
+            cmd_stop <= s_axis_cmd_stop;
+            cmd_valid <= s_axis_cmd_valid;
+            cmd_ready <= cmd_ready_next;
+            data_tdata <= s_axis_data_tdata;
+            data_tvalid <= s_axis_data_tvalid;
+            data_tready <= data_tready_next;
+            data_tlast <= s_axis_data_tlast;
+            m_data_tdata <= m_data_tdata;
+            m_data_tvalid <= m_data_tvalid_next;
+            m_data_tlast <= m_data_tlast_next;
+            scl_o_reg <= scl_o_next;
+            scl_t_reg <= scl_t_next;
+            sda_o_reg <= sda_o_next;
+            sda_t_reg <= sda_t_next;
+            busy_reg <= busy_next;
+            bus_control_reg <= bus_control_next;
+            bus_active_reg <= bus_active_next;
+            missed_ack_reg <= missed_ack_next;
+            prescale_reg <= prescale;
+            clk_counter <= clk_counter + 1;
+            bit_counter <= next_state == IDLE ? 3'b0 : bit_counter + 1;
+            byte_counter <= next_state == IDLE ? 8'b0 : byte_counter + (bit_counter == 3'b111);
+            state <= next_state;
+            scl_i_prev <= scl_i;
+            sda_i_prev <= sda_i;
+            ack_received <= (state == ADDR_ACK || state == WRITE_ACK) && bit_counter == 3'b111 && sda_i == 1'b1;
+            if (next_state == IDLE)
+                shift_reg <= 8'b0;
+            else if (state == ADDR && bit_counter == 3'b111)
+                shift_reg <= {cmd_address, cmd_read};
+            else if (state == WRITE && bit_counter == 3'b111)
+                shift_reg <= data_tdata;
+        end
+    end
+
+    always @(*) begin
+        next_state = state;
+        scl_o_next = scl_o_reg;
+        scl_t_next = scl_t_reg;
+        sda_o_next = sda_o_reg;
+        sda_t_next = sda_t_reg;
+        busy_next = busy_reg;
+        bus_control_next = bus_control_reg;
+        bus_active_next = bus_active_reg;
+        missed_ack_next = missed_ack_reg;
+        cmd_ready_next = 1'b0;
+        data_tready_next = 1'b0;
+        m_data_tvalid_next = 1'b0;
+        m_data_tlast_next = 1'b0;
+
+        case (state)
+            IDLE: begin
+                scl_o_next = 1'b1;
+                scl_t_next = 1'b1;
+                sda_o_next = 1'b1;
+                sda_t_next = 1'b1;
+                busy_next = 1'b0;
+                bus_control_next = 1'b0;
+                bus_active_next = 1'b0;
+                missed_ack_next = 1'b0;
+                if (cmd_valid) begin
+                    cmd_ready_next = 1'b1;
+                    next_state = START;
+                end
+            end
+            START: begin
+                scl_o_next = 1'b1;
+                scl_t_next = 1'b0;
+                sda_o_next = 1'b0;
+                sda_t_next = 1'b0;
+                busy_next = 1'b1;
+                bus_control_next = 1'b1;
+                bus_active_next = 1'b1;
+                missed_ack_next = 1'b0;
+                if (clk_counter >= prescale_reg) begin
+                    clk_counter = 16'b0;
+                    next_state = ADDR;
+                end
+            end
+            ADDR: begin
+                scl_o_next = 1'b0;
+                scl_t_next = 1'b0;
+                sda_o_next = shift_reg[7-bit_counter];
+                sda_t_next = 1'b0;
+                busy_next = 1'b1;
+                bus_control_next = 1'b1;
+                bus_active_next = 1'b1;
+                missed_ack_next = 1'b0;
+                if (clk_counter >= prescale_reg) begin
+                    clk_counter = 16'b0;
+                    if (bit_counter == 3'b111) begin
+                        next_state = ADDR_ACK;
+                        bit_counter = 3'b0;
+                    end
+                end
+            end
+            ADDR_ACK: begin
+                scl_o_next = 1'b1;
+                scl_t_next = 1'b0;
+                sda_o_next = 1'b1;
+                sda_t_next = 1'b1;
+                busy_next = 1'b1;
+                bus_control_next = 1'b1;
+                bus_active_next = 1'b1;
+                missed_ack_next = ack_received;
+                if (clk_counter >= prescale_reg) begin
+                    clk_counter = 16'b0;
+                    if (ack_received) begin
+                        if (cmd_read)
+                            next_state = READ;
+                        else if (cmd_write || cmd_write_multiple)
+                            next_state = WRITE;
+                    end else begin
+                        next_state = STOP;
+                    end
+                end
+            end
+            WRITE: begin
+                scl_o_next = 1'b0;
+                scl_t_next = 1'b0;
+                sda_o_next = shift_reg[7-bit_counter];
+                sda_t_next = 1'b0;
+                busy_next = 1'b1;
+                bus_control_next = 1'b1;
+                bus_active_next = 1'b1;
+                missed_ack_next = 1'b0;
+                if (clk_counter >= prescale_reg) begin
+                    clk_counter = 16'b0;
+                    if (bit_counter == 3'b111) begin
+                        next_state = WRITE_ACK;
+                        bit_counter = 3'b0;
+                    end
+                end
+            end
+            WRITE_ACK: begin
+                scl_o_next = 1'b1;
+                scl_t_next = 1'b0;
+                sda_o_next = 1'b1;
+                sda_t_next = 1'b1;
+                busy_next = 1'b1;
+                bus_control_next = 1'b1;
+                bus_active_next = 1'b1;
+                missed_ack_next = ack_received;
+                if (clk_counter >= prescale_reg) begin
+                    clk_counter = 16'b0;
+                    if (ack_received) begin
+                        if (data_tlast)
+                            next_state = STOP;
+                        else
+                            next_state = WRITE;
+                    end else begin
+                        next_state = STOP;
+                    end
+                end
+            end
+            READ: begin
+                scl_o_next = 1'b1;
+                scl_t_next = 1'b0;
+                sda_o_next = 1'b1;
+                sda_t_next = 1'b1;
+                busy_next = 1'b1;
+                bus_control_next = 1'b1;
+                bus_active_next = 1'b1;
+                missed_ack_next = 1'b0;
+                m_data_tdata = shift_reg;
+                m_data_tvalid_next = 1'b1;
+                m_data_tlast_next = byte_counter == 8'b11111111;
+                if (clk_counter >= prescale_reg) begin
+                    clk_counter = 16'b0;
+                    if (bit_counter == 3'b111) begin
+                        shift_reg = {shift_reg[6:0], sda_i};
+                        next_state = READ_ACK;
+                        bit_counter = 3'b0;
+                    end
+                end
+            end
+            READ_ACK: begin
+                scl_o_next = 1'b0;
+                scl_t_next = 1'b0;
+                sda_o_next = byte_counter == 8'b11111111 ? 1'b1 : 1'b0;
+                sda_t_next = 1'b0;
+                busy_next = 1'b1;
+                bus_control_next = 1'b1;
+                bus_active_next = 1'b1;
+                missed_ack_next = 1'b0;
+                if (clk_counter >= prescale_reg) begin
+                    clk_counter = 16'b0;
+                    if (byte_counter == 8'b11111111)
+                        next_state = STOP;
+                    else
+                        next_state = READ;
+                end
+            end
+            STOP: begin
+                scl_o_next = 1'b0;
+                scl_t_next = 1'b0;
+                sda_o_next = 1'b0;
+                sda_t_next = 1'b0;
+                busy_next = 1'b1;
+                bus_control_next = 1'b1;
+                bus_active_next = 1'b0;
+                missed_ack_next = 1'b0;
+                if (clk_counter >= prescale_reg) begin
+                    clk_counter = 16'b0;
+                    next_state = IDLE;
+                end
+            end
+        endcase
+    end
+
+    assign s_axis_cmd_ready = cmd_ready;
+    assign s_axis_data_tready = data_tready;
+    assign m_axis_data_tdata = m_data_tdata;
+    assign m_axis_data_tvalid = m_data_tvalid;
+    assign m_axis_data_tlast = m_data_tlast;
+    assign scl_o = scl_o_reg;
+    assign scl_t = scl_t_reg;
+    assign sda_o = sda_o_reg;
+    assign sda_t = sda_t_reg;
+    assign busy = busy_reg;
+    assign bus_control = bus_control_reg;
+    assign bus_active = bus_active_reg;
+    assign missed_ack = missed_ack_reg;
+
+endmodule

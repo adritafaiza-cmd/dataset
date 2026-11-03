@@ -1,0 +1,451 @@
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // Slave to Master signals
+    reg [ADDR_WIDTH-1:0] s2m_awaddr;
+    reg [2:0] s2m_awprot;
+    reg s2m_awvalid;
+    reg [DATA_WIDTH-1:0] s2m_wdata;
+    reg [STRB_WIDTH-1:0] s2m_wstrb;
+    reg s2m_wvalid;
+    reg [1:0] s2m_bresp;
+    reg s2m_bvalid;
+    reg [ADDR_WIDTH-1:0] s2m_araddr;
+    reg [2:0] s2m_arprot;
+    reg s2m_arvalid;
+    reg [DATA_WIDTH-1:0] s2m_rdata;
+    reg [1:0] s2m_rresp;
+    reg s2m_rvalid;
+
+    // Master to Slave signals
+    reg [ADDR_WIDTH-1:0] m2s_awaddr;
+    reg [2:0] m2s_awprot;
+    reg m2s_awvalid;
+    reg [DATA_WIDTH-1:0] m2s_wdata;
+    reg [STRB_WIDTH-1:0] m2s_wstrb;
+    reg m2s_wvalid;
+    reg [1:0] m2s_bresp;
+    reg m2s_bvalid;
+    reg [ADDR_WIDTH-1:0] m2s_araddr;
+    reg [2:0] m2s_arprot;
+    reg m2s_arvalid;
+    reg [DATA_WIDTH-1:0] m2s_rdata;
+    reg [1:0] m2s_rresp;
+    reg m2s_rvalid;
+
+    // FIFOs for AW, W, AR channels
+    reg [ADDR_WIDTH-1:0] awaddr_fifo [0:1];
+    reg [2:0] awprot_fifo [0:1];
+    reg awvalid_fifo [0:1];
+    reg [DATA_WIDTH-1:0] wdata_fifo [0:1];
+    reg [STRB_WIDTH-1:0] wstrb_fifo [0:1];
+    reg wvalid_fifo [0:1];
+    reg [ADDR_WIDTH-1:0] araddr_fifo [0:1];
+    reg [2:0] arprot_fifo [0:1];
+    reg arvalid_fifo [0:1];
+
+    reg aw_fifo_wr_en;
+    reg aw_fifo_rd_en;
+    reg w_fifo_wr_en;
+    reg w_fifo_rd_en;
+    reg ar_fifo_wr_en;
+    reg ar_fifo_rd_en;
+
+    reg [1:0] aw_fifo_wr_ptr;
+    reg [1:0] aw_fifo_rd_ptr;
+    reg [1:0] w_fifo_wr_ptr;
+    reg [1:0] w_fifo_rd_ptr;
+    reg [1:0] ar_fifo_wr_ptr;
+    reg [1:0] ar_fifo_rd_ptr;
+
+    reg aw_fifo_full;
+    reg w_fifo_full;
+    reg ar_fifo_full;
+
+    reg aw_fifo_empty;
+    reg w_fifo_empty;
+    reg ar_fifo_empty;
+
+    // FIFOs for B, R channels
+    reg [1:0] bresp_fifo [0:1];
+    reg bvalid_fifo [0:1];
+    reg [DATA_WIDTH-1:0] rdata_fifo [0:1];
+    reg [1:0] rresp_fifo [0:1];
+    reg rvalid_fifo [0:1];
+
+    reg b_fifo_wr_en;
+    reg b_fifo_rd_en;
+    reg r_fifo_wr_en;
+    reg r_fifo_rd_en;
+
+    reg [1:0] b_fifo_wr_ptr;
+    reg [1:0] b_fifo_rd_ptr;
+    reg [1:0] r_fifo_wr_ptr;
+    reg [1:0] r_fifo_rd_ptr;
+
+    reg b_fifo_full;
+    reg r_fifo_full;
+
+    reg b_fifo_empty;
+    reg r_fifo_empty;
+
+    // AW FIFO
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            aw_fifo_wr_ptr <= 2'b00;
+            aw_fifo_rd_ptr <= 2'b00;
+        end else begin
+            if (aw_fifo_wr_en && !aw_fifo_full)
+                aw_fifo_wr_ptr <= aw_fifo_wr_ptr + 1;
+            if (aw_fifo_rd_en && !aw_fifo_empty)
+                aw_fifo_rd_ptr <= aw_fifo_rd_ptr + 1;
+        end
+    end
+
+    always @(*) begin
+        aw_fifo_full = (aw_fifo_wr_ptr == {~aw_fifo_rd_ptr[1], aw_fifo_rd_ptr[0]});
+        aw_fifo_empty = (aw_fifo_wr_ptr == aw_fifo_rd_ptr);
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            awaddr_fifo[0] <= 0;
+            awaddr_fifo[1] <= 0;
+            awprot_fifo[0] <= 0;
+            awprot_fifo[1] <= 0;
+            awvalid_fifo[0] <= 0;
+            awvalid_fifo[1] <= 0;
+        end else begin
+            if (aw_fifo_wr_en && !aw_fifo_full) begin
+                awaddr_fifo[aw_fifo_wr_ptr] <= s_axil_awaddr;
+                awprot_fifo[aw_fifo_wr_ptr] <= s_axil_awprot;
+                awvalid_fifo[aw_fifo_wr_ptr] <= s_axil_awvalid;
+            end
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_axil_awaddr <= 0;
+            m_axil_awprot <= 0;
+            m_axil_awvalid <= 0;
+        end else begin
+            if (aw_fifo_rd_en && !aw_fifo_empty) begin
+                m_axil_awaddr <= awaddr_fifo[aw_fifo_rd_ptr];
+                m_axil_awprot <= awprot_fifo[aw_fifo_rd_ptr];
+                m_axil_awvalid <= awvalid_fifo[aw_fifo_rd_ptr];
+            end else begin
+                m_axil_awvalid <= 0;
+            end
+        end
+    end
+
+    // W FIFO
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            w_fifo_wr_ptr <= 2'b00;
+            w_fifo_rd_ptr <= 2'b00;
+        end else begin
+            if (w_fifo_wr_en && !w_fifo_full)
+                w_fifo_wr_ptr <= w_fifo_wr_ptr + 1;
+            if (w_fifo_rd_en && !w_fifo_empty)
+                w_fifo_rd_ptr <= w_fifo_rd_ptr + 1;
+        end
+    end
+
+    always @(*) begin
+        w_fifo_full = (w_fifo_wr_ptr == {~w_fifo_rd_ptr[1], w_fifo_rd_ptr[0]});
+        w_fifo_empty = (w_fifo_wr_ptr == w_fifo_rd_ptr);
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            wdata_fifo[0] <= 0;
+            wdata_fifo[1] <= 0;
+            wstrb_fifo[0] <= 0;
+            wstrb_fifo[1] <= 0;
+            wvalid_fifo[0] <= 0;
+            wvalid_fifo[1] <= 0;
+        end else begin
+            if (w_fifo_wr_en && !w_fifo_full) begin
+                wdata_fifo[w_fifo_wr_ptr] <= s_axil_wdata;
+                wstrb_fifo[w_fifo_wr_ptr] <= s_axil_wstrb;
+                wvalid_fifo[w_fifo_wr_ptr] <= s_axil_wvalid;
+            end
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_axil_wdata <= 0;
+            m_axil_wstrb <= 0;
+            m_axil_wvalid <= 0;
+        end else begin
+            if (w_fifo_rd_en && !w_fifo_empty) begin
+                m_axil_wdata <= wdata_fifo[w_fifo_rd_ptr];
+                m_axil_wstrb <= wstrb_fifo[w_fifo_rd_ptr];
+                m_axil_wvalid <= wvalid_fifo[w_fifo_rd_ptr];
+            end else begin
+                m_axil_wvalid <= 0;
+            end
+        end
+    end
+
+    // AR FIFO
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            ar_fifo_wr_ptr <= 2'b00;
+            ar_fifo_rd_ptr <= 2'b00;
+        end else begin
+            if (ar_fifo_wr_en && !ar_fifo_full)
+                ar_fifo_wr_ptr <= ar_fifo_wr_ptr + 1;
+            if (ar_fifo_rd_en && !ar_fifo_empty)
+                ar_fifo_rd_ptr <= ar_fifo_rd_ptr + 1;
+        end
+    end
+
+    always @(*) begin
+        ar_fifo_full = (ar_fifo_wr_ptr == {~ar_fifo_rd_ptr[1], ar_fifo_rd_ptr[0]});
+        ar_fifo_empty = (ar_fifo_wr_ptr == ar_fifo_rd_ptr);
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            araddr_fifo[0] <= 0;
+            araddr_fifo[1] <= 0;
+            arprot_fifo[0] <= 0;
+            arprot_fifo[1] <= 0;
+            arvalid_fifo[0] <= 0;
+            arvalid_fifo[1] <= 0;
+        end else begin
+            if (ar_fifo_wr_en && !ar_fifo_full) begin
+                araddr_fifo[ar_fifo_wr_ptr] <= s_axil_araddr;
+                arprot_fifo[ar_fifo_wr_ptr] <= s_axil_arprot;
+                arvalid_fifo[ar_fifo_wr_ptr] <= s_axil_arvalid;
+            end
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_axil_araddr <= 0;
+            m_axil_arprot <= 0;
+            m_axil_arvalid <= 0;
+        end else begin
+            if (ar_fifo_rd_en && !ar_fifo_empty) begin
+                m_axil_araddr <= araddr_fifo[ar_fifo_rd_ptr];
+                m_axil_arprot <= arprot_fifo[ar_fifo_rd_ptr];
+                m_axil_arvalid <= arvalid_fifo[ar_fifo_rd_ptr];
+            end else begin
+                m_axil_arvalid <= 0;
+            end
+        end
+    end
+
+    // B FIFO
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            b_fifo_wr_ptr <= 2'b00;
+            b_fifo_rd_ptr <= 2'b00;
+        end else begin
+            if (b_fifo_wr_en && !b_fifo_full)
+                b_fifo_wr_ptr <= b_fifo_wr_ptr + 1;
+            if (b_fifo_rd_en && !b_fifo_empty)
+                b_fifo_rd_ptr <= b_fifo_rd_ptr + 1;
+        end
+    end
+
+    always @(*) begin
+        b_fifo_full = (b_fifo_wr_ptr == {~b_fifo_rd_ptr[1], b_fifo_rd_ptr[0]});
+        b_fifo_empty = (b_fifo_wr_ptr == b_fifo_rd_ptr);
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            bresp_fifo[0] <= 0;
+            bresp_fifo[1] <= 0;
+            bvalid_fifo[0] <= 0;
+            bvalid_fifo[1] <= 0;
+        end else begin
+            if (b_fifo_wr_en && !b_fifo_full) begin
+                bresp_fifo[b_fifo_wr_ptr] <= m_axil_bresp;
+                bvalid_fifo[b_fifo_wr_ptr] <= m_axil_bvalid;
+            end
+        end
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_axil_bresp <= 0;
+            s_axil_bvalid <= 0;
+        end else begin
+            if (b_fifo_rd_en && !b_fifo_empty) begin
+                s_axil_bresp <= bresp_fifo[b_fifo_rd_ptr];
+                s_axil_bvalid <= bvalid_fifo[b_fifo_rd_ptr];
+            end else begin
+                s_axil_bvalid <= 0;
+            end
+        end
+    end
+
+    // R FIFO
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            r_fifo_wr_ptr <= 2'b00;
+            r_fifo_rd_ptr <= 2'b00;
+        end else begin
+            if (r_fifo_wr_en && !r_fifo_full)
+                r_fifo_wr_ptr <= r_fifo_wr_ptr + 1;
+            if (r_fifo_rd_en && !r_fifo_empty)
+                r_fifo_rd_ptr <= r_fifo_rd_ptr + 1;
+        end
+    end
+
+    always @(*) begin
+        r_fifo_full = (r_fifo_wr_ptr == {~r_fifo_rd_ptr[1], r_fifo_rd_ptr[0]});
+        r_fifo_empty = (r_fifo_wr_ptr == r_fifo_rd_ptr);
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            rdata_fifo[0] <= 0;
+            rdata_fifo[1] <= 0;
+            rresp_fifo[0] <= 0;
+            rresp_fifo[1] <= 0;
+            rvalid_fifo[0] <= 0;
+            rvalid_fifo[1] <= 0;
+        end else begin
+            if (r_fifo_wr_en && !r_fifo_full) begin
+                rdata_fifo[r_fifo_wr_ptr] <= m_axil_rdata;
+                rresp_fifo[r_fifo_wr_ptr] <= m_axil_rresp;
+                rvalid_fifo[r_fifo_wr_ptr] <= m_axil_rvalid;
+            end
+        end
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_axil_rdata <= 0;
+            s_axil_rresp <= 0;
+            s_axil_rvalid <= 0;
+        end else begin
+            if (r_fifo_rd_en && !r_fifo_empty) begin
+                s_axil_rdata <= rdata_fifo[r_fifo_rd_ptr];
+                s_axil_rresp <= rresp_fifo[r_fifo_rd_ptr];
+                s_axil_rvalid <= rvalid_fifo[r_fifo_rd_ptr];
+            end else begin
+                s_axil_rvalid <= 0;
+            end
+        end
+    end
+
+    // Control signals
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_axil_awready <= 0;
+            s_axil_wready <= 0;
+            s_axil_arready <= 0;
+        end else begin
+            s_axil_awready <= !aw_fifo_full;
+            s_axil_wready <= !w_fifo_full;
+            s_axil_arready <= !ar_fifo_full;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_axil_bready <= 0;
+            m_axil_rready <= 0;
+        end else begin
+            m_axil_bready <= !b_fifo_full;
+            m_axil_rready <= !r_fifo_full;
+        end
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            aw_fifo_wr_en <= 0;
+            w_fifo_wr_en <= 0;
+            ar_fifo_wr_en <= 0;
+        end else begin
+            aw_fifo_wr_en <= s_axil_awvalid && s_axil_awready;
+            w_fifo_wr_en <= s_axil_wvalid && s_axil_wready;
+            ar_fifo_wr_en <= s_axil_arvalid && s_axil_arready;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            aw_fifo_rd_en <= 0;
+            w_fifo_rd_en <= 0;
+            ar_fifo_rd_en <= 0;
+            b_fifo_wr_en <= 0;
+            r_fifo_wr_en <= 0;
+            b_fifo_rd_en <= 0;
+            r_fifo_rd_en <= 0;
+        end else begin
+            aw_fifo_rd_en <= m_axil_awready && m_axil_awvalid;
+            w_fifo_rd_en <= m_axil_wready && m_axil_wvalid;
+            ar_fifo_rd_en <= m_axil_arready && m_axil_arvalid;
+            b_fifo_wr_en <= m_axil_bvalid && m_axil_bready;
+            r_fifo_wr_en <= m_axil_rvalid && m_axil_rready;
+            b_fifo_rd_en <= s_axil_bready && s_axil_bvalid;
+            r_fifo_rd_en <= s_axil_rready && s_axil_rvalid;
+        end
+    end
+
+endmodule

@@ -1,0 +1,81 @@
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    wire req_valid;
+    reg [$clog2(PORTS)-1:0] current_grant;
+    reg [$clog2(PORTS)-1:0] next_grant;
+    reg [PORTS-1:0] grant_reg;
+    reg grant_valid_reg;
+    reg [$clog2(PORTS)-1:0] grant_encoded_reg;
+
+    // Detect if there is any valid request
+    assign req_valid = |request;
+
+    // Determine the next grant
+    always @(*) begin
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            // Find the next requestor in a round-robin fashion
+            integer i;
+            next_grant = current_grant;
+            for (i = 0; i < PORTS; i = i + 1) begin
+                if (request[(current_grant + i) % PORTS]) begin
+                    next_grant = (current_grant + i) % PORTS;
+                    break;
+                end
+            end
+        end else begin
+            // Find the highest priority requestor
+            if (ARB_LSB_HIGH_PRIORITY) begin
+                next_grant = 0;
+                while (next_grant < PORTS && !request[next_grant]) begin
+                    next_grant = next_grant + 1;
+                end
+            end else begin
+                next_grant = PORTS - 1;
+                while (next_grant > 0 && !request[next_grant]) begin
+                    next_grant = next_grant - 1;
+                end
+            end
+        end
+    end
+
+    // Update the grant, grant_valid, and grant_encoded based on the determined next grant and the current state
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            grant_reg <= 0;
+            grant_valid_reg <= 0;
+            grant_encoded_reg <= 0;
+            current_grant <= 0;
+        end else begin
+            if (!grant_valid_reg || (!ARB_BLOCK && !acknowledge[grant_encoded_reg]) || !request[grant_encoded_reg]) begin
+                grant_reg <= (1 << next_grant);
+                grant_valid_reg <= req_valid;
+                grant_encoded_reg <= next_grant;
+                current_grant <= next_grant;
+            end else if (ARB_BLOCK && ARB_BLOCK_ACK && acknowledge[grant_encoded_reg]) begin
+                grant_valid_reg <= 0;
+            end
+        end
+    end
+
+    // Assign outputs
+    assign grant = grant_reg;
+    assign grant_valid = grant_valid_reg;
+    assign grant_encoded = grant_encoded_reg;
+
+endmodule

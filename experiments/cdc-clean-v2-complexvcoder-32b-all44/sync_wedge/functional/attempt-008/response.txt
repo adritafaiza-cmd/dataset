@@ -1,0 +1,246 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "sync_wedge",
+            "function": "A destination-clock bit synchronizer with edge detect.",
+            "parameters": [
+                {
+                    "name": "STAGES",
+                    "value": 2
+                }
+            ],
+            "ports": [
+                {
+                    "name": "clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "en_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "serial_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "external"
+                },
+                {
+                    "name": "r_edge_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "f_edge_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "serial_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                }
+            ],
+            "instances": [
+                {
+                    "module": "sync_chain",
+                    "name": "sync_chain_inst",
+                    "function": "Synchronizes an asynchronous signal to the clk_i domain.",
+                    "connections": [
+                        {
+                            "local": "clk_i",
+                            "remote": "clk_i"
+                        },
+                        {
+                            "local": "rst_ni",
+                            "remote": "rst_ni"
+                        },
+                        {
+                            "local": "serial_i",
+                            "remote": "async_in"
+                        },
+                        {
+                            "local": "sync_chain_out",
+                            "remote": "sync_out"
+                        }
+                    ]
+                }
+            ],
+            "connections": [
+                {
+                    "source": "sync_chain_inst.sync_out",
+                    "destination": "serial_o"
+                },
+                {
+                    "source": "sync_chain_inst.sync_out",
+                    "destination": "d1"
+                },
+                {
+                    "source": "d1",
+                    "destination": "d2"
+                },
+                {
+                    "source": "d2",
+                    "destination": "d3"
+                }
+            ],
+            "internal_signals": [
+                {
+                    "name": "sync_chain_out",
+                    "width": 1
+                },
+                {
+                    "name": "d1",
+                    "width": 1
+                },
+                {
+                    "name": "d2",
+                    "width": 1
+                },
+                {
+                    "name": "d3",
+                    "width": 1
+                }
+            ],
+            "behavior": [
+                "serial_o is the synchronized version of serial_i in the clk_i domain.",
+                "r_edge_o pulses for one cycle on the rising edge of the synchronized bit when en_i is high.",
+                "f_edge_o pulses for one cycle on the falling edge of the synchronized bit when en_i is high.",
+                "After reset, outputs are low."
+            ]
+        },
+        {
+            "Top_module_name": "sync_chain",
+            "function": "Synchronizes an asynchronous signal to a target clock domain.",
+            "parameters": [
+                {
+                    "name": "STAGES",
+                    "value": 2
+                }
+            ],
+            "ports": [
+                {
+                    "name": "clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "async_in",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "external"
+                },
+                {
+                    "name": "sync_out",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {
+                    "name": "sync_chain",
+                    "width": 1,
+                    "array_size": "STAGES"
+                }
+            ],
+            "behavior": [
+                "Synchronizes async_in to the clk_i domain using a shift register chain of length STAGES.",
+                "After reset, sync_out is low."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module sync_wedge #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    wire sync_chain_out;
+    reg  d1, d2, d3;
+
+    sync_chain #(
+        .STAGES(STAGES)
+    ) sync_chain_inst (
+        .clk_i(clk_i),
+        .rst_ni(rst_ni),
+        .async_in(serial_i),
+        .sync_out(sync_chain_out)
+    );
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            d1 <= 1'b0;
+            d2 <= 1'b0;
+            d3 <= 1'b0;
+        end else begin
+            d1 <= sync_chain_out;
+            d2 <= d1;
+            d3 <= d2;
+        end
+    end
+
+    assign serial_o = sync_chain_out;
+    assign r_edge_o = en_i & (d2 & ~d3);
+    assign f_edge_o = en_i & (~d2 & d3);
+
+endmodule
+
+module sync_chain #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  async_in,
+    output sync_out
+);
+
+    reg [STAGES-1:0] sync_chain;
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            sync_chain <= {STAGES{1'b0}};
+        end else begin
+            sync_chain[0] <= async_in;
+            sync_chain[STAGES-1:1] <= sync_chain[STAGES-2:0];
+        end
+    end
+
+    assign sync_out = sync_chain[STAGES-1];
+
+endmodule
+```

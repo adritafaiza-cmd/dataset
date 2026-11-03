@@ -1,0 +1,160 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "arbiter",
+      "function": "Multi-port request arbiter with configurable priority and blocking mechanism",
+      "parameters": [
+        { "name": "PORTS", "value": "4" },
+        { "name": "ARB_TYPE_ROUND_ROBIN", "value": "0" },
+        { "name": "ARB_BLOCK", "value": "0" },
+        { "name": "ARB_BLOCK_ACK", "value": "1" },
+        { "name": "ARB_LSB_HIGH_PRIORITY", "value": "0" }
+      ],
+      "ports": [
+        { "name": "clk", "direction": "input", "width": 1, "clock_domain": "clk" },
+        { "name": "rst", "direction": "input", "width": 1, "clock_domain": "clk" },
+        { "name": "request", "direction": "input", "width": "PORTS", "clock_domain": "clk" },
+        { "name": "acknowledge", "direction": "input", "width": "PORTS", "clock_domain": "clk" },
+        { "name": "grant", "direction": "output", "width": "PORTS", "clock_domain": "clk" },
+        { "name": "grant_valid", "direction": "output", "width": 1, "clock_domain": "clk" },
+        { "name": "grant_encoded", "direction": "output", "width": "$clog2(PORTS)", "clock_domain": "clk" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        { "name": "req_active", "width": "PORTS" },
+        { "name": "next_grant", "width": "PORTS" },
+        { "name": "current_grant", "width": "PORTS" },
+        { "name": "grant_index", "width": "$clog2(PORTS)" },
+        { "name": "block_condition", "width": 1 }
+      ],
+      "behavior": [
+        "Capture the active requests in req_active.",
+        "Determine the next grant based on ARB_TYPE_ROUND_ROBIN, ARB_LSB_HIGH_PRIORITY, and current_grant.",
+        "Hold the grant if ARB_BLOCK is set and either ARB_BLOCK_ACK is nonzero and acknowledge is not set, or ARB_BLOCK_ACK is zero and request is still set.",
+        "Update current_grant on the rising edge of clk if not blocked and grant_valid is not set.",
+        "Set grant_valid to 1 when a new grant is issued and grant_encoded to the index of the granted request.",
+        "Reset current_grant and grant_valid on the active-high reset rst.",
+        "Ensure safe reset release and data coherence for clock-domain and reset-domain crossings."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    wire [PORTS-1:0] req_active;
+    wire [PORTS-1:0] next_grant;
+    reg  [PORTS-1:0] current_grant;
+    reg  [$clog2(PORTS)-1:0] grant_index;
+    reg  block_condition;
+
+    // Capture active requests
+    assign req_active = request;
+
+    // Determine the next grant
+    generate
+        if (ARB_TYPE_ROUND_ROBIN) begin : round_robin_arb
+            wire [PORTS-1:0] rotated_req;
+            assign rotated_req = req_active << (grant_index + 1) | (req_active >> (PORTS - grant_index - 1));
+
+            always @(*) begin
+                next_grant = 0;
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    for (integer i = 0; i < PORTS; i = i + 1) begin
+                        if (rotated_req[i]) begin
+                            next_grant[i] = 1;
+                            break;
+                        end
+                    end
+                end else begin
+                    for (integer i = PORTS - 1; i >= 0; i = i - 1) begin
+                        if (rotated_req[i]) begin
+                            next_grant[i] = 1;
+                            break;
+                        end
+                    end
+                end
+            end
+        end else begin : fixed_priority_arb
+            always @(*) begin
+                next_grant = 0;
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    for (integer i = 0; i < PORTS; i = i + 1) begin
+                        if (req_active[i]) begin
+                            next_grant[i] = 1;
+                            break;
+                        end
+                    end
+                end else begin
+                    for (integer i = PORTS - 1; i >= 0; i = i - 1) begin
+                        if (req_active[i]) begin
+                            next_grant[i] = 1;
+                            break;
+                        end
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // Determine block condition
+    always @(*) begin
+        block_condition = 0;
+        if (ARB_BLOCK) begin
+            if (ARB_BLOCK_ACK) begin
+                block_condition = (current_grant & ~acknowledge) != 0;
+            end else begin
+                block_condition = (current_grant & request) != 0;
+            end
+        end
+    end
+
+    // Update current grant and grant_valid
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            current_grant <= 0;
+            grant_valid <= 0;
+            grant_index <= 0;
+        end else begin
+            if (!block_condition && !grant_valid) begin
+                current_grant <= next_grant;
+                grant_valid <= 1;
+                for (integer i = 0; i < PORTS; i = i + 1) begin
+                    if (next_grant[i]) begin
+                        grant_index <= i;
+                    end
+                end
+            end else if (grant_valid && (acknowledge & current_grant) != 0) begin
+                grant_valid <= 0;
+            end
+        end
+    end
+
+    // Assign grant and grant_encoded
+    assign grant = current_grant;
+    assign grant_encoded = grant_index;
+
+endmodule
+```

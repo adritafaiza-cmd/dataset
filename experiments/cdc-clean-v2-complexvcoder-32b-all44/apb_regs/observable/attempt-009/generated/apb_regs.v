@@ -1,0 +1,98 @@
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd4,
+  parameter int unsigned        ApbAddrWidth = 32'd8,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd32,
+  parameter int unsigned        RegDataWidth = 32'd32,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type                apb_addr_t   = logic[ApbAddrWidth-1:0],
+  parameter type                reg_data_t   = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Internal signals
+  logic [ApbAddrWidth-1:0] addr_reg;
+  logic [ApbDataWidth-1:0] data_reg;
+  logic [ApbDataWidth/8-1:0] write_strobe;
+  logic [NoApbRegs*RegDataWidth-1:0] reg_file;
+  logic [RegDataWidth-1:0] read_data;
+  logic [RegDataWidth-1:0] write_data;
+  logic write_enable;
+  logic read_enable;
+  logic [$clog2(NoApbRegs)-1:0] reg_index;
+
+  // Decode address to register index
+  assign reg_index = (addr_reg - base_addr_i) / AddrOffset;
+
+  // Decode write strobe
+  always_comb begin
+    write_strobe = '0;
+    if (req_i && (addr_reg >= base_addr_i) && (addr_reg < base_addr_i + NoApbRegs*AddrOffset)) begin
+      for (int i = 0; i < ApbDataWidth/8; i++) begin
+        if (addr_reg[2:0] == i) begin
+          write_strobe[i] = 1'b1;
+        end
+      end
+    end
+  end
+
+  // Read and write control
+  always_comb begin
+    read_enable = req_i && (addr_reg >= base_addr_i) && (addr_reg < base_addr_i + NoApbRegs*AddrOffset);
+    write_enable = read_enable && ~ReadOnly[reg_index];
+  end
+
+  // Read data selection
+  assign read_data = reg_file[reg_index*RegDataWidth +: RegDataWidth];
+
+  // Write data selection
+  always_comb begin
+    write_data = '0;
+    for (int i = 0; i < ApbDataWidth/8; i++) begin
+      if (write_strobe[i]) begin
+        write_data[i*8 +: 8] = data_reg[i*8 +: 8];
+      end else begin
+        write_data[i*8 +: 8] = reg_file[reg_index*RegDataWidth + i*8 +: 8];
+      end
+    end
+  end
+
+  // Register file and response
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        if (ReadOnly[i]) begin
+          reg_file[i*RegDataWidth +: RegDataWidth] <= reg_init_i[i];
+        end else begin
+          reg_file[i*RegDataWidth +: RegDataWidth] <= '0;
+        end
+      end
+    end else if (write_enable) begin
+      reg_file[reg_index*RegDataWidth +: RegDataWidth] <= write_data;
+    end
+  end
+
+  // Output register values
+  always_ff @(posedge pclk_i) begin
+    reg_q_o <= reg_file;
+  end
+
+  // APB response
+  always_ff @(posedge pclk_i) begin
+    if (read_enable) begin
+      resp_o <= 1'b1;
+    end else begin
+      resp_o <= 1'b0;
+    end
+  end
+
+endmodule

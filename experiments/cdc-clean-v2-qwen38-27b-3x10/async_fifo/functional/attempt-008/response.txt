@@ -1,0 +1,200 @@
+```verilog
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWIDTH = ASIZE + 1;
+    localparam FULL_THRESH = DEPTH - 1;
+    localparam EMPTY_THRESH = 1;
+
+    wire [AWIDTH-1:0] wptr;
+    wire [AWIDTH-1:0] rptr;
+
+    wire [AWIDTH-1:0] wptr_gray;
+    wire [AWIDTH-1:0] rptr_gray;
+
+    wire [AWIDTH-1:0] rptr_gray_wclk;
+    wire [AWIDTH-1:0] wptr_gray_rclk;
+
+    wire winc_eff;
+    wire rinc_eff;
+
+    wire wfull_int;
+    wire rempty_int;
+
+    wire [AWIDTH-1:0] wptr_gray_sync1;
+    wire [AWIDTH-1:0] wptr_gray_sync2;
+    wire [AWIDTH-1:0] rptr_gray_sync1;
+    wire [AWIDTH-1:0] rptr_gray_sync2;
+
+    // Write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {AWIDTH{1'b0}};
+        end else if (winc_eff) begin
+            wptr <= wptr + 1'b1;
+        end
+    end
+
+    assign wptr_gray = wptr ^ (wptr >> 1);
+
+    // Read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= {AWIDTH{1'b0}};
+        end else if (rinc_eff) begin
+            rptr <= rptr + 1'b1;
+        end
+    end
+
+    assign rptr_gray = rptr ^ (rptr >> 1);
+
+    // Synchronize rptr_gray to write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_wclk <= {AWIDTH{1'b0}};
+        end else begin
+            rptr_gray_wclk <= rptr_gray;
+        end
+    end
+
+    // Synchronize wptr_gray to read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_gray_rclk <= {AWIDTH{1'b0}};
+        end else begin
+            wptr_gray_rclk <= wptr_gray;
+        end
+    end
+
+    // Full detection in write domain
+    // Full when wptr_gray == rptr_gray_wclk with MSB different
+    // Actually, full when wptr_gray == rptr_gray_wclk ^ (1 << (AWIDTH-1))
+    // Let's use the standard approach:
+    // wfull when wptr_gray == rptr_gray_wclk and wptr[ASIZE] != rptr_gray_wclk[ASIZE]
+    // More precisely: wfull when wptr_gray == rptr_gray_wclk ^ (1 << (AWIDTH-1))
+    
+    wire [AWIDTH-1:0] rptr_gray_wclk_full_check;
+    assign rptr_gray_wclk_full_check = rptr_gray_wclk ^ (1 << (AWIDTH-1));
+    assign wfull_int = (wptr_gray == rptr_gray_wclk_full_check);
+
+    // Empty detection in read domain
+    // Empty when rptr_gray == wptr_gray_rclk
+    assign rempty_int = (rptr_gray == wptr_gray_rclk);
+
+    // Effective increment signals
+    assign winc_eff = winc & ~wfull_int;
+    assign rinc_eff = rinc & ~rempty_int;
+
+    // Almost full: wptr - rptr >= FULL_THRESH
+    // We need to compute the difference in the write domain
+    // wptr and rptr_gray_wclk are both in write domain (rptr_gray_wclk is synchronized)
+    // But rptr_gray_wclk is gray code, so we need to convert back to binary or compute difference differently
+    
+    // Let's use a different approach: count the number of entries
+    // We can convert rptr_gray_wclk back to binary in the write domain
+    wire [AWIDTH-1:0] rptr_bin_wclk;
+    gray2bin #(.WIDTH(AWIDTH)) u_gray2bin_w (
+        .gray(rptr_gray_wclk),
+        .bin(rptr_bin_wclk)
+    );
+
+    wire [AWIDTH-1:0] wptr_bin_wclk;
+    assign wptr_bin_wclk = wptr;
+
+    wire [AWIDTH:0] wcount;
+    assign wcount = wptr_bin_wclk - rptr_bin_wclk;
+
+    assign awfull = (wcount >= FULL_THRESH);
+
+    // Almost empty: wptr - rptr <= EMPTY_THRESH
+    // In read domain
+    wire [AWIDTH-1:0] wptr_bin_rclk;
+    gray2bin #(.WIDTH(AWIDTH)) u_gray2bin_r (
+        .gray(wptr_gray_rclk),
+        .bin(wptr_bin_rclk)
+    );
+
+    wire [AWIDTH-1:0] rptr_bin_rclk;
+    assign rptr_bin_rclk = rptr;
+
+    wire [AWIDTH:0] rcount;
+    assign rcount = wptr_bin_rclk - rptr_bin_rclk;
+
+    assign arempty = (rcount <= EMPTY_THRESH);
+
+    // Memory
+    reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+    // Write to memory
+    always @(posedge wclk) begin
+        if (winc_eff) begin
+            mem[wptr[ASIZE-1:0]] <= wdata;
+        end
+    end
+
+    // Read from memory
+    // For fall-through, we want rdata to present the oldest unread word
+    // when rempty falls, without requiring an additional accepted read.
+    // This means rdata should be the data at rptr[ASIZE-1:0] when not empty.
+    // But the spec says "rdata is one read-clock sample" and "FALLTHROUGH does not select a combinational memory read."
+    // So we need to register the read data.
+    
+    // Let's think about this more carefully.
+    // When FALLTHROUGH is TRUE, rdata presents the current oldest unread word once rempty falls.
+    // This suggests that rdata is a registered version of the data at the read pointer.
+    
+    reg [DSIZE-1:0] rdata_reg;
+    reg             rdata_valid;
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rdata_reg <= {DSIZE{1'b0}};
+            rdata_valid <= 1'b0;
+        end else begin
+            if (!rempty_int) begin
+                rdata_reg <= mem[rptr[ASIZE-1:0]];
+                rdata_valid <= 1'b1;
+            end
+        end
+    end
+
+    assign rdata = rdata_reg;
+
+    // Outputs
+    assign wfull = wfull_int;
+    assign rempty = rempty_int;
+
+endmodule
+
+module gray2bin
+    #(
+        parameter WIDTH = 4
+    )(
+        input  wire [WIDTH-1:0] gray,
+        output wire [WIDTH-1:0] bin
+    );
+
+    wire [WIDTH-1:0] temp;
+    assign temp = gray ^ (gray >> 1);
+    assign bin = temp ^ (temp >> 1) ^ (temp >> 2) ^ (temp >> 3) ^ (temp >> 4) ^ (temp >> 5) ^ (temp >> 6) ^ (temp >> 7);
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,262 @@
+module axis_switch #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter S_ID_WIDTH = 8,
+    parameter M_ID_WIDTH = S_ID_WIDTH+$clog2(S_COUNT),
+    parameter M_DEST_WIDTH = 1,
+    parameter S_DEST_WIDTH = M_DEST_WIDTH+$clog2(M_COUNT),
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter M_BASE = 0,
+    parameter M_TOP = 0,
+    parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
+    parameter UPDATE_TID = 0,
+    parameter S_REG_TYPE = 0,
+    parameter M_REG_TYPE = 2,
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 1
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    /*
+     * AXI Stream inputs
+     */
+    input  wire [S_COUNT*DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [S_COUNT*KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire [S_COUNT-1:0]               s_axis_tvalid,
+    output wire [S_COUNT-1:0]               s_axis_tready,
+    input  wire [S_COUNT-1:0]               s_axis_tlast,
+    input  wire [S_COUNT*S_ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [S_COUNT*USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI Stream outputs
+     */
+    output wire [M_COUNT*DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [M_COUNT*KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire [M_COUNT-1:0]               m_axis_tvalid,
+    input  wire [M_COUNT-1:0]               m_axis_tready,
+    output wire [M_COUNT-1:0]               m_axis_tlast,
+    output wire [M_COUNT*M_ID_WIDTH-1:0]    m_axis_tid,
+    output wire [M_COUNT*M_DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [M_COUNT*USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    wire [S_COUNT-1:0] grant;
+    wire [S_COUNT-1:0] request;
+
+    arbiter #(
+        .S_COUNT(S_COUNT),
+        .M_COUNT(M_COUNT),
+        .M_CONNECT(M_CONNECT),
+        .ARB_TYPE_ROUND_ROBIN(ARB_TYPE_ROUND_ROBIN),
+        .ARB_LSB_HIGH_PRIORITY(ARB_LSB_HIGH_PRIORITY)
+    ) arbiter_inst (
+        .clk(clk),
+        .rst(rst),
+        .s_axis_tvalid(s_axis_tvalid),
+        .s_axis_tdest(s_axis_tdest),
+        .m_axis_tready(m_axis_tready),
+        .grant(grant),
+        .request(request)
+    );
+
+    data_selector #(
+        .S_COUNT(S_COUNT),
+        .M_COUNT(M_COUNT),
+        .DATA_WIDTH(DATA_WIDTH),
+        .KEEP_ENABLE(KEEP_ENABLE),
+        .KEEP_WIDTH(KEEP_WIDTH),
+        .ID_ENABLE(ID_ENABLE),
+        .S_ID_WIDTH(S_ID_WIDTH),
+        .M_ID_WIDTH(M_ID_WIDTH),
+        .M_DEST_WIDTH(M_DEST_WIDTH),
+        .S_DEST_WIDTH(S_DEST_WIDTH),
+        .USER_ENABLE(USER_ENABLE),
+        .USER_WIDTH(USER_WIDTH),
+        .UPDATE_TID(UPDATE_TID)
+    ) data_selector_inst (
+        .clk(clk),
+        .rst(rst),
+        .grant(grant),
+        .s_axis_tdata(s_axis_tdata),
+        .s_axis_tkeep(s_axis_tkeep),
+        .s_axis_tlast(s_axis_tlast),
+        .s_axis_tid(s_axis_tid),
+        .s_axis_tdest(s_axis_tdest),
+        .s_axis_tuser(s_axis_tuser),
+        .m_axis_tdata(m_axis_tdata),
+        .m_axis_tkeep(m_axis_tkeep),
+        .m_axis_tvalid(m_axis_tvalid),
+        .m_axis_tlast(m_axis_tlast),
+        .m_axis_tid(m_axis_tid),
+        .m_axis_tdest(m_axis_tdest),
+        .m_axis_tuser(m_axis_tuser)
+    );
+
+    assign s_axis_tready = request;
+
+endmodule
+
+module arbiter #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 1
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    input  wire [S_COUNT-1:0]               s_axis_tvalid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [M_COUNT-1:0]               m_axis_tready,
+    output wire [S_COUNT-1:0]               grant,
+    output wire [S_COUNT-1:0]               request
+);
+
+    reg [S_COUNT-1:0] request_reg;
+    reg [$clog2(S_COUNT)-1:0] round_robin_ptr;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            request_reg <= 0;
+            round_robin_ptr <= 0;
+        end else begin
+            request_reg <= s_axis_tvalid & ~grant;
+            if (|grant) begin
+                if (ARB_LSB_HIGH_PRIORITY) begin
+                    round_robin_ptr <= round_robin_ptr + 1;
+                end else begin
+                    round_robin_ptr <= round_robin_ptr - 1;
+                end
+            end
+        end
+    end
+
+    generate
+        if (ARB_TYPE_ROUND_ROBIN) begin : gen_round_robin
+            always @(*) begin
+                grant = 0;
+                for (int i = 0; i < S_COUNT; i = i + 1) begin
+                    int idx = (round_robin_ptr + i) % S_COUNT;
+                    if (request_reg[idx]) begin
+                        grant[idx] = 1;
+                        break;
+                    end
+                end
+            end
+        end else begin : gen_fixed_priority
+            always @(*) begin
+                grant = request_reg;
+            end
+        end
+    endgenerate
+
+    assign request = request_reg;
+
+endmodule
+
+module data_selector #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter S_ID_WIDTH = 8,
+    parameter M_ID_WIDTH = S_ID_WIDTH+$clog2(S_COUNT),
+    parameter M_DEST_WIDTH = 1,
+    parameter S_DEST_WIDTH = M_DEST_WIDTH+$clog2(M_COUNT),
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter UPDATE_TID = 0
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    input  wire [S_COUNT-1:0]               grant,
+    input  wire [S_COUNT*DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [S_COUNT*KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire [S_COUNT-1:0]               s_axis_tlast,
+    input  wire [S_COUNT*S_ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [S_COUNT*USER_WIDTH-1:0]    s_axis_tuser,
+    output wire [M_COUNT*DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [M_COUNT*KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire [M_COUNT-1:0]               m_axis_tvalid,
+    output wire [M_COUNT-1:0]               m_axis_tlast,
+    output wire [M_COUNT*M_ID_WIDTH-1:0]    m_axis_tid,
+    output wire [M_COUNT*M_DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [M_COUNT*USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    wire [S_COUNT-1:0] grant_valid;
+    wire [$clog2(S_COUNT)-1:0] grant_idx;
+
+    always @(*) begin
+        grant_valid = grant;
+        grant_idx = 0;
+        for (int i = 0; i < S_COUNT; i = i + 1) begin
+            if (grant_valid[i]) begin
+                grant_idx = i;
+                break;
+            end
+        end
+    end
+
+    wire [DATA_WIDTH-1:0] sel_tdata;
+    wire [KEEP_WIDTH-1:0] sel_tkeep;
+    wire sel_tlast;
+    wire [S_ID_WIDTH-1:0] sel_tid;
+    wire [S_DEST_WIDTH-1:0] sel_tdest;
+    wire sel_tuser;
+
+    assign sel_tdata = s_axis_tdata[(grant_idx+1)*DATA_WIDTH-1:grant_idx*DATA_WIDTH];
+    assign sel_tkeep = s_axis_tkeep[(grant_idx+1)*KEEP_WIDTH-1:grant_idx*KEEP_WIDTH];
+    assign sel_tlast = s_axis_tlast[grant_idx];
+    assign sel_tid = s_axis_tid[(grant_idx+1)*S_ID_WIDTH-1:grant_idx*S_ID_WIDTH];
+    assign sel_tdest = s_axis_tdest[(grant_idx+1)*S_DEST_WIDTH-1:grant_idx*S_DEST_WIDTH];
+    assign sel_tuser = s_axis_tuser[grant_idx];
+
+    wire [M_COUNT-1:0] dest_mask;
+
+    genvar j;
+    generate
+        for (j = 0; j < M_COUNT; j = j + 1) begin : gen_dest_mask
+            assign dest_mask[j] = (sel_tdest[$clog2(M_COUNT)-1:0] == j);
+        end
+    endgenerate
+
+    wire [M_COUNT-1:0] valid_mask;
+    assign valid_mask = grant_valid & dest_mask;
+
+    wire [$clog2(M_COUNT)-1:0] valid_idx;
+
+    always @(*) begin
+        valid_idx = 0;
+        for (int i = 0; i < M_COUNT; i = i + 1) begin
+            if (valid_mask[i]) begin
+                valid_idx = i;
+                break;
+            end
+        end
+    end
+
+    assign m_axis_tdata = sel_tdata;
+    assign m_axis_tkeep = sel_tkeep;
+    assign m_axis_tvalid = valid_mask[valid_idx];
+    assign m_axis_tlast = sel_tlast;
+    assign m_axis_tid = {sel_tid, valid_idx};
+    assign m_axis_tdest = sel_tdest[$clog2(M_COUNT)-1:0];
+    assign m_axis_tuser = sel_tuser;
+
+endmodule

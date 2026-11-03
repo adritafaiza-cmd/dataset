@@ -1,0 +1,168 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire [WIDTH-1:0] src_payload;
+  wire src_valid_internal;
+  wire src_ready_internal;
+
+  // Source domain: capture data and valid when handshake occurs
+  // Destination domain: generate ready signal
+
+  // We use a 4-phase handshake:
+  // - Source asserts req (valid)
+  // - Destination synchronizes req, asserts ack
+  // - Source synchronizes ack, deasserts req
+  // - Destination synchronizes req deassertion, deasserts ack
+
+  // For data: hold payload stable during the entire handshake,
+  // synchronize through 2 stages in destination domain.
+
+  // Source domain registers
+  reg [WIDTH-1:0] src_data_reg;
+  reg src_valid_reg;
+  reg src_ack_sync0, src_ack_sync1, src_ack_sync2;
+  reg src_req_sync0, src_req_sync1, src_req_sync2; // not needed in src
+
+  // Destination domain registers
+  reg [WIDTH-1:0] dst_data_sync0, dst_data_sync1, dst_data_sync2;
+  reg dst_req_sync0, dst_req_sync1, dst_req_sync2;
+  reg dst_ack_reg;
+  reg dst_valid_reg;
+  reg dst_data_reg;
+
+  // Source domain logic
+  // src_ready_o is high when we are not in the middle of a transfer
+  // i.e., when src_valid_reg is low OR when we've received ack and deasserted valid
+
+  // Let's use a simpler approach:
+  // - src_valid_reg holds the valid signal for the current transfer
+  // - When src_valid_i && src_ready_o, we capture data and set src_valid_reg
+  // - src_ready_o is high when src_valid_reg is low (no pending transfer)
+  // - When src_ack_sync2 is high (ack received), we deassert src_valid_reg
+
+  // But we need to handle DECOUPLED mode where source can accept new item
+  // before previous destination handshake returns.
+
+  // Let me reconsider the architecture:
+
+  // 4-phase handshake:
+  // Phase 1: src_valid_reg = 1 (req asserted)
+  // Phase 2: dst sees req, asserts ack
+  // Phase 3: src sees ack, deasserts req (src_valid_reg = 0)
+  // Phase 4: dst sees req deasserted, deasserts ack
+
+  // Data is held stable in src_data_reg during phases 1-3.
+  // In destination, we synchronize the data through 2 stages.
+
+  // For DECOUPLED=1, we can allow a new transfer to start before the
+  // previous one's phase 4 completes. This means we need to track
+  // whether we're in a transfer.
+
+  // Let's use a state machine approach:
+
+  // Source domain:
+  reg src_valid_reg;
+  reg [WIDTH-1:0] src_data_reg;
+  reg src_ack_sync0, src_ack_sync1, src_ack_sync2;
+
+  // Destination domain:
+  reg dst_req_sync0, dst_req_sync1, dst_req_sync2;
+  reg dst_ack_reg;
+  reg [WIDTH-1:0] dst_data_sync0, dst_data_sync1, dst_data_sync2;
+  reg dst_valid_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+
+  // Source domain
+  assign src_ready_o = ~src_valid_reg;
+
+  // Capture data and valid
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_valid_reg <= 1'b0;
+      src_data_reg <= {WIDTH{1'b0}};
+      src_ack_sync0 <= 1'b0;
+      src_ack_sync1 <= 1'b0;
+      src_ack_sync2 <= 1'b0;
+    end else begin
+      // Synchronize ack
+      src_ack_sync0 <= dst_ack_reg;
+      src_ack_sync1 <= src_ack_sync0;
+      src_ack_sync2 <= src_ack_sync1;
+
+      // If we have a valid transfer and ack is received, deassert valid
+      if (src_valid_reg && src_ack_sync2) begin
+        src_valid_reg <= 1'b0;
+      end else if (!src_valid_reg && src_valid_i) begin
+        // Accept new transfer
+        src_valid_reg <= 1'b1;
+        src_data_reg <= src_data_i;
+      end
+    end
+  end
+
+  // Destination domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req_sync0 <= 1'b0;
+      dst_req_sync1 <= 1'b0;
+      dst_req_sync2 <= 1'b0;
+      dst_ack_reg <= 1'b0;
+      dst_data_sync0 <= {WIDTH{1'b0}};
+      dst_data_sync1 <= {WIDTH{1'b0}};
+      dst_data_sync2 <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+      dst_data_reg <= {WIDTH{1'b0}};
+    end else begin
+      // Synchronize req
+      dst_req_sync0 <= src_valid_reg;
+      dst_req_sync1 <= dst_req_sync0;
+      dst_req_sync2 <= dst_req_sync1;
+
+      // Synchronize data (only meaningful when req is asserted)
+      dst_data_sync0 <= src_data_reg;
+      dst_data_sync1 <= dst_data_sync0;
+      dst_data_sync2 <= dst_data_sync1;
+
+      // 4-phase handshake in destination
+      if (!dst_req_sync2) begin
+        // Req is deasserted, deassert ack
+        dst_ack_reg <= 1'b0;
+        dst_valid_reg <= 1'b0;
+      end else begin
+        // Req is asserted
+        if (!dst_ack_reg) begin
+          // First time seeing req, assert ack
+          dst_ack_reg <= 1'b1;
+          dst_valid_reg <= 1'b1;
+          dst_data_reg <= dst_data_sync2;
+        end else begin
+          // Ack already asserted, wait for req to deassert
+          // Keep valid high until ready
+          if (dst_ready_i) begin
+            dst_valid_reg <= 1'b0;
+          end
+        end
+      end
+    end
+  end
+
+  assign dst_data_o = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+endmodule

@@ -1,0 +1,244 @@
+Here is the complete Verilog-2001 code for the described FIFO module:
+
+```
+module cdc_fifo_gray #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 2
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    // Local parameters
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam ADDR_WIDTH = LOG_DEPTH;
+    localparam GRAY_WIDTH = ADDR_WIDTH + 1;
+
+    // Internal signals
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg [ADDR_WIDTH-1:0] src_rd_ptr;
+    reg [ADDR_WIDTH-1:0] src_wr_ptr;
+    reg [ADDR_WIDTH-1:0] dst_rd_ptr;
+    reg [ADDR_WIDTH-1:0] dst_wr_ptr;
+    reg [GRAY_WIDTH-1:0] src_rd_gray;
+    reg [GRAY_WIDTH-1:0] src_wr_gray;
+    reg [GRAY_WIDTH-1:0] dst_rd_gray;
+    reg [GRAY_WIDTH-1:0] dst_wr_gray;
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d1 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d1 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d1 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d1 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d2 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d2 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d2 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d2 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d3 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d3 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d3 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d3 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d4 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d4 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d4 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d4 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d5 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d5 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d5 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d5 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d6 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d6 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d6 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d6 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d7 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d7 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d7 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d7 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d8 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d8 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d8 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d8 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d9 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d9 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d9 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d9 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d10 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d10 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d10 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d10 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d11 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d11 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d11 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d11 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d12 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d12 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d12 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d12 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d13 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d13 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d13 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d13 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d14 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d14 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d14 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d14 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d15 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d15 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d15 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d15 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d16 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d16 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d16 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d16 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d17 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d17 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d17 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d17 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d18 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d18 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d18 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d18 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d19 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d19 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d19 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d19 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d20 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d20 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d20 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d20 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d21 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d21 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d21 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d21 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d22 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d22 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d22 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d22 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d23 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d23 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d23 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d23 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d24 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d24 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d24 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d24 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d25 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d25 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d25 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d25 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d26 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d26 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d26 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d26 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d27 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d27 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d27 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d27 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d28 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d28 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d28 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d28 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d29 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d29 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d29 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d29 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d30 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d30 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d30 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d30 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d31 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d31 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d31 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d31 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d32 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d32 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d32 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d32 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d33 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d33 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d33 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d33 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d34 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d34 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d34 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d34 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d35 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d35 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d35 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d35 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d36 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d36 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d36 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d36 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d37 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d37 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d37 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d37 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d38 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d38 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d38 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d38 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d39 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d39 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d39 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d39 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d40 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d40 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d40 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d40 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d41 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d41 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d41 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d41 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d42 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d42 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d42 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d42 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d43 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d43 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d43 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d43 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d44 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d44 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d44 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d44 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d45 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d45 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d45 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d45 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d46 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d46 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d46 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d46 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d47 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d47 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d47 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d47 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d48 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d48 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d48 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d48 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d49 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d49 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d49 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d49 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d50 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d50 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d50 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d50 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_rd_gray_sync_d51 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] src_wr_gray_sync_d51 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_rd_gray_sync_d51 [0:SYNC_STAGES-1];
+    reg [GRAY_WIDTH-1:0] dst_wr_gray_sync_d51 [0:SYNC_STAGES-1];
+    reg

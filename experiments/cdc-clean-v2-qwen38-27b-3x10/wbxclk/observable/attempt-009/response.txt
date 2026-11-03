@@ -1,0 +1,213 @@
+```verilog
+module	wbxclk #(
+		parameter	AW=32,
+				DW=32,
+				LGFIFO = 5
+	) (
+		input	wire			i_wb_clk, i_reset,
+		input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+		input	wire	[(AW-1):0]	i_wb_addr,
+		input	wire	[(DW-1):0]	i_wb_data,
+		input	wire	[(DW/8-1):0]	i_wb_sel,
+		output	wire			o_wb_stall,
+		output	reg			o_wb_ack,
+		output	reg	[(DW-1):0]	o_wb_data,
+		output	reg			o_wb_err,
+		input	wire			i_xclk_clk,
+		output	reg			o_xclk_cyc,
+		output	reg			o_xclk_stb,
+		output	reg			o_xclk_we,
+		output	reg	[(AW-1):0]	o_xclk_addr,
+		output	reg	[(DW-1):0]	o_xclk_data,
+		output	reg	[(DW/8-1):0]	o_xclk_sel,
+		input	wire			i_xclk_stall,
+		input	wire			i_xclk_ack,
+		input	wire	[(DW-1):0]	i_xclk_data,
+		input	wire			i_xclk_err
+	);
+
+	localparam FIFO_DEPTH = 1 << LGFIFO;
+	localparam FIFO_WIDTH = AW + DW + DW/8 + 1; // addr + data + sel + we
+	localparam CNT_WIDTH  = LGFIFO + 1;
+
+	// Request FIFO: WB -> XCLK
+	reg [FIFO_WIDTH-1:0] req_fifo [0:FIFO_DEPTH-1];
+	reg [LGFIFO-1:0]     req_wr_ptr, req_rd_ptr;
+	reg [CNT_WIDTH-1:0]  req_count;
+
+	// Response FIFO: XCLK -> WB
+	reg [DW+1:0] resp_fifo [0:FIFO_DEPTH-1]; // data + err
+	reg [LGFIFO-1:0]     resp_wr_ptr, resp_rd_ptr;
+	reg [CNT_WIDTH-1:0]  resp_count;
+
+	// Synchronizers for request FIFO pointers
+	reg [LGFIFO-1:0] req_wr_ptr_sync1, req_wr_ptr_sync2;
+	reg [LGFIFO-1:0] req_rd_ptr_sync1, req_rd_ptr_sync2;
+
+	// Synchronizers for response FIFO pointers
+	reg [LGFIFO-1:0] resp_wr_ptr_sync1, resp_wr_ptr_sync2;
+	reg [LGFIFO-1:0] resp_rd_ptr_sync1, resp_rd_ptr_sync2;
+
+	// WB-side state
+	reg wb_stall_r;
+	reg wb_ack_r;
+	reg [DW-1:0] wb_data_r;
+	reg wb_err_r;
+	reg wb_resp_valid;
+
+	// XCLK-side state
+	reg xclk_cyc_r;
+	reg xclk_stb_r;
+	reg xclk_we_r;
+	reg [AW-1:0] xclk_addr_r;
+	reg [DW-1:0] xclk_data_r;
+	reg [DW/8-1:0] xclk_sel_r;
+	reg xclk_req_valid;
+
+	// Derived signals
+	wire req_full  = (req_count == FIFO_DEPTH[CNT_WIDTH-1:0]);
+	wire req_empty = (req_count == {CNT_WIDTH{1'b0}});
+	wire resp_full  = (resp_count == FIFO_DEPTH[CNT_WIDTH-1:0]);
+	wire resp_empty = (resp_count == {CNT_WIDTH{1'b0}});
+
+	assign o_wb_stall = wb_stall_r;
+	assign o_wb_ack   = wb_ack_r;
+	assign o_wb_data  = wb_data_r;
+	assign o_wb_err   = wb_err_r;
+
+	assign o_xclk_cyc  = xclk_cyc_r;
+	assign o_xclk_stb  = xclk_stb_r;
+	assign o_xclk_we   = xclk_we_r;
+	assign o_xclk_addr = xclk_addr_r;
+	assign o_xclk_data = xclk_data_r;
+	assign o_xclk_sel  = xclk_sel_r;
+
+	// WB clock domain: request FIFO write
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_wr_ptr <= {LGFIFO{1'b0}};
+			req_count  <= {CNT_WIDTH{1'b0}};
+			wb_stall_r <= 1'b1;
+			wb_ack_r   <= 1'b0;
+			wb_data_r  <= {DW{1'b0}};
+			wb_err_r   <= 1'b0;
+			wb_resp_valid <= 1'b0;
+		end else begin
+			// Response FIFO read (WB side)
+			if (!resp_empty && !wb_resp_valid) begin
+				wb_resp_valid <= 1'b1;
+				wb_data_r     <= resp_fifo[resp_rd_ptr][DW:0];
+				wb_err_r      <= resp_fifo[resp_rd_ptr][DW];
+				resp_rd_ptr   <= resp_rd_ptr + 1'b1;
+				resp_count    <= resp_count - 1'b1;
+			end else if (wb_resp_valid) begin
+				wb_ack_r      <= 1'b1;
+				wb_resp_valid <= 1'b0;
+			end else begin
+				wb_ack_r <= 1'b0;
+			end
+
+			// Request FIFO write (WB side)
+			if (i_wb_cyc && i_wb_stb && !req_full) begin
+				req_fifo[req_wr_ptr] <= {i_wb_we, i_wb_addr, i_wb_data, i_wb_sel};
+				req_wr_ptr <= req_wr_ptr + 1'b1;
+				req_count  <= req_count + 1'b1;
+			end
+
+			// Stall: full request FIFO or response FIFO full (can't accept new if resp full)
+			wb_stall_r <= req_full || resp_full;
+		end
+	end
+
+	// XCLK clock domain: request FIFO read, response FIFO write
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_rd_ptr   <= {LGFIFO{1'b0}};
+			resp_wr_ptr  <= {LGFIFO{1'b0}};
+			resp_count   <= {CNT_WIDTH{1'b0}};
+			xclk_cyc_r   <= 1'b0;
+			xclk_stb_r   <= 1'b0;
+			xclk_we_r    <= 1'b0;
+			xclk_addr_r  <= {AW{1'b0}};
+			xclk_data_r  <= {DW{1'b0}};
+			xclk_sel_r   <= {(DW/8){1'b0}};
+			xclk_req_valid <= 1'b0;
+		end else begin
+			// Response FIFO write (XCLK side)
+			if (i_xclk_ack && !resp_full) begin
+				resp_fifo[resp_wr_ptr] <= {i_xclk_err, i_xclk_data};
+				resp_wr_ptr <= resp_wr_ptr + 1'b1;
+				resp_count  <= resp_count + 1'b1;
+			end
+
+			// Request FIFO read (XCLK side)
+			if (!req_empty && !xclk_req_valid && !i_xclk_stall) begin
+				xclk_req_valid <= 1'b1;
+				xclk_we_r      <= req_fifo[req_rd_ptr][FIFO_WIDTH-1];
+				xclk_addr_r    <= req_fifo[req_rd_ptr][FIFO_WIDTH-2:FIFO_WIDTH-1-AW];
+				xclk_data_r    <= req_fifo[req_rd_ptr][FIFO_WIDTH-1-AW:FIFO_WIDTH-1-AW-DW];
+				xclk_sel_r     <= req_fifo[req_rd_ptr][FIFO_WIDTH-1-AW-DW-1:0];
+				req_rd_ptr     <= req_rd_ptr + 1'b1;
+				req_count      <= req_count - 1'b1;
+			end else if (xclk_req_valid && !i_xclk_stall) begin
+				xclk_cyc_r     <= 1'b1;
+				xclk_stb_r     <= 1'b1;
+			end else if (xclk_req_valid && i_xclk_ack) begin
+				xclk_req_valid <= 1'b0;
+				xclk_cyc_r     <= 1'b0;
+				xclk_stb_r     <= 1'b0;
+			end else if (xclk_req_valid) begin
+				// Stalled, hold
+			end else begin
+				xclk_cyc_r <= 1'b0;
+				xclk_stb_r <= 1'b0;
+			end
+		end
+	end
+
+	// Synchronizers: WB -> XCLK (request write pointer)
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_wr_ptr_sync1 <= {LGFIFO{1'b0}};
+			req_wr_ptr_sync2 <= {LGFIFO{1'b0}};
+		end else begin
+			req_wr_ptr_sync1 <= req_wr_ptr;
+			req_wr_ptr_sync2 <= req_wr_ptr_sync1;
+		end
+	end
+
+	// Synchronizers: XCLK -> WB (request read pointer)
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_rd_ptr_sync1 <= {LGFIFO{1'b0}};
+			req_rd_ptr_sync2 <= {LGFIFO{1'b0}};
+		end else begin
+			req_rd_ptr_sync1 <= req_rd_ptr;
+			req_rd_ptr_sync2 <= req_rd_ptr_sync1;
+		end
+	end
+
+	// Synchronizers: XCLK -> WB (response write pointer)
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			resp_wr_ptr_sync1 <= {LGFIFO{1'b0}};
+			resp_wr_ptr_sync2 <= {LGFIFO{1'b0}};
+		end else begin
+			resp_wr_ptr_sync1 <= resp_wr_ptr;
+			resp_wr_ptr_sync2 <= resp_wr_ptr_sync1;
+		end
+	end
+
+	// Synchronizers: WB -> XCLK (response read pointer)
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			resp_rd_ptr_sync1 <= {LGFIFO{1'b0}};
+			resp_rd_ptr_sync2 <= {LGFIFO{1'b0}};
+		end else begin
+			resp_rd_ptr_sync1 <= resp_rd_ptr;
+			resp_rd_ptr_sync2 <= resp_rd_ptr_sync1;
+		end
+	end
+
+endmodule
+```<|im_end|>

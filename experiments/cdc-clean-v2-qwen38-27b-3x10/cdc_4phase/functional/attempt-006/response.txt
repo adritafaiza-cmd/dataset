@@ -1,0 +1,135 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain state
+  reg [WIDTH-1:0] src_data_reg;
+  reg             src_valid_reg;
+  reg             src_ready_reg;
+  reg             src_pending;
+
+  // Destination domain state
+  reg [WIDTH-1:0] dst_data_reg;
+  reg             dst_valid_reg;
+  reg             dst_ready_reg;
+
+  // Synchronizers for src_valid to dst domain
+  reg [1:0] src_valid_sync;
+  // Synchronizers for dst_ready to src domain
+  reg [1:0] dst_ready_sync;
+
+  // Synchronizers for src_data to dst domain (only valid when src_valid is high)
+  // We use a simple approach: data is stable while valid is high, so we can
+  // synchronize data along with valid. But to be safe, we'll use a 2-stage
+  // synchronizer for data as well, and only use it when valid is high.
+
+  // Actually, for a 4-phase handshake, the standard approach is:
+  // - src_valid goes high, data is stable
+  // - dst sees valid, captures data
+  // - dst_ready goes high
+  // - src sees ready, deasserts valid
+  // - dst sees valid deasserted, deasserts ready
+  //
+  // For CDC, we need to synchronize the control signals. Data is only
+  // sampled when valid is high, so we can synchronize data with a 2-stage
+  // synchronizer and only use it when the synchronized valid is high.
+
+  // Let's use a simpler approach: synchronize src_valid and dst_ready,
+  // and for data, use a 2-stage synchronizer that is only valid when
+  // the synchronized src_valid is high.
+
+  // Synchronize src_valid to dst domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_valid_sync <= 2'b00;
+    else
+      src_valid_sync <= {src_valid_sync[0], src_valid_reg};
+  end
+
+  // Synchronize dst_ready to src domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_ready_sync <= 2'b00;
+    else
+      dst_ready_sync <= {dst_ready_sync[0], dst_ready_reg};
+  end
+
+  // Synchronize src_data to dst domain
+  // Data is only meaningful when src_valid is high, so we synchronize it
+  // and only use it when src_valid_sync[1] is high.
+  reg [WIDTH-1:0] src_data_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_data_sync <= {WIDTH{1'b0}};
+    else
+      src_data_sync <= src_data_reg;
+  end
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_reg  <= {WIDTH{1'b0}};
+      src_valid_reg <= 1'b0;
+      src_ready_reg <= 1'b1;
+      src_pending   <= 1'b0;
+    end else begin
+      if (src_valid_i && src_ready_reg) begin
+        // Accept new data
+        src_data_reg  <= src_data_i;
+        src_valid_reg <= 1'b1;
+        src_ready_reg <= 1'b0;
+        src_pending   <= 1'b1;
+      end else if (src_valid_reg && dst_ready_sync[1]) begin
+        // Destination has acknowledged, deassert valid
+        src_valid_reg <= 1'b0;
+        src_ready_reg <= 1'b1;
+        src_pending   <= 1'b0;
+      end
+    end
+  end
+
+  // Destination domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_reg  <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+      dst_ready_reg <= 1'b0;
+    end else begin
+      if (src_valid_sync[1] && !dst_valid_reg) begin
+        // New valid from source, capture data
+        dst_data_reg  <= src_data_sync;
+        dst_valid_reg <= 1'b1;
+        dst_ready_reg <= 1'b0;
+      end else if (dst_valid_reg && dst_ready_i) begin
+        // Destination ready, acknowledge
+        dst_valid_reg <= 1'b0;
+        dst_ready_reg <= 1'b1;
+      end else if (!dst_valid_reg && dst_ready_reg && !src_valid_sync[1]) begin
+        // Source has deasserted valid, deassert ready
+        dst_ready_reg <= 1'b0;
+      end
+    end
+  end
+
+  // Outputs
+  assign src_ready_o = src_ready_reg;
+  assign dst_data_o  = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+endmodule
+```<|im_end|>

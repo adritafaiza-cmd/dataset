@@ -1,0 +1,198 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "arbiter",
+            "function": "Multi-port request arbiter",
+            "parameters": [
+                {"name": "PORTS", "value": "4"},
+                {"name": "ARB_TYPE_ROUND_ROBIN", "value": "0"},
+                {"name": "ARB_BLOCK", "value": "0"},
+                {"name": "ARB_BLOCK_ACK", "value": "1"},
+                {"name": "ARB_LSB_HIGH_PRIORITY", "value": "0"}
+            ],
+            "ports": [
+                {"name": "clk", "direction": "input", "width": 1, "clock_domain": "clk"},
+                {"name": "rst", "direction": "input", "width": 1, "clock_domain": "clk"},
+                {"name": "request", "direction": "input", "width": "PORTS", "clock_domain": "clk"},
+                {"name": "acknowledge", "direction": "input", "width": "PORTS", "clock_domain": "clk"},
+                {"name": "grant", "direction": "output", "width": "PORTS", "clock_domain": "clk"},
+                {"name": "grant_valid", "direction": "output", "width": 1, "clock_domain": "clk"},
+                {"name": "grant_encoded", "direction": "output", "width": "$clog2(PORTS)", "clock_domain": "clk"}
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {"name": "next_grant", "width": "PORTS"},
+                {"name": "current_grant", "width": "PORTS"},
+                {"name": "next_valid", "width": 1},
+                {"name": "priority_signal", "width": "PORTS"},
+                {"name": "highest_priority", "width": "PORTS"},
+                {"name": "request_mask", "width": "PORTS"},
+                {"name": "priority_mask", "width": "PORTS"},
+                {"name": "grant_mask", "width": "PORTS"},
+                {"name": "pending_request", "width": "PORTS"},
+                {"name": "selected_request", "width": "PORTS"},
+                {"name": "next_encoded", "width": "$clog2(PORTS)"}
+            ],
+            "behavior": [
+                "On reset, initialize current_grant to 0 and grant_valid to 0.",
+                "Determine priority_signal based on ARB_TYPE_ROUND_ROBIN and ARB_LSB_HIGH_PRIORITY.",
+                "Mask priority_signal with request to get pending_request.",
+                "Select the highest priority request from pending_request as selected_request.",
+                "Determine next_grant based on selected_request and grant_valid.",
+                "If ARB_BLOCK is set, hold the grant until acknowledge or until request drops.",
+                "Determine next_valid based on selected_request and ARB_BLOCK.",
+                "If ARB_BLOCK_ACK is set, hold the grant until acknowledge.",
+                "If ARB_BLOCK_ACK is zero, hold the grant until request drops.",
+                "Encode the selected request index into next_encoded.",
+                "On each clock cycle, update current_grant to next_grant and grant_valid to next_valid.",
+                "On each clock cycle, update grant_encoded to next_encoded.",
+                "Drive grant and grant_valid from current_grant and grant_valid respectively."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    reg [PORTS-1:0] current_grant;
+    reg             grant_valid_reg;
+    reg [$clog2(PORTS)-1:0] current_encoded;
+    reg [PORTS-1:0] next_grant;
+    reg             next_valid;
+    reg [$clog2(PORTS)-1:0] next_encoded;
+    wire [PORTS-1:0] priority_signal;
+    wire [PORTS-1:0] pending_request;
+    wire [PORTS-1:0] selected_request;
+
+    // Priority signal generation
+    generate
+        if (ARB_TYPE_ROUND_ROBIN) begin : round_robin
+            wire [$clog2(PORTS)-1:0] round_robin_counter;
+            always @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    round_robin_counter <= 0;
+                end else if (next_valid) begin
+                    round_robin_counter <= round_robin_counter + 1;
+                end
+            end
+            assign priority_signal = (1 << round_robin_counter);
+        end else begin : fixed_priority
+            assign priority_signal = {PORTS{1'b1}};
+        end
+    endgenerate
+
+    // Mask priority signal with request to get pending request
+    assign pending_request = priority_signal & request;
+
+    // Select the highest priority request from pending_request as selected_request
+    genvar i;
+    generate
+        if (ARB_LSB_HIGH_PRIORITY) begin : lsb_priority
+            always @(*) begin
+                selected_request = 0;
+                for (i = 0; i < PORTS; i = i + 1) begin
+                    if (pending_request[i]) begin
+                        selected_request = (1 << i);
+                    end
+                end
+            end
+        end else begin : msb_priority
+            always @(*) begin
+                selected_request = 0;
+                for (i = PORTS - 1; i >= 0; i = i - 1) begin
+                    if (pending_request[i]) begin
+                        selected_request = (1 << i);
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // Determine next_grant based on selected_request and grant_valid
+    always @(*) begin
+        next_grant = selected_request;
+        if (ARB_BLOCK && grant_valid_reg) begin
+            if (ARB_BLOCK_ACK) begin
+                if (acknowledge & current_grant) begin
+                    next_grant = current_grant;
+                end else if (~request & current_grant) begin
+                    next_grant = 0;
+                end
+            end else begin
+                if (~request & current_grant) begin
+                    next_grant = 0;
+                end
+            end
+        end
+    end
+
+    // Determine next_valid based on selected_request and ARB_BLOCK
+    always @(*) begin
+        next_valid = (selected_request != 0);
+        if (ARB_BLOCK && grant_valid_reg) begin
+            if (ARB_BLOCK_ACK) begin
+                if (acknowledge & current_grant) begin
+                    next_valid = 1;
+                end else if (~request & current_grant) begin
+                    next_valid = 0;
+                end
+            end else begin
+                if (~request & current_grant) begin
+                    next_valid = 0;
+                end
+            end
+        end
+    end
+
+    // Encode the selected request index into next_encoded
+    always @(*) begin
+        next_encoded = 0;
+        for (i = 0; i < PORTS; i = i + 1) begin
+            if (selected_request[i]) begin
+                next_encoded = i;
+            end
+        end
+    end
+
+    // Update current_grant and grant_valid on each clock cycle
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            current_grant <= 0;
+            grant_valid_reg <= 0;
+            current_encoded <= 0;
+        end else begin
+            current_grant <= next_grant;
+            grant_valid_reg <= next_valid;
+            current_encoded <= next_encoded;
+        end
+    end
+
+    // Drive grant and grant_valid from current_grant and grant_valid_reg respectively
+    assign grant = current_grant;
+    assign grant_valid = grant_valid_reg;
+    assign grant_encoded = current_encoded;
+
+endmodule
+```

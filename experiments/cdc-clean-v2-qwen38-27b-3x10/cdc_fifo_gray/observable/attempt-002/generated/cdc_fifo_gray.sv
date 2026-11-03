@@ -1,0 +1,116 @@
+module cdc_fifo_gray #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 2
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH + 1;
+
+    // Source side
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg [PTR_W-1:0] src_wr_ptr;
+    reg [PTR_W-1:0] src_rd_ptr_sync;
+    reg [PTR_W-1:0] src_rd_ptr_gray_sync;
+
+    // Destination side
+    reg [PTR_W-1:0] dst_rd_ptr;
+    reg [PTR_W-1:0] dst_wr_ptr_sync;
+    reg [PTR_W-1:0] dst_wr_ptr_gray_sync;
+
+    // Gray code conversion functions
+    function [PTR_W-1:0] bin2gray;
+        input [PTR_W-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    function [PTR_W-1:0] gray2bin;
+        input [PTR_W-1:0] gray;
+        reg [PTR_W-1:0] bin;
+        integer i;
+        begin
+            bin[PTR_W-1] = gray[PTR_W-1];
+            for (i = PTR_W-2; i >= 0; i = i - 1)
+                bin[i] = gray[i] ^ bin[i+1];
+            gray2bin = bin;
+        end
+    endfunction
+
+    // Source side: write pointer and ready
+    wire [PTR_W-1:0] src_wr_ptr_gray = bin2gray(src_wr_ptr);
+    wire [PTR_W-1:0] src_rd_ptr_bin = gray2bin(src_rd_ptr_gray_sync);
+    wire src_full = (src_wr_ptr[PTR_W-1] != src_rd_ptr_bin[PTR_W-1]) &&
+                    (src_wr_ptr[LOG_DEPTH-1:0] == src_rd_ptr_bin[LOG_DEPTH-1:0]);
+    assign src_ready_o = ~src_full;
+
+    // Destination side: read pointer and valid
+    wire [PTR_W-1:0] dst_rd_ptr_gray = bin2gray(dst_rd_ptr);
+    wire [PTR_W-1:0] dst_wr_ptr_bin = gray2bin(dst_wr_ptr_gray_sync);
+    wire dst_empty = (dst_rd_ptr == dst_wr_ptr_bin);
+    assign dst_valid_o = ~dst_empty;
+
+    // Memory read address
+    wire [LOG_DEPTH-1:0] rd_addr = dst_rd_ptr[LOG_DEPTH-1:0];
+    assign dst_data_o = mem[rd_addr];
+
+    // Source clock domain: write to memory and advance write pointer
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_wr_ptr <= {PTR_W{1'b0}};
+        end else if (src_valid_i && src_ready_o) begin
+            mem[src_wr_ptr[LOG_DEPTH-1:0]] <= src_data_i;
+            src_wr_ptr <= src_wr_ptr + 1'b1;
+        end
+    end
+
+    // Destination clock domain: advance read pointer
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_rd_ptr <= {PTR_W{1'b0}};
+        end else if (dst_valid_o && dst_ready_i) begin
+            dst_rd_ptr <= dst_rd_ptr + 1'b1;
+        end
+    end
+
+    // Synchronize source write pointer (gray) to destination domain
+    reg [PTR_W-1:0] dst_wr_ptr_gray_sync_r [0:SYNC_STAGES-1];
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            for (integer i = 0; i < SYNC_STAGES; i = i + 1)
+                dst_wr_ptr_gray_sync_r[i] <= {PTR_W{1'b0}};
+        end else begin
+            dst_wr_ptr_gray_sync_r[0] <= src_wr_ptr_gray;
+            for (integer i = 1; i < SYNC_STAGES; i = i + 1)
+                dst_wr_ptr_gray_sync_r[i] <= dst_wr_ptr_gray_sync_r[i-1];
+        end
+    end
+    assign dst_wr_ptr_gray_sync = dst_wr_ptr_gray_sync_r[SYNC_STAGES-1];
+
+    // Synchronize destination read pointer (gray) to source domain
+    reg [PTR_W-1:0] src_rd_ptr_gray_sync_r [0:SYNC_STAGES-1];
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            for (integer i = 0; i < SYNC_STAGES; i = i + 1)
+                src_rd_ptr_gray_sync_r[i] <= {PTR_W{1'b0}};
+        end else begin
+            src_rd_ptr_gray_sync_r[0] <= dst_rd_ptr_gray;
+            for (integer i = 1; i < SYNC_STAGES; i = i + 1)
+                src_rd_ptr_gray_sync_r[i] <= src_rd_ptr_gray_sync_r[i-1];
+        end
+    end
+    assign src_rd_ptr_gray_sync = src_rd_ptr_gray_sync_r[SYNC_STAGES-1];
+
+endmodule

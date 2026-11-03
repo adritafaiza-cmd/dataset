@@ -1,0 +1,233 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "cdc_fifo_2phase",
+            "function": "Asynchronous FIFO with valid/ready handshake",
+            "parameters": [
+                {"name": "WIDTH", "value": "8"},
+                {"name": "LOG_DEPTH", "value": "3"}
+            ],
+            "ports": [
+                {"name": "src_rst_ni", "direction": "input", "width": 1, "clock_domain": "src"},
+                {"name": "src_clk_i", "direction": "input", "width": 1, "clock_domain": "src"},
+                {"name": "src_data_i", "direction": "input", "width": "WIDTH", "clock_domain": "src"},
+                {"name": "src_valid_i", "direction": "input", "width": 1, "clock_domain": "src"},
+                {"name": "src_ready_o", "direction": "output", "width": 1, "clock_domain": "src"},
+                {"name": "dst_rst_ni", "direction": "input", "width": 1, "clock_domain": "dst"},
+                {"name": "dst_clk_i", "direction": "input", "width": 1, "clock_domain": "dst"},
+                {"name": "dst_data_o", "direction": "output", "width": "WIDTH", "clock_domain": "dst"},
+                {"name": "dst_valid_o", "direction": "output", "width": 1, "clock_domain": "dst"},
+                {"name": "dst_ready_i", "direction": "input", "width": 1, "clock_domain": "dst"}
+            ],
+            "instances": [
+                {
+                    "module": "async_fifo_buffer",
+                    "name": "fifo_buffer",
+                    "function": "Buffer for asynchronous FIFO",
+                    "connections": [
+                        {"port": "src_rst_ni", "signal": "src_rst_ni"},
+                        {"port": "src_clk_i", "signal": "src_clk_i"},
+                        {"port": "src_data_i", "signal": "src_data_i"},
+                        {"port": "src_valid_i", "signal": "src_valid_i"},
+                        {"port": "src_ready_o", "signal": "src_ready_o"},
+                        {"port": "dst_rst_ni", "signal": "dst_rst_ni"},
+                        {"port": "dst_clk_i", "signal": "dst_clk_i"},
+                        {"port": "dst_data_o", "signal": "dst_data_o"},
+                        {"port": "dst_valid_o", "signal": "dst_valid_o"},
+                        {"port": "dst_ready_i", "signal": "dst_ready_i"}
+                    ]
+                }
+            ],
+            "connections": [],
+            "internal_signals": [],
+            "behavior": [
+                "Accept source beats when src_valid_i and src_ready_o are high.",
+                "Deliver destination beats in order when dst_valid_o and dst_ready_i are high.",
+                "src_ready_o must be low when the FIFO cannot accept another item.",
+                "After reset the FIFO is empty and dest is idle.",
+                "The destination word is a registered sample. dst_valid_o may remain low for multiple destination clocks after an accepted beat even when another word is already stored."
+            ]
+        },
+        {
+            "Top_module_name": "async_fifo_buffer",
+            "function": "Buffer implementation for asynchronous FIFO",
+            "parameters": [
+                {"name": "WIDTH", "value": "8"},
+                {"name": "LOG_DEPTH", "value": "3"}
+            ],
+            "ports": [
+                {"name": "src_rst_ni", "direction": "input", "width": 1, "clock_domain": "src"},
+                {"name": "src_clk_i", "direction": "input", "width": 1, "clock_domain": "src"},
+                {"name": "src_data_i", "direction": "input", "width": "WIDTH", "clock_domain": "src"},
+                {"name": "src_valid_i", "direction": "input", "width": 1, "clock_domain": "src"},
+                {"name": "src_ready_o", "direction": "output", "width": 1, "clock_domain": "src"},
+                {"name": "dst_rst_ni", "direction": "input", "width": 1, "clock_domain": "dst"},
+                {"name": "dst_clk_i", "direction": "input", "width": 1, "clock_domain": "dst"},
+                {"name": "dst_data_o", "direction": "output", "width": "WIDTH", "clock_domain": "dst"},
+                {"name": "dst_valid_o", "direction": "output", "width": 1, "clock_domain": "dst"},
+                {"name": "dst_ready_i", "direction": "input", "width": 1, "clock_domain": "dst"}
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {"name": "fifo_mem", "width": "WIDTH", "size": "2**LOG_DEPTH"},
+                {"name": "write_ptr_gray", "width": "LOG_DEPTH+1"},
+                {"name": "read_ptr_gray", "width": "LOG_DEPTH+1"},
+                {"name": "write_ptr_gray_synced", "width": "LOG_DEPTH+1"},
+                {"name": "read_ptr_gray_synced", "width": "LOG_DEPTH+1"},
+                {"name": "write_ptr", "width": "LOG_DEPTH+1"},
+                {"name": "read_ptr", "width": "LOG_DEPTH+1"},
+                {"name": "full", "width": 1},
+                {"name": "empty", "width": 1}
+            ],
+            "behavior": [
+                "Implement a 2**LOG_DEPTH entry FIFO with WIDTH bit entries.",
+                "Use gray code counters for write and read pointers to facilitate safe asynchronous transfer.",
+                "Synchronize the write pointer to the destination clock domain and the read pointer to the source clock domain.",
+                "Determine FIFO full and empty states based on the synchronized pointers.",
+                "Accept source beats when src_valid_i and src_ready_o are high and FIFO is not full.",
+                "Deliver destination beats in order when dst_valid_o and dst_ready_i are high and FIFO is not empty.",
+                "src_ready_o must be low when the FIFO cannot accept another item.",
+                "After reset the FIFO is empty and dest is idle.",
+                "The destination word is a registered sample. dst_valid_o may remain low for multiple destination clocks after an accepted beat even when another word is already stored."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module cdc_fifo_2phase #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    // Internal FIFO buffer module
+    async_fifo_buffer #(
+        .WIDTH(WIDTH),
+        .LOG_DEPTH(LOG_DEPTH)
+    ) fifo_buffer (
+        .src_rst_ni(src_rst_ni),
+        .src_clk_i(src_clk_i),
+        .src_data_i(src_data_i),
+        .src_valid_i(src_valid_i),
+        .src_ready_o(src_ready_o),
+        .dst_rst_ni(dst_rst_ni),
+        .dst_clk_i(dst_clk_i),
+        .dst_data_o(dst_data_o),
+        .dst_valid_o(dst_valid_o),
+        .dst_ready_i(dst_ready_i)
+    );
+
+endmodule
+
+module async_fifo_buffer #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 2 ** LOG_DEPTH;
+    localparam ADDR_WIDTH = LOG_DEPTH + 1;
+
+    reg [WIDTH-1:0] fifo_mem [DEPTH-1:0];
+    reg [ADDR_WIDTH-1:0] write_ptr_gray, read_ptr_gray;
+    reg [ADDR_WIDTH-1:0] write_ptr_gray_synced, read_ptr_gray_synced;
+    reg [ADDR_WIDTH-1:0] write_ptr, read_ptr;
+    reg full, empty;
+
+    // Gray code conversion functions
+    function [ADDR_WIDTH-1:0] binary_to_gray;
+        input [ADDR_WIDTH-1:0] bin;
+        binary_to_gray = bin ^ (bin >> 1);
+    endfunction
+
+    function [ADDR_WIDTH-1:0] gray_to_binary;
+        input [ADDR_WIDTH-1:0] gray;
+        reg [ADDR_WIDTH-1:0] bin;
+        integer i;
+        bin = gray;
+        for (i = ADDR_WIDTH - 2; i >= 0; i = i - 1) begin
+            bin[i] = bin[i + 1] ^ gray[i];
+        end
+        gray_to_binary = bin;
+    endfunction
+
+    // Source domain logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            write_ptr_gray <= 0;
+            full <= 0;
+        end else if (src_valid_i && !full) begin
+            fifo_mem[gray_to_binary(write_ptr_gray)] <= src_data_i;
+            write_ptr_gray <= binary_to_gray(gray_to_binary(write_ptr_gray) + 1);
+        end
+    end
+
+    // Synchronize write pointer to destination domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            write_ptr_gray_synced <= 0;
+        end else begin
+            write_ptr_gray_synced <= write_ptr_gray;
+        end
+    end
+
+    // Destination domain logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            read_ptr_gray <= 0;
+            empty <= 1;
+        end else if (dst_valid_o && dst_ready_i) begin
+            read_ptr_gray <= binary_to_gray(gray_to_binary(read_ptr_gray) + 1);
+        end
+    end
+
+    // Synchronize read pointer to source domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            read_ptr_gray_synced <= 0;
+        end else begin
+            read_ptr_gray_synced <= read_ptr_gray;
+        end
+    end
+
+    // Decode gray pointers to binary
+    assign write_ptr = gray_to_binary(write_ptr_gray);
+    assign read_ptr = gray_to_binary(read_ptr_gray_synced);
+
+    // Determine full and empty states
+    assign full = (write_ptr_gray == binary_to_gray(gray_to_binary(read_ptr_gray_synced) + DEPTH));
+    assign empty = (write_ptr_gray_synced == read_ptr_gray);
+
+    // Ready and valid signals
+    assign src_ready_o = !full;
+    assign dst_valid_o = !empty;
+    assign dst_data_o = fifo_mem[read_ptr];
+
+endmodule
+```

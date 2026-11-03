@@ -1,0 +1,144 @@
+```systemverilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Extract APB signals from req_i
+  wire psel;
+  wire penable;
+  wire pwrite;
+  wire [ApbAddrWidth-1:0] paddr;
+  wire [ApbDataWidth-1:0] pwdata;
+  wire [ApbDataWidth/8-1:0] pstrb;
+
+  assign psel    = req_i.psel;
+  assign penable = req_i.penable;
+  assign pwrite  = req_i.pwrite;
+  assign paddr   = req_i.paddr;
+  assign pwdata  = req_i.pwdata;
+  assign pstrb   = req_i.pstrb;
+
+  // Response
+  assign resp_o.pready = 1'b1;
+  assign resp_o.pslverr = 1'b0;
+  assign resp_o.prdata  = 8'h0; // Not used for write-only, but keep valid
+
+  // Address decoding
+  // Calculate offset from base address
+  wire [ApbAddrWidth-1:0] addr_offset = paddr - base_addr_i;
+  
+  // Determine register index
+  // Each register occupies AddrOffset bytes
+  // We need to extract the register index from the address offset
+  // The number of bits needed to index NoApbRegs registers
+  localparam int unsigned RegIndexWidth = $clog2(NoApbRegs == 0 ? 1 : NoApbRegs);
+  
+  // The register index is the upper bits of the address offset
+  // Specifically, bits [RegIndexWidth + $clog2(AddrOffset) - 1 : $clog2(AddrOffset)]
+  // But simpler: divide the offset by AddrOffset
+  // Since AddrOffset is a power of 2 (typically), we can shift
+  // Let's use a more general approach: extract the register index
+  // The address offset within the register bank determines which register
+  // reg_idx = addr_offset / AddrOffset
+  
+  // For simplicity and correctness, let's compute the register index
+  // We'll use a combinational block to decode
+  wire [RegIndexWidth-1:0] reg_idx;
+  
+  // The register index is determined by the address offset
+  // Assuming AddrOffset is a power of 2, we can shift right by log2(AddrOffset)
+  localparam int unsigned AddrOffsetLog2 = $clog2(AddrOffset == 1 ? 1 : AddrOffset);
+  
+  assign reg_idx = addr_offset[RegIndexWidth + AddrOffsetLog2 - 1 : AddrOffsetLog2];
+  
+  // Check if the address is within the valid register range
+  wire addr_valid = (reg_idx < NoApbRegs);
+  
+  // Byte strobe for the register
+  // The byte strobes need to be aligned with the register's byte position
+  // The lower bits of the address offset determine which bytes within the register are accessed
+  wire [AddrOffsetLog2-1:0] byte_offset = addr_offset[AddrOffsetLog2-1:0];
+  
+  // Generate byte strobes for the register
+  // We need to map the APB byte strobes to the register's byte positions
+  // The APB data width may be larger than the register data width
+  // We only care about the bytes that overlap with the register
+  
+  // For each byte in the register, determine if it should be updated
+  // The register has RegDataWidth/8 bytes
+  localparam int unsigned RegBytes = RegDataWidth / 8;
+  
+  // Byte strobe for each byte of the register
+  wire [RegBytes-1:0] reg_strb;
+  
+  genvar i;
+  generate
+    for (i = 0; i < RegBytes; i++) begin : gen_strb
+      // The byte position in the APB data bus
+      // The register starts at byte_offset within the AddrOffset-byte block
+      // So the byte i of the register corresponds to APB data byte (byte_offset + i)
+      // But we need to check if this byte is within the APB data width
+      wire byte_in_range = (byte_offset + i) < (ApbDataWidth / 8);
+      assign reg_strb[i] = byte_in_range ? pstrb[byte_offset + i] : 1'b0;
+    end
+  endgenerate
+  
+  // Register storage
+  reg_data_t [NoApbRegs-1:0] reg_q;
+  
+  // Write enable
+  wire write_en = psel & penable & pwrite & addr_valid;
+  
+  // Update registers
+  integer j;
+  always @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (j = 0; j < NoApbRegs; j = j + 1) begin
+        if (ReadOnly[j])
+          reg_q[j] <= reg_init_i[j];
+        else
+          reg_q[j] <= '0;
+      end
+    end else begin
+      if (write_en) begin
+        for (j = 0; j < NoApbRegs; j = j + 1) begin
+          if (j == reg_idx && !ReadOnly[j]) begin
+            // Update only the strobed bytes
+            for (i = 0; i < RegBytes; i = i + 1) begin
+              if (reg_strb[i]) begin
+                reg_q[j][i*8 +: 8] <= pwdata[i*8 +: 8];
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+  
+  // Output: read-only registers expose reg_init_i, writable registers expose reg_q
+  genvar k;
+  generate
+    for (k = 0; k < NoApbRegs; k++) begin : gen_out
+      assign reg_q_o[k] = ReadOnly[k] ? reg_init_i[k] : reg_q[k];
+    end
+  endgenerate
+
+endmodule
+```<|im_end|>

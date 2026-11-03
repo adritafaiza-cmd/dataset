@@ -1,0 +1,483 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ========================================================================
+    // Write Address Channel (AW) - S to M
+    // ========================================================================
+    wire [ADDR_WIDTH+2:0] aw_payload;
+    assign aw_payload = {s_axil_awaddr, s_axil_awprot};
+
+    wire aw_s2m_req;
+    wire aw_s2m_ack;
+    wire aw_m2s_req;
+    wire aw_m2s_ack;
+
+    // S to M synchronizer
+    wire [1:0] aw_s2m_sync;
+    reg [1:0] aw_s2m_sync_r;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            aw_s2m_sync_r <= 2'b00;
+        else
+            aw_s2m_sync_r <= {aw_s2m_sync_r[0], aw_s2m_req};
+    end
+    assign aw_s2m_sync = aw_s2m_sync_r;
+
+    // M to S synchronizer
+    wire [1:0] aw_m2s_sync;
+    reg [1:0] aw_m2s_sync_r;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            aw_m2s_sync_r <= 2'b00;
+        else
+            aw_m2s_sync_r <= {aw_m2s_sync_r[0], aw_m2s_ack};
+    end
+    assign aw_m2s_sync = aw_m2s_sync_r;
+
+    // S-side AW FSM
+    reg aw_s_req;
+    reg aw_s_ack;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            aw_s_req <= 1'b0;
+            aw_s_ack <= 1'b0;
+        end else begin
+            if (aw_s_req && aw_m2s_sync[1]) begin
+                aw_s_req <= 1'b0;
+                aw_s_ack <= 1'b0;
+            end else if (!aw_s_req && s_axil_awvalid && s_axil_awready) begin
+                aw_s_req <= 1'b1;
+            end
+        end
+    end
+    assign aw_s2m_req = aw_s_req;
+    assign s_axil_awready = !aw_s_req;
+
+    // M-side AW FSM
+    reg aw_m_req;
+    reg aw_m_ack;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            aw_m_req <= 1'b0;
+            aw_m_ack <= 1'b0;
+        end else begin
+            if (aw_m_req && aw_s2m_sync[1]) begin
+                aw_m_req <= 1'b0;
+                aw_m_ack <= 1'b0;
+            end else if (!aw_m_req && aw_m2s_sync[1]) begin
+                aw_m_req <= 1'b1;
+            end
+        end
+    end
+    assign aw_m2s_ack = aw_m_ack;
+    assign m_axil_awvalid = aw_m_req;
+
+    // ========================================================================
+    // Write Data Channel (W) - S to M
+    // ========================================================================
+    wire [DATA_WIDTH+STRB_WIDTH:0] w_payload;
+    assign w_payload = {s_axil_wdata, s_axil_wstrb};
+
+    wire w_s2m_req;
+    wire w_s2m_ack;
+    wire w_m2s_req;
+    wire w_m2s_ack;
+
+    // S to M synchronizer
+    wire [1:0] w_s2m_sync;
+    reg [1:0] w_s2m_sync_r;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            w_s2m_sync_r <= 2'b00;
+        else
+            w_s2m_sync_r <= {w_s2m_sync_r[0], w_s2m_req};
+    end
+    assign w_s2m_sync = w_s2m_sync_r;
+
+    // M to S synchronizer
+    wire [1:0] w_m2s_sync;
+    reg [1:0] w_m2s_sync_r;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            w_m2s_sync_r <= 2'b00;
+        else
+            w_m2s_sync_r <= {w_m2s_sync_r[0], w_m2s_ack};
+    end
+    assign w_m2s_sync = w_m2s_sync_r;
+
+    // S-side W FSM
+    reg w_s_req;
+    reg w_s_ack;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            w_s_req <= 1'b0;
+            w_s_ack <= 1'b0;
+        end else begin
+            if (w_s_req && w_m2s_sync[1]) begin
+                w_s_req <= 1'b0;
+                w_s_ack <= 1'b0;
+            end else if (!w_s_req && s_axil_wvalid && s_axil_wready) begin
+                w_s_req <= 1'b1;
+            end
+        end
+    end
+    assign w_s2m_req = w_s_req;
+    assign s_axil_wready = !w_s_req;
+
+    // M-side W FSM
+    reg w_m_req;
+    reg w_m_ack;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            w_m_req <= 1'b0;
+            w_m_ack <= 1'b0;
+        end else begin
+            if (w_m_req && w_s2m_sync[1]) begin
+                w_m_req <= 1'b0;
+                w_m_ack <= 1'b0;
+            end else if (!w_m_req && w_m2s_sync[1]) begin
+                w_m_req <= 1'b1;
+            end
+        end
+    end
+    assign w_m2s_ack = w_m_ack;
+    assign m_axil_wvalid = w_m_req;
+
+    // ========================================================================
+    // Write Response Channel (B) - M to S
+    // ========================================================================
+    wire [1:0] b_payload;
+    assign b_payload = m_axil_bresp;
+
+    wire b_m2s_req;
+    wire b_m2s_ack;
+    wire b_s2m_req;
+    wire b_s2m_ack;
+
+    // M to S synchronizer
+    wire [1:0] b_m2s_sync;
+    reg [1:0] b_m2s_sync_r;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            b_m2s_sync_r <= 2'b00;
+        else
+            b_m2s_sync_r <= {b_m2s_sync_r[0], b_m2s_req};
+    end
+    assign b_m2s_sync = b_m2s_sync_r;
+
+    // S to M synchronizer
+    wire [1:0] b_s2m_sync;
+    reg [1:0] b_s2m_sync_r;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            b_s2m_sync_r <= 2'b00;
+        else
+            b_s2m_sync_r <= {b_s2m_sync_r[0], b_s2m_ack};
+    end
+    assign b_s2m_sync = b_s2m_sync_r;
+
+    // M-side B FSM
+    reg b_m_req;
+    reg b_m_ack;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            b_m_req <= 1'b0;
+            b_m_ack <= 1'b0;
+        end else begin
+            if (b_m_req && b_s2m_sync[1]) begin
+                b_m_req <= 1'b0;
+                b_m_ack <= 1'b0;
+            end else if (!b_m_req && m_axil_bvalid && m_axil_bready) begin
+                b_m_req <= 1'b1;
+            end
+        end
+    end
+    assign b_m2s_req = b_m_req;
+    assign m_axil_bready = !b_m_req;
+
+    // S-side B FSM
+    reg b_s_req;
+    reg b_s_ack;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            b_s_req <= 1'b0;
+            b_s_ack <= 1'b0;
+        end else begin
+            if (b_s_req && b_m2s_sync[1]) begin
+                b_s_req <= 1'b0;
+                b_s_ack <= 1'b0;
+            end else if (!b_s_req && b_s2m_sync[1]) begin
+                b_s_req <= 1'b1;
+            end
+        end
+    end
+    assign b_s2m_ack = b_s_ack;
+    assign s_axil_bvalid = b_s_req;
+
+    // ========================================================================
+    // Read Address Channel (AR) - S to M
+    // ========================================================================
+    wire [ADDR_WIDTH+2:0] ar_payload;
+    assign ar_payload = {s_axil_araddr, s_axil_arprot};
+
+    wire ar_s2m_req;
+    wire ar_s2m_ack;
+    wire ar_m2s_req;
+    wire ar_m2s_ack;
+
+    // S to M synchronizer
+    wire [1:0] ar_s2m_sync;
+    reg [1:0] ar_s2m_sync_r;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            ar_s2m_sync_r <= 2'b00;
+        else
+            ar_s2m_sync_r <= {ar_s2m_sync_r[0], ar_s2m_req};
+    end
+    assign ar_s2m_sync = ar_s2m_sync_r;
+
+    // M to S synchronizer
+    wire [1:0] ar_m2s_sync;
+    reg [1:0] ar_m2s_sync_r;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            ar_m2s_sync_r <= 2'b00;
+        else
+            ar_m2s_sync_r <= {ar_m2s_sync_r[0], ar_m2s_ack};
+    end
+    assign ar_m2s_sync = ar_m2s_sync_r;
+
+    // S-side AR FSM
+    reg ar_s_req;
+    reg ar_s_ack;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            ar_s_req <= 1'b0;
+            ar_s_ack <= 1'b0;
+        end else begin
+            if (ar_s_req && ar_m2s_sync[1]) begin
+                ar_s_req <= 1'b0;
+                ar_s_ack <= 1'b0;
+            end else if (!ar_s_req && s_axil_arvalid && s_axil_arready) begin
+                ar_s_req <= 1'b1;
+            end
+        end
+    end
+    assign ar_s2m_req = ar_s_req;
+    assign s_axil_arready = !ar_s_req;
+
+    // M-side AR FSM
+    reg ar_m_req;
+    reg ar_m_ack;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            ar_m_req <= 1'b0;
+            ar_m_ack <= 1'b0;
+        end else begin
+            if (ar_m_req && ar_s2m_sync[1]) begin
+                ar_m_req <= 1'b0;
+                ar_m_ack <= 1'b0;
+            end else if (!ar_m_req && ar_m2s_sync[1]) begin
+                ar_m_req <= 1'b1;
+            end
+        end
+    end
+    assign ar_m2s_ack = ar_m_ack;
+    assign m_axil_arvalid = ar_m_req;
+
+    // ========================================================================
+    // Read Data Channel (R) - M to S
+    // ========================================================================
+    wire [DATA_WIDTH+1:0] r_payload;
+    assign r_payload = {m_axil_rdata, m_axil_rresp};
+
+    wire r_m2s_req;
+    wire r_m2s_ack;
+    wire r_s2m_req;
+    wire r_s2m_ack;
+
+    // M to S synchronizer
+    wire [1:0] r_m2s_sync;
+    reg [1:0] r_m2s_sync_r;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            r_m2s_sync_r <= 2'b00;
+        else
+            r_m2s_sync_r <= {r_m2s_sync_r[0], r_m2s_req};
+    end
+    assign r_m2s_sync = r_m2s_sync_r;
+
+    // S to M synchronizer
+    wire [1:0] r_s2m_sync;
+    reg [1:0] r_s2m_sync_r;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            r_s2m_sync_r <= 2'b00;
+        else
+            r_s2m_sync_r <= {r_s2m_sync_r[0], r_s2m_ack};
+    end
+    assign r_s2m_sync = r_s2m_sync_r;
+
+    // M-side R FSM
+    reg r_m_req;
+    reg r_m_ack;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            r_m_req <= 1'b0;
+            r_m_ack <= 1'b0;
+        end else begin
+            if (r_m_req && r_s2m_sync[1]) begin
+                r_m_req <= 1'b0;
+                r_m_ack <= 1'b0;
+            end else if (!r_m_req && m_axil_rvalid && m_axil_rready) begin
+                r_m_req <= 1'b1;
+            end
+        end
+    end
+    assign r_m2s_req = r_m_req;
+    assign m_axil_rready = !r_m_req;
+
+    // S-side R FSM
+    reg r_s_req;
+    reg r_s_ack;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            r_s_req <= 1'b0;
+            r_s_ack <= 1'b0;
+        end else begin
+            if (r_s_req && r_m2s_sync[1]) begin
+                r_s_req <= 1'b0;
+                r_s_ack <= 1'b0;
+            end else if (!r_s_req && r_s2m_sync[1]) begin
+                r_s_req <= 1'b1;
+            end
+        end
+    end
+    assign r_s2m_ack = r_s_ack;
+    assign s_axil_rvalid = r_s_req;
+
+    // ========================================================================
+    // M-side data registers (stable while valid)
+    // ========================================================================
+    reg [ADDR_WIDTH-1:0] m_awaddr_r;
+    reg [2:0]            m_awprot_r;
+    reg [DATA_WIDTH-1:0] m_wdata_r;
+    reg [STRB_WIDTH-1:0] m_wstrb_r;
+    reg [ADDR_WIDTH-1:0] m_araddr_r;
+    reg [2:0]            m_arprot_r;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_awaddr_r <= {ADDR_WIDTH{1'b0}};
+            m_awprot_r <= 3'b000;
+            m_wdata_r  <= {DATA_WIDTH{1'b0}};
+            m_wstrb_r  <= {STRB_WIDTH{1'b0}};
+            m_araddr_r <= {ADDR_WIDTH{1'b0}};
+            m_arprot_r <= 3'b000;
+        end else begin
+            if (aw_m_req && aw_s2m_sync[1]) begin
+                m_awaddr_r <= aw_payload[ADDR_WIDTH+2:3];
+                m_awprot_r <= aw_payload[2:0];
+            end
+            if (w_m_req && w_s2m_sync[1]) begin
+                m_wdata_r  <= w_payload[DATA_WIDTH+STRB_WIDTH:STRB_WIDTH];
+                m_wstrb_r  <= w_payload[STRB_WIDTH-1:0];
+            end
+            if (ar_m_req && ar_s2m_sync[1]) begin
+                m_araddr_r <= ar_payload[ADDR_WIDTH+2:3];
+                m_arprot_r <= ar_payload[2:0];
+            end
+        end
+    end
+
+    assign m_axil_awaddr = m_awaddr_r;
+    assign m_axil_awprot = m_awprot_r;
+    assign m_axil_wdata  = m_wdata_r;
+    assign m_axil_wstrb  = m_wstrb_r;
+    assign m_axil_araddr = m_araddr_r;
+    assign m_axil_arprot = m_arprot_r;
+
+    // ========================================================================
+    // S-side data registers (stable while valid)
+    // ========================================================================
+    reg [1:0]            s_bresp_r;
+    reg [DATA_WIDTH-1:0] s_rdata_r;
+    reg [1:0]            s_rresp_r;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_bresp_r <= 2'b00;
+            s_rdata_r <= {DATA_WIDTH{1'b0}};
+            s_rresp_r <= 2'b00;
+        end else begin
+            if (b_s_req && b_m2s_sync[1]) begin
+                s_bresp_r <= b_payload;
+            end
+            if (r_s_req && r_m2s_sync[1]) begin
+                s_rdata_r <= r_payload[DATA_WIDTH+1:2];
+                s_rresp_r <= r_payload[1:0];
+            end
+        end
+    end
+
+    assign s_axil_bresp = s_bresp_r;
+    assign s_axil_rdata = s_rdata_r;
+    assign s_axil_rresp = s_rresp_r;
+
+endmodule
+```<|im_end|>

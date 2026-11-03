@@ -1,0 +1,226 @@
+module apbxclk #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		parameter [0:0]	OPT_REGISTERED = 1'b0,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH
+	) (
+		input	wire			S_APB_PCLK, S_PRESETn,
+		input	wire			S_APB_PSEL,
+		input	wire			S_APB_PENABLE,
+		output	reg			S_APB_PREADY,
+		input	wire	[AW-1:0]	S_APB_PADDR,
+		input	wire			S_APB_PWRITE,
+		input	wire	[DW-1:0]	S_APB_PWDATA,
+		input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+		input	wire	[2:0]		S_APB_PPROT,
+		output	wire	[DW-1:0]	S_APB_PRDATA,
+		output	wire			S_APB_PSLVERR,
+		input	wire			M_APB_PCLK,
+		output	reg			M_PRESETn,
+		output	reg			M_APB_PSEL,
+		output	reg			M_APB_PENABLE,
+		input	wire			M_APB_PREADY,
+		output	wire	[AW-1:0]	M_APB_PADDR,
+		output	wire			M_APB_PWRITE,
+		output	wire	[DW-1:0]	M_APB_PWDATA,
+		output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+		output	wire	[2:0]		M_APB_PPROT,
+		input	wire	[DW-1:0]	M_APB_PRDATA,
+		input	wire			M_APB_PSLVERR
+	);
+
+	// Internal signals
+	reg [AW-1:0] m_addr;
+	reg m_write;
+	reg [DW-1:0] m_wdata;
+	reg [DW/8-1:0] m_wstrb;
+	reg [2:0] m_pprot;
+
+	// Source domain: capture request on setup phase
+	reg s_req_valid;
+	reg [AW-1:0] s_addr;
+	reg s_write;
+	reg [DW-1:0] s_wdata;
+	reg [DW/8-1:0] s_wstrb;
+	reg [2:0] s_pprot;
+
+	// Handshake: source -> destination
+	reg s_req;
+	reg [2:0] s_req_sync;
+	reg [2:0] s_req_sync_r;
+
+	// Handshake: destination -> source
+	reg m_done;
+	reg [2:0] m_done_sync;
+	reg [2:0] m_done_sync_r;
+
+	// Destination domain: state machine
+	reg m_state;
+	localparam M_IDLE = 1'b0;
+	localparam M_SETUP = 1'b1;
+
+	// Response data from destination
+	reg [DW-1:0] m_rdata;
+	reg m_rslverr;
+
+	// Synchronize m_done back to source domain
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_req_sync <= 3'b0;
+			s_req_sync_r <= 3'b0;
+		end else begin
+			s_req_sync <= s_req;
+			s_req_sync_r <= s_req_sync;
+		end
+	end
+
+	// Synchronize m_done to source domain
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_done_sync <= 3'b0;
+			m_done_sync_r <= 3'b0;
+		end else begin
+			m_done_sync <= m_done;
+			m_done_sync_r <= m_done_sync;
+		end
+	end
+
+	// Source domain: detect request and capture
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_req_valid <= 1'b0;
+			s_addr <= {AW{1'b0}};
+			s_write <= 1'b0;
+			s_wdata <= {DW{1'b0}};
+			s_wstrb <= {(DW/8){1'b0}};
+			s_pprot <= 3'b0;
+			s_req <= 1'b0;
+			S_APB_PREADY <= 1'b0;
+		end else begin
+			// Detect setup phase: PSEL high, PENABLE low
+			if (S_APB_PSEL && !S_APB_PENABLE) begin
+				// Capture request
+				s_addr <= S_APB_PADDR;
+				s_write <= S_APB_PWRITE;
+				s_wdata <= S_APB_PWDATA;
+				s_wstrb <= S_APB_PWSTRB;
+				s_pprot <= S_APB_PPROT;
+				s_req_valid <= 1'b1;
+				s_req <= 1'b1;
+			end else if (s_req_valid && m_done_sync_r) begin
+				// Transaction completed, clear request
+				s_req_valid <= 1'b0;
+				s_req <= 1'b0;
+			end
+
+			// Assert PREADY when transaction is complete
+			if (s_req_valid && m_done_sync_r) begin
+				S_APB_PREADY <= 1'b1;
+			end else begin
+				S_APB_PREADY <= 1'b0;
+			end
+		end
+	end
+
+	// Destination domain: reset synchronization
+	reg [2:0] m_reset_sync;
+	reg [2:0] m_reset_sync_r;
+
+	always @(posedge M_APB_PCLK) begin
+		m_reset_sync <= S_PRESETn;
+		m_reset_sync_r <= m_reset_sync;
+	end
+
+	always @(posedge M_APB_PCLK) begin
+		M_PRESETn <= m_reset_sync_r;
+	end
+
+	// Destination domain: state machine
+	always @(posedge M_APB_PCLK) begin
+		if (!M_PRESETn) begin
+			m_state <= M_IDLE;
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			m_addr <= {AW{1'b0}};
+			m_write <= 1'b0;
+			m_wdata <= {DW{1'b0}};
+			m_wstrb <= {(DW/8){1'b0}};
+			m_pprot <= 3'b0;
+			m_done <= 1'b0;
+			m_rdata <= {DW{1'b0}};
+			m_rslverr <= 1'b0;
+		end else begin
+			case (m_state)
+				M_IDLE: begin
+					M_APB_PSEL <= 1'b0;
+					M_APB_PENABLE <= 1'b0;
+					m_done <= 1'b0;
+					if (s_req_sync_r) begin
+						// Start setup phase
+						m_state <= M_SETUP;
+						M_APB_PSEL <= 1'b1;
+						M_APB_PENABLE <= 1'b0;
+						m_addr <= s_addr;
+						m_write <= s_write;
+						m_wdata <= s_wdata;
+						m_wstrb <= s_wstrb;
+						m_pprot <= s_pprot;
+					end
+				end
+				M_SETUP: begin
+					// Move to access phase
+					M_APB_PSEL <= 1'b1;
+					M_APB_PENABLE <= 1'b1;
+					m_state <= M_IDLE;
+					// Wait for PREADY
+					if (M_APB_PREADY) begin
+						// Capture response
+						m_rdata <= M_APB_PRDATA;
+						m_rslverr <= M_APB_PSLVERR;
+						m_done <= 1'b1;
+						M_APB_PSEL <= 1'b0;
+						M_APB_PENABLE <= 1'b0;
+					end
+				end
+				default: begin
+					m_state <= M_IDLE;
+					M_APB_PSEL <= 1'b0;
+					M_APB_PENABLE <= 1'b0;
+					m_done <= 1'b0;
+				end
+			endcase
+		end
+	end
+
+	// Output assignments
+	assign M_APB_PADDR = m_addr;
+	assign M_APB_PWRITE = m_write;
+	assign M_APB_PWDATA = m_wdata;
+	assign M_APB_PWSTRB = m_wstrb;
+	assign M_APB_PPROT = m_pprot;
+
+	// Synchronize response data back to source domain
+	reg [DW-1:0] m_rdata_sync;
+	reg [DW-1:0] m_rdata_sync_r;
+	reg m_rslverr_sync;
+	reg m_rslverr_sync_r;
+
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_rdata_sync <= {DW{1'b0}};
+			m_rdata_sync_r <= {DW{1'b0}};
+			m_rslverr_sync <= 1'b0;
+			m_rslverr_sync_r <= 1'b0;
+		end else begin
+			m_rdata_sync <= m_rdata;
+			m_rdata_sync_r <= m_rdata_sync;
+			m_rslverr_sync <= m_rslverr;
+			m_rslverr_sync_r <= m_rslverr_sync;
+		end
+	end
+
+	assign S_APB_PRDATA = m_rdata_sync_r;
+	assign S_APB_PSLVERR = m_rslverr_sync_r;
+
+endmodule

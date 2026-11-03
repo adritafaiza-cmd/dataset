@@ -1,0 +1,170 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "areset_deassert_sync",
+            "function": "Destination-clock reset-release synchronizer",
+            "parameters": [
+                {
+                    "name": "CHAINS",
+                    "value": 2
+                },
+                {
+                    "name": "RST_POL",
+                    "value": 1
+                }
+            ],
+            "ports": [
+                {
+                    "name": "clk",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "async_rst_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "async"
+                },
+                {
+                    "name": "sync_rst_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk"
+                }
+            ],
+            "instances": [
+                {
+                    "module": "sync_chain",
+                    "name": "sync_chain_inst",
+                    "function": "Synchronization chain for reset deassertion",
+                    "connections": [
+                        {
+                            "local": "clk",
+                            "remote": "clk"
+                        },
+                        {
+                            "local": "async_rst_i",
+                            "remote": "async_rst_i"
+                        },
+                        {
+                            "local": "sync_rst_o",
+                            "remote": "sync_rst_o"
+                        }
+                    ]
+                }
+            ],
+            "connections": [],
+            "internal_signals": [],
+            "behavior": [
+                "sync_rst_o must follow assertion of async_rst_i immediately.",
+                "sync_rst_o may release only after clk has observed a safe deassert.",
+                "CHAINS is the release-pipeline depth.",
+                "RST_POL is 1 for active-high async_rst_i.",
+                "After a completed release, sync_rst_o is inactive."
+            ]
+        },
+        {
+            "Top_module_name": "sync_chain",
+            "function": "Synchronization chain for reset deassertion",
+            "parameters": [
+                {
+                    "name": "CHAINS",
+                    "value": 2
+                },
+                {
+                    "name": "RST_POL",
+                    "value": 1
+                }
+            ],
+            "ports": [
+                {
+                    "name": "clk",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "async_rst_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "async"
+                },
+                {
+                    "name": "sync_rst_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {
+                    "name": "rst_chain",
+                    "width": "CHAINS"
+                }
+            ],
+            "behavior": [
+                "rst_chain[0] is driven by async_rst_i.",
+                "rst_chain[i] is driven by rst_chain[i-1] for i = 1 to CHAINS-1.",
+                "sync_rst_o is driven by rst_chain[CHAINS-1].",
+                "sync_rst_o is active when any bit in rst_chain is set, ensuring immediate assertion.",
+                "sync_rst_o is deasserted only when all bits in rst_chain are cleared, ensuring safe deassertion."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module areset_deassert_sync #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    wire sync_rst_o_int;
+
+    sync_chain #(
+        .CHAINS(CHAINS),
+        .RST_POL(RST_POL)
+    ) sync_chain_inst (
+        .clk(clk),
+        .async_rst_i(async_rst_i),
+        .sync_rst_o(sync_rst_o_int)
+    );
+
+    assign sync_rst_o = sync_rst_o_int;
+
+endmodule
+
+module sync_chain #(
+    parameter CHAINS = 2,
+    parameter RST_POL = 1'b1
+)(
+    input  clk,
+    input  async_rst_i,
+    output sync_rst_o
+);
+
+    reg [CHAINS-1:0] rst_chain;
+
+    always @(posedge clk or posedge async_rst_i) begin
+        if (RST_POL && async_rst_i) begin
+            rst_chain <= {CHAINS{1'b1}};
+        end else begin
+            rst_chain <= {rst_chain[CHAINS-2:0], 1'b0};
+        end
+    end
+
+    assign sync_rst_o = |rst_chain;
+
+endmodule
+```

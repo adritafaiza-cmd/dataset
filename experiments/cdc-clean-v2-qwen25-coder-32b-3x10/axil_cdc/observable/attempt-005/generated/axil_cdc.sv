@@ -1,0 +1,234 @@
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // Slave to Master FIFO for Write Address Channel
+    reg [ADDR_WIDTH-1:0] s_awaddr_fifo [0:1];
+    reg [2:0] s_awprot_fifo [0:1];
+    reg s_awvalid_fifo [0:1];
+    reg [1:0] s_awfifo_wr_ptr;
+    reg [1:0] s_awfifo_rd_ptr;
+    reg s_awfifo_full;
+    reg s_awfifo_empty;
+
+    // Slave to Master FIFO for Write Data Channel
+    reg [DATA_WIDTH-1:0] s_wdata_fifo [0:1];
+    reg [STRB_WIDTH-1:0] s_wstrb_fifo [0:1];
+    reg s_wvalid_fifo [0:1];
+    reg [1:0] s_wfifo_wr_ptr;
+    reg [1:0] s_wfifo_rd_ptr;
+    reg s_wfifo_full;
+    reg s_wfifo_empty;
+
+    // Master to Slave FIFO for Write Response Channel
+    reg [1:0] m_bresp_fifo [0:1];
+    reg m_bvalid_fifo [0:1];
+    reg [1:0] m_bfifo_wr_ptr;
+    reg [1:0] m_bfifo_rd_ptr;
+    reg m_bfifo_full;
+    reg m_bfifo_empty;
+
+    // Slave to Master FIFO for Read Address Channel
+    reg [ADDR_WIDTH-1:0] s_araddr_fifo [0:1];
+    reg [2:0] s_arprot_fifo [0:1];
+    reg s_arvalid_fifo [0:1];
+    reg [1:0] s_arfifo_wr_ptr;
+    reg [1:0] s_arfifo_rd_ptr;
+    reg s_arfifo_full;
+    reg s_arfifo_empty;
+
+    // Master to Slave FIFO for Read Data Channel
+    reg [DATA_WIDTH-1:0] m_rdata_fifo [0:1];
+    reg [1:0] m_rresp_fifo [0:1];
+    reg m_rvalid_fifo [0:1];
+    reg [1:0] m_rfifo_wr_ptr;
+    reg [1:0] m_rfifo_rd_ptr;
+    reg m_rfifo_full;
+    reg m_rfifo_empty;
+
+    // FIFO control logic for Write Address Channel
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_awfifo_wr_ptr <= 2'b00;
+            s_awfifo_rd_ptr <= 2'b00;
+        end else begin
+            if (s_axil_awvalid && !s_awfifo_full && m_axil_awready) begin
+                s_awaddr_fifo[s_awfifo_wr_ptr] <= s_axil_awaddr;
+                s_awprot_fifo[s_awfifo_wr_ptr] <= s_axil_awprot;
+                s_awvalid_fifo[s_awfifo_wr_ptr] <= 1'b1;
+                s_awfifo_wr_ptr <= s_awfifo_wr_ptr + 1'b1;
+            end
+            if (m_axil_awvalid && m_axil_awready) begin
+                s_awvalid_fifo[s_awfifo_rd_ptr] <= 1'b0;
+                s_awfifo_rd_ptr <= s_awfifo_rd_ptr + 1'b1;
+            end
+        end
+    end
+
+    assign s_awfifo_full = (s_awfifo_wr_ptr == s_awfifo_rd_ptr + 1'b1);
+    assign s_awfifo_empty = (s_awfifo_wr_ptr == s_awfifo_rd_ptr);
+
+    // FIFO control logic for Write Data Channel
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_wfifo_wr_ptr <= 2'b00;
+            s_wfifo_rd_ptr <= 2'b00;
+        end else begin
+            if (s_axil_wvalid && !s_wfifo_full && m_axil_wready) begin
+                s_wdata_fifo[s_wfifo_wr_ptr] <= s_axil_wdata;
+                s_wstrb_fifo[s_wfifo_wr_ptr] <= s_axil_wstrb;
+                s_wvalid_fifo[s_wfifo_wr_ptr] <= 1'b1;
+                s_wfifo_wr_ptr <= s_wfifo_wr_ptr + 1'b1;
+            end
+            if (m_axil_wvalid && m_axil_wready) begin
+                s_wvalid_fifo[s_wfifo_rd_ptr] <= 1'b0;
+                s_wfifo_rd_ptr <= s_wfifo_rd_ptr + 1'b1;
+            end
+        end
+    end
+
+    assign s_wfifo_full = (s_wfifo_wr_ptr == s_wfifo_rd_ptr + 1'b1);
+    assign s_wfifo_empty = (s_wfifo_wr_ptr == s_wfifo_rd_ptr);
+
+    // FIFO control logic for Write Response Channel
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_bfifo_wr_ptr <= 2'b00;
+            m_bfifo_rd_ptr <= 2'b00;
+        end else begin
+            if (m_axil_bvalid && !m_bfifo_full && s_axil_bready) begin
+                m_bresp_fifo[m_bfifo_wr_ptr] <= m_axil_bresp;
+                m_bvalid_fifo[m_bfifo_wr_ptr] <= 1'b1;
+                m_bfifo_wr_ptr <= m_bfifo_wr_ptr + 1'b1;
+            end
+            if (s_axil_bvalid && s_axil_bready) begin
+                m_bvalid_fifo[m_bfifo_rd_ptr] <= 1'b0;
+                m_bfifo_rd_ptr <= m_bfifo_rd_ptr + 1'b1;
+            end
+        end
+    end
+
+    assign m_bfifo_full = (m_bfifo_wr_ptr == m_bfifo_rd_ptr + 1'b1);
+    assign m_bfifo_empty = (m_bfifo_wr_ptr == m_bfifo_rd_ptr);
+
+    // FIFO control logic for Read Address Channel
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_arfifo_wr_ptr <= 2'b00;
+            s_arfifo_rd_ptr <= 2'b00;
+        end else begin
+            if (s_axil_arvalid && !s_arfifo_full && m_axil_arready) begin
+                s_araddr_fifo[s_arfifo_wr_ptr] <= s_axil_araddr;
+                s_arprot_fifo[s_arfifo_wr_ptr] <= s_axil_arprot;
+                s_arvalid_fifo[s_arfifo_wr_ptr] <= 1'b1;
+                s_arfifo_wr_ptr <= s_arfifo_wr_ptr + 1'b1;
+            end
+            if (m_axil_arvalid && m_axil_arready) begin
+                s_arvalid_fifo[s_arfifo_rd_ptr] <= 1'b0;
+                s_arfifo_rd_ptr <= s_arfifo_rd_ptr + 1'b1;
+            end
+        end
+    end
+
+    assign s_arfifo_full = (s_arfifo_wr_ptr == s_arfifo_rd_ptr + 1'b1);
+    assign s_arfifo_empty = (s_arfifo_wr_ptr == s_arfifo_rd_ptr);
+
+    // FIFO control logic for Read Data Channel
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rfifo_wr_ptr <= 2'b00;
+            m_rfifo_rd_ptr <= 2'b00;
+        end else begin
+            if (m_axil_rvalid && !m_rfifo_full && s_axil_rready) begin
+                m_rdata_fifo[m_rfifo_wr_ptr] <= m_axil_rdata;
+                m_rresp_fifo[m_rfifo_wr_ptr] <= m_axil_rresp;
+                m_rvalid_fifo[m_rfifo_wr_ptr] <= 1'b1;
+                m_rfifo_wr_ptr <= m_rfifo_wr_ptr + 1'b1;
+            end
+            if (s_axil_rvalid && s_axil_rready) begin
+                m_rvalid_fifo[m_rfifo_rd_ptr] <= 1'b0;
+                m_rfifo_rd_ptr <= m_rfifo_rd_ptr + 1'b1;
+            end
+        end
+    end
+
+    assign m_rfifo_full = (m_rfifo_wr_ptr == m_rfifo_rd_ptr + 1'b1);
+    assign m_rfifo_empty = (m_rfifo_wr_ptr == m_rfifo_rd_ptr);
+
+    // AXI Lite Slave Interface
+    assign s_axil_awready = !s_awfifo_full;
+    assign s_axil_wready = !s_wfifo_full;
+    assign s_axil_bresp = m_bresp_fifo[s_awfifo_rd_ptr];
+    assign s_axil_bvalid = m_bvalid_fifo[s_awfifo_rd_ptr];
+    assign s_axil_arready = !s_arfifo_full;
+    assign s_axil_rdata = m_rdata_fifo[s_arfifo_rd_ptr];
+    assign s_axil_rresp = m_rresp_fifo[s_arfifo_rd_ptr];
+    assign s_axil_rvalid = m_rvalid_fifo[s_arfifo_rd_ptr];
+
+    // AXI Lite Master Interface
+    assign m_axil_awaddr = s_awaddr_fifo[m_awfifo_wr_ptr];
+    assign m_axil_awprot = s_awprot_fifo[m_awfifo_wr_ptr];
+    assign m_axil_awvalid = s_awvalid_fifo[m_awfifo_wr_ptr];
+    assign m_axil_wdata = s_wdata_fifo[m_wfifo_wr_ptr];
+    assign m_axil_wstrb = s_wstrb_fifo[m_wfifo_wr_ptr];
+    assign m_axil_wvalid = s_wvalid_fifo[m_wfifo_wr_ptr];
+    assign m_axil_bready = !m_bfifo_full;
+    assign m_axil_araddr = s_araddr_fifo[m_arfifo_wr_ptr];
+    assign m_axil_arprot = s_arprot_fifo[m_arfifo_wr_ptr];
+    assign m_axil_arvalid = s_arvalid_fifo[m_arfifo_wr_ptr];
+    assign m_axil_rready = !m_rfifo_full;
+
+endmodule

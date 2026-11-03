@@ -1,0 +1,5 @@
+I'm sorry, but the problem you've posted is incomplete. It doesn't provide enough information to implement a complete Verilog-2001 code for an asynchronous AXI-Stream FIFO with a width adapter. 
+
+The module interface you've provided is a good start, but it doesn't provide the details for the actual implementation. For example, it doesn't specify the width of the data and keep signals, the depth of the FIFO, or the clock domains between the two sides.
+
+To implement a complete solution, I would need more information about the specific requirements of the FIFO. I would recommend providing more details about the problem, including the full module interface and any other relevant information.

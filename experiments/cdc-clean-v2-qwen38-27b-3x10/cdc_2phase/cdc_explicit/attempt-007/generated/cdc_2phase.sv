@@ -1,0 +1,97 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain: hold data and generate request
+  reg [WIDTH-1:0] src_data_hold;
+  reg             src_req;
+  reg             src_ack_sync;
+  reg             src_ack_sync2;
+
+  // Destination domain: synchronize request, hold data, generate ack
+  reg             dst_req_sync;
+  reg             dst_req_sync2;
+  reg             dst_ack;
+  reg             dst_ack_sync;
+  reg             dst_ack_sync2;
+  reg [WIDTH-1:0] dst_data_hold;
+  reg             dst_valid;
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_hold <= {WIDTH{1'b0}};
+      src_req       <= 1'b0;
+      src_ack_sync  <= 1'b0;
+      src_ack_sync2 <= 1'b0;
+    end else begin
+      // Synchronize ack from destination
+      src_ack_sync  <= dst_ack;
+      src_ack_sync2 <= src_ack_sync;
+
+      // If no outstanding request or ack received, can accept new data
+      if (!src_req || src_ack_sync2) begin
+        if (src_valid_i) begin
+          src_data_hold <= src_data_i;
+          src_req       <= 1'b1;
+        end
+      end
+    end
+  end
+
+  // Source ready: can accept if no outstanding request or ack has been received
+  assign src_ready_o = !src_req || src_ack_sync2;
+
+  // Destination domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req_sync  <= 1'b0;
+      dst_req_sync2 <= 1'b0;
+      dst_ack       <= 1'b0;
+      dst_ack_sync  <= 1'b0;
+      dst_ack_sync2 <= 1'b0;
+      dst_data_hold <= {WIDTH{1'b0}};
+      dst_valid     <= 1'b0;
+    end else begin
+      // Synchronize request from source
+      dst_req_sync  <= src_req;
+      dst_req_sync2 <= dst_req_sync;
+
+      // Synchronize ack to source
+      dst_ack_sync  <= dst_ack;
+      dst_ack_sync2 <= dst_ack_sync;
+
+      // When request is detected (synchronized), capture data and assert valid
+      if (dst_req_sync2 && !dst_valid) begin
+        dst_data_hold <= src_data_hold;
+        dst_valid     <= 1'b1;
+      end
+
+      // When valid and ready, complete transfer and assert ack
+      if (dst_valid && dst_ready_i) begin
+        dst_valid <= 1'b0;
+        dst_ack   <= 1'b1;
+      end
+
+      // Deassert ack when source has acknowledged (src_req goes low)
+      if (!dst_req_sync2) begin
+        dst_ack <= 1'b0;
+      end
+    end
+  end
+
+  assign dst_data_o  = dst_data_hold;
+  assign dst_valid_o = dst_valid;
+
+endmodule

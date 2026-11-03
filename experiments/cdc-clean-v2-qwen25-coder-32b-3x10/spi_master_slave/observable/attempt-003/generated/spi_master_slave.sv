@@ -1,0 +1,118 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // Internal signals
+    reg [N-1:0]        shift_reg;
+    reg [3:0]          bit_cnt;
+    reg                spi_busy;
+    reg [N-1:0]        di_i_sync;
+    reg                wren_i_sync;
+    reg                spi_start;
+    reg [1:0]          sclk_div_cnt;
+    reg                sclk_edge;
+
+    // Synchronize di_i and wren_i from pclk_i domain to sclk_i domain
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_i_sync <= 0;
+            wren_i_sync <= 0;
+        end else begin
+            di_i_sync <= di_i;
+            wren_i_sync <= wren_i;
+        end
+    end
+
+    // SPI clock divider and edge detection
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sclk_div_cnt <= 0;
+            sclk_edge <= 0;
+        end else begin
+            if (sclk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                sclk_div_cnt <= 0;
+                sclk_edge <= ~sclk_edge;
+            end else begin
+                sclk_div_cnt <= sclk_div_cnt + 1;
+            end
+        end
+    end
+
+    // SPI control logic
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_ssel_o <= 1;
+            spi_sck_o <= 0;
+            spi_busy <= 0;
+            bit_cnt <= 0;
+            shift_reg <= 0;
+            wr_ack_o <= 0;
+            do_valid_o <= 0;
+            do_o <= 0;
+            spi_start <= 0;
+        end else begin
+            wr_ack_o <= 0;
+            do_valid_o <= 0;
+
+            if (!spi_busy && wren_i_sync) begin
+                spi_start <= 1;
+            end
+
+            if (spi_start) begin
+                spi_ssel_o <= 0;
+                spi_busy <= 1;
+                shift_reg <= di_i_sync;
+                bit_cnt <= N - 1;
+                spi_start <= 0;
+            end
+
+            if (spi_busy) begin
+                if (sclk_edge) begin
+                    spi_sck_o <= 1;
+                    spi_mosi_o <= shift_reg[bit_cnt];
+                end else begin
+                    spi_sck_o <= 0;
+                    if (bit_cnt == 0) begin
+                        spi_busy <= 0;
+                        spi_ssel_o <= 1;
+                        do_o <= shift_reg;
+                        do_valid_o <= 1;
+                    end else begin
+                        bit_cnt <= bit_cnt - 1;
+                        shift_reg <= {shift_reg[N-2:0], spi_miso_i};
+                    end
+                end
+            end
+        end
+    end
+
+    // Parallel-side request logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_o <= 1;
+        end else begin
+            if (do_valid_o) begin
+                di_req_o <= 1;
+            end else if (wren_i && !spi_busy) begin
+                di_req_o <= 0;
+                wr_ack_o <= 1;
+            end
+        end
+    end
+
+endmodule

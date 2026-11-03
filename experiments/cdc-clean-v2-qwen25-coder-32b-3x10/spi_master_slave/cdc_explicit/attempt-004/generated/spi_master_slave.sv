@@ -1,0 +1,195 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // Internal signals
+    reg [N-1:0]        shift_reg;
+    reg [N-1:0]        rx_data;
+    reg [3:0]          bit_cnt;
+    reg                tx_start;
+    reg                rx_done;
+    reg                tx_done;
+    reg                sclk_en;
+    reg                pclk_en;
+    reg                sclk_rst;
+    reg                pclk_rst;
+    reg                sclk_rst_sync;
+    reg                pclk_rst_sync;
+    reg                sclk_rst_sync2;
+    reg                pclk_rst_sync2;
+    reg                sclk_en_sync;
+    reg                pclk_en_sync;
+    reg                sclk_en_sync2;
+    reg                pclk_en_sync2;
+    reg                wren_sync;
+    reg                wren_sync2;
+    reg                wren_sync3;
+    reg                di_req_sync;
+    reg                di_req_sync2;
+    reg                di_req_sync3;
+
+    // Reset synchronization
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sclk_rst_sync <= 1'b1;
+            sclk_rst_sync2 <= 1'b1;
+        end else begin
+            sclk_rst_sync <= 1'b0;
+            sclk_rst_sync2 <= sclk_rst_sync;
+        end
+    end
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            pclk_rst_sync <= 1'b1;
+            pclk_rst_sync2 <= 1'b1;
+        end else begin
+            pclk_rst_sync <= 1'b0;
+            pclk_rst_sync2 <= pclk_rst_sync;
+        end
+    end
+
+    // Enable synchronization
+    always @(posedge sclk_i or posedge sclk_rst_sync2) begin
+        if (sclk_rst_sync2) begin
+            sclk_en_sync <= 1'b0;
+            sclk_en_sync2 <= 1'b0;
+        end else begin
+            sclk_en_sync <= sclk_en;
+            sclk_en_sync2 <= sclk_en_sync;
+        end
+    end
+
+    always @(posedge pclk_i or posedge pclk_rst_sync2) begin
+        if (pclk_rst_sync2) begin
+            pclk_en_sync <= 1'b0;
+            pclk_en_sync2 <= 1'b0;
+        end else begin
+            pclk_en_sync <= pclk_en;
+            pclk_en_sync2 <= pclk_en_sync;
+        end
+    end
+
+    // wren synchronization
+    always @(posedge pclk_i or posedge pclk_rst_sync2) begin
+        if (pclk_rst_sync2) begin
+            wren_sync <= 1'b0;
+            wren_sync2 <= 1'b0;
+            wren_sync3 <= 1'b0;
+        end else begin
+            wren_sync <= wren_i;
+            wren_sync2 <= wren_sync;
+            wren_sync3 <= wren_sync2;
+        end
+    end
+
+    // di_req synchronization
+    always @(posedge sclk_i or posedge sclk_rst_sync2) begin
+        if (sclk_rst_sync2) begin
+            di_req_sync <= 1'b0;
+            di_req_sync2 <= 1'b0;
+            di_req_sync3 <= 1'b0;
+        end else begin
+            di_req_sync <= di_req_o;
+            di_req_sync2 <= di_req_sync;
+            di_req_sync3 <= di_req_sync2;
+        end
+    end
+
+    // SPI clock enable generation
+    reg [1:0] sclk_div_cnt;
+    always @(posedge sclk_i or posedge sclk_rst_sync2) begin
+        if (sclk_rst_sync2) begin
+            sclk_div_cnt <= 2'b00;
+            sclk_en <= 1'b0;
+        end else begin
+            if (sclk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                sclk_div_cnt <= 2'b00;
+                sclk_en <= ~sclk_en;
+            end else begin
+                sclk_div_cnt <= sclk_div_cnt + 1;
+            end
+        end
+    end
+
+    // SPI control logic
+    always @(posedge sclk_i or posedge sclk_rst_sync2) begin
+        if (sclk_rst_sync2) begin
+            spi_ssel_o <= 1'b1;
+            spi_sck_o <= 1'b0;
+            spi_mosi_o <= 1'b0;
+            bit_cnt <= 4'b0000;
+            tx_start <= 1'b0;
+            rx_done <= 1'b0;
+            tx_done <= 1'b0;
+            wr_ack_o <= 1'b0;
+            do_valid_o <= 1'b0;
+            shift_reg <= {N{1'b0}};
+            rx_data <= {N{1'b0}};
+        end else begin
+            if (sclk_en_sync2) begin
+                if (tx_start && (bit_cnt == N)) begin
+                    tx_done <= 1'b1;
+                    rx_done <= 1'b1;
+                    tx_start <= 1'b0;
+                end else if (tx_start) begin
+                    spi_mosi_o <= shift_reg[N-1];
+                    shift_reg <= {shift_reg[N-2:0], 1'b0};
+                    bit_cnt <= bit_cnt + 1;
+                end else if (wren_sync3 && !di_req_sync3) begin
+                    shift_reg <= di_i;
+                    bit_cnt <= 4'b0000;
+                    tx_start <= 1'b1;
+                    wr_ack_o <= 1'b1;
+                end else begin
+                    wr_ack_o <= 1'b0;
+                end
+
+                if (rx_done) begin
+                    do_o <= rx_data;
+                    do_valid_o <= 1'b1;
+                    rx_done <= 1'b0;
+                end else begin
+                    do_valid_o <= 1'b0;
+                end
+
+                if (tx_done) begin
+                    tx_done <= 1'b0;
+                    di_req_o <= 1'b1;
+                end else if (di_req_sync3) begin
+                    di_req_o <= 1'b0;
+                end
+
+                spi_sck_o <= sclk_en;
+                spi_ssel_o <= ~tx_start;
+            end
+        end
+    end
+
+    // MISO capture
+    always @(posedge sclk_i or posedge sclk_rst_sync2) begin
+        if (sclk_rst_sync2) begin
+            rx_data <= {N{1'b0}};
+        end else begin
+            if (sclk_en_sync2 && tx_start && (bit_cnt < N)) begin
+                rx_data <= {rx_data[N-2:0], spi_miso_i};
+            end
+        end
+    end
+
+endmodule

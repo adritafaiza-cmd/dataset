@@ -1,0 +1,141 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // Internal signals
+    reg [N-1:0]        shift_reg;
+    reg [N-1:0]        miso_reg;
+    reg [3:0]          bit_cnt;
+    reg                shift_en;
+    reg                shift_done;
+    reg                wr_ack_pclk;
+    reg                di_req_pclk;
+    reg                do_valid_pclk;
+    reg [N-1:0]        do_o_pclk;
+
+    // Synchronizers for reset and control signals
+    reg                rst_sync_sclk;
+    reg                rst_sync_pclk;
+    reg                wren_sync_sclk;
+
+    // Synchronizer for reset in sclk domain
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            rst_sync_sclk <= 1'b1;
+        end else begin
+            rst_sync_sclk <= 1'b0;
+        end
+    end
+
+    // Synchronizer for reset in pclk domain
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            rst_sync_pclk <= 1'b1;
+        end else begin
+            rst_sync_pclk <= 1'b0;
+        end
+    end
+
+    // Synchronizer for wren_i in sclk domain
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            wren_sync_sclk <= 1'b0;
+        end else begin
+            wren_sync_sclk <= wren_i;
+        end
+    end
+
+    // SPI control logic in sclk domain
+    always @(posedge sclk_i or posedge rst_sync_sclk) begin
+        if (rst_sync_sclk) begin
+            spi_ssel_o <= 1'b0;
+            spi_sck_o <= 1'b0;
+            shift_reg <= {N{1'b0}};
+            miso_reg <= {N{1'b0}};
+            bit_cnt <= 4'b0;
+            shift_en <= 1'b0;
+            shift_done <= 1'b0;
+        end else begin
+            if (wren_sync_sclk && !shift_en) begin
+                shift_reg <= di_i;
+                bit_cnt <= N-1;
+                shift_en <= 1'b1;
+                spi_ssel_o <= 1'b1;
+            end else if (shift_en) begin
+                if (bit_cnt == 0) begin
+                    shift_en <= 1'b0;
+                    shift_done <= 1'b1;
+                    spi_ssel_o <= 1'b0;
+                end else begin
+                    bit_cnt <= bit_cnt - 1;
+                end
+            end
+
+            // SPI clock generation
+            spi_sck_o <= (shift_en && (bit_cnt[0] ^ (SPI_2X_CLK_DIV == 2)));
+
+            // MOSI output
+            spi_mosi_o <= shift_reg[N-1];
+
+            // Shift register update
+            if (shift_en) begin
+                shift_reg <= {shift_reg[N-2:0], 1'b0};
+            end
+
+            // MISO capture
+            if (shift_en && spi_sck_o) begin
+                miso_reg <= {miso_reg[N-2:0], spi_miso_i};
+            end
+        end
+    end
+
+    // Control signals synchronization and handshake logic in pclk domain
+    always @(posedge pclk_i or posedge rst_sync_pclk) begin
+        if (rst_sync_pclk) begin
+            wr_ack_o <= 1'b0;
+            di_req_o <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o <= {N{1'b0}};
+            wr_ack_pclk <= 1'b0;
+            di_req_pclk <= 1'b0;
+            do_valid_pclk <= 1'b0;
+            do_o_pclk <= {N{1'b0}};
+        end else begin
+            // Write acknowledge
+            wr_ack_o <= wr_ack_pclk;
+            wr_ack_pclk <= shift_done;
+
+            // Data request
+            di_req_o <= di_req_pclk;
+            di_req_pclk <= !wren_i && !shift_en;
+
+            // Data valid and output
+            do_valid_o <= do_valid_pclk;
+            do_o <= do_o_pclk;
+            if (shift_done) begin
+                do_valid_pclk <= 1'b1;
+                do_o_pclk <= miso_reg;
+            end else if (do_valid_pclk) begin
+                do_valid_pclk <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

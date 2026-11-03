@@ -1,0 +1,110 @@
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWIDTH = ASIZE + 1;
+
+    reg [DSIZE-1:0] mem [DEPTH-1:0];
+
+    reg [AWIDTH-1:0] wptr, rptr;
+    reg [AWIDTH-1:0] wptr_gray, rptr_gray;
+    reg [AWIDTH-1:0] rptr_gray_synced, wptr_gray_synced;
+
+    // Binary to Gray conversion
+    function [AWIDTH-1:0] bin_to_gray;
+        input [AWIDTH-1:0] bin;
+        bin_to_gray = bin ^ (bin >> 1);
+    endfunction
+
+    // Gray to Binary conversion
+    function [AWIDTH-1:0] gray_to_bin;
+        input [AWIDTH-1:0] gray;
+        integer i;
+        reg [AWIDTH-1:0] bin;
+        bin = gray;
+        for (i = AWIDTH-2; i >= 0; i = i - 1) begin
+            bin[i] = bin[i+1] ^ gray[i];
+        end
+        gray_to_bin = bin;
+    endfunction
+
+    // Write side logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= 0;
+            wptr_gray <= 0;
+        end else if (winc && !wfull) begin
+            mem[wptr[ASIZE-1:0]] <= wdata;
+            wptr <= wptr + 1;
+            wptr_gray <= bin_to_gray(wptr + 1);
+        end
+    end
+
+    // Read side logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= 0;
+            rptr_gray <= 0;
+        end else if (rinc && !rempty) begin
+            rptr <= rptr + 1;
+            rptr_gray <= bin_to_gray(rptr + 1);
+        end
+    end
+
+    // Cross-domain synchronization for read pointer
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_synced <= 0;
+        end else begin
+            rptr_gray_synced <= rptr_gray;
+        end
+    end
+
+    // Cross-domain synchronization for write pointer
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_gray_synced <= 0;
+        end else begin
+            wptr_gray_synced <= wptr_gray;
+        end
+    end
+
+    // Calculate full and empty flags
+    wire [AWIDTH-1:0] wptr_synced, rptr_synced;
+    assign wptr_synced = gray_to_bin(wptr_gray_synced);
+    assign rptr_synced = gray_to_bin(rptr_gray_synced);
+
+    assign wfull = (wptr_synced[AWIDTH-1] != rptr_synced[AWIDTH-1]) && (wptr_synced[ASIZE-1:0] == rptr_synced[ASIZE-1:0]);
+    assign rempty = (wptr_synced[AWIDTH-1] == rptr_synced[AWIDTH-1]) && (wptr_synced[ASIZE-1:0] == rptr_synced[ASIZE-1:0]);
+
+    // Almost full and almost empty flags
+    assign awfull = (wptr_synced[AWIDTH-1] != rptr_synced[AWIDTH-1]) && (wptr_synced[ASIZE-1:0] == (rptr_synced[ASIZE-1:0] + 1));
+    assign arempty = (wptr_synced[AWIDTH-1] == rptr_synced[AWIDTH-1]) && (wptr_synced[ASIZE-1:0] == (rptr_synced[ASIZE-1:0] - 1));
+
+    // Read data output
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rdata <= 0;
+        end else if (rinc && !rempty) begin
+            rdata <= mem[rptr[ASIZE-1:0]];
+        end
+    end
+
+endmodule

@@ -1,0 +1,280 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    // FIFO signals
+    reg [ADDR_WIDTH-1:0]       fifo_addr;
+    reg [DATA_WIDTH-1:0]       fifo_wdata;
+    reg [DATA_WIDTH/8-1:0]     fifo_strb;
+    reg [2:0]                  fifo_prot;
+    reg                        fifo_wren;
+    reg                        fifo_rden;
+    reg                        fifo_empty;
+    reg                        fifo_full;
+
+    // Synchronization signals
+    reg                        src_req_sync;
+    reg                        src_req_sync2;
+    reg                        dst_req_sync;
+    reg                        dst_req_sync2;
+    reg                        src_ack_sync;
+    reg                        src_ack_sync2;
+    reg                        dst_ack_sync;
+    reg                        dst_ack_sync2;
+
+    // Source side logic
+    reg                        src_req;
+    reg                        src_req_reg;
+    reg                        src_ack;
+    reg                        src_ack_reg;
+
+    // Destination side logic
+    reg                        dst_req;
+    reg                        dst_req_reg;
+    reg                        dst_ack;
+    reg                        dst_ack_reg;
+
+    // FIFO instantiation
+    fifo_sync #(
+        .DATA_WIDTH(ADDR_WIDTH + DATA_WIDTH + DATA_WIDTH/8 + 3),
+        .LOG_DEPTH(LOG_DEPTH)
+    ) u_fifo (
+        .clk_i(src_pclk_i),
+        .rst_ni(src_preset_ni),
+        .wren_i(fifo_wren),
+        .rden_i(fifo_rden),
+        .data_i({src_paddr_i, src_pwdata_i, src_pstrb_i, src_pprot_i}),
+        .data_o({fifo_addr, fifo_wdata, fifo_strb, fifo_prot}),
+        .empty_o(fifo_empty),
+        .full_o(fifo_full)
+    );
+
+    // Source side request handling
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_req <= 0;
+            src_req_reg <= 0;
+        end else begin
+            if (src_psel_i && src_penable_i && !fifo_full) begin
+                src_req <= 1;
+            end else begin
+                src_req <= 0;
+            end
+            src_req_reg <= src_req;
+        end
+    end
+
+    // Source side FIFO write enable
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            fifo_wren <= 0;
+        end else begin
+            fifo_wren <= src_req && !src_req_reg;
+        end
+    end
+
+    // Source side acknowledgment handling
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_ack <= 0;
+            src_ack_reg <= 0;
+        end else begin
+            if (src_ack_sync2 && !src_ack_reg) begin
+                src_ack <= 1;
+            end else begin
+                src_ack <= 0;
+            end
+            src_ack_reg <= src_ack;
+        end
+    end
+
+    // Source side ready signal
+    assign src_pready_o = src_ack;
+
+    // Source side data output
+    assign src_prdata_o = dst_prdata_i;
+    assign src_pslverr_o = dst_pslverr_i;
+
+    // Destination side request handling
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_req <= 0;
+            dst_req_reg <= 0;
+        end else begin
+            if (!fifo_empty) begin
+                dst_req <= 1;
+            end else begin
+                dst_req <= 0;
+            end
+            dst_req_reg <= dst_req;
+        end
+    end
+
+    // Destination side FIFO read enable
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            fifo_rden <= 0;
+        end else begin
+            fifo_rden <= dst_req && !dst_req_reg && dst_pready_i;
+        end
+    end
+
+    // Destination side acknowledgment handling
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_ack <= 0;
+            dst_ack_reg <= 0;
+        end else begin
+            if (dst_pready_i && dst_req) begin
+                dst_ack <= 1;
+            end else begin
+                dst_ack <= 0;
+            end
+            dst_ack_reg <= dst_ack;
+        end
+    end
+
+    // Destination side output signals
+    assign dst_psel_o = dst_req;
+    assign dst_penable_o = dst_req;
+    assign dst_pwrite_o = src_pwrite_i;
+    assign dst_paddr_o = fifo_addr;
+    assign dst_pwdata_o = fifo_wdata;
+    assign dst_pstrb_o = fifo_strb;
+    assign dst_pprot_o = fifo_prot;
+
+    // Synchronization logic for request and acknowledgment
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_req_sync <= 0;
+            src_req_sync2 <= 0;
+        end else begin
+            src_req_sync <= dst_req;
+            src_req_sync2 <= src_req_sync;
+        end
+    end
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_req_sync <= 0;
+            dst_req_sync2 <= 0;
+        end else begin
+            dst_req_sync <= src_req;
+            dst_req_sync2 <= dst_req_sync;
+        end
+    end
+
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_ack_sync <= 0;
+            src_ack_sync2 <= 0;
+        end else begin
+            src_ack_sync <= dst_ack;
+            src_ack_sync2 <= src_ack_sync;
+        end
+    end
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_ack_sync <= 0;
+            dst_ack_sync2 <= 0;
+        end else begin
+            dst_ack_sync <= src_ack;
+            dst_ack_sync2 <= dst_ack_sync;
+        end
+    end
+
+endmodule
+
+// FIFO with synchronization
+module fifo_sync #(
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      clk_i,
+    input                      rst_ni,
+    input                      wren_i,
+    input                      rden_i,
+    input  [DATA_WIDTH-1:0]    data_i,
+    output [DATA_WIDTH-1:0]    data_o,
+    output                     empty_o,
+    output                     full_o
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+
+    reg [DATA_WIDTH-1:0]       mem [0:DEPTH-1];
+    reg [$clog2(DEPTH)-1:0]    wr_ptr;
+    reg [$clog2(DEPTH)-1:0]    rd_ptr;
+    reg [$clog2(DEPTH):0]      count;
+
+    // Write pointer and memory write
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            wr_ptr <= 0;
+        end else if (wren_i && !full_o) begin
+            mem[wr_ptr] <= data_i;
+            wr_ptr <= wr_ptr + 1;
+        end
+    end
+
+    // Read pointer and memory read
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            rd_ptr <= 0;
+        end else if (rden_i && !empty_o) begin
+            rd_ptr <= rd_ptr + 1;
+        end
+    end
+
+    // Count and flags
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            count <= 0;
+        end else begin
+            if (wren_i && !rden_i && !full_o) begin
+                count <= count + 1;
+            end else if (!wren_i && rden_i && !empty_o) begin
+                count <= count - 1;
+            end else if (wren_i && rden_i && !full_o && !empty_o) begin
+                count <= count;
+            end else if (wren_i && rden_i && full_o && empty_o) begin
+                count <= 0;
+            end
+        end
+    end
+
+    assign empty_o = (count == 0);
+    assign full_o = (count == DEPTH);
+
+    // Output data
+    assign data_o = mem[rd_ptr];
+
+endmodule

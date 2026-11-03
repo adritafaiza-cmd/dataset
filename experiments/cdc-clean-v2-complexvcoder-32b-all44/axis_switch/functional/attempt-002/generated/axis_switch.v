@@ -1,0 +1,192 @@
+module axis_switch #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter S_ID_WIDTH = 8,
+    parameter M_ID_WIDTH = S_ID_WIDTH+$clog2(S_COUNT),
+    parameter M_DEST_WIDTH = 1,
+    parameter S_DEST_WIDTH = M_DEST_WIDTH+$clog2(M_COUNT),
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter M_BASE = 0,
+    parameter M_TOP = 0,
+    parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
+    parameter UPDATE_TID = 0,
+    parameter S_REG_TYPE = 0,
+    parameter M_REG_TYPE = 2,
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 1
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    /*
+     * AXI Stream inputs
+     */
+    input  wire [S_COUNT*DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [S_COUNT*KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire [S_COUNT-1:0]               s_axis_tvalid,
+    output wire [S_COUNT-1:0]               s_axis_tready,
+    input  wire [S_COUNT-1:0]               s_axis_tlast,
+    input  wire [S_COUNT*S_ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [S_COUNT*USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI Stream outputs
+     */
+    output wire [M_COUNT*DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [M_COUNT*KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire [M_COUNT-1:0]               m_axis_tvalid,
+    input  wire [M_COUNT-1:0]               m_axis_tready,
+    output wire [M_COUNT-1:0]               m_axis_tlast,
+    output wire [M_COUNT*M_ID_WIDTH-1:0]    m_axis_tid,
+    output wire [M_COUNT*M_DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [M_COUNT*USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    /*
+     * Internal signals
+     */
+    wire [S_COUNT-1:0] req;
+    wire [M_COUNT-1:0] grant;
+    reg [S_COUNT-1:0]  grant_reg;
+    reg [M_COUNT-1:0]  valid_reg;
+    reg [M_COUNT-1:0]  last_reg;
+    reg [M_COUNT*M_ID_WIDTH-1:0]  tid_reg;
+    reg [M_COUNT*M_DEST_WIDTH-1:0]  dest_reg;
+    reg [M_COUNT*USER_WIDTH-1:0]  user_reg;
+    reg [M_COUNT*M_ID_WIDTH-1:0]  tid_next;
+    reg [M_COUNT*M_DEST_WIDTH-1:0]  dest_next;
+    reg [M_COUNT*USER_WIDTH-1:0]  user_next;
+    reg [M_COUNT*DATA_WIDTH-1:0]  data_next;
+    reg [M_COUNT*KEEP_WIDTH-1:0]  keep_next;
+
+    /*
+     * Request generation
+     */
+    genvar i;
+    generate
+        for (i = 0; i < S_COUNT; i = i + 1) begin : gen_req
+            assign req[i] = s_axis_tvalid[i] & ~valid_reg[s_axis_tdest[i]];
+        end
+    endgenerate
+
+    /*
+     * Round-robin arbiter
+     */
+    round_robin_arbiter #(
+        .WIDTH(S_COUNT)
+    ) u_rr_arbiter (
+        .clk(clk),
+        .rst(rst),
+        .req(req),
+        .grant(grant)
+    );
+
+    /*
+     * Grant register
+     */
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            grant_reg <= {S_COUNT{1'b0}};
+        end else begin
+            grant_reg <= grant;
+        end
+    end
+
+    /*
+     * Output data register
+     */
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            valid_reg <= {M_COUNT{1'b0}};
+            last_reg <= {M_COUNT{1'b0}};
+            tid_reg <= {M_COUNT*M_ID_WIDTH{1'b0}};
+            dest_reg <= {M_COUNT*M_DEST_WIDTH{1'b0}};
+            user_reg <= {M_COUNT*USER_WIDTH{1'b0}};
+            data_next <= {M_COUNT*DATA_WIDTH{1'b0}};
+            keep_next <= {M_COUNT*KEEP_WIDTH{1'b0}};
+        end else begin
+            for (int j = 0; j < M_COUNT; j = j + 1) begin
+                if (grant_reg[j]) begin
+                    valid_reg[j] <= 1'b1;
+                    last_reg[j] <= s_axis_tlast[j];
+                    if (USER_ENABLE) begin
+                        user_reg[j*USER_WIDTH +: USER_WIDTH] <= s_axis_tuser[j*USER_WIDTH +: USER_WIDTH];
+                    end
+                    if (ID_ENABLE) begin
+                        tid_reg[j*M_ID_WIDTH +: M_ID_WIDTH] <= s_axis_tid[j*S_ID_WIDTH +: S_ID_WIDTH];
+                    end
+                    dest_reg[j*M_DEST_WIDTH +: M_DEST_WIDTH] <= s_axis_tdest[j*S_DEST_WIDTH +: S_DEST_WIDTH];
+                    data_next[j*DATA_WIDTH +: DATA_WIDTH] <= s_axis_tdata[j*DATA_WIDTH +: DATA_WIDTH];
+                    keep_next[j*KEEP_WIDTH +: KEEP_WIDTH] <= s_axis_tkeep[j*KEEP_WIDTH +: KEEP_WIDTH];
+                end else if (m_axis_tready[j]) begin
+                    valid_reg[j] <= 1'b0;
+                end
+            end
+        end
+    end
+
+    /*
+     * Output assignments
+     */
+    assign m_axis_tvalid = valid_reg;
+    assign m_axis_tlast = last_reg;
+    assign m_axis_tdata = data_next;
+    assign m_axis_tkeep = keep_next;
+    assign m_axis_tuser = user_reg;
+    assign m_axis_tid = tid_reg;
+    assign m_axis_tdest = dest_reg;
+
+    /*
+     * Input ready signals
+     */
+    assign s_axis_tready = grant;
+
+endmodule
+
+module round_robin_arbiter #(
+    parameter WIDTH = 4
+)
+(
+    input  wire clk,
+    input  wire rst,
+    input  wire [WIDTH-1:0] req,
+    output reg [WIDTH-1:0] grant
+);
+
+    reg [$clog2(WIDTH)-1:0] ptr;
+    reg [WIDTH-1:0] req_d;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            ptr <= 0;
+            req_d <= 0;
+        end else begin
+            req_d <= req;
+        end
+    end
+
+    always @(*) begin
+        grant = 0;
+        for (int i = 0; i < WIDTH; i = i + 1) begin
+            if (req_d[(ptr + i) % WIDTH]) begin
+                grant[(ptr + i) % WIDTH] = 1;
+                break;
+            end
+        end
+        if (|grant) begin
+            for (int i = 0; i < WIDTH; i = i + 1) begin
+                if (grant[i]) begin
+                    ptr <= i;
+                    break;
+                end
+            end
+        end
+    end
+
+endmodule

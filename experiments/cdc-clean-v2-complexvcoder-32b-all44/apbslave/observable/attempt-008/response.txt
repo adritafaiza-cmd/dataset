@@ -1,0 +1,229 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "apbslave",
+      "function": "Implements a single-clock APB slave that supports ordinary setup and access phases, reads, and byte-strobed writes. Reset should leave it idle.",
+      "parameters": [
+        {
+          "name": "C_APB_ADDR_WIDTH",
+          "value": "12"
+        },
+        {
+          "name": "C_APB_DATA_WIDTH",
+          "value": "32"
+        }
+      ],
+      "ports": [
+        {
+          "name": "PCLK",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PRESETn",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PSEL",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PENABLE",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PREADY",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PADDR",
+          "direction": "input",
+          "width": "C_APB_ADDR_WIDTH",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PWRITE",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PWDATA",
+          "direction": "input",
+          "width": "C_APB_DATA_WIDTH",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PWSTRB",
+          "direction": "input",
+          "width": "C_APB_DATA_WIDTH/8",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PPROT",
+          "direction": "input",
+          "width": 3,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PRDATA",
+          "direction": "output",
+          "width": "C_APB_DATA_WIDTH",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PSLVERR",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "PCLK"
+        }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        {
+          "name": "AW",
+          "width": "C_APB_ADDR_WIDTH"
+        },
+        {
+          "name": "DW",
+          "width": "C_APB_DATA_WIDTH"
+        },
+        {
+          "name": "APBLSB",
+          "width": "$clog2(C_APB_DATA_WIDTH)-3"
+        },
+        {
+          "name": "state",
+          "width": 2
+        },
+        {
+          "name": "next_state",
+          "width": 2
+        },
+        {
+          "name": "read_data",
+          "width": "C_APB_DATA_WIDTH"
+        },
+        {
+          "name": "write_enable",
+          "width": 1
+        }
+      ],
+      "behavior": [
+        "Reset semantics: Active-low reset (PRESETn). On reset, the APB slave should be idle.",
+        "State transitions: The APB slave has two main states - IDLE and ACCESS. In the IDLE state, the slave waits for a selection signal (PSEL) and an enable signal (PENABLE). Upon receiving these signals, the state transitions to ACCESS.",
+        "Handshakes: The APB slave uses the PREADY signal to indicate readiness to the APB master. In the IDLE state, PREADY is low. In the ACCESS state, PREADY is high to acknowledge the transaction.",
+        "Reads: When PWRITE is low, the APB slave performs a read operation. The read data is driven on PRDATA during the ACCESS state.",
+        "Byte-strobed writes: When PWRITE is high, the APB slave performs a byte-strobed write operation. The write data (PWDATA) is written to the target address (PADDR) only where the corresponding byte strobe (PWSTRB) is high.",
+        "Protocol: The APB slave supports ordinary setup and access phases. The setup phase occurs when PSEL is high and PENABLE is low. The access phase occurs when both PSEL and PENABLE are high.",
+        "Error handling: The PSLVERR signal is always low, indicating no errors in this simplified implementation."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module apbslave #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH,
+		localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+	) (
+		input	wire			PCLK, PRESETn,
+		input	wire			PSEL,
+		input	wire			PENABLE,
+		output	reg			PREADY,
+		input	wire	[AW-1:0]	PADDR,
+		input	wire			PWRITE,
+		input	wire	[DW-1:0]	PWDATA,
+		input	wire	[DW/8-1:0]	PWSTRB,
+		input	wire	[2:0]		PPROT,
+		output	reg	[DW-1:0]	PRDATA,
+		output	wire			PSLVERR
+	);
+
+	// Internal signals
+	reg	[1:0]			state;
+	reg	[1:0]			next_state;
+	reg	[DW-1:0]		read_data;
+	reg				write_enable;
+
+	// States
+	localparam	IDLE = 2'b00;
+	localparam	ACCESS = 2'b01;
+
+	// Memory model (simplified)
+	reg [DW-1:0] memory [0:(1<<AW)-1];
+
+	// State transition logic
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			state <= IDLE;
+		end else begin
+			state <= next_state;
+		end
+	end
+
+	// Next state logic
+	always @(*) begin
+		next_state = state;
+		case (state)
+			IDLE: begin
+				if (PSEL && PENABLE) begin
+					next_state = ACCESS;
+				end
+			end
+			ACCESS: begin
+				next_state = IDLE;
+			end
+		endcase
+	end
+
+	// Output logic
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			PREADY <= 1'b0;
+			PRDATA <= 32'b0;
+			PSLVERR <= 1'b0;
+		end else begin
+			case (state)
+				IDLE: begin
+					PREADY <= 1'b0;
+				end
+				ACCESS: begin
+					PREADY <= 1'b1;
+					if (PWRITE) begin
+						// Byte-strobed write
+						for (integer i = 0; i < DW/8; i = i + 1) begin
+							if (PWSTRB[i]) begin
+								memory[PADDR][i*8 +: 8] <= PWDATA[i*8 +: 8];
+							end
+						end
+					end else begin
+						// Read
+						read_data <= memory[PADDR];
+					end
+				end
+			endcase
+			PRDATA <= read_data;
+			PSLVERR <= 1'b0;
+		end
+	end
+
+endmodule
+```

@@ -1,0 +1,144 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    reg [N-1:0] shift_reg;
+    reg [3:0]   bit_cnt;
+    reg         shift_en;
+    reg         sclk_div_cnt;
+    reg         sclk_edge;
+    reg         pclk_edge;
+    reg         data_loaded;
+    reg         data_valid;
+
+    // SCLK Divider
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sclk_div_cnt <= 0;
+        end else begin
+            if (sclk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                sclk_div_cnt <= 0;
+            end else begin
+                sclk_div_cnt <= sclk_div_cnt + 1;
+            end
+        end
+    end
+
+    // SCLK Edge Detection
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sclk_edge <= 0;
+        end else begin
+            if (sclk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                sclk_edge <= ~sclk_edge;
+            end
+        end
+    end
+
+    // PCLK Edge Detection
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            pclk_edge <= 0;
+        end else begin
+            pclk_edge <= ~pclk_edge;
+        end
+    end
+
+    // Shift Register Control
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            shift_reg <= 0;
+            bit_cnt <= 0;
+            shift_en <= 0;
+            data_loaded <= 0;
+            data_valid <= 0;
+        end else begin
+            if (sclk_edge) begin
+                if (shift_en) begin
+                    if (bit_cnt < N) begin
+                        shift_reg <= {shift_reg[N-2:0], spi_miso_i};
+                        bit_cnt <= bit_cnt + 1;
+                    end else begin
+                        shift_en <= 0;
+                        data_valid <= 1;
+                    end
+                end else begin
+                    if (data_loaded) begin
+                        shift_reg <= di_i;
+                        bit_cnt <= 0;
+                        shift_en <= 1;
+                        data_loaded <= 0;
+                    end
+                end
+            end
+        end
+    end
+
+    // Data Loading and Acknowledgment
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            wr_ack_o <= 0;
+            di_req_o <= 1;
+        end else begin
+            if (pclk_edge) begin
+                if (wren_i && di_req_o) begin
+                    data_loaded <= 1;
+                    wr_ack_o <= 1;
+                    di_req_o <= 0;
+                end else begin
+                    wr_ack_o <= 0;
+                end
+            end
+        end
+    end
+
+    // Data Output and Valid Signal
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            do_valid_o <= 0;
+            do_o <= 0;
+        end else begin
+            if (pclk_edge) begin
+                if (data_valid) begin
+                    do_o <= shift_reg;
+                    do_valid_o <= 1;
+                    data_valid <= 0;
+                    di_req_o <= 1;
+                end else begin
+                    do_valid_o <= 0;
+                end
+            end
+        end
+    end
+
+    // SPI Control Signals
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_ssel_o <= 0;
+            spi_sck_o <= 0;
+            spi_mosi_o <= 0;
+        end else begin
+            if (sclk_edge) begin
+                spi_ssel_o <= shift_en;
+                spi_sck_o <= sclk_edge;
+                spi_mosi_o <= shift_reg[N-1];
+            end
+        end
+    end
+
+endmodule

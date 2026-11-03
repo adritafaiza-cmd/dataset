@@ -1,0 +1,262 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "sync_wedge",
+      "function": "Bit synchronizer with edge detection",
+      "parameters": [
+        {
+          "name": "STAGES",
+          "value": 2
+        }
+      ],
+      "ports": [
+        {
+          "name": "clk_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_i"
+        },
+        {
+          "name": "rst_ni",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_i"
+        },
+        {
+          "name": "en_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_i"
+        },
+        {
+          "name": "serial_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "async"
+        },
+        {
+          "name": "r_edge_o",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "clk_i"
+        },
+        {
+          "name": "f_edge_o",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "clk_i"
+        },
+        {
+          "name": "serial_o",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "clk_i"
+        }
+      ],
+      "instances": [
+        {
+          "module": "sync_chain",
+          "name": "sync_chain_inst",
+          "function": "Synchronize the asynchronous bit into the clk_i domain",
+          "connections": [
+            {
+              "local": "clk_i",
+              "remote": "clk_i"
+            },
+            {
+              "local": "rst_ni",
+              "remote": "rst_ni"
+            },
+            {
+              "local": "serial_i",
+              "remote": "async_in"
+            },
+            {
+              "local": "serial_synced",
+              "remote": "sync_out"
+            }
+          ]
+        }
+      ],
+      "connections": [
+        {
+          "source": "sync_chain_inst.sync_out",
+          "destination": "serial_o"
+        },
+        {
+          "source": "sync_chain_inst.sync_out",
+          "destination": "serial_d1"
+        },
+        {
+          "source": "serial_d1",
+          "destination": "serial_d2"
+        },
+        {
+          "source": "serial_d2",
+          "destination": "serial_d3"
+        },
+        {
+          "source": "serial_d2",
+          "destination": "r_edge_o",
+          "operation": "serial_d2 & ~serial_d3"
+        },
+        {
+          "source": "serial_d2",
+          "destination": "f_edge_o",
+          "operation": "~serial_d2 & serial_d3"
+        }
+      ],
+      "internal_signals": [
+        {
+          "name": "serial_synced",
+          "width": 1
+        },
+        {
+          "name": "serial_d1",
+          "width": 1
+        },
+        {
+          "name": "serial_d2",
+          "width": 1
+        },
+        {
+          "name": "serial_d3",
+          "width": 1
+        }
+      ],
+      "behavior": [
+        "serial_o is the synchronized version of serial_i in clk_i domain.",
+        "r_edge_o pulses for one cycle when a rising edge is detected on the synchronized bit.",
+        "f_edge_o pulses for one cycle when a falling edge is detected on the synchronized bit.",
+        "Outputs are low after reset."
+      ]
+    },
+    {
+      "Top_module_name": "sync_chain",
+      "function": "Synchronize an asynchronous input into a target clock domain",
+      "parameters": [
+        {
+          "name": "STAGES",
+          "value": 2
+        }
+      ],
+      "ports": [
+        {
+          "name": "clk_i",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_i"
+        },
+        {
+          "name": "rst_ni",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "clk_i"
+        },
+        {
+          "name": "async_in",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "async"
+        },
+        {
+          "name": "sync_out",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "clk_i"
+        }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        {
+          "name": "sync_stage",
+          "width": 1,
+          "array_size": "STAGES"
+        }
+      ],
+      "behavior": [
+        "Synchronize async_in into the clk_i domain using a shift register chain of length STAGES.",
+        "After reset, sync_out is low."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module sync_wedge #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  en_i,
+    input  serial_i,
+    output r_edge_o,
+    output f_edge_o,
+    output serial_o
+);
+
+    wire serial_synced;
+    reg  serial_d1;
+    reg  serial_d2;
+    reg  serial_d3;
+
+    sync_chain #(
+        .STAGES(STAGES)
+    ) sync_chain_inst (
+        .clk_i      (clk_i),
+        .rst_ni     (rst_ni),
+        .async_in   (serial_i),
+        .sync_out   (serial_synced)
+    );
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            serial_d1 <= 1'b0;
+            serial_d2 <= 1'b0;
+            serial_d3 <= 1'b0;
+        end else begin
+            if (en_i) begin
+                serial_d1 <= serial_synced;
+                serial_d2 <= serial_d1;
+                serial_d3 <= serial_d2;
+            end
+        end
+    end
+
+    assign serial_o = serial_synced;
+    assign r_edge_o = serial_d2 & ~serial_d3;
+    assign f_edge_o = ~serial_d2 & serial_d3;
+
+endmodule
+
+module sync_chain #(
+    parameter STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  async_in,
+    output sync_out
+);
+
+    reg [STAGES-1:0] sync_stage;
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            sync_stage <= {STAGES{1'b0}};
+        end else begin
+            sync_stage[0] <= async_in;
+            for (int i = 1; i < STAGES; i = i + 1) begin
+                sync_stage[i] <= sync_stage[i-1];
+            end
+        end
+    end
+
+    assign sync_out = sync_stage[STAGES-1];
+
+endmodule
+```

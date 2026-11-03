@@ -1,0 +1,277 @@
+module uart16550 (
+	wb_clk_i,
+	wb_rst_i, wb_adr_i, wb_dat_i, wb_dat_o, wb_we_i, wb_stb_i, wb_cyc_i, wb_ack_o, wb_sel_i,
+	int_o,
+	stx_pad_o, srx_pad_i,
+	rts_pad_o, cts_pad_i, dtr_pad_o, dsr_pad_i, ri_pad_i, dcd_pad_i
+);
+
+	input wb_clk_i;
+	input wb_rst_i;
+	input [3:0] wb_adr_i;
+	input [7:0] wb_dat_i;
+	output [7:0] wb_dat_o;
+	input wb_we_i;
+	input wb_stb_i;
+	input wb_cyc_i;
+	output wb_ack_o;
+	input [3:0] wb_sel_i;
+	output int_o;
+	output stx_pad_o;
+	input srx_pad_i;
+	output rts_pad_o;
+	input cts_pad_i;
+	output dtr_pad_o;
+	input dsr_pad_i;
+	input ri_pad_i;
+	input dcd_pad_i;
+
+	// Internal signals
+	wire reset;
+	wire bit_clk;
+	wire [7:0] tx_data;
+	wire tx_ready;
+	wire [7:0] rx_data;
+	wire rx_valid;
+	wire rx_error;
+
+	// Generate bit clock (placeholder, should be replaced with actual bit clock generation)
+	// For demonstration, we'll just tie it to wb_clk_i
+	assign bit_clk = wb_clk_i;
+
+	// Reset signal (active high)
+	assign reset = wb_rst_i;
+
+	// Wishbone register file
+	wishbone_register_file reg_file (
+		.wb_clk_i(wb_clk_i),
+		.wb_rst_i(wb_rst_i),
+		.wb_adr_i(wb_adr_i),
+		.wb_dat_i(wb_dat_i),
+		.wb_dat_o(wb_dat_o),
+		.wb_we_i(wb_we_i),
+		.wb_stb_i(wb_stb_i),
+		.wb_cyc_i(wb_cyc_i),
+		.wb_ack_o(wb_ack_o),
+		.wb_sel_i(wb_sel_i),
+		.tx_data(tx_data),
+		.tx_ready(tx_ready),
+		.rx_data(rx_data)
+	);
+
+	// UART transmitter
+	uart_transmitter tx (
+		.bit_clk(bit_clk),
+		.reset(reset),
+		.tx_data(tx_data),
+		.tx_ready(tx_ready),
+		.stx_pad_o(stx_pad_o)
+	);
+
+	// UART receiver
+	uart_receiver rx (
+		.bit_clk(bit_clk),
+		.reset(reset),
+		.srx_pad_i(srx_pad_i),
+		.rx_data(rx_data),
+		.rx_valid(rx_valid),
+		.rx_error(rx_error)
+	);
+
+	// Interrupt controller
+	interrupt_controller int_ctrl (
+		.wb_clk_i(wb_clk_i),
+		.wb_rst_i(wb_rst_i),
+		.rx_valid(rx_valid),
+		.rx_error(rx_error),
+		.int_o(int_o)
+	);
+
+	// Modem signals (simple assignments for demonstration)
+	assign rts_pad_o = 1'b0; // Placeholder for RTS signal
+	assign dtr_pad_o = 1'b0; // Placeholder for DTR signal
+
+endmodule
+
+// Wishbone register file module
+module wishbone_register_file (
+	input wb_clk_i,
+	input wb_rst_i,
+	input [3:0] wb_adr_i,
+	input [7:0] wb_dat_i,
+	output [7:0] wb_dat_o,
+	input wb_we_i,
+	input wb_stb_i,
+	input wb_cyc_i,
+	output wb_ack_o,
+	input [3:0] wb_sel_i,
+	output [7:0] tx_data,
+	input tx_ready,
+	input [7:0] rx_data
+);
+
+	reg [7:0] registers [15:0];
+	reg [7:0] wb_dat_o_reg;
+	reg wb_ack_o_reg;
+
+	assign wb_dat_o = wb_dat_o_reg;
+	assign wb_ack_o = wb_ack_o_reg;
+	assign tx_data = registers[1]; // Assuming TX Holding Register is at address 1
+
+	always @(posedge wb_clk_i or posedge wb_rst_i) begin
+		if (wb_rst_i) begin
+			wb_dat_o_reg <= 8'b0;
+			wb_ack_o_reg <= 1'b0;
+			for (integer i = 0; i < 16; i = i + 1) begin
+				registers[i] <= 8'b0;
+			end
+		end else begin
+			wb_ack_o_reg <= wb_stb_i & wb_cyc_i;
+
+			if (wb_stb_i & wb_cyc_i & wb_we_i) begin
+				if (wb_adr_i == 1) begin
+					registers[wb_adr_i] <= wb_dat_i;
+				end else begin
+					registers[wb_adr_i] <= wb_dat_i & wb_sel_i;
+				end
+			end
+
+			if (wb_stb_i & wb_cyc_i & ~wb_we_i) begin
+				wb_dat_o_reg <= registers[wb_adr_i];
+			end
+
+			if (wb_adr_i == 0) begin // Assuming Line Status Register is at address 0
+				wb_dat_o_reg[0] <= tx_ready;
+				wb_dat_o_reg[1] <= rx_valid;
+				wb_dat_o_reg[2] <= rx_error;
+			end else if (wb_adr_i == 2) begin // Assuming RX Holding Register is at address 2
+				wb_dat_o_reg <= rx_data;
+			end
+		end
+	end
+
+endmodule
+
+// UART transmitter module
+module uart_transmitter (
+	input bit_clk,
+	input reset,
+	input [7:0] tx_data,
+	output reg tx_ready,
+	output reg stx_pad_o
+);
+
+	reg [2:0] bit_count;
+	reg [7:0] shift_reg;
+	reg tx_start;
+
+	always @(posedge bit_clk or posedge reset) begin
+		if (reset) begin
+			bit_count <= 3'b0;
+			shift_reg <= 8'b0;
+			tx_start <= 1'b0;
+			tx_ready <= 1'b1;
+			stx_pad_o <= 1'b1;
+		end else begin
+			if (tx_ready) begin
+				if (tx_start) begin
+					shift_reg <= tx_data;
+					bit_count <= 3'b0;
+					tx_ready <= 1'b0;
+					stx_pad_o <= 1'b0; // Start bit
+				end else begin
+					tx_start <= 1'b1;
+				end
+			end else begin
+				if (bit_count < 3'b100) begin // Transmit 8 data bits + 1 stop bit
+					bit_count <= bit_count + 1'b1;
+					stx_pad_o <= shift_reg[0];
+					shift_reg <= {1'b1, shift_reg[7:1]};
+				end else begin
+					bit_count <= 3'b0;
+					tx_ready <= 1'b1;
+					stx_pad_o <= 1'b1;
+				end
+			end
+		end
+	end
+
+endmodule
+
+// UART receiver module
+module uart_receiver (
+	input bit_clk,
+	input reset,
+	input srx_pad_i,
+	output reg [7:0] rx_data,
+	output reg rx_valid,
+	output reg rx_error
+);
+
+	reg [2:0] bit_count;
+	reg [7:0] shift_reg;
+	reg start_bit_detected;
+	reg [7:0] parity_bit;
+
+	always @(posedge bit_clk or posedge reset) begin
+		if (reset) begin
+			bit_count <= 3'b0;
+			shift_reg <= 8'b0;
+			start_bit_detected <= 1'b0;
+			rx_valid <= 1'b0;
+			rx_error <= 1'b0;
+			parity_bit <= 1'b0;
+		end else begin
+			if (srx_pad_i == 1'b0 && !start_bit_detected) begin
+				start_bit_detected <= 1'b1;
+				bit_count <= 3'b0;
+				parity_bit <= 1'b0;
+			end else if (start_bit_detected) begin
+				if (bit_count < 3'b100) begin // Receive 8 data bits + 1 stop bit
+					bit_count <= bit_count + 1'b1;
+					shift_reg <= {srx_pad_i, shift_reg[7:1]};
+					parity_bit <= parity_bit ^ srx_pad_i;
+				end else if (bit_count == 3'b100) begin // Stop bit
+					if (srx_pad_i != 1'b1) begin
+						rx_error <= 1'b1;
+					end
+					rx_data <= shift_reg;
+					rx_valid <= 1'b1;
+				end else begin
+					bit_count <= 3'b0;
+					start_bit_detected <= 1'b0;
+					rx_valid <= 1'b0;
+					rx_error <= 1'b0;
+				end
+			end
+		end
+	end
+
+endmodule
+
+// Interrupt controller module
+module interrupt_controller (
+	input wb_clk_i,
+	input wb_rst_i,
+	input rx_valid,
+	input rx_error,
+	output int_o
+);
+
+	reg int_o_reg;
+
+	always @(posedge wb_clk_i or posedge wb_rst_i) begin
+		if (wb_rst_i) begin
+			int_o_reg <= 1'b0;
+		end else begin
+			if (rx_valid || rx_error) begin
+				int_o_reg <= 1'b1;
+			end else begin
+				int_o_reg <= 1'b0;
+			end
+		end
+	end
+
+	assign int_o = int_o_reg;
+
+endmodule

@@ -1,0 +1,210 @@
+```verilog
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWIDTH = ASIZE + 1;
+
+    // Write domain
+    reg [DSIZE-1:0] mem [0:DEPTH-1];
+    reg [AWIDTH-1:0] wptr;
+    reg [ASIZE-1:0] wptr_gray;
+    reg [ASIZE-1:0] rptr_gray_w;
+
+    // Read domain
+    reg [AWIDTH-1:0] rptr;
+    reg [ASIZE-1:0] rptr_gray;
+    reg [ASIZE-1:0] wptr_gray_r;
+
+    // Gray code conversion
+    function [ASIZE-1:0] bin2gray;
+        input [ASIZE-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    // Write domain logic
+    wire winc_eff = winc & ~wfull;
+    wire [ASIZE-1:0] wptr_next = wptr[ASIZE-1:0] + 1'b1;
+    wire [ASIZE-1:0] wptr_gray_next = bin2gray(wptr_next);
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {AWIDTH{1'b0}};
+            wptr_gray <= {ASIZE{1'b0}};
+            rptr_gray_w <= {ASIZE{1'b0}};
+        end else begin
+            if (winc_eff) begin
+                mem[wptr[ASIZE-1:0]] <= wdata;
+                wptr <= wptr + 1'b1;
+                wptr_gray <= wptr_gray_next;
+            end
+            rptr_gray_w <= rptr_gray;
+        end
+    end
+
+    // Read domain logic
+    wire rinc_eff = rinc & ~rempty;
+    wire [ASIZE-1:0] rptr_next = rptr[ASIZE-1:0] + 1'b1;
+    wire [ASIZE-1:0] rptr_gray_next = bin2gray(rptr_next);
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= {AWIDTH{1'b0}};
+            rptr_gray <= {ASIZE{1'b0}};
+            wptr_gray_r <= {ASIZE{1'b0}};
+        end else begin
+            if (rinc_eff) begin
+                rptr <= rptr + 1'b1;
+                rptr_gray <= rptr_gray_next;
+            end
+            wptr_gray_r <= wptr_gray;
+        end
+    end
+
+    // Status flags
+    // wfull: write pointer has lapped read pointer by DEPTH
+    // Compare wptr_gray with rptr_gray_w (read pointer gray in write domain)
+    // Full when wptr_gray == rptr_gray_w and wptr[ASIZE] != rptr_gray_w[ASIZE-1]... 
+    // Actually, for gray code pointers, full condition:
+    // wptr_gray == rptr_gray_w and wptr[ASIZE] != rptr_gray_w[ASIZE-1]
+    // But since we're comparing gray codes, the standard approach:
+    // Full when the MSB of wptr differs from MSB of rptr (in binary) and the lower ASIZE bits of gray match.
+    // Let's use the standard Cummings approach:
+    // wfull = (wptr_gray == rptr_gray_w) && (wptr[ASIZE] != rptr_gray_w[ASIZE-1])
+    // Wait, rptr_gray_w is the gray code of rptr. The MSB of rptr in binary is not directly available.
+    // Standard approach: keep the full pointer in binary with extra bit, convert to gray for crossing.
+    // Let me reconsider.
+
+    // Actually, the standard Cummings FIFO uses:
+    // Write pointer: AWIDTH bits binary, converted to AWIDTH-bit gray for crossing
+    // Read pointer: AWIDTH bits binary, converted to AWIDTH-bit gray for crossing
+    // Full: wptr_gray == rptr_gray_w && wptr[ASIZE] != rptr_gray_w[ASIZE-1]
+    // Empty: rptr_gray == wptr_gray_r && rptr[ASIZE] != wptr_gray_r[ASIZE-1]
+
+    // Let me redo with AWIDTH-bit gray codes.
+
+    // Redo: use AWIDTH-bit gray codes for crossing.
+
+    // Write domain
+    reg [AWIDTH-1:0] wptr_gray_full;
+    reg [AWIDTH-1:0] rptr_gray_w_full;
+
+    // Read domain
+    reg [AWIDTH-1:0] rptr_gray_full;
+    reg [AWIDTH-1:0] wptr_gray_r_full;
+
+    function [AWIDTH-1:0] bin2gray_aw;
+        input [AWIDTH-1:0] bin;
+        begin
+            bin2gray_aw = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    // Write domain with AWIDTH-bit gray
+    wire [AWIDTH-1:0] wptr_gray_next_full = bin2gray_aw(wptr + 1'b1);
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {AWIDTH{1'b0}};
+            wptr_gray_full <= {AWIDTH{1'b0}};
+            rptr_gray_w_full <= {AWIDTH{1'b0}};
+        end else begin
+            if (winc_eff) begin
+                mem[wptr[ASIZE-1:0]] <= wdata;
+                wptr <= wptr + 1'b1;
+                wptr_gray_full <= wptr_gray_next_full;
+            end
+            rptr_gray_w_full <= rptr_gray_full;
+        end
+    end
+
+    // Read domain with AWIDTH-bit gray
+    wire [AWIDTH-1:0] rptr_gray_next_full = bin2gray_aw(rptr + 1'b1);
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= {AWIDTH{1'b0}};
+            rptr_gray_full <= {AWIDTH{1'b0}};
+            wptr_gray_r_full <= {AWIDTH{1'b0}};
+        end else begin
+            if (rinc_eff) begin
+                rptr <= rptr + 1'b1;
+                rptr_gray_full <= rptr_gray_next_full;
+            end
+            wptr_gray_r_full <= wptr_gray_full;
+        end
+    end
+
+    // Full: wptr_gray == rptr_gray_w and MSB differs
+    assign wfull = (wptr_gray_full == rptr_gray_w_full) && (wptr[ASIZE] != rptr_gray_w_full[ASIZE-1]);
+
+    // Empty: rptr_gray == wptr_gray_r and MSB differs
+    assign rempty = (rptr_gray_full == wptr_gray_r_full) && (rptr[ASIZE] != wptr_gray_r_full[ASIZE-1]);
+
+    // Almost full: one less than full
+    // awfull when wptr - rptr == DEPTH - 1
+    // In gray code terms, this is trickier. Let's compute in binary.
+    // We need rptr in write domain. Let's cross rptr binary as well, or compute awfull differently.
+    // Alternative: awfull = wfull | (wptr[ASIZE-1:0] == rptr_gray_w_full[ASIZE-1:0] + 1) ... not straightforward.
+    // Let's cross the read pointer binary to write domain for awfull computation.
+
+    reg [AWIDTH-1:0] rptr_bin_w;
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n)
+            rptr_bin_w <= {AWIDTH{1'b0}};
+        else
+            rptr_bin_w <= rptr_gray_w_full; // This is gray, not binary. Need to convert.
+    end
+
+    // Convert gray to binary
+    function [AWIDTH-1:0] gray2bin;
+        input [AWIDTH-1:0] gray;
+        integer i;
+        begin
+            gray2bin[AWIDTH-1] = gray[AWIDTH-1];
+            for (i = AWIDTH-2; i >= 0; i = i - 1)
+                gray2bin[i] = gray2bin[i+1] ^ gray[i];
+        end
+    endfunction
+
+    wire [AWIDTH-1:0] rptr_bin_w_decoded = gray2bin(rptr_gray_w_full);
+    wire [AWIDTH-1:0] wptr_minus_rptr = wptr - rptr_bin_w_decoded;
+    assign awfull = (wptr_minus_rptr == DEPTH - 1);
+
+    // Almost empty: one more than empty
+    reg [AWIDTH-1:0] wptr_bin_r;
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n)
+            wptr_bin_r <= {AWIDTH{1'b0}};
+        else
+            wptr_bin_r <= wptr_gray_r_full;
+    end
+
+    wire [AWIDTH-1:0] wptr_bin_r_decoded = gray2bin(wptr_gray_r_full);
+    wire [AWIDTH-1:0] wptr_minus_rptr_r = wptr_bin_r_decoded - rptr;
+    assign arempty = (wptr_minus_rptr_r == 1);
+
+    // Read data
+    assign rdata = mem[rptr[ASIZE-1:0]];
+
+endmodule
+```<|im_end|>

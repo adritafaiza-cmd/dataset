@@ -1,0 +1,193 @@
+```verilog
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam ADDR_WIDTH = LOG_DEPTH;
+
+    reg [ADDR_WIDTH:0] src_wr_ptr_gray, src_wr_ptr_gray_sync;
+    reg [ADDR_WIDTH:0] src_rd_ptr_gray;
+    reg [ADDR_WIDTH:0] dst_wr_ptr_gray;
+    reg [ADDR_WIDTH:0] dst_rd_ptr_gray, dst_rd_ptr_gray_sync;
+
+    reg [WIDTH-1:0] mem [DEPTH-1:0];
+
+    reg src_clear_pending, dst_clear_pending;
+
+    // Gray code conversion functions
+    function [ADDR_WIDTH:0] bin_to_gray;
+        input [ADDR_WIDTH:0] bin;
+        bin_to_gray = bin ^ (bin >> 1);
+    endfunction
+
+    function [ADDR_WIDTH:0] gray_to_bin;
+        input [ADDR_WIDTH:0] gray;
+        integer i;
+        reg [ADDR_WIDTH:0] bin;
+        bin = gray;
+        for (i = ADDR_WIDTH; i > 0; i = i - 1) begin
+            bin[i-1] = bin[i] ^ bin[i-1];
+        end
+        gray_to_bin = bin;
+    endfunction
+
+    // Source domain logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_wr_ptr_gray <= 0;
+            src_clear_pending <= 0;
+        end else begin
+            if (src_clear_i) begin
+                src_wr_ptr_gray <= 0;
+                src_clear_pending <= 1;
+            end else if (src_ready_o && src_valid_i) begin
+                src_wr_ptr_gray <= src_wr_ptr_gray + 1;
+            end
+        end
+    end
+
+    // Synchronize src_wr_ptr_gray to destination domain
+    genvar i;
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : sync_wr_ptr
+            reg [ADDR_WIDTH:0] sync_stage;
+            if (i == 0) begin
+                always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+                    if (!dst_rst_ni) begin
+                        sync_stage <= 0;
+                    end else begin
+                        sync_stage <= src_wr_ptr_gray;
+                    end
+                end
+            end else begin
+                always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+                    if (!dst_rst_ni) begin
+                        sync_stage <= 0;
+                    end else begin
+                        sync_stage <= sync_wr_ptr[i-1].sync_stage;
+                    end
+                end
+            end
+            assign src_wr_ptr_gray_sync = sync_wr_ptr[SYNC_STAGES-1].sync_stage;
+        end
+    endgenerate
+
+    // Destination domain logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_rd_ptr_gray <= 0;
+            dst_clear_pending <= 0;
+        end else begin
+            if (dst_clear_i) begin
+                dst_rd_ptr_gray <= 0;
+                dst_clear_pending <= 1;
+            end else if (dst_valid_o && dst_ready_i) begin
+                dst_rd_ptr_gray <= dst_rd_ptr_gray + 1;
+            end
+        end
+    end
+
+    // Synchronize dst_rd_ptr_gray to source domain
+    generate
+        for (i = 0; i < SYNC_STAGES; i = i + 1) begin : sync_rd_ptr
+            reg [ADDR_WIDTH:0] sync_stage;
+            if (i == 0) begin
+                always @(posedge src_clk_i or negedge src_rst_ni) begin
+                    if (!src_rst_ni) begin
+                        sync_stage <= 0;
+                    end else begin
+                        sync_stage <= dst_rd_ptr_gray;
+                    end
+                end
+            end else begin
+                always @(posedge src_clk_i or negedge src_rst_ni) begin
+                    if (!src_rst_ni) begin
+                        sync_stage <= 0;
+                    end else begin
+                        sync_stage <= sync_rd_ptr[i-1].sync_stage;
+                    end
+                end
+            end
+            assign dst_rd_ptr_gray_sync = sync_rd_ptr[SYNC_STAGES-1].sync_stage;
+        end
+    endgenerate
+
+    // Source ready logic
+    always @(*) begin
+        src_ready_o = 1;
+        if (bin_to_gray(gray_to_bin(src_wr_ptr_gray) + 1) == src_wr_ptr_gray_sync) begin
+            src_ready_o = 0;
+        end
+    end
+
+    // Source write logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            mem[gray_to_bin(src_wr_ptr_gray)] <= 0;
+        end else if (src_ready_o && src_valid_i) begin
+            mem[gray_to_bin(src_wr_ptr_gray)] <= src_data_i;
+        end
+    end
+
+    // Destination valid logic
+    always @(*) begin
+        dst_valid_o = 0;
+        if (bin_to_gray(gray_to_bin(dst_wr_ptr_gray) + 1) != dst_rd_ptr_gray_sync) begin
+            dst_valid_o = 1;
+        end
+    end
+
+    // Destination read logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_data_o <= 0;
+        end else if (dst_valid_o && dst_ready_i) begin
+            dst_data_o <= mem[gray_to_bin(dst_rd_ptr_gray)];
+        end
+    end
+
+    // Clear pending logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_clear_pending_o <= 0;
+        end else begin
+            if (src_clear_i) begin
+                src_clear_pending_o <= 1;
+            end else if (src_clear_pending && (bin_to_gray(gray_to_bin(src_wr_ptr_gray)) == src_wr_ptr_gray_sync)) begin
+                src_clear_pending_o <= 0;
+            end
+        end
+    end
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_clear_pending_o <= 0;
+        end else begin
+            if (dst_clear_i) begin
+                dst_clear_pending_o <= 1;
+            end else if (dst_clear_pending && (bin_to_gray(gray_to_bin(dst_rd_ptr_gray)) == dst_rd_ptr_gray_sync)) begin
+                dst_clear_pending_o <= 0;
+            end
+        end
+    end
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,356 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "axis_fifo",
+      "function": "Implement a single-clock AXI-Stream FIFO with specified behavior and parameters.",
+      "parameters": [
+        { "name": "DEPTH", "value": "4096" },
+        { "name": "DATA_WIDTH", "value": "8" },
+        { "name": "KEEP_ENABLE", "value": "(DATA_WIDTH>8)" },
+        { "name": "KEEP_WIDTH", "value": "((DATA_WIDTH+7)/8)" },
+        { "name": "LAST_ENABLE", "value": "1" },
+        { "name": "ID_ENABLE", "value": "0" },
+        { "name": "ID_WIDTH", "value": "8" },
+        { "name": "DEST_ENABLE", "value": "0" },
+        { "name": "DEST_WIDTH", "value": "8" },
+        { "name": "USER_ENABLE", "value": "1" },
+        { "name": "USER_WIDTH", "value": "1" },
+        { "name": "RAM_PIPELINE", "value": "1" },
+        { "name": "OUTPUT_FIFO_ENABLE", "value": "0" },
+        { "name": "FRAME_FIFO", "value": "0" },
+        { "name": "USER_BAD_FRAME_VALUE", "value": "1'b1" },
+        { "name": "USER_BAD_FRAME_MASK", "value": "1'b1" },
+        { "name": "DROP_OVERSIZE_FRAME", "value": "FRAME_FIFO" },
+        { "name": "DROP_BAD_FRAME", "value": "0" },
+        { "name": "DROP_WHEN_FULL", "value": "0" },
+        { "name": "MARK_WHEN_FULL", "value": "0" },
+        { "name": "PAUSE_ENABLE", "value": "0" },
+        { "name": "FRAME_PAUSE", "value": "FRAME_FIFO" }
+      ],
+      "ports": [
+        { "name": "clk", "direction": "input", "width": "1", "clock_domain": "single" },
+        { "name": "rst", "direction": "input", "width": "1", "clock_domain": "single" },
+        { "name": "s_axis_tdata", "direction": "input", "width": "DATA_WIDTH", "clock_domain": "single" },
+        { "name": "s_axis_tkeep", "direction": "input", "width": "KEEP_WIDTH", "clock_domain": "single" },
+        { "name": "s_axis_tvalid", "direction": "input", "width": "1", "clock_domain": "single" },
+        { "name": "s_axis_tready", "direction": "output", "width": "1", "clock_domain": "single" },
+        { "name": "s_axis_tlast", "direction": "input", "width": "1", "clock_domain": "single" },
+        { "name": "s_axis_tid", "direction": "input", "width": "ID_WIDTH", "clock_domain": "single" },
+        { "name": "s_axis_tdest", "direction": "input", "width": "DEST_WIDTH", "clock_domain": "single" },
+        { "name": "s_axis_tuser", "direction": "input", "width": "USER_WIDTH", "clock_domain": "single" },
+        { "name": "m_axis_tdata", "direction": "output", "width": "DATA_WIDTH", "clock_domain": "single" },
+        { "name": "m_axis_tkeep", "direction": "output", "width": "KEEP_WIDTH", "clock_domain": "single" },
+        { "name": "m_axis_tvalid", "direction": "output", "width": "1", "clock_domain": "single" },
+        { "name": "m_axis_tready", "direction": "input", "width": "1", "clock_domain": "single" },
+        { "name": "m_axis_tlast", "direction": "output", "width": "1", "clock_domain": "single" },
+        { "name": "m_axis_tid", "direction": "output", "width": "ID_WIDTH", "clock_domain": "single" },
+        { "name": "m_axis_tdest", "direction": "output", "width": "DEST_WIDTH", "clock_domain": "single" },
+        { "name": "m_axis_tuser", "direction": "output", "width": "USER_WIDTH", "clock_domain": "single" },
+        { "name": "pause_req", "direction": "input", "width": "1", "clock_domain": "single" },
+        { "name": "pause_ack", "direction": "output", "width": "1", "clock_domain": "single" },
+        { "name": "status_depth", "direction": "output", "width": "$clog2(DEPTH)+1", "clock_domain": "single" },
+        { "name": "status_depth_commit", "direction": "output", "width": "$clog2(DEPTH)+1", "clock_domain": "single" },
+        { "name": "status_overflow", "direction": "output", "width": "1", "clock_domain": "single" },
+        { "name": "status_bad_frame", "direction": "output", "width": "1", "clock_domain": "single" },
+        { "name": "status_good_frame", "direction": "output", "width": "1", "clock_domain": "single" }
+      ],
+      "instances": [
+        { "module": "fifo_core", "name": "fifo_inst", "function": "Core FIFO functionality", "connections": [] }
+      ],
+      "connections": [],
+      "internal_signals": [
+        { "name": "fifo_wr_en", "width": "1" },
+        { "name": "fifo_rd_en", "width": "1" },
+        { "name": "fifo_full", "width": "1" },
+        { "name": "fifo_empty", "width": "1" },
+        { "name": "fifo_data_out", "width": "DATA_WIDTH + KEEP_WIDTH + LAST_ENABLE + ID_ENABLE*ID_WIDTH + DEST_ENABLE*DEST_WIDTH + USER_ENABLE*USER_WIDTH" },
+        { "name": "fifo_depth", "width": "$clog2(DEPTH)+1" },
+        { "name": "fifo_depth_commit", "width": "$clog2(DEPTH)+1" },
+        { "name": "frame_error", "width": "1" },
+        { "name": "frame_good", "width": "1" },
+        { "name": "pause_state", "width": "1" }
+      ],
+      "behavior": [
+        "Store DEPTH words. Preserve order, tlast, and enabled sidebands.",
+        "After reset the FIFO is empty.",
+        "FRAME_FIFO and drop/mark parameters change frame behavior as named.",
+        "Handle pause request and generate pause acknowledge.",
+        "Track FIFO depth and provide status signals for overflow, bad frame, and good frame.",
+        "Ensure reset release is safe in the clock domain and transferred multi-bit data remains coherent."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module axis_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    /*
+     * AXI input
+     */
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   pause_req,
+    output wire                   pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] status_depth,
+    output wire [$clog2(DEPTH):0] status_depth_commit,
+    output wire                   status_overflow,
+    output wire                   status_bad_frame,
+    output wire                   status_good_frame
+);
+
+    /*
+     * Internal signals
+     */
+    wire                          fifo_wr_en;
+    wire                          fifo_rd_en;
+    wire                          fifo_full;
+    wire                          fifo_empty;
+    wire [$clog2(DEPTH):0]        fifo_depth;
+    wire [$clog2(DEPTH):0]        fifo_depth_commit;
+    wire                          frame_error;
+    wire                          frame_good;
+    wire                          pause_state;
+    wire [DATA_WIDTH+KEEP_WIDTH+LAST_ENABLE+ID_ENABLE*ID_WIDTH+DEST_ENABLE*DEST_WIDTH+USER_ENABLE*USER_WIDTH-1:0] fifo_data_out;
+
+    /*
+     * FIFO core instantiation
+     */
+    fifo_core #(
+        .DEPTH(DEPTH),
+        .DATA_WIDTH(DATA_WIDTH+KEEP_WIDTH+LAST_ENABLE+ID_ENABLE*ID_WIDTH+DEST_ENABLE*DEST_WIDTH+USER_ENABLE*USER_WIDTH)
+    ) fifo_inst (
+        .clk(clk),
+        .rst(rst),
+        .wr_en(fifo_wr_en),
+        .rd_en(fifo_rd_en),
+        .din({s_axis_tdata, s_axis_tkeep, s_axis_tlast, s_axis_tid, s_axis_tdest, s_axis_tuser}),
+        .dout(fifo_data_out),
+        .full(fifo_full),
+        .empty(fifo_empty),
+        .depth(fifo_depth),
+        .depth_commit(fifo_depth_commit)
+    );
+
+    /*
+     * Write enable logic
+     */
+    assign fifo_wr_en = s_axis_tvalid && s_axis_tready && !fifo_full;
+
+    /*
+     * Read enable logic
+     */
+    assign fifo_rd_en = m_axis_tready && m_axis_tvalid && !fifo_empty;
+
+    /*
+     * AXI input handshake
+     */
+    assign s_axis_tready = !fifo_full;
+
+    /*
+     * AXI output handshake
+     */
+    assign m_axis_tvalid = !fifo_empty;
+    assign m_axis_tdata = fifo_data_out[DATA_WIDTH-1:0];
+    assign m_axis_tkeep = fifo_data_out[DATA_WIDTH+KEEP_WIDTH-1:DATA_WIDTH];
+    assign m_axis_tlast = LAST_ENABLE ? fifo_data_out[DATA_WIDTH+KEEP_WIDTH] : 1'b0;
+    assign m_axis_tid = ID_ENABLE ? fifo_data_out[DATA_WIDTH+KEEP_WIDTH+LAST_ENABLE+ID_WIDTH-1:DATA_WIDTH+KEEP_WIDTH+LAST_ENABLE] : {ID_WIDTH{1'b0}};
+    assign m_axis_tdest = DEST_ENABLE ? fifo_data_out[DATA_WIDTH+KEEP_WIDTH+LAST_ENABLE+ID_WIDTH+DEST_WIDTH-1:DATA_WIDTH+KEEP_WIDTH+LAST_ENABLE+ID_WIDTH] : {DEST_WIDTH{1'b0}};
+    assign m_axis_tuser = USER_ENABLE ? fifo_data_out[DATA_WIDTH+KEEP_WIDTH+LAST_ENABLE+ID_WIDTH+DEST_WIDTH+USER_WIDTH-1:DATA_WIDTH+KEEP_WIDTH+LAST_ENABLE+ID_WIDTH+DEST_WIDTH] : {USER_WIDTH{1'b0}};
+
+    /*
+     * Pause handling
+     */
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            pause_state <= 1'b0;
+        end else if (PAUSE_ENABLE && pause_req) begin
+            pause_state <= 1'b1;
+        end else if (m_axis_tready && m_axis_tvalid) begin
+            pause_state <= 1'b0;
+        end
+    end
+
+    assign pause_ack = pause_state;
+
+    /*
+     * Frame error detection
+     */
+    reg frame_started;
+    reg frame_last_received;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            frame_started <= 1'b0;
+            frame_last_received <= 1'b0;
+        end else begin
+            if (fifo_wr_en && s_axis_tlast) begin
+                frame_last_received <= 1'b1;
+            end else if (fifo_wr_en) begin
+                frame_started <= 1'b1;
+            end else if (fifo_rd_en && fifo_data_out[DATA_WIDTH+KEEP_WIDTH]) begin
+                frame_last_received <= 1'b0;
+                if (!frame_started) begin
+                    frame_error <= 1'b1;
+                end else begin
+                    frame_good <= 1'b1;
+                end
+                frame_started <= 1'b0;
+            end
+        end
+    end
+
+    assign frame_error = (USER_ENABLE && (fifo_data_out[DATA_WIDTH+KEEP_WIDTH+LAST_ENABLE+ID_WIDTH+DEST_WIDTH+USER_WIDTH-1:DATA_WIDTH+KEEP_WIDTH+LAST_ENABLE+ID_WIDTH+DEST_WIDTH] & USER_BAD_FRAME_MASK) == USER_BAD_FRAME_VALUE) ? 1'b1 : frame_error;
+    assign frame_good = frame_last_received ? 1'b1 : frame_good;
+
+    /*
+     * Status signals
+     */
+    assign status_depth = fifo_depth;
+    assign status_depth_commit = fifo_depth_commit;
+    assign status_overflow = fifo_full;
+    assign status_bad_frame = frame_error;
+    assign status_good_frame = frame_good;
+
+endmodule
+
+module fifo_core #(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8
+)
+(
+    input  wire                   clk,
+    input  wire                   rst,
+    input  wire                   wr_en,
+    input  wire                   rd_en,
+    input  wire [DATA_WIDTH-1:0]  din,
+    output wire [DATA_WIDTH-1:0]  dout,
+    output wire                   full,
+    output wire                   empty,
+    output wire [$clog2(DEPTH):0] depth,
+    output wire [$clog2(DEPTH):0] depth_commit
+);
+
+    /*
+     * Internal signals
+     */
+    reg [$clog2(DEPTH):0]         wr_ptr;
+    reg [$clog2(DEPTH):0]         rd_ptr;
+    reg [$clog2(DEPTH):0]         depth_reg;
+    reg [DATA_WIDTH-1:0]          mem [DEPTH-1:0];
+
+    /*
+     * Write pointer logic
+     */
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            wr_ptr <= 0;
+        end else if (wr_en && !full) begin
+            wr_ptr <= wr_ptr + 1;
+        end
+    end
+
+    /*
+     * Read pointer logic
+     */
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rd_ptr <= 0;
+        end else if (rd_en && !empty) begin
+            rd_ptr <= rd_ptr + 1;
+        end
+    end
+
+    /*
+     * Depth calculation
+     */
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            depth_reg <= 0;
+        end else begin
+            if (wr_en && !rd_en && !full) begin
+                depth_reg <= depth_reg + 1;
+            end else if (!wr_en && rd_en && !empty) begin
+                depth_reg <= depth_reg - 1;
+            end
+        end
+    end
+
+    assign depth = depth_reg;
+    assign depth_commit = depth_reg;
+
+    /*
+     * Memory write
+     */
+    always @(posedge clk) begin
+        if (wr_en && !full) begin
+            mem[wr_ptr % DEPTH] <= din;
+        end
+    end
+
+    /*
+     * Memory read
+     */
+    assign dout = mem[rd_ptr % DEPTH];
+
+    /*
+     * Full and empty flags
+     */
+    assign full = (wr_ptr == rd_ptr + DEPTH);
+    assign empty = (wr_ptr == rd_ptr);
+
+endmodule
+```

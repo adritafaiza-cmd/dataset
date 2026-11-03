@@ -1,0 +1,188 @@
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWIDTH = ASIZE + 1;
+    localparam FULL_THRESH = DEPTH - 1;
+    localparam EMPTY_THRESH = 1;
+
+    // Write domain
+    reg [AWIDTH-1:0] wptr;
+    reg [ASIZE-1:0]  waddr;
+    reg [DSIZE-1:0]  mem [0:DEPTH-1];
+
+    // Read domain
+    reg [AWIDTH-1:0] rptr;
+    reg [ASIZE-1:0]  raddr;
+    reg [DSIZE-1:0]  rdata_reg;
+
+    // Gray code pointers
+    wire [AWIDTH-1:0] wptr_gray = wptr ^ (wptr >> 1);
+    wire [AWIDTH-1:0] rptr_gray = rptr ^ (rptr >> 1);
+
+    // Synchronizers
+    reg [AWIDTH-1:0] wptr_gray_r1, wptr_gray_r2;
+    reg [AWIDTH-1:0] rptr_gray_r1, rptr_gray_r2;
+
+    // Write domain: synchronize read pointer gray
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr_gray_r1 <= {AWIDTH{1'b0}};
+            wptr_gray_r2 <= {AWIDTH{1'b0}};
+        end else begin
+            wptr_gray_r1 <= rptr_gray;
+            wptr_gray_r2 <= wptr_gray_r1;
+        end
+    end
+
+    // Read domain: synchronize write pointer gray
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr_gray_r1 <= {AWIDTH{1'b0}};
+            rptr_gray_r2 <= {AWIDTH{1'b0}};
+        end else begin
+            rptr_gray_r1 <= wptr_gray;
+            rptr_gray_r2 <= rptr_gray_r1;
+        end
+    end
+
+    // Convert gray to binary
+    function [AWIDTH-1:0] gray2bin;
+        input [AWIDTH-1:0] gray;
+        integer i;
+        begin
+            gray2bin[AWIDTH-1] = gray[AWIDTH-1];
+            for (i = AWIDTH-2; i >= 0; i = i - 1)
+                gray2bin[i] = gray[i] ^ gray2bin[i+1];
+        end
+    endfunction
+
+    wire [AWIDTH-1:0] rptr_bin_w = gray2bin(wptr_gray_r2);
+    wire [AWIDTH-1:0] wptr_bin_r = gray2bin(rptr_gray_r2);
+
+    // Write enable
+    wire wvalid = winc & ~wfull;
+
+    // Read enable
+    wire rvalid = rinc & ~rempty;
+
+    // Full condition: write pointer has lapped read pointer
+    wire wfull_int = (wptr[AWIDTH-1] != rptr_bin_w[AWIDTH-1]) &&
+                     (wptr[AWIDTH-2:0] == rptr_bin_w[AWIDTH-2:0]);
+    assign wfull = wfull_int;
+
+    // Empty condition: read pointer has lapped write pointer
+    wire rempty_int = (rptr[AWIDTH-1] != wptr_bin_r[AWIDTH-1]) &&
+                      (rptr[AWIDTH-2:0] == wptr_bin_r[AWIDTH-2:0]);
+    assign rempty = rempty_int;
+
+    // Almost full: distance to full is 1
+    wire [AWIDTH-1:0] wdist = wptr - rptr_bin_w;
+    assign awfull = (wdist == FULL_THRESH);
+
+    // Almost empty: distance to empty is 1
+    wire [AWIDTH-1:0] rdist = rptr - wptr_bin_r;
+    assign arempty = (rdist == EMPTY_THRESH);
+
+    // Write pointer update
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr  <= {AWIDTH{1'b0}};
+            waddr <= {ASIZE{1'b0}};
+        end else if (wvalid) begin
+            wptr  <= wptr + 1'b1;
+            waddr <= waddr + 1'b1;
+        end
+    end
+
+    // Memory write
+    always @(posedge wclk) begin
+        if (wvalid)
+            mem[waddr] <= wdata;
+    end
+
+    // Read pointer update
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr  <= {AWIDTH{1'b0}};
+            raddr <= {ASIZE{1'b0}};
+        end else if (rvalid) begin
+            rptr  <= rptr + 1'b1;
+            raddr <= raddr + 1'b1;
+        end
+    end
+
+    // Read data output
+    // FALLTHROUGH: present data when not empty, even before read is accepted
+    // Non-FALLTHROUGH: present data only after read is accepted (registered)
+    generate
+        if (FALLTHROUGH == "TRUE") begin
+            // Fall-through: rdata shows the oldest unread word when not empty
+            // We need to read from memory at raddr when not empty
+            // But we must be careful: when rempty is high, rdata is don't care
+            // When rempty falls, rdata should show the word at raddr
+            // Since rempty is a registered signal (lags), we use the current raddr
+            // and the synchronized write pointer to determine if data is available
+            
+            // Actually, for fall-through, we want rdata to be the data at raddr
+            // when the FIFO is not empty. The rempty signal is based on the
+            // synchronized pointers, so it may lag. We use the current raddr
+            // to read from memory.
+            
+            // The key insight: when rempty is low (or about to be low), the data
+            // at raddr is valid. We read it combinationally from memory.
+            // But the spec says "FALLTHROUGH does not select a combinational memory read."
+            // So we need to register the read data.
+            
+            // Let's re-read: "rdata presents the current oldest unread word once rempty falls,
+            // without requiring an additional accepted read. rdata is one read-clock sample."
+            
+            // This means: when rempty transitions from high to low, rdata should show the data
+            // on the next clock edge (one read-clock sample latency).
+            
+            // So we register the memory read at raddr, but only when data is available.
+            // Actually, we can just always register the memory read at raddr, and
+            // the rempty signal tells the user when rdata is valid.
+            
+            // But wait, if we always register, then when rempty is high, rdata_reg
+            // holds the last read data, which is fine since rempty is high.
+            
+            // Let's just register the memory read at raddr every clock.
+            always @(posedge rclk or negedge rrst_n) begin
+                if (!rrst_n)
+                    rdata_reg <= {DSIZE{1'b0}};
+                else
+                    rdata_reg <= mem[raddr];
+            end
+            assign rdata = rdata_reg;
+        end else begin
+            // Non-fall-through: rdata is valid only after a read is accepted
+            // Register the memory read when rvalid is high
+            always @(posedge rclk or negedge rrst_n) begin
+                if (!rrst_n)
+                    rdata_reg <= {DSIZE{1'b0}};
+                else if (rvalid)
+                    rdata_reg <= mem[raddr];
+            end
+            assign rdata = rdata_reg;
+        end
+    endgenerate
+
+endmodule

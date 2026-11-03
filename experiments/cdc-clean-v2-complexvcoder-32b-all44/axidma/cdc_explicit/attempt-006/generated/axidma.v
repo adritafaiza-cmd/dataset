@@ -1,0 +1,394 @@
+module axidma #(
+        parameter C_AXI_ID_WIDTH = 1,
+        parameter C_AXI_ADDR_WIDTH = 32,
+        parameter C_AXI_DATA_WIDTH = 32,
+        localparam C_AXIL_ADDR_WIDTH = 5,
+        localparam C_AXIL_DATA_WIDTH = 32,
+        parameter [0:0] OPT_UNALIGNED = 1'b1,
+        parameter [0:0] OPT_WRAPMEM = 1'b1,
+        parameter LGFIFO = LGMAXBURST+1,
+        parameter LGLEN = C_AXI_ADDR_WIDTH,
+        parameter [0:0] OPT_LOWPOWER = 1'b0,
+        parameter [0:0] OPT_CLKGATE = OPT_LOWPOWER,
+        parameter [C_AXI_ID_WIDTH-1:0] AXI_READ_ID = 0,
+        parameter [C_AXI_ID_WIDTH-1:0] AXI_WRITE_ID = 0,
+        parameter [7:0] ABORT_KEY = 8'h6d,
+        localparam ADDRLSB = $clog2(C_AXI_DATA_WIDTH)-3,
+        localparam AXILLSB = $clog2(C_AXIL_DATA_WIDTH)-3,
+        localparam LGLENW = LGLEN-ADDRLSB
+    ) (
+        input wire S_AXI_ACLK,
+        input wire S_AXI_ARESETN,
+        input wire S_AXIL_AWVALID,
+        output wire S_AXIL_AWREADY,
+        input wire [C_AXIL_ADDR_WIDTH-1:0] S_AXIL_AWADDR,
+        input wire [2:0] S_AXIL_AWPROT,
+        input wire S_AXIL_WVALID,
+        output wire S_AXIL_WREADY,
+        input wire [C_AXIL_DATA_WIDTH-1:0] S_AXIL_WDATA,
+        input wire [C_AXIL_DATA_WIDTH/8-1:0] S_AXIL_WSTRB,
+        output reg S_AXIL_BVALID,
+        input wire S_AXIL_BREADY,
+        output wire [1:0] S_AXIL_BRESP,
+        input wire S_AXIL_ARVALID,
+        output wire S_AXIL_ARREADY,
+        input wire [C_AXIL_ADDR_WIDTH-1:0] S_AXIL_ARADDR,
+        input wire [2:0] S_AXIL_ARPROT,
+        output reg S_AXIL_RVALID,
+        input wire S_AXIL_RREADY,
+        output reg [C_AXIL_DATA_WIDTH-1:0] S_AXIL_RDATA,
+        output wire [1:0] S_AXIL_RRESP,
+        output reg M_AXI_AWVALID,
+        input wire M_AXI_AWREADY,
+        output reg [C_AXI_ID_WIDTH-1:0] M_AXI_AWID,
+        output reg [C_AXI_ADDR_WIDTH-1:0] M_AXI_AWADDR,
+        output reg [2:0] M_AXI_AWSIZE,
+        output reg [1:0] M_AXI_AWBURST,
+        output reg M_AXI_AWLOCK,
+        output reg [3:0] M_AXI_AWCACHE,
+        output reg [2:0] M_AXI_AWPROT,
+        output reg [3:0] M_AXI_AWQOS,
+        output reg M_AXI_WVALID,
+        input wire M_AXI_WREADY,
+        output reg [C_AXI_DATA_WIDTH-1:0] M_AXI_WDATA,
+        output reg [C_AXI_DATA_WIDTH/8-1:0] M_AXI_WSTRB,
+        output reg M_AXI_WLAST,
+        input wire M_AXI_BVALID,
+        output reg M_AXI_BREADY,
+        input wire [C_AXI_ID_WIDTH-1:0] M_AXI_BID,
+        input wire [1:0] M_AXI_BRESP,
+        output reg M_AXI_ARVALID,
+        input wire M_AXI_ARREADY,
+        output wire [C_AXI_ID_WIDTH-1:0] M_AXI_ARID,
+        output reg [C_AXI_ADDR_WIDTH-1:0] M_AXI_ARADDR,
+        output wire [2:0] M_AXI_ARSIZE,
+        output wire [1:0] M_AXI_ARBURST,
+        output wire M_AXI_ARLOCK,
+        output wire [3:0] M_AXI_ARCACHE,
+        output wire [2:0] M_AXI_ARPROT,
+        output wire [3:0] M_AXI_ARQOS,
+        input wire M_AXI_RVALID,
+        output wire M_AXI_RREADY,
+        input wire [C_AXI_ID_WIDTH-1:0] M_AXI_RID,
+        input wire [C_AXI_DATA_WIDTH-1:0] M_AXI_RDATA,
+        input wire M_AXI_RLAST,
+        input wire [1:0] M_AXI_RRESP,
+        output reg o_int
+    );
+
+    // Internal state registers
+    reg [C_AXI_ADDR_WIDTH-1:0] source_addr;
+    reg [C_AXI_ADDR_WIDTH-1:0] dest_addr;
+    reg [LGLENW-1:0] length;
+    reg [1:0] state;
+    reg [1:0] next_state;
+    reg [1:0] read_state;
+    reg [1:0] write_state;
+    reg [LGLENW-1:0] read_count;
+    reg [LGLENW-1:0] write_count;
+
+    // Constants
+    localparam IDLE = 2'b00;
+    localparam READ = 2'b01;
+    localparam WRITE = 2'b10;
+    localparam DONE = 2'b11;
+
+    // AXI Lite Control Register Addresses
+    localparam REG_SOURCE_ADDR = 5'b00000;
+    localparam REG_DEST_ADDR = 5'b00001;
+    localparam REG_LENGTH = 5'b00010;
+    localparam REG_START = 5'b00011;
+    localparam REG_STATUS = 5'b00100;
+
+    // AXI Lite Control Register State
+    reg [C_AXIL_DATA_WIDTH-1:0] axil_wdata_reg;
+    reg [C_AXIL_DATA_WIDTH-1:0] axil_rdata_reg;
+    reg axil_wready_reg;
+    reg axil_awready_reg;
+    reg axil_bvalid_reg;
+    reg [1:0] axil_bresp_reg;
+    reg axil_arready_reg;
+    reg axil_rvalid_reg;
+    reg [1:0] axil_rresp_reg;
+
+    // AXI Write Control
+    reg [LGLENW-1:0] write_length;
+    reg [C_AXI_ADDR_WIDTH-1:0] write_addr;
+    reg write_start;
+
+    // AXI Read Control
+    reg [LGLENW-1:0] read_length;
+    reg [C_AXI_ADDR_WIDTH-1:0] read_addr;
+    reg read_start;
+
+    // AXI Write State Machine
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            write_state <= IDLE;
+            write_count <= 0;
+            M_AXI_AWVALID <= 0;
+            M_AXI_WVALID <= 0;
+            M_AXI_WLAST <= 0;
+            M_AXI_BREADY <= 0;
+        end else begin
+            write_state <= next_state;
+            case (write_state)
+                IDLE: begin
+                    M_AXI_AWVALID <= 0;
+                    M_AXI_WVALID <= 0;
+                    M_AXI_WLAST <= 0;
+                    M_AXI_BREADY <= 0;
+                    if (write_start) begin
+                        write_count <= write_length - 1;
+                        write_addr <= dest_addr;
+                        next_state <= WRITE;
+                    end
+                end
+                WRITE: begin
+                    M_AXI_BREADY <= 1;
+                    M_AXI_AWVALID <= 1;
+                    M_AXI_WVALID <= 1;
+                    M_AXI_WLAST <= (write_count == 0);
+                    if (M_AXI_AWREADY) begin
+                        M_AXI_AWVALID <= 0;
+                    end
+                    if (M_AXI_WREADY) begin
+                        M_AXI_WVALID <= 0;
+                        if (M_AXI_WLAST) begin
+                            if (M_AXI_BVALID) begin
+                                M_AXI_BREADY <= 0;
+                                next_state <= DONE;
+                            end
+                        end else begin
+                            write_count <= write_count - 1;
+                            write_addr <= write_addr + (C_AXI_DATA_WIDTH/8);
+                        end
+                    end
+                end
+                DONE: begin
+                    next_state <= IDLE;
+                end
+            endcase
+        end
+    end
+
+    // AXI Read State Machine
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            read_state <= IDLE;
+            read_count <= 0;
+            M_AXI_ARVALID <= 0;
+            M_AXI_RREADY <= 0;
+        end else begin
+            read_state <= next_state;
+            case (read_state)
+                IDLE: begin
+                    M_AXI_ARVALID <= 0;
+                    M_AXI_RREADY <= 0;
+                    if (read_start) begin
+                        read_count <= read_length - 1;
+                        read_addr <= source_addr;
+                        next_state <= READ;
+                    end
+                end
+                READ: begin
+                    M_AXI_ARVALID <= 1;
+                    M_AXI_RREADY <= 1;
+                    if (M_AXI_ARREADY) begin
+                        M_AXI_ARVALID <= 0;
+                    end
+                    if (M_AXI_RVALID) begin
+                        M_AXI_RREADY <= 0;
+                        if (M_AXI_RLAST) begin
+                            next_state <= DONE;
+                        end else begin
+                            read_count <= read_count - 1;
+                            read_addr <= read_addr + (C_AXI_DATA_WIDTH/8);
+                        end
+                    end
+                end
+                DONE: begin
+                    next_state <= IDLE;
+                end
+            endcase
+        end
+    end
+
+    // AXI Lite Write Address Channel
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            axil_awready_reg <= 0;
+        end else begin
+            if (S_AXIL_AWVALID && axil_awready_reg) begin
+                axil_awready_reg <= 0;
+            end else if (S_AXIL_AWVALID && !axil_awready_reg) begin
+                axil_awready_reg <= 1;
+            end
+        end
+    end
+
+    // AXI Lite Write Data Channel
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            axil_wready_reg <= 0;
+        end else begin
+            if (S_AXIL_WVALID && axil_wready_reg) begin
+                axil_wready_reg <= 0;
+            end else if (S_AXIL_WVALID && !axil_wready_reg) begin
+                axil_wready_reg <= 1;
+                case (S_AXIL_AWADDR)
+                    REG_SOURCE_ADDR: source_addr <= S_AXIL_WDATA;
+                    REG_DEST_ADDR: dest_addr <= S_AXIL_WDATA;
+                    REG_LENGTH: length <= S_AXIL_WDATA;
+                    REG_START: begin
+                        if (S_AXIL_WDATA == 32'h00000001) begin
+                            read_start <= 1;
+                            read_length <= length;
+                            write_start <= 1;
+                            write_length <= length;
+                        end
+                    end
+                endcase
+            end
+        end
+    end
+
+    // AXI Lite Write Response Channel
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            axil_bvalid_reg <= 0;
+            axil_bresp_reg <= 0;
+        end else begin
+            if (axil_bvalid_reg && S_AXIL_BREADY) begin
+                axil_bvalid_reg <= 0;
+            end else if (S_AXIL_WVALID && S_AXIL_WREADY) begin
+                axil_bvalid_reg <= 1;
+                axil_bresp_reg <= 0;
+            end
+        end
+    end
+
+    // AXI Lite Read Address Channel
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            axil_arready_reg <= 0;
+        end else begin
+            if (S_AXIL_ARVALID && axil_arready_reg) begin
+                axil_arready_reg <= 0;
+            end else if (S_AXIL_ARVALID && !axil_arready_reg) begin
+                axil_arready_reg <= 1;
+            end
+        end
+    end
+
+    // AXI Lite Read Data Channel
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            axil_rvalid_reg <= 0;
+            axil_rresp_reg <= 0;
+        end else begin
+            if (axil_rvalid_reg && S_AXIL_RREADY) begin
+                axil_rvalid_reg <= 0;
+            end else if (S_AXIL_ARVALID && S_AXIL_ARREADY) begin
+                axil_rvalid_reg <= 1;
+                axil_rresp_reg <= 0;
+                case (S_AXIL_ARADDR)
+                    REG_SOURCE_ADDR: axil_rdata_reg <= source_addr;
+                    REG_DEST_ADDR: axil_rdata_reg <= dest_addr;
+                    REG_LENGTH: axil_rdata_reg <= length;
+                    REG_STATUS: axil_rdata_reg <= (read_state == DONE && write_state == DONE) ? 32'h00000001 : 32'h00000000;
+                    default: axil_rdata_reg <= 32'h00000000;
+                endcase
+            end
+        end
+    end
+
+    // AXI Write Address Channel
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            M_AXI_AWID <= AXI_WRITE_ID;
+            M_AXI_AWADDR <= 0;
+            M_AXI_AWSIZE <= 3; // 32-bit
+            M_AXI_AWBURST <= 1; // INCR
+            M_AXI_AWLOCK <= 0;
+            M_AXI_AWCACHE <= 0;
+            M_AXI_AWPROT <= 0;
+            M_AXI_AWQOS <= 0;
+        end else if (write_state == WRITE) begin
+            if (M_AXI_AWVALID && M_AXI_AWREADY) begin
+                M_AXI_AWADDR <= write_addr + (C_AXI_DATA_WIDTH/8);
+            end else begin
+                M_AXI_AWADDR <= write_addr;
+            end
+        end
+    end
+
+    // AXI Write Data Channel
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            M_AXI_WDATA <= 0;
+            M_AXI_WSTRB <= (C_AXI_DATA_WIDTH/8)'hF;
+        end else if (write_state == WRITE && M_AXI_WVALID && M_AXI_WREADY) begin
+            M_AXI_WDATA <= M_AXI_RDATA; // Assume read data is available for write
+        end
+    end
+
+    // AXI Read Address Channel
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            M_AXI_ARID <= AXI_READ_ID;
+            M_AXI_ARADDR <= 0;
+            M_AXI_ARSIZE <= 3; // 32-bit
+            M_AXI_ARBURST <= 1; // INCR
+            M_AXI_ARLOCK <= 0;
+            M_AXI_ARCACHE <= 0;
+            M_AXI_ARPROT <= 0;
+            M_AXI_ARQOS <= 0;
+        end else if (read_state == READ) begin
+            if (M_AXI_ARVALID && M_AXI_ARREADY) begin
+                M_AXI_ARADDR <= read_addr + (C_AXI_DATA_WIDTH/8);
+            end else begin
+                M_AXI_ARADDR <= read_addr;
+            end
+        end
+    end
+
+    // AXI Read Data Channel
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            M_AXI_RREADY <= 0;
+        end else begin
+            if (read_state == READ && M_AXI_RVALID) begin
+                M_AXI_RREADY <= 1;
+            end else begin
+                M_AXI_RREADY <= 0;
+            end
+        end
+    end
+
+    // Output assignments
+    assign S_AXIL_AWREADY = axil_awready_reg;
+    assign S_AXIL_WREADY = axil_wready_reg;
+    assign S_AXIL_BVALID = axil_bvalid_reg;
+    assign S_AXIL_BRESP = axil_bresp_reg;
+    assign S_AXIL_ARREADY = axil_arready_reg;
+    assign S_AXIL_RVALID = axil_rvalid_reg;
+    assign S_AXIL_RDATA = axil_rdata_reg;
+    assign S_AXIL_RRESP = axil_rresp_reg;
+    assign M_AXI_AWID = AXI_WRITE_ID;
+    assign M_AXI_AWSIZE = 3; // 32-bit
+    assign M_AXI_AWBURST = 1; // INCR
+    assign M_AXI_AWLOCK = 0;
+    assign M_AXI_AWCACHE = 0;
+    assign M_AXI_AWPROT = 0;
+    assign M_AXI_AWQOS = 0;
+    assign M_AXI_ARID = AXI_READ_ID;
+    assign M_AXI_ARSIZE = 3; // 32-bit
+    assign M_AXI_ARBURST = 1; // INCR
+    assign M_AXI_ARLOCK = 0;
+    assign M_AXI_ARCACHE = 0;
+    assign M_AXI_ARPROT = 0;
+    assign M_AXI_ARQOS = 0;
+    assign o_int = (read_state == DONE && write_state == DONE);
+
+endmodule

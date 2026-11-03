@@ -1,0 +1,260 @@
+module axis_async_fifo_adapter #
+(
+    parameter DEPTH = 4096,
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                     s_clk,
+    input  wire                     s_rst,
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    input  wire                     m_clk,
+    input  wire                     m_rst,
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser,
+    input  wire                     s_pause_req,
+    output wire                     s_pause_ack,
+    input  wire                     m_pause_req,
+    output wire                     m_pause_ack,
+    output wire [$clog2(DEPTH):0]   s_status_depth,
+    output wire [$clog2(DEPTH):0]   s_status_depth_commit,
+    output wire                     s_status_overflow,
+    output wire                     s_status_bad_frame,
+    output wire                     s_status_good_frame,
+    output wire [$clog2(DEPTH):0]   m_status_depth,
+    output wire [$clog2(DEPTH):0]   m_status_depth_commit,
+    output wire                     m_status_overflow,
+    output wire                     m_status_bad_frame,
+    output wire                     m_status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam PTR_WIDTH = ADDR_WIDTH + 1;
+    localparam DEPTH_MASK = DEPTH - 1;
+
+    // Internal signal declarations
+    wire [S_DATA_WIDTH-1:0] s_data_reg;
+    wire [S_KEEP_WIDTH-1:0] s_keep_reg;
+    wire s_last_reg;
+    wire [ID_WIDTH-1:0] s_id_reg;
+    wire [DEST_WIDTH-1:0] s_dest_reg;
+    wire [USER_WIDTH-1:0] s_user_reg;
+
+    wire s_wr_en;
+    wire s_full;
+    wire s_empty;
+    wire [PTR_WIDTH-1:0] s_wr_ptr;
+    wire [PTR_WIDTH-1:0] s_rd_ptr_sync;
+    wire [PTR_WIDTH-1:0] s_rd_ptr_commit;
+
+    wire m_rd_en;
+    wire m_full;
+    wire m_empty;
+    wire [PTR_WIDTH-1:0] m_rd_ptr;
+    wire [PTR_WIDTH-1:0] m_wr_ptr_sync;
+    wire [PTR_WIDTH-1:0] m_wr_ptr_commit;
+
+    wire s_pause_active;
+    wire m_pause_active;
+
+    // Source side logic
+    assign s_data_reg = s_axis_tdata;
+    assign s_keep_reg = S_KEEP_ENABLE ? s_axis_tkeep : {S_KEEP_WIDTH{1'b1}};
+    assign s_last_reg = s_axis_tlast;
+    assign s_id_reg = ID_ENABLE ? s_axis_tid : {ID_WIDTH{1'b0}};
+    assign s_dest_reg = DEST_ENABLE ? s_axis_tdest : {DEST_WIDTH{1'b0}};
+    assign s_user_reg = USER_ENABLE ? s_axis_tuser : {USER_WIDTH{1'b0}};
+
+    assign s_pause_active = PAUSE_ENABLE ? s_pause_req : 1'b0;
+    assign s_pause_ack = PAUSE_ENABLE ? s_pause_req : 1'b0;
+
+    assign s_wr_en = s_axis_tvalid && s_axis_tready && !s_pause_active;
+
+    // Destination side logic
+    assign m_pause_active = PAUSE_ENABLE ? m_pause_req : 1'b0;
+    assign m_pause_ack = PAUSE_ENABLE ? m_pause_req : 1'b0;
+
+    assign m_rd_en = m_axis_tvalid && m_axis_tready && !m_pause_active;
+
+    // FIFO control signals
+    assign s_full = (s_wr_ptr[PTR_WIDTH-1] != s_rd_ptr_sync[PTR_WIDTH-1]) && 
+                    (s_wr_ptr[ADDR_WIDTH-1:0] == s_rd_ptr_sync[ADDR_WIDTH-1:0]);
+    assign s_empty = (s_wr_ptr == s_rd_ptr_sync);
+    assign m_full = (m_wr_ptr_sync[PTR_WIDTH-1] != m_rd_ptr[PTR_WIDTH-1]) && 
+                    (m_wr_ptr_sync[ADDR_WIDTH-1:0] == m_rd_ptr[ADDR_WIDTH-1:0]);
+    assign m_empty = (m_wr_ptr_sync == m_rd_ptr);
+
+    assign s_axis_tready = !s_full && !s_pause_active;
+    assign m_axis_tvalid = !m_empty && !m_pause_active;
+
+    // Status signals
+    wire [PTR_WIDTH-1:0] s_depth_raw;
+    wire [PTR_WIDTH-1:0] m_depth_raw;
+    
+    assign s_depth_raw = s_wr_ptr - s_rd_ptr_sync;
+    assign m_depth_raw = m_wr_ptr_sync - m_rd_ptr;
+
+    assign s_status_depth = s_depth_raw[ADDR_WIDTH:0];
+    assign s_status_depth_commit = s_depth_raw[ADDR_WIDTH:0];
+    assign m_status_depth = m_depth_raw[ADDR_WIDTH:0];
+    assign m_status_depth_commit = m_depth_raw[ADDR_WIDTH:0];
+
+    assign s_status_overflow = 1'b0;
+    assign s_status_bad_frame = 1'b0;
+    assign s_status_good_frame = 1'b0;
+    assign m_status_overflow = 1'b0;
+    assign m_status_bad_frame = 1'b0;
+    assign m_status_good_frame = 1'b0;
+
+    // Write pointer update
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_wr_ptr <= {PTR_WIDTH{1'b0}};
+        else if (s_wr_en)
+            s_wr_ptr <= s_wr_ptr + 1'b1;
+    end
+
+    // Read pointer update
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_rd_ptr <= {PTR_WIDTH{1'b0}};
+        else if (m_rd_en)
+            m_rd_ptr <= m_rd_ptr + 1'b1;
+    end
+
+    // CDC: Synchronous read of write pointer in m_clk domain
+    reg [PTR_WIDTH-1:0] m_wr_ptr_sync_r1, m_wr_ptr_sync_r2, m_wr_ptr_sync_r3;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_wr_ptr_sync_r1 <= {PTR_WIDTH{1'b0}};
+            m_wr_ptr_sync_r2 <= {PTR_WIDTH{1'b0}};
+            m_wr_ptr_sync_r3 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            m_wr_ptr_sync_r1 <= s_wr_ptr;
+            m_wr_ptr_sync_r2 <= m_wr_ptr_sync_r1;
+            m_wr_ptr_sync_r3 <= m_wr_ptr_sync_r2;
+        end
+    end
+    assign m_wr_ptr_sync = m_wr_ptr_sync_r3;
+
+    // CDC: Synchronous read of read pointer in s_clk domain
+    reg [PTR_WIDTH-1:0] s_rd_ptr_sync_r1, s_rd_ptr_sync_r2, s_rd_ptr_sync_r3;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_rd_ptr_sync_r1 <= {PTR_WIDTH{1'b0}};
+            s_rd_ptr_sync_r2 <= {PTR_WIDTH{1'b0}};
+            s_rd_ptr_sync_r3 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            s_rd_ptr_sync_r1 <= m_rd_ptr;
+            s_rd_ptr_sync_r2 <= s_rd_ptr_sync_r1;
+            s_rd_ptr_sync_r3 <= s_rd_ptr_sync_r2;
+        end
+    end
+    assign s_rd_ptr_sync = s_rd_ptr_sync_r3;
+    assign s_rd_ptr_commit = s_rd_ptr_sync;
+    assign m_wr_ptr_commit = m_wr_ptr_sync;
+
+    // RAM storage
+    reg [S_DATA_WIDTH-1:0] ram_data [0:DEPTH-1];
+    reg [S_KEEP_WIDTH-1:0] ram_keep [0:DEPTH-1];
+    reg ram_last [0:DEPTH-1];
+    reg [ID_WIDTH-1:0] ram_id [0:DEPTH-1];
+    reg [DEST_WIDTH-1:0] ram_dest [0:DEPTH-1];
+    reg [USER_WIDTH-1:0] ram_user [0:DEPTH-1];
+
+    // Write to RAM in s_clk domain
+    always @(posedge s_clk) begin
+        if (s_wr_en) begin
+            ram_data[s_wr_ptr[ADDR_WIDTH-1:0]] <= s_data_reg;
+            ram_keep[s_wr_ptr[ADDR_WIDTH-1:0]] <= s_keep_reg;
+            ram_last[s_wr_ptr[ADDR_WIDTH-1:0]] <= s_last_reg;
+            ram_id[s_wr_ptr[ADDR_WIDTH-1:0]] <= s_id_reg;
+            ram_dest[s_wr_ptr[ADDR_WIDTH-1:0]] <= s_dest_reg;
+            ram_user[s_wr_ptr[ADDR_WIDTH-1:0]] <= s_user_reg;
+        end
+    end
+
+    // Read from RAM in m_clk domain
+    wire [ADDR_WIDTH-1:0] rd_addr = m_rd_ptr[ADDR_WIDTH-1:0];
+    
+    wire [S_DATA_WIDTH-1:0] rd_data;
+    wire [S_KEEP_WIDTH-1:0] rd_keep;
+    wire rd_last;
+    wire [ID_WIDTH-1:0] rd_id;
+    wire [DEST_WIDTH-1:0] rd_dest;
+    wire [USER_WIDTH-1:0] rd_user;
+
+    assign rd_data = ram_data[rd_addr];
+    assign rd_keep = ram_keep[rd_addr];
+    assign rd_last = ram_last[rd_addr];
+    assign rd_id = ram_id[rd_addr];
+    assign rd_dest = ram_dest[rd_addr];
+    assign rd_user = ram_user[rd_addr];
+
+    // Width adaptation: S_DATA_WIDTH to M_DATA_WIDTH
+    // For simplicity, assume direct mapping when widths are equal or compatible
+    // In a real implementation, this would involve byte alignment and keep signal adjustment
+    
+    reg [M_DATA_WIDTH-1:0] m_data_out;
+    reg [M_KEEP_WIDTH-1:0] m_keep_out;
+    reg m_last_out;
+    reg [ID_WIDTH-1:0] m_id_out;
+    reg [DEST_WIDTH-1:0] m_dest_out;
+    reg [USER_WIDTH-1:0] m_user_out;
+
+    always @(*) begin
+        if (M_DATA_WIDTH >= S_DATA_WIDTH) begin
+            m_data_out = {M_DATA_WIDTH-S_DATA_WIDTH{1'b0}} | rd_data;
+            m_keep_out = M_KEEP_ENABLE ? {M_KEEP_WIDTH{1'b1}} : {M_KEEP_WIDTH{1'b0}};
+        end else begin
+            m_data_out = rd_data[M_DATA_WIDTH-1:0];
+            m_keep_out = M_KEEP_ENABLE ? rd_keep[M_KEEP_WIDTH-1:0] : {M_KEEP_WIDTH{1'b0}};
+        end
+        m_last_out = rd_last;
+        m_id_out = rd_id;
+        m_dest_out = rd_dest;
+        m_user_out = rd_user;
+    end
+
+    assign m_axis_tdata = m_data_out;
+    assign m_axis_tkeep = m_keep_out;
+    assign m_axis_tlast = m_last_out;
+    assign m_axis_tid = m_id_out;
+    assign m_axis_tdest = m_dest_out;
+    assign m_axis_tuser = m_user_out;
+
+endmodule

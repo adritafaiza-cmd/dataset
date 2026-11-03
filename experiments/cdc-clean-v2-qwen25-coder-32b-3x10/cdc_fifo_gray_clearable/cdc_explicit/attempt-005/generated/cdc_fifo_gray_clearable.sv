@@ -1,0 +1,125 @@
+module cdc_fifo_gray_clearable #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input                  src_clear_i,
+    output                 src_clear_pending_o,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    input                  dst_clear_i,
+    output                 dst_clear_pending_o,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam ADDR_WIDTH = LOG_DEPTH;
+
+    reg [ADDR_WIDTH:0] src_gray_wr_ptr, src_gray_wr_ptr_nxt;
+    reg [ADDR_WIDTH:0] src_gray_rd_ptr, src_gray_rd_ptr_nxt;
+    reg [ADDR_WIDTH:0] dst_gray_wr_ptr, dst_gray_wr_ptr_nxt;
+    reg [ADDR_WIDTH:0] dst_gray_rd_ptr, dst_gray_rd_ptr_nxt;
+
+    reg [WIDTH-1:0] mem [DEPTH-1:0];
+    reg [WIDTH-1:0] dst_data_reg [SYNC_STAGES-1:0];
+    reg [SYNC_STAGES-1:0] dst_valid_reg;
+
+    reg src_clear_pending, src_clear_pending_nxt;
+    reg dst_clear_pending, dst_clear_pending_nxt;
+
+    // Binary to Gray conversion
+    function [ADDR_WIDTH:0] bin_to_gray;
+        input [ADDR_WIDTH:0] bin;
+        bin_to_gray = bin ^ (bin >> 1);
+    endfunction
+
+    // Gray to Binary conversion
+    function [ADDR_WIDTH:0] gray_to_bin;
+        input [ADDR_WIDTH:0] gray;
+        integer i;
+        reg [ADDR_WIDTH:0] bin;
+        bin = gray;
+        for (i = ADDR_WIDTH-1; i > 0; i = i - 1) begin
+            bin[i-1] = bin[i] ^ bin[i-1];
+        end
+        gray_to_bin = bin;
+    endfunction
+
+    // Source domain logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_gray_wr_ptr <= 0;
+            src_gray_rd_ptr <= 0;
+            src_clear_pending <= 0;
+        end else begin
+            src_gray_wr_ptr <= src_gray_wr_ptr_nxt;
+            src_gray_rd_ptr <= src_gray_rd_ptr_nxt;
+            src_clear_pending <= src_clear_pending_nxt;
+        end
+    end
+
+    always @(*) begin
+        src_gray_wr_ptr_nxt = src_gray_wr_ptr;
+        src_gray_rd_ptr_nxt = src_gray_rd_ptr;
+        src_clear_pending_nxt = src_clear_pending;
+        src_ready_o = 1'b0;
+
+        if (src_clear_i) begin
+            src_gray_wr_ptr_nxt = 0;
+            src_gray_rd_ptr_nxt = 0;
+            src_clear_pending_nxt = 1'b1;
+        end else if (!src_clear_pending) begin
+            if (src_valid_i && (gray_to_bin(src_gray_wr_ptr) != gray_to_bin(src_gray_rd_ptr) + 1)) begin
+                mem[gray_to_bin(src_gray_wr_ptr)[ADDR_WIDTH-1:0]] = src_data_i;
+                src_gray_wr_ptr_nxt = bin_to_gray(gray_to_bin(src_gray_wr_ptr) + 1);
+                src_ready_o = 1'b1;
+            end
+        end
+    end
+
+    // Destination domain logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_gray_wr_ptr <= 0;
+            dst_gray_rd_ptr <= 0;
+            dst_clear_pending <= 0;
+            dst_data_reg <= {SYNC_STAGES{WIDTH{1'b0}}};
+            dst_valid_reg <= 0;
+        end else begin
+            dst_gray_wr_ptr <= dst_gray_wr_ptr_nxt;
+            dst_gray_rd_ptr <= dst_gray_rd_ptr_nxt;
+            dst_clear_pending <= dst_clear_pending_nxt;
+            dst_data_reg <= {dst_data_reg[SYNC_STAGES-2:0], mem[gray_to_bin(dst_gray_wr_ptr)[ADDR_WIDTH-1:0]]};
+            dst_valid_reg <= {dst_valid_reg[SYNC_STAGES-2:0], (gray_to_bin(dst_gray_wr_ptr) != gray_to_bin(dst_gray_rd_ptr))};
+        end
+    end
+
+    always @(*) begin
+        dst_gray_wr_ptr_nxt = dst_gray_wr_ptr;
+        dst_gray_rd_ptr_nxt = dst_gray_rd_ptr;
+        dst_clear_pending_nxt = dst_clear_pending;
+
+        if (dst_clear_i) begin
+            dst_gray_wr_ptr_nxt = 0;
+            dst_gray_rd_ptr_nxt = 0;
+            dst_clear_pending_nxt = 1'b1;
+        end else if (!dst_clear_pending) begin
+            if (dst_ready_i && dst_valid_reg[SYNC_STAGES-1]) begin
+                dst_gray_rd_ptr_nxt = bin_to_gray(gray_to_bin(dst_gray_rd_ptr) + 1);
+            end
+        end
+    end
+
+    assign dst_data_o = dst_data_reg[SYNC_STAGES-1];
+    assign dst_valid_o = dst_valid_reg[SYNC_STAGES-1];
+    assign src_clear_pending_o = src_clear_pending;
+    assign dst_clear_pending_o = dst_clear_pending;
+
+endmodule

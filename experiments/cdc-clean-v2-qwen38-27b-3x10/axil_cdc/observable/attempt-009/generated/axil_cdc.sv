@@ -1,0 +1,387 @@
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ============================================================
+    // Write Address Channel (AW) - S to M
+    // ============================================================
+    reg  [ADDR_WIDTH-1:0] s_awaddr_reg;
+    reg  [2:0]            s_awprot_reg;
+    reg                   s_awvalid_reg;
+    wire                  s_awready;
+
+    // S-side: capture AW when valid and ready
+    assign s_axil_awready = s_awready;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_awvalid_reg <= 1'b0;
+            s_awaddr_reg  <= {ADDR_WIDTH{1'b0}};
+            s_awprot_reg  <= 3'b0;
+        end else begin
+            if (s_axil_awvalid && s_awready) begin
+                s_awvalid_reg <= 1'b1;
+                s_awaddr_reg  <= s_axil_awaddr;
+                s_awprot_reg  <= s_axil_awprot;
+            end else if (s_awvalid_reg && s_awready) begin
+                s_awvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // M-side: generate AW
+    reg  [ADDR_WIDTH-1:0] m_awaddr_reg;
+    reg  [2:0]            m_awprot_reg;
+    reg                   m_awvalid_reg;
+    wire                  m_awready;
+
+    assign m_axil_awaddr  = m_awaddr_reg;
+    assign m_axil_awprot  = m_awprot_reg;
+    assign m_axil_awvalid = m_awvalid_reg;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_awvalid_reg <= 1'b0;
+            m_awaddr_reg  <= {ADDR_WIDTH{1'b0}};
+            m_awprot_reg  <= 3'b0;
+        end else begin
+            if (m_awvalid_reg && m_axil_awready) begin
+                m_awvalid_reg <= 1'b0;
+            end else if (!m_awvalid_reg && s_awvalid_reg) begin
+                m_awvalid_reg <= 1'b1;
+                m_awaddr_reg  <= s_awaddr_reg;
+                m_awprot_reg  <= s_awprot_reg;
+            end
+        end
+    end
+
+    // Handshake: S-side ready when M-side is not busy or just completed
+    // Use a simple 2-phase handshake: S asserts valid, M deasserts when done
+    // We need to track when M has accepted the AW
+    reg m_aw_done;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_aw_done <= 1'b0;
+        end else begin
+            if (m_awvalid_reg && m_axil_awready) begin
+                m_aw_done <= 1'b1;
+            end else if (!m_awvalid_reg) begin
+                m_aw_done <= 1'b0;
+            end
+        end
+    end
+
+    // S-side ready: can accept new AW when previous is done
+    assign s_awready = !s_awvalid_reg || m_aw_done;
+
+    // ============================================================
+    // Write Data Channel (W) - S to M
+    // ============================================================
+    reg  [DATA_WIDTH-1:0] s_wdata_reg;
+    reg  [STRB_WIDTH-1:0] s_wstrb_reg;
+    reg                   s_wvalid_reg;
+    wire                  s_wready;
+
+    assign s_axil_wready = s_wready;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_wvalid_reg <= 1'b0;
+            s_wdata_reg  <= {DATA_WIDTH{1'b0}};
+            s_wstrb_reg  <= {STRB_WIDTH{1'b0}};
+        end else begin
+            if (s_axil_wvalid && s_wready) begin
+                s_wvalid_reg <= 1'b1;
+                s_wdata_reg  <= s_axil_wdata;
+                s_wstrb_reg  <= s_axil_wstrb;
+            end else if (s_wvalid_reg && s_wready) begin
+                s_wvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // M-side: generate W
+    reg  [DATA_WIDTH-1:0] m_wdata_reg;
+    reg  [STRB_WIDTH-1:0] m_wstrb_reg;
+    reg                   m_wvalid_reg;
+
+    assign m_axil_wdata  = m_wdata_reg;
+    assign m_axil_wstrb  = m_wstrb_reg;
+    assign m_axil_wvalid = m_wvalid_reg;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_wvalid_reg <= 1'b0;
+            m_wdata_reg  <= {DATA_WIDTH{1'b0}};
+            m_wstrb_reg  <= {STRB_WIDTH{1'b0}};
+        end else begin
+            if (m_wvalid_reg && m_axil_wready) begin
+                m_wvalid_reg <= 1'b0;
+            end else if (!m_wvalid_reg && s_wvalid_reg) begin
+                m_wvalid_reg <= 1'b1;
+                m_wdata_reg  <= s_wdata_reg;
+                m_wstrb_reg  <= s_wstrb_reg;
+            end
+        end
+    end
+
+    reg m_w_done;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_w_done <= 1'b0;
+        end else begin
+            if (m_wvalid_reg && m_axil_wready) begin
+                m_w_done <= 1'b1;
+            end else if (!m_wvalid_reg) begin
+                m_w_done <= 1'b0;
+            end
+        end
+    end
+
+    assign s_wready = !s_wvalid_reg || m_w_done;
+
+    // ============================================================
+    // Write Response Channel (B) - M to S
+    // ============================================================
+    reg  [1:0] m_bresp_reg;
+    reg        m_bvalid_reg;
+    wire       m_bready;
+
+    assign m_axil_bready = m_bready;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_bvalid_reg <= 1'b0;
+            m_bresp_reg  <= 2'b0;
+        end else begin
+            if (m_axil_bvalid && m_bready) begin
+                m_bvalid_reg <= 1'b1;
+                m_bresp_reg  <= m_axil_bresp;
+            end else if (m_bvalid_reg && m_bready) begin
+                m_bvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // S-side: generate B
+    reg  [1:0] s_bresp_reg;
+    reg        s_bvalid_reg;
+
+    assign s_axil_bresp  = s_bresp_reg;
+    assign s_axil_bvalid = s_bvalid_reg;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_bvalid_reg <= 1'b0;
+            s_bresp_reg  <= 2'b0;
+        end else begin
+            if (s_bvalid_reg && s_axil_bready) begin
+                s_bvalid_reg <= 1'b0;
+            end else if (!s_bvalid_reg && m_bvalid_reg) begin
+                s_bvalid_reg <= 1'b1;
+                s_bresp_reg  <= m_bresp_reg;
+            end
+        end
+    end
+
+    reg s_b_done;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_b_done <= 1'b0;
+        end else begin
+            if (s_bvalid_reg && s_axil_bready) begin
+                s_b_done <= 1'b1;
+            end else if (!s_bvalid_reg) begin
+                s_b_done <= 1'b0;
+            end
+        end
+    end
+
+    assign m_bready = !m_bvalid_reg || s_b_done;
+
+    // ============================================================
+    // Read Address Channel (AR) - S to M
+    // ============================================================
+    reg  [ADDR_WIDTH-1:0] s_araddr_reg;
+    reg  [2:0]            s_arprot_reg;
+    reg                   s_arvalid_reg;
+    wire                  s_arready;
+
+    assign s_axil_arready = s_arready;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_arvalid_reg <= 1'b0;
+            s_araddr_reg  <= {ADDR_WIDTH{1'b0}};
+            s_arprot_reg  <= 3'b0;
+        end else begin
+            if (s_axil_arvalid && s_arready) begin
+                s_arvalid_reg <= 1'b1;
+                s_araddr_reg  <= s_axil_araddr;
+                s_arprot_reg  <= s_axil_arprot;
+            end else if (s_arvalid_reg && s_arready) begin
+                s_arvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // M-side: generate AR
+    reg  [ADDR_WIDTH-1:0] m_araddr_reg;
+    reg  [2:0]            m_arprot_reg;
+    reg                   m_arvalid_reg;
+
+    assign m_axil_araddr  = m_araddr_reg;
+    assign m_axil_arprot  = m_arprot_reg;
+    assign m_axil_arvalid = m_arvalid_reg;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_arvalid_reg <= 1'b0;
+            m_araddr_reg  <= {ADDR_WIDTH{1'b0}};
+            m_arprot_reg  <= 3'b0;
+        end else begin
+            if (m_arvalid_reg && m_axil_arready) begin
+                m_arvalid_reg <= 1'b0;
+            end else if (!m_arvalid_reg && s_arvalid_reg) begin
+                m_arvalid_reg <= 1'b1;
+                m_araddr_reg  <= s_araddr_reg;
+                m_arprot_reg  <= s_arprot_reg;
+            end
+        end
+    end
+
+    reg m_ar_done;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_ar_done <= 1'b0;
+        end else begin
+            if (m_arvalid_reg && m_axil_arready) begin
+                m_ar_done <= 1'b1;
+            end else if (!m_arvalid_reg) begin
+                m_ar_done <= 1'b0;
+            end
+        end
+    end
+
+    assign s_arready = !s_arvalid_reg || m_ar_done;
+
+    // ============================================================
+    // Read Data Channel (R) - M to S
+    // ============================================================
+    reg  [DATA_WIDTH-1:0] m_rdata_reg;
+    reg  [1:0]            m_rresp_reg;
+    reg                   m_rvalid_reg;
+    wire                  m_rready;
+
+    assign m_axil_rready = m_rready;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rvalid_reg <= 1'b0;
+            m_rdata_reg  <= {DATA_WIDTH{1'b0}};
+            m_rresp_reg  <= 2'b0;
+        end else begin
+            if (m_axil_rvalid && m_rready) begin
+                m_rvalid_reg <= 1'b1;
+                m_rdata_reg  <= m_axil_rdata;
+                m_rresp_reg  <= m_axil_rresp;
+            end else if (m_rvalid_reg && m_rready) begin
+                m_rvalid_reg <= 1'b0;
+            end
+        end
+    end
+
+    // S-side: generate R
+    reg  [DATA_WIDTH-1:0] s_rdata_reg;
+    reg  [1:0]            s_rresp_reg;
+    reg                   s_rvalid_reg;
+
+    assign s_axil_rdata  = s_rdata_reg;
+    assign s_axil_rresp  = s_rresp_reg;
+    assign s_axil_rvalid = s_rvalid_reg;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_rvalid_reg <= 1'b0;
+            s_rdata_reg  <= {DATA_WIDTH{1'b0}};
+            s_rresp_reg  <= 2'b0;
+        end else begin
+            if (s_rvalid_reg && s_axil_rready) begin
+                s_rvalid_reg <= 1'b0;
+            end else if (!s_rvalid_reg && m_rvalid_reg) begin
+                s_rvalid_reg <= 1'b1;
+                s_rdata_reg  <= m_rdata_reg;
+                s_rresp_reg  <= m_rresp_reg;
+            end
+        end
+    end
+
+    reg s_r_done;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_r_done <= 1'b0;
+        end else begin
+            if (s_rvalid_reg && s_axil_rready) begin
+                s_r_done <= 1'b1;
+            end else if (!s_rvalid_reg) begin
+                s_r_done <= 1'b0;
+            end
+        end
+    end
+
+    assign m_rready = !m_rvalid_reg || s_r_done;
+
+endmodule

@@ -1,0 +1,205 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // State machine states
+    localparam S_IDLE    = 3'd0;
+    localparam S_WAIT_WR = 3'd1;
+    localparam S_SHIFT   = 3'd2;
+    localparam S_DONE    = 3'd3;
+
+    reg [2:0] state;
+    reg [2:0] next_state;
+
+    // SPI shift registers
+    reg [N-1:0] tx_shift;
+    reg [N-1:0] rx_shift;
+    reg [N-1:0] tx_data;
+    reg [N-1:0] rx_data;
+
+    // Bit counter
+    reg [N-1:0] bit_cnt;
+
+    // SPI clock divider counter
+    reg [N-1:0] clk_div_cnt;
+    reg         clk_phase;
+
+    // Handshake signals
+    reg         wr_ack_int;
+    reg         do_valid_int;
+
+    // SPI_2X_CLK_DIV is used to determine the number of sclk cycles per bit
+    // For standard SPI, we need 2 sclk cycles per bit (one for setup, one for capture)
+    // SPI_2X_CLK_DIV indicates the divider factor
+    // We'll use a simple approach: generate spi_sck_o with a period of 2*SPI_2X_CLK_DIV sclk cycles
+
+    // SPI clock generation
+    // We need to generate a clock with 50% duty cycle
+    // Each bit takes 2 * SPI_2X_CLK_DIV sclk cycles
+    // Half period = SPI_2X_CLK_DIV sclk cycles
+
+    wire [N-1:0] half_period = SPI_2X_CLK_DIV[N-1:0];
+
+    // SPI clock generator
+    reg [N-1:0] clk_gen_cnt;
+    reg         clk_gen_phase;
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            clk_gen_cnt   <= {N{1'b0}};
+            clk_gen_phase <= 1'b0;
+        end else if (state == S_SHIFT) begin
+            if (clk_gen_cnt == half_period - 1) begin
+                clk_gen_cnt   <= {N{1'b0}};
+                clk_gen_phase <= ~clk_gen_phase;
+            end else begin
+                clk_gen_cnt <= clk_gen_cnt + 1'b1;
+            end
+        end else begin
+            clk_gen_cnt   <= {N{1'b0}};
+            clk_gen_phase <= 1'b0;
+        end
+    end
+
+    // SPI SCK output
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_sck_o <= 1'b0;
+        end else if (state == S_SHIFT) begin
+            spi_sck_o <= clk_gen_phase;
+        end else begin
+            spi_sck_o <= 1'b0;
+        end
+    end
+
+    // SPI SS output
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_ssel_o <= 1'b1; // Inactive high
+        end else begin
+            case (state)
+                S_IDLE:    spi_ssel_o <= 1'b1;
+                S_WAIT_WR: spi_ssel_o <= 1'b1;
+                S_SHIFT:   spi_ssel_o <= 1'b0; // Active low
+                S_DONE:    spi_ssel_o <= 1'b1;
+                default:   spi_ssel_o <= 1'b1;
+            endcase
+        end
+    end
+
+    // SPI MOSI output
+    assign spi_mosi_o = tx_shift[N-1];
+
+    // State machine
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state <= S_IDLE;
+        end else begin
+            state <= next_state;
+        end
+    end
+
+    always @(*) begin
+        next_state = state;
+        case (state)
+            S_IDLE: begin
+                if (wren_i) begin
+                    next_state = S_WAIT_WR;
+                end
+            end
+            S_WAIT_WR: begin
+                // Wait for wren_i to be deasserted or just proceed
+                // Actually, we should accept the word when wren_i is high
+                // Let's restructure: accept word in S_IDLE when wren_i is high
+                next_state = S_SHIFT;
+            end
+            S_SHIFT: begin
+                if (bit_cnt == N-1) begin
+                    next_state = S_DONE;
+                end
+            end
+            S_DONE: begin
+                next_state = S_IDLE;
+            end
+            default: next_state = S_IDLE;
+        endcase
+    end
+
+    // Control logic
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            tx_shift    <= {N{1'b0}};
+            rx_shift    <= {N{1'b0}};
+            tx_data     <= {N{1'b0}};
+            rx_data     <= {N{1'b0}};
+            bit_cnt     <= {N{1'b0}};
+            di_req_o    <= 1'b0;
+            wr_ack_o    <= 1'b0;
+            do_valid_o  <= 1'b0;
+            do_o        <= {N{1'b0}};
+        end else begin
+            // Default: clear single-cycle pulses
+            wr_ack_o   <= 1'b0;
+            do_valid_o <= 1'b0;
+
+            case (state)
+                S_IDLE: begin
+                    di_req_o <= 1'b1;
+                    if (wren_i) begin
+                        // Accept the word
+                        tx_data  <= di_i;
+                        tx_shift <= di_i;
+                        bit_cnt  <= {N{1'b0}};
+                        wr_ack_o <= 1'b1;
+                        di_req_o <= 1'b0;
+                    end
+                end
+                S_WAIT_WR: begin
+                    // This state is transitional
+                    di_req_o <= 1'b0;
+                end
+                S_SHIFT: begin
+                    di_req_o <= 1'b0;
+                    // On rising edge of spi_sck_o, capture MISO and shift
+                    // We detect the rising edge of clk_gen_phase
+                    if (clk_gen_phase == 1'b1 && clk_gen_cnt == 0) begin
+                        // Rising edge of SCK
+                        rx_shift <= {spi_miso_i, rx_shift[N-1:1]};
+                        tx_shift <= {tx_shift[N-2:0], 1'b0};
+                        if (bit_cnt == N-1) begin
+                            rx_data <= {spi_miso_i, rx_shift[N-1:1]};
+                        end else begin
+                            bit_cnt <= bit_cnt + 1'b1;
+                        end
+                    end
+                end
+                S_DONE: begin
+                    di_req_o <= 1'b1;
+                    do_o     <= rx_data;
+                    do_valid_o <= 1'b1;
+                end
+                default: begin
+                    di_req_o <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+endmodule
+```<|im_end|>

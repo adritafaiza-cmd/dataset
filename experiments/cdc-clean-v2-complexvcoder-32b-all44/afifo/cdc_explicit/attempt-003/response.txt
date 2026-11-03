@@ -1,0 +1,337 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "afifo",
+      "function": "Asynchronous FIFO with 2**LGFIFO entries of WIDTH bits",
+      "parameters": [
+        { "name": "LGFIFO", "value": "LGFIFO" },
+        { "name": "WIDTH", "value": "WIDTH" },
+        { "name": "NFF", "value": "NFF" },
+        { "name": "WRITE_ON_POSEDGE", "value": "WRITE_ON_POSEDGE" },
+        { "name": "OPT_REGISTER_READS", "value": "OPT_REGISTER_READS" }
+      ],
+      "ports": [
+        { "name": "i_wclk", "direction": "input", "width": 1, "clock_domain": "i_wclk" },
+        { "name": "i_wr_reset_n", "direction": "input", "width": 1, "clock_domain": "i_wclk" },
+        { "name": "i_wr", "direction": "input", "width": 1, "clock_domain": "i_wclk" },
+        { "name": "i_wr_data", "direction": "input", "width": "WIDTH", "clock_domain": "i_wclk" },
+        { "name": "o_wr_full", "direction": "output", "width": 1, "clock_domain": "i_wclk" },
+        { "name": "i_rclk", "direction": "input", "width": 1, "clock_domain": "i_rclk" },
+        { "name": "i_rd_reset_n", "direction": "input", "width": 1, "clock_domain": "i_rclk" },
+        { "name": "i_rd", "direction": "input", "width": 1, "clock_domain": "i_rclk" },
+        { "name": "o_rd_data", "direction": "output", "width": "WIDTH", "clock_domain": "i_rclk" },
+        { "name": "o_rd_empty", "direction": "output", "width": 1, "clock_domain": "i_rclk" }
+      ],
+      "instances": [
+        {
+          "module": "async_fifo_memory",
+          "name": "memory",
+          "function": "Memory storage for FIFO",
+          "connections": [
+            { "local": "i_wclk", "remote": "wclk" },
+            { "local": "i_wr_reset_n", "remote": "wreset_n" },
+            { "local": "i_wr", "remote": "wr" },
+            { "local": "i_wr_data", "remote": "wr_data" },
+            { "local": "i_rclk", "remote": "rclk" },
+            { "local": "i_rd_reset_n", "remote": "rreset_n" },
+            { "local": "i_rd", "remote": "rd" },
+            { "local": "o_rd_data", "remote": "rd_data" },
+            { "local": "o_wr_full", "remote": "wr_full" },
+            { "local": "o_rd_empty", "remote": "rd_empty" }
+          ]
+        },
+        {
+          "module": "sync_control",
+          "name": "write_sync",
+          "function": "Synchronize write control to read clock",
+          "connections": [
+            { "local": "i_wclk", "remote": "clk" },
+            { "local": "i_wr_reset_n", "remote": "reset_n" },
+            { "local": "i_wr", "remote": "async_control" },
+            { "local": "write_sync_ctrl", "remote": "sync_control" }
+          ]
+        },
+        {
+          "module": "sync_control",
+          "name": "read_sync",
+          "function": "Synchronize read control to write clock",
+          "connections": [
+            { "local": "i_rclk", "remote": "clk" },
+            { "local": "i_rd_reset_n", "remote": "reset_n" },
+            { "local": "i_rd", "remote": "async_control" },
+            { "local": "read_sync_ctrl", "remote": "sync_control" }
+          ]
+        }
+      ],
+      "connections": [
+        { "from": "write_sync.sync_control", "to": "memory.wr" },
+        { "from": "read_sync.sync_control", "to": "memory.rd" }
+      ],
+      "internal_signals": [
+        { "name": "write_sync_ctrl", "width": 1 },
+        { "name": "read_sync_ctrl", "width": 1 }
+      ],
+      "behavior": [
+        "Storage accepts 2**LGFIFO writes before any read. o_wr_full is high only when that storage is occupied.",
+        "A write is accepted when i_wr is high and o_wr_full is low, on the edge selected by WRITE_ON_POSEDGE.",
+        "A read is accepted when i_rd is high and o_rd_empty is low.",
+        "A write while full does not change stored data. A read while empty does not change o_rd_data and does not drop a later word.",
+        "Accepted data returns exactly once, in write order.",
+        "While write reset is asserted, o_wr_full is low. While read reset is asserted, o_rd_empty is high.",
+        "o_rd_empty can be high while words remain stored. The read side presents one stored word at a time. After a read, empty may return high until the next stored word becomes visible.",
+        "OPT_REGISTER_READS selects additional output registering; the payload must always have destination-clock synchronization.",
+        "NFF is the synchronizer depth. Use at least 2 stages.",
+        "Do not emit FORMAL-only ports.",
+        "Use acknowledged single-bit control between i_wclk and i_rclk, with at least NFF stages and sufficient payload settling. Synchronize the held payload separately; do not independently synchronize a changing data bus.",
+        "Hold each memory word stable from the time it is offered until the read side takes it.",
+        "Do not form full or empty by comparing a multi-bit pointer that was synchronized bit by bit.",
+        "Reset release must be safe in each clock domain.",
+        "Payloads pass through two destination-clock stages before they are advertised as valid. Preserve source ownership of each queued word until its accepted destination transfer; synchronization stages alone do not establish multi-bit coherence. Availability may lag and bubbles may span multiple destination clocks. There is no one-beat-per-clock guarantee. Register the offered word in the write domain before launching its request. NFF sets the minimum control synchronization depth; additional request-settling stages are permitted. OPT_REGISTER_READS selects an additional destination holding register or the synchronized destination payload, never an asynchronous memory bypass."
+      ]
+    },
+    {
+      "Top_module_name": "async_fifo_memory",
+      "function": "Memory storage for FIFO",
+      "parameters": [
+        { "name": "LGFIFO", "value": "LGFIFO" },
+        { "name": "WIDTH", "value": "WIDTH" },
+        { "name": "NFF", "value": "NFF" },
+        { "name": "WRITE_ON_POSEDGE", "value": "WRITE_ON_POSEDGE" },
+        { "name": "OPT_REGISTER_READS", "value": "OPT_REGISTER_READS" }
+      ],
+      "ports": [
+        { "name": "wclk", "direction": "input", "width": 1, "clock_domain": "wclk" },
+        { "name": "wreset_n", "direction": "input", "width": 1, "clock_domain": "wclk" },
+        { "name": "wr", "direction": "input", "width": 1, "clock_domain": "wclk" },
+        { "name": "wr_data", "direction": "input", "width": "WIDTH", "clock_domain": "wclk" },
+        { "name": "rclk", "direction": "input", "width": 1, "clock_domain": "rclk" },
+        { "name": "rreset_n", "direction": "input", "width": 1, "clock_domain": "rclk" },
+        { "name": "rd", "direction": "input", "width": 1, "clock_domain": "rclk" },
+        { "name": "rd_data", "direction": "output", "width": "WIDTH", "clock_domain": "rclk" },
+        { "name": "wr_full", "direction": "output", "width": 1, "clock_domain": "wclk" },
+        { "name": "rd_empty", "direction": "output", "width": 1, "clock_domain": "rclk" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [],
+      "behavior": [
+        "Memory storage for FIFO with write and read operations synchronized across asynchronous clocks.",
+        "Handles full and empty conditions using separate logic in each clock domain."
+      ]
+    },
+    {
+      "Top_module_name": "sync_control",
+      "function": "Synchronize single-bit control signal between asynchronous clocks",
+      "parameters": [
+        { "name": "NFF", "value": "NFF" }
+      ],
+      "ports": [
+        { "name": "clk", "direction": "input", "width": 1, "clock_domain": "clk" },
+        { "name": "reset_n", "direction": "input", "width": 1, "clock_domain": "clk" },
+        { "name": "async_control", "direction": "input", "width": 1, "clock_domain": "async_clk" },
+        { "name": "sync_control", "direction": "output", "width": 1, "clock_domain": "clk" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [],
+      "behavior": [
+        "Synchronizes a single-bit control signal from an asynchronous clock domain to the local clock domain using NFF stages."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	// Internal signals for synchronization
+	wire write_sync_ctrl;
+	wire read_sync_ctrl;
+
+	// Instantiate memory module
+	async_fifo_memory #(
+		.LGFIFO(LGFIFO),
+		.WIDTH(WIDTH),
+		.NFF(NFF),
+		.WRITE_ON_POSEDGE(WRITE_ON_POSEDGE),
+		.OPT_REGISTER_READS(OPT_REGISTER_READS)
+	) memory (
+		.wclk(i_wclk),
+		.wreset_n(i_wr_reset_n),
+		.wr(write_sync_ctrl),
+		.wr_data(i_wr_data),
+		.rclk(i_rclk),
+		.rreset_n(i_rd_reset_n),
+		.rd(read_sync_ctrl),
+		.rd_data(o_rd_data),
+		.wr_full(o_wr_full),
+		.rd_empty(o_rd_empty)
+	);
+
+	// Instantiate write control synchronizer
+	sync_control #(
+		.NFF(NFF)
+	) write_sync (
+		.clk(i_rclk),
+		.reset_n(i_rd_reset_n),
+		.async_control(i_wr),
+		.sync_control(write_sync_ctrl)
+	);
+
+	// Instantiate read control synchronizer
+	sync_control #(
+		.NFF(NFF)
+	) read_sync (
+		.clk(i_wclk),
+		.reset_n(i_wr_reset_n),
+		.async_control(i_rd),
+		.sync_control(read_sync_ctrl)
+	);
+
+endmodule
+
+module async_fifo_memory #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			wclk, wreset_n, wr,
+		input	wire	[WIDTH-1:0]	wr_data,
+		input	wire			rclk, rreset_n, rd,
+		output	reg	[WIDTH-1:0]	rd_data,
+		output	reg			wr_full,
+		output	reg			rd_empty
+	);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam ADDR_WIDTH = LGFIFO;
+
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+	reg [ADDR_WIDTH:0] wr_ptr, rd_ptr, wr_ptr_gray, rd_ptr_gray;
+	reg [ADDR_WIDTH:0] wr_ptr_gray_sync, rd_ptr_gray_sync;
+
+	// Gray code conversion functions
+	function [ADDR_WIDTH:0] bin_to_gray;
+		input [ADDR_WIDTH:0] bin;
+		bin_to_gray = bin ^ (bin >> 1);
+	endfunction
+
+	function [ADDR_WIDTH:0] gray_to_bin;
+		input [ADDR_WIDTH:0] gray;
+		integer i;
+		reg [ADDR_WIDTH:0] bin;
+		bin = gray;
+		for (i = ADDR_WIDTH-1; i >= 0; i = i - 1) begin
+			bin[i] = bin[i+1] ^ gray[i];
+		end
+		gray_to_bin = bin;
+	endfunction
+
+	// Write pointer logic
+	always @(posedge wclk or negedge wreset_n) begin
+		if (!wreset_n) begin
+			wr_ptr <= 0;
+			wr_ptr_gray <= 0;
+		end else if (wr && !wr_full) begin
+			wr_ptr <= wr_ptr + 1;
+			wr_ptr_gray <= bin_to_gray(wr_ptr + 1);
+		end
+	end
+
+	// Read pointer logic
+	always @(posedge rclk or negedge rreset_n) begin
+		if (!rreset_n) begin
+			rd_ptr <= 0;
+			rd_ptr_gray <= 0;
+		end else if (rd && !rd_empty) begin
+			rd_ptr <= rd_ptr + 1;
+			rd_ptr_gray <= bin_to_gray(rd_ptr + 1);
+		end
+	end
+
+	// Synchronize write pointer gray code to read clock
+	sync_control #(
+		.NFF(NFF)
+	) wr_ptr_gray_sync_inst (
+		.clk(rclk),
+		.reset_n(rreset_n),
+		.async_control(wr_ptr_gray),
+		.sync_control(wr_ptr_gray_sync)
+	);
+
+	// Synchronize read pointer gray code to write clock
+	sync_control #(
+		.NFF(NFF)
+	) rd_ptr_gray_sync_inst (
+		.clk(wclk),
+		.reset_n(wreset_n),
+		.async_control(rd_ptr_gray),
+		.sync_control(rd_ptr_gray_sync)
+	);
+
+	// Write full flag
+	assign wr_full = (wr_ptr_gray_sync == {1'b1, rd_ptr_gray_sync[ADDR_WIDTH-1:0]});
+
+	// Read empty flag
+	assign rd_empty = (rd_ptr_gray_sync == {1'b1, wr_ptr_gray_sync[ADDR_WIDTH-1:0]});
+
+	// Write data to memory
+	always @(posedge wclk) begin
+		if (wr && !wr_full) begin
+			mem[wr_ptr[ADDR_WIDTH-1:0]] <= wr_data;
+		end
+	end
+
+	// Read data from memory
+	always @(posedge rclk) begin
+		if (rd && !rd_empty) begin
+			if (OPT_REGISTER_READS) begin
+				rd_data <= mem[rd_ptr[ADDR_WIDTH-1:0]];
+			end else begin
+				rd_data <= mem[gray_to_bin(rd_ptr_gray_sync)[ADDR_WIDTH-1:0]];
+			end
+		end
+	end
+
+endmodule
+
+module sync_control #(
+		parameter	NFF = 2
+	) (
+		input	wire	clk, reset_n, async_control,
+		output	reg	sync_control
+	);
+
+	reg [NFF-1:0] sync_chain;
+
+	always @(posedge clk or negedge reset_n) begin
+		if (!reset_n) begin
+			sync_chain <= 0;
+		end else begin
+			sync_chain <= {async_control, sync_chain[NFF-1:1]};
+		end
+	end
+
+	assign sync_control = sync_chain[0];
+
+endmodule
+```

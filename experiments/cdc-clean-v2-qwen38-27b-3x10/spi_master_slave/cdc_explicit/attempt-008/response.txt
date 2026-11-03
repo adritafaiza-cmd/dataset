@@ -1,0 +1,335 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // ========================================================================
+    // Reset Synchronizers
+    // ========================================================================
+    // SCLK domain reset
+    reg [1:0] rst_sclk_sync;
+    wire rst_sclk = rst_sclk_sync[1];
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i)
+            rst_sclk_sync <= 2'b00;
+        else
+            rst_sclk_sync <= {rst_sclk_sync[0], 1'b0};
+    end
+
+    // PCLK domain reset
+    reg [1:0] rst_pclk_sync;
+    wire rst_pclk = rst_pclk_sync[1];
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i)
+            rst_pclk_sync <= 2'b00;
+        else
+            rst_pclk_sync <= {rst_pclk_sync[0], 1'b0};
+    end
+
+    // ========================================================================
+    // PCLK Domain: Parallel Interface & Handshake
+    // ========================================================================
+    // State machine for parallel side
+    // IDLE: waiting for wren_i
+    // WAIT_ACK: waiting for wren_i to deassert (handshake complete)
+    // WAIT_REQ: waiting for di_req_o to deassert (serial side done)
+
+    localparam [1:0] ST_IDLE     = 2'd0;
+    localparam [1:0] ST_WAIT_ACK = 2'd1;
+    localparam [1:0] ST_WAIT_REQ = 2'd2;
+
+    reg [1:0] p_state;
+    reg [N-1:0] tx_word_reg;
+    reg [N-1:0] rx_word_reg;
+    reg         tx_valid_reg;
+    reg         rx_valid_reg;
+
+    // Synchronizers for control signals crossing to SCLK domain
+    // tx_valid: PCLK -> SCLK (single bit, 2-stage sync)
+    reg [1:0] tx_valid_sync;
+    wire tx_valid_sclk = tx_valid_sync[1];
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i)
+            tx_valid_sync <= 2'b00;
+        else
+            tx_valid_sync <= {tx_valid_sync[0], tx_valid_reg};
+    end
+
+    // rx_done: SCLK -> PCLK (single bit, 2-stage sync)
+    reg [1:0] rx_done_sync;
+    wire rx_done_pclk = rx_done_sync[1];
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i)
+            rx_done_sync <= 2'b00;
+        else
+            rx_done_sync <= {rx_done_sync[0], rx_done_sclk};
+    end
+
+    // rx_word: SCLK -> PCLK (multi-bit, use handshake or gray code)
+    // Since we need coherent multi-bit transfer, use a simple approach:
+    // The SCLK domain holds rx_word stable until PCLK acknowledges.
+    // We'll use a 2-phase handshake for the data.
+
+    // Actually, let's use a simpler approach: 
+    // The SCLK domain will pulse rx_done_pclk when a word is complete.
+    // The PCLK domain will sample rx_word when rx_done_pclk is high.
+    // To ensure coherence, the SCLK domain must hold rx_word stable
+    // until PCLK has sampled it. We'll use a handshake.
+
+    // Let's use a 4-phase handshake for rx_word:
+    // SCLK domain: rx_word_valid (assert when word ready)
+    // PCLK domain: rx_word_ack (assert when sampled)
+    // This ensures multi-bit coherence.
+
+    reg [1:0] rx_word_valid_sync;
+    wire rx_word_valid_pclk = rx_word_valid_sync[1];
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i)
+            rx_word_valid_sync <= 2'b00;
+        else
+            rx_word_valid_sync <= {rx_word_valid_sync[0], rx_word_valid_sclk};
+    end
+
+    reg [1:0] rx_word_ack_sync;
+    wire rx_word_ack_sclk = rx_word_ack_sync[1];
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i)
+            rx_word_ack_sync <= 2'b00;
+        else
+            rx_word_ack_sync <= {rx_word_ack_sync[0], rx_word_ack_pclk};
+    end
+
+    // PCLK domain state machine
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            p_state     <= ST_IDLE;
+            tx_word_reg <= {N{1'b0}};
+            rx_word_reg <= {N{1'b0}};
+            tx_valid_reg <= 1'b0;
+            rx_valid_reg <= 1'b0;
+            wr_ack_o    <= 1'b0;
+            do_valid_o  <= 1'b0;
+            do_o        <= {N{1'b0}};
+            di_req_o    <= 1'b0;
+            rx_word_ack_pclk <= 1'b0;
+        end else begin
+            // Default: deassert single-cycle outputs
+            wr_ack_o   <= 1'b0;
+            do_valid_o <= 1'b0;
+
+            case (p_state)
+                ST_IDLE: begin
+                    di_req_o <= 1'b0;
+                    if (wren_i) begin
+                        tx_word_reg  <= di_i;
+                        tx_valid_reg <= 1'b1;
+                        wr_ack_o     <= 1'b1;
+                        p_state      <= ST_WAIT_ACK;
+                    end
+                end
+
+                ST_WAIT_ACK: begin
+                    // Wait for wren_i to deassert
+                    if (!wren_i) begin
+                        p_state <= ST_WAIT_REQ;
+                    end
+                end
+
+                ST_WAIT_REQ: begin
+                    // Wait for rx_word_valid_pclk to indicate serial side has a word
+                    if (rx_word_valid_pclk) begin
+                        // Sample the received word
+                        rx_word_reg <= rx_word_sclk;
+                        do_o        <= rx_word_sclk;
+                        do_valid_o  <= 1'b1;
+                        // Acknowledge the receive
+                        rx_word_ack_pclk <= 1'b1;
+                        // Deassert tx_valid to allow next transfer
+                        tx_valid_reg <= 1'b0;
+                        p_state      <= ST_IDLE;
+                    end
+                end
+
+                default: begin
+                    p_state <= ST_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // ========================================================================
+    // SCLK Domain: SPI Serial Interface
+    // ========================================================================
+    // SPI state machine
+    // IDLE: ssel high (inactive), sck low
+    // ACTIVE: ssel low (active), shifting data
+
+    localparam [1:0] SPI_IDLE   = 2'd0;
+    localparam [1:0] SPI_ACTIVE = 2'd1;
+
+    reg [1:0] spi_state;
+    reg [N-1:0] tx_shift_reg;
+    reg [N-1:0] rx_shift_reg;
+    reg [$clog2(N)-1:0] bit_count;
+    reg [N-1:0] rx_word_sclk;
+    reg         rx_word_valid_sclk;
+    reg         rx_word_ack_pclk;
+
+    // Synchronizers for control signals crossing from PCLK domain
+    // tx_valid: PCLK -> SCLK
+    reg [1:0] tx_valid_sclk_sync;
+    wire tx_valid_sclk = tx_valid_sclk_sync[1];
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i)
+            tx_valid_sclk_sync <= 2'b00;
+        else
+            tx_valid_sclk_sync <= {tx_valid_sclk_sync[0], tx_valid_pclk};
+    end
+
+    // tx_word: PCLK -> SCLK (multi-bit, use handshake)
+    // We'll use a similar 4-phase handshake for tx_word.
+    // PCLK domain: tx_word_valid (assert when word ready)
+    // SCLK domain: tx_word_ack (assert when sampled)
+
+    reg [1:0] tx_word_valid_sync;
+    wire tx_word_valid_sclk = tx_word_valid_sync[1];
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i)
+            tx_word_valid_sync <= 2'b00;
+        else
+            tx_word_valid_sync <= {tx_word_valid_sync[0], tx_word_valid_pclk};
+    end
+
+    reg [1:0] tx_word_ack_sync;
+    wire tx_word_ack_pclk = tx_word_ack_sync[1];
+
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i)
+            tx_word_ack_sync <= 2'b00;
+        else
+            tx_word_ack_sync <= {tx_word_ack_sync[0], tx_word_ack_sclk};
+    end
+
+    // SCLK domain state machine
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_state          <= SPI_IDLE;
+            tx_shift_reg       <= {N{1'b0}};
+            rx_shift_reg       <= {N{1'b0}};
+            bit_count          <= {$clog2(N){1'b0}};
+            rx_word_sclk       <= {N{1'b0}};
+            rx_word_valid_sclk <= 1'b0;
+            tx_word_ack_sclk   <= 1'b0;
+            spi_ssel_o         <= 1'b1;
+            spi_sck_o          <= 1'b0;
+        end else begin
+            // Default: deassert single-cycle signals
+            rx_word_valid_sclk <= 1'b0;
+
+            case (spi_state)
+                SPI_IDLE: begin
+                    spi_ssel_o <= 1'b1;
+                    spi_sck_o  <= 1'b0;
+                    // Wait for tx_word_valid_sclk
+                    if (tx_word_valid_sclk) begin
+                        // Sample the transmit word
+                        tx_shift_reg <= tx_word_pclk;
+                        // Acknowledge the transmit word
+                        tx_word_ack_sclk <= 1'b1;
+                        // Start SPI transfer
+                        spi_ssel_o <= 1'b0;
+                        bit_count  <= {$clog2(N){1'b0}};
+                        spi_state  <= SPI_ACTIVE;
+                    end
+                end
+
+                SPI_ACTIVE: begin
+                    spi_ssel_o <= 1'b0;
+                    // Toggle SCK
+                    if (spi_sck_o == 1'b0) begin
+                        spi_sck_o <= 1'b1;
+                        // On rising edge of SCK, shift out MSB and capture MISO
+                        // Actually, let's use a simpler approach:
+                        // On each SCLK cycle, shift and toggle SCK
+                    end else begin
+                        spi_sck_o <= 1'b0;
+                        // On falling edge of SCK, shift data
+                        // Shift out MSB of tx_shift_reg
+                        tx_shift_reg <= {tx_shift_reg[N-2:0], 1'b0};
+                        // Capture MISO into LSB of rx_shift_reg
+                        rx_shift_reg <= {spi_miso_i, rx_shift_reg[N-1:1]};
+                        
+                        // Increment bit count
+                        if (bit_count == N-1) begin
+                            // Transfer complete
+                            rx_word_sclk       <= rx_shift_reg;
+                            rx_word_valid_sclk <= 1'b1;
+                            // Wait for rx_word_ack_pclk before re-arming
+                            spi_state <= SPI_IDLE;
+                        end else begin
+                            bit_count <= bit_count + 1'b1;
+                        end
+                    end
+                end
+
+                default: begin
+                    spi_state <= SPI_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // ========================================================================
+    // Output Assignments
+    // ========================================================================
+    assign spi_mosi_o = tx_shift_reg[N-1];
+
+    // ========================================================================
+    // PCLK Domain: Handshake Signals for Data Transfer
+    // ========================================================================
+    // tx_word_valid_pclk: asserted when tx_word_reg is valid
+    reg tx_word_valid_pclk;
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i)
+            tx_word_valid_pclk <= 1'b0;
+        else
+            tx_word_valid_pclk <= tx_valid_reg;
+    end
+
+    // rx_word_ack_pclk: asserted when PCLK has sampled rx_word
+    // Already defined in the PCLK state machine above
+
+    // ========================================================================
+    // SCLK Domain: Handshake Signals for Data Transfer
+    // ========================================================================
+    // tx_word_ack_sclk: asserted when SCLK has sampled tx_word
+    // Already defined in the SCLK state machine above
+
+    // rx_word_valid_sclk: asserted when SCLK has a completed word
+    // Already defined in the SCLK state machine above
+
+endmodule
+```<|im_end|>

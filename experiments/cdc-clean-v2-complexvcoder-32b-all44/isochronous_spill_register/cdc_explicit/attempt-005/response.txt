@@ -1,0 +1,187 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "isochronous_spill_register",
+            "function": "2-deep valid/ready spill buffer between related clocks",
+            "parameters": [
+                {
+                    "name": "WIDTH",
+                    "value": "8"
+                }
+            ],
+            "ports": [
+                {
+                    "name": "src_clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "src_clk"
+                },
+                {
+                    "name": "src_rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "src_clk"
+                },
+                {
+                    "name": "src_valid_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "src_clk"
+                },
+                {
+                    "name": "src_ready_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "src_clk"
+                },
+                {
+                    "name": "src_data_i",
+                    "direction": "input",
+                    "width": "WIDTH",
+                    "clock_domain": "src_clk"
+                },
+                {
+                    "name": "dst_clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "dst_clk"
+                },
+                {
+                    "name": "dst_rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "dst_clk"
+                },
+                {
+                    "name": "dst_valid_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "dst_clk"
+                },
+                {
+                    "name": "dst_ready_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "dst_clk"
+                },
+                {
+                    "name": "dst_data_o",
+                    "direction": "output",
+                    "width": "WIDTH",
+                    "clock_domain": "dst_clk"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {
+                    "name": "src_reg_valid",
+                    "width": 1
+                },
+                {
+                    "name": "src_reg_data",
+                    "width": "WIDTH"
+                },
+                {
+                    "name": "dst_reg_valid",
+                    "width": 1
+                },
+                {
+                    "name": "dst_reg_data",
+                    "width": "WIDTH"
+                },
+                {
+                    "name": "src_next_ready",
+                    "width": 1
+                },
+                {
+                    "name": "dst_next_valid",
+                    "width": 1
+                }
+            ],
+            "behavior": [
+                "On src_clk, if src_rst_ni is low, src_reg_valid and src_reg_data are reset to 0.",
+                "On src_clk, if src_rst_ni is high and src_valid_i is high and src_ready_o is high, src_reg_valid is set to 1 and src_reg_data is set to src_data_i.",
+                "On src_clk, src_ready_o is high if src_reg_valid is low or dst_reg_valid is low.",
+                "On dst_clk, if dst_rst_ni is low, dst_reg_valid and dst_reg_data are reset to 0.",
+                "On dst_clk, if dst_rst_ni is high and dst_ready_i is high and dst_valid_o is high, dst_reg_valid is set to 0.",
+                "On dst_clk, if dst_rst_ni is high and dst_ready_i is high and dst_valid_o is low and src_reg_valid is high, dst_reg_valid is set to 1 and dst_reg_data is set to src_reg_data and src_reg_valid is set to 0.",
+                "On dst_clk, dst_valid_o is high if dst_reg_valid is high."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    // Internal signals
+    reg                src_reg_valid;
+    reg  [WIDTH-1:0] src_reg_data;
+    reg                dst_reg_valid;
+    reg  [WIDTH-1:0] dst_reg_data;
+    reg                src_next_ready;
+    reg                dst_next_valid;
+
+    // Source clock domain logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_reg_valid <= 0;
+            src_reg_data  <= 0;
+            src_next_ready <= 1;
+        end else begin
+            if (src_next_ready && src_valid_i) begin
+                src_reg_valid <= 1;
+                src_reg_data  <= src_data_i;
+                src_next_ready <= 0;
+            end else if (dst_next_valid) begin
+                src_next_ready <= 1;
+            end
+        end
+    end
+
+    // Source ready output
+    assign src_ready_o = src_next_ready;
+
+    // Destination clock domain logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_reg_valid <= 0;
+            dst_reg_data  <= 0;
+            dst_next_valid <= 0;
+        end else begin
+            if (dst_ready_i && dst_valid_o) begin
+                dst_reg_valid <= 0;
+                dst_next_valid <= 0;
+            end else if (!dst_reg_valid && src_reg_valid) begin
+                dst_reg_valid <= 1;
+                dst_reg_data  <= src_reg_data;
+                dst_next_valid <= 1;
+                src_reg_valid <= 0;
+            end
+        end
+    end
+
+    // Destination valid and data outputs
+    assign dst_valid_o = dst_reg_valid;
+    assign dst_data_o  = dst_reg_data;
+
+endmodule
+```

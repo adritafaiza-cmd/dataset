@@ -1,0 +1,190 @@
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  a_clk_i,
+    input  a_rst_ni,
+    input  a_clear_i,
+    output a_clear_o,
+    input  a_clear_ack_i,
+    output a_isolate_o,
+    input  a_isolate_ack_i,
+    input  b_clk_i,
+    input  b_rst_ni,
+    input  b_clear_i,
+    output b_clear_o,
+    input  b_clear_ack_i,
+    output b_isolate_o,
+    input  b_isolate_ack_i
+);
+
+    // Internal signals
+    reg a_isolate_req;
+    reg a_isolate_req_ack;
+    reg b_isolate_req;
+    reg b_isolate_req_ack;
+    reg a_clear_req;
+    reg a_clear_req_ack;
+    reg b_clear_req;
+    reg b_clear_req_ack;
+    reg a_release_req;
+    reg a_release_req_ack;
+    reg b_release_req;
+    reg b_release_req_ack;
+
+    // Cross-domain handshakes
+    cdc_handshake a_to_b_isolate_req (
+        .clk(a_clk_i),
+        .rst_ni(a_rst_ni),
+        .req(a_isolate_req),
+        .ack(a_isolate_req_ack)
+    );
+
+    cdc_handshake b_to_a_isolate_req (
+        .clk(b_clk_i),
+        .rst_ni(b_rst_ni),
+        .req(b_isolate_req),
+        .ack(b_isolate_req_ack)
+    );
+
+    cdc_handshake a_to_b_clear_req (
+        .clk(a_clk_i),
+        .rst_ni(a_rst_ni),
+        .req(a_clear_req),
+        .ack(a_clear_req_ack)
+    );
+
+    cdc_handshake b_to_a_clear_req (
+        .clk(b_clk_i),
+        .rst_ni(b_rst_ni),
+        .req(b_clear_req),
+        .ack(b_clear_req_ack)
+    );
+
+    cdc_handshake a_to_b_release_req (
+        .clk(a_clk_i),
+        .rst_ni(a_rst_ni),
+        .req(a_release_req),
+        .ack(a_release_req_ack)
+    );
+
+    cdc_handshake b_to_a_release_req (
+        .clk(b_clk_i),
+        .rst_ni(b_rst_ni),
+        .req(b_release_req),
+        .ack(b_release_req_ack)
+    );
+
+    // State machine for a_clk_i domain
+    reg [1:0] a_state;
+    localparam A_IDLE = 2'b00, A_ISOLATE = 2'b01, A_CLEAR = 2'b10, A_RELEASE = 2'b11;
+
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            a_state <= A_IDLE;
+            a_isolate_req <= 0;
+            a_clear_req <= 0;
+            a_release_req <= 0;
+        end else begin
+            case (a_state)
+                A_IDLE: begin
+                    if (a_clear_i || b_clear_i) begin
+                        a_isolate_req <= 1;
+                        a_state <= A_ISOLATE;
+                    end
+                end
+                A_ISOLATE: begin
+                    if (a_isolate_req_ack && b_isolate_req_ack) begin
+                        a_isolate_req <= 0;
+                        a_clear_req <= 1;
+                        a_state <= A_CLEAR;
+                    end
+                end
+                A_CLEAR: begin
+                    if (a_clear_req_ack && b_clear_req_ack) begin
+                        a_clear_req <= 0;
+                        a_release_req <= 1;
+                        a_state <= A_RELEASE;
+                    end
+                end
+                A_RELEASE: begin
+                    if (a_release_req_ack && b_release_req_ack) begin
+                        a_release_req <= 0;
+                        a_state <= A_IDLE;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // State machine for b_clk_i domain
+    reg [1:0] b_state;
+    localparam B_IDLE = 2'b00, B_ISOLATE = 2'b01, B_CLEAR = 2'b10, B_RELEASE = 2'b11;
+
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            b_state <= B_IDLE;
+            b_isolate_req <= 0;
+            b_clear_req <= 0;
+            b_release_req <= 0;
+        end else begin
+            case (b_state)
+                B_IDLE: begin
+                    if (b_clear_i || a_clear_i) begin
+                        b_isolate_req <= 1;
+                        b_state <= B_ISOLATE;
+                    end
+                end
+                B_ISOLATE: begin
+                    if (b_isolate_req_ack && a_isolate_req_ack) begin
+                        b_isolate_req <= 0;
+                        b_clear_req <= 1;
+                        b_state <= B_CLEAR;
+                    end
+                end
+                B_CLEAR: begin
+                    if (b_clear_req_ack && a_clear_req_ack) begin
+                        b_clear_req <= 0;
+                        b_release_req <= 1;
+                        b_state <= B_RELEASE;
+                    end
+                end
+                B_RELEASE: begin
+                    if (b_release_req_ack && a_release_req_ack) begin
+                        b_release_req <= 0;
+                        b_state <= B_IDLE;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // Outputs
+    assign a_isolate_o = a_isolate_req_ack;
+    assign b_isolate_o = b_isolate_req_ack;
+    assign a_clear_o = a_clear_req_ack;
+    assign b_clear_o = b_clear_req_ack;
+
+endmodule
+
+module cdc_handshake #(
+    parameter SYNC_STAGES = 2
+)(
+    input clk,
+    input rst_ni,
+    input req,
+    output reg ack
+);
+
+    reg [SYNC_STAGES-1:0] sync_req;
+
+    always @(posedge clk or negedge rst_ni) begin
+        if (!rst_ni) begin
+            sync_req <= 0;
+            ack <= 0;
+        end else begin
+            sync_req <= {sync_req[SYNC_STAGES-2:0], req};
+            ack <= sync_req[SYNC_STAGES-1];
+        end
+    end
+
+endmodule

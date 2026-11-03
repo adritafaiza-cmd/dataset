@@ -1,0 +1,125 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain: capture data and generate request pulse
+  reg [WIDTH-1:0] src_data_reg;
+  reg             src_req;
+  wire            src_accept;
+
+  assign src_accept = src_valid_i & src_ready_o;
+
+  // Destination domain: receive request, hold data, generate ack
+  reg [WIDTH-1:0] dst_data_reg;
+  reg             dst_req;
+  reg             dst_ack;
+  reg             dst_valid_reg;
+
+  // Two-phase handshake signals (synchronized across domains)
+  // req: source -> destination
+  // ack: destination -> source
+
+  // Synchronize req from source to destination
+  reg [1:0] req_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      req_sync <= 2'b00;
+    else
+      req_sync <= {req_sync[0], src_req};
+  end
+  wire dst_req_sync = req_sync[1];
+
+  // Synchronize ack from destination to source
+  reg [1:0] ack_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      ack_sync <= 2'b00;
+    else
+      ack_sync <= {ack_sync[0], dst_ack};
+  end
+  wire src_ack_sync = ack_sync[1];
+
+  // Source domain logic
+  // src_ready_o is high when no outstanding request (i.e., ack has been received or we're idle)
+  // We use a simple state machine:
+  //   IDLE: waiting for valid data, src_ready_o = 1
+  //   WAIT_ACK: request sent, waiting for ack, src_ready_o = 0
+
+  reg src_state;
+  localparam SRC_IDLE = 1'b0;
+  localparam SRC_WAIT_ACK = 1'b1;
+
+  assign src_ready_o = (src_state == SRC_IDLE);
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_state <= SRC_IDLE;
+      src_req   <= 1'b0;
+      src_data_reg <= {WIDTH{1'b0}};
+    end else begin
+      case (src_state)
+        SRC_IDLE: begin
+          if (src_accept) begin
+            src_data_reg <= src_data_i;
+            src_req      <= 1'b1;
+            src_state    <= SRC_WAIT_ACK;
+          end
+        end
+        SRC_WAIT_ACK: begin
+          if (src_ack_sync) begin
+            src_req   <= 1'b0;
+            src_state <= SRC_IDLE;
+          end
+        end
+        default: begin
+          src_state <= SRC_IDLE;
+        end
+      endcase
+    end
+  end
+
+  // Destination domain logic
+  // When dst_req_sync transitions from 0 to 1, capture data and assert valid
+  // When dst_valid_o and dst_ready_i, deassert valid and pulse ack
+
+  reg dst_req_prev;
+  wire dst_req_edge = dst_req_sync & ~dst_req_prev;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req_prev  <= 1'b0;
+      dst_data_reg  <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+      dst_ack       <= 1'b0;
+    end else begin
+      dst_req_prev <= dst_req_sync;
+
+      if (dst_req_edge) begin
+        dst_data_reg  <= src_data_reg;
+        dst_valid_reg <= 1'b1;
+      end
+
+      if (dst_valid_reg & dst_ready_i) begin
+        dst_valid_reg <= 1'b0;
+        dst_ack       <= 1'b1;
+      end else begin
+        dst_ack <= 1'b0;
+      end
+    end
+  end
+
+  assign dst_data_o  = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+endmodule

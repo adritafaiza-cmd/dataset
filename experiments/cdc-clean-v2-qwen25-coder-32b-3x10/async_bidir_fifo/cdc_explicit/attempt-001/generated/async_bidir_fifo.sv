@@ -1,0 +1,165 @@
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+
+  reg [DSIZE-1:0] mem_a [0:DEPTH-1];
+  reg [DSIZE-1:0] mem_b [0:DEPTH-1];
+
+  reg [ASIZE:0] wptr_a, rptr_a, wptr_b, rptr_b;
+  reg [ASIZE:0] wptr_a_sync, rptr_a_sync, wptr_b_sync, rptr_b_sync;
+
+  reg [ASIZE:0] wptr_a_gray, rptr_a_gray, wptr_b_gray, rptr_b_gray;
+  reg [ASIZE:0] wptr_a_gray_sync, rptr_a_gray_sync, wptr_b_gray_sync, rptr_b_gray_sync;
+
+  // Gray code conversion
+  function [ASIZE:0] bin2gray;
+    input [ASIZE:0] bin;
+    bin2gray = (bin >> 1) ^ bin;
+  endfunction
+
+  // Gray code to binary conversion
+  function [ASIZE:0] gray2bin;
+    input [ASIZE:0] gray;
+    integer i;
+    reg [ASIZE:0] bin;
+    bin = gray;
+    for (i = ASIZE-1; i > 0; i = i - 1)
+      bin[i-1] = bin[i] ^ bin[i-1];
+    gray2bin = bin;
+  endfunction
+
+  // a_clk domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      wptr_a <= 0;
+      rptr_a <= 0;
+    end else if (a_dir) begin
+      if (!a_full && a_winc)
+        wptr_a <= wptr_a + 1;
+    end else begin
+      if (!a_empty && a_rinc)
+        rptr_a <= rptr_a + 1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      wptr_a_gray <= 0;
+    else
+      wptr_a_gray <= bin2gray(wptr_a);
+  end
+
+  // b_clk domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      wptr_b <= 0;
+      rptr_b <= 0;
+    end else if (b_dir) begin
+      if (!b_full && b_winc)
+        wptr_b <= wptr_b + 1;
+    end else begin
+      if (!b_empty && b_rinc)
+        rptr_b <= rptr_b + 1;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      wptr_b_gray <= 0;
+    else
+      wptr_b_gray <= bin2gray(wptr_b);
+  end
+
+  // Cross-domain synchronization
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      rptr_b_gray_sync <= 0;
+      rptr_b_sync <= 0;
+    end else begin
+      rptr_b_gray_sync <= wptr_b_gray;
+      rptr_b_sync <= gray2bin(rptr_b_gray_sync);
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      rptr_a_gray_sync <= 0;
+      rptr_a_sync <= 0;
+    end else begin
+      rptr_a_gray_sync <= wptr_a_gray;
+      rptr_a_sync <= gray2bin(rptr_a_gray_sync);
+    end
+  end
+
+  // FIFO flags
+  assign a_full = (wptr_a == rptr_a_sync + DEPTH);
+  assign a_afull = (wptr_a == rptr_a_sync + DEPTH - 1);
+  assign a_empty = (wptr_a == rptr_a_sync);
+  assign a_aempty = (wptr_a == rptr_a_sync + 1);
+
+  assign b_full = (wptr_b == rptr_b_sync + DEPTH);
+  assign b_afull = (wptr_b == rptr_b_sync + DEPTH - 1);
+  assign b_empty = (wptr_b == rptr_b_sync);
+  assign b_aempty = (wptr_b == rptr_b_sync + 1);
+
+  // Data write
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      mem_a <= '{default:0};
+    end else if (a_dir && !a_full && a_winc) begin
+      mem_a[wptr_a[ASIZE-1:0]] <= a_wdata;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      mem_b <= '{default:0};
+    end else if (b_dir && !b_full && b_winc) begin
+      mem_b[wptr_b[ASIZE-1:0]] <= b_wdata;
+    end
+  end
+
+  // Data read
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a_rdata <= 0;
+    else if (!a_dir && !a_empty && a_rinc)
+      a_rdata <= mem_b[rptr_a[ASIZE-1:0]];
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b_rdata <= 0;
+    else if (!b_dir && !b_empty && b_rinc)
+      b_rdata <= mem_a[rptr_b[ASIZE-1:0]];
+  end
+
+endmodule

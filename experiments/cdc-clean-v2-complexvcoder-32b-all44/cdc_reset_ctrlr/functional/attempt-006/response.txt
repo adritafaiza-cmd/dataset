@@ -1,0 +1,326 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "cdc_reset_ctrlr",
+            "function": "Two-domain isolate-then-clear reset controller",
+            "parameters": [
+                {
+                    "name": "SYNC_STAGES",
+                    "value": 2
+                }
+            ],
+            "ports": [
+                {
+                    "name": "a_clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "a_clk_i"
+                },
+                {
+                    "name": "a_rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "a_clk_i"
+                },
+                {
+                    "name": "a_clear_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "a_clk_i"
+                },
+                {
+                    "name": "a_clear_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "a_clk_i"
+                },
+                {
+                    "name": "a_clear_ack_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "a_clk_i"
+                },
+                {
+                    "name": "a_isolate_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "a_clk_i"
+                },
+                {
+                    "name": "a_isolate_ack_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "a_clk_i"
+                },
+                {
+                    "name": "b_clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "b_clk_i"
+                },
+                {
+                    "name": "b_rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "b_clk_i"
+                },
+                {
+                    "name": "b_clear_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "b_clk_i"
+                },
+                {
+                    "name": "b_clear_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "b_clk_i"
+                },
+                {
+                    "name": "b_clear_ack_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "b_clk_i"
+                },
+                {
+                    "name": "b_isolate_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "b_clk_i"
+                },
+                {
+                    "name": "b_isolate_ack_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "b_clk_i"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {
+                    "name": "a_isolate_req",
+                    "width": 1
+                },
+                {
+                    "name": "b_isolate_req",
+                    "width": 1
+                },
+                {
+                    "name": "a_clear_req",
+                    "width": 1
+                },
+                {
+                    "name": "b_clear_req",
+                    "width": 1
+                },
+                {
+                    "name": "a_clear_req_sync",
+                    "width": 1
+                },
+                {
+                    "name": "b_clear_req_sync",
+                    "width": 1
+                },
+                {
+                    "name": "a_isolate_req_sync",
+                    "width": 1
+                },
+                {
+                    "name": "b_isolate_req_sync",
+                    "width": 1
+                },
+                {
+                    "name": "a_clear_done",
+                    "width": 1
+                },
+                {
+                    "name": "b_clear_done",
+                    "width": 1
+                },
+                {
+                    "name": "a_isolate_done",
+                    "width": 1
+                },
+                {
+                    "name": "b_isolate_done",
+                    "width": 1
+                },
+                {
+                    "name": "a_clear_state",
+                    "width": 2
+                },
+                {
+                    "name": "b_clear_state",
+                    "width": 2
+                }
+            ],
+            "behavior": [
+                "When either side requests clear (*_clear_i), first raise both isolate outputs, wait for both isolate acks, then raise both clear outputs, wait for both clear acks, then release isolate and clear.",
+                "Do not leave one domain cleared while the other is still live.",
+                "After reset, isolate and clear outputs are inactive.",
+                "Peer progress is delivered in order: idle, then active, then done, then released, then idle. Each step waits until the previous transfer is acknowledged, so the other side observes it one handshake later than the local transition. Do not release isolate or clear before the peer completion has been observed.",
+                "Both sides must acknowledge isolation before clearing begins. Hold clear while completion is exchanged with the peer. Drop clear before releasing isolation, and exchange an explicit release status so neither side leaves isolation while its peer is still clearing. Complete one sequence before accepting another. Added handshake latency is permitted."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  a_clk_i,
+    input  a_rst_ni,
+    input  a_clear_i,
+    output a_clear_o,
+    input  a_clear_ack_i,
+    output a_isolate_o,
+    input  a_isolate_ack_i,
+    input  b_clk_i,
+    input  b_rst_ni,
+    input  b_clear_i,
+    output b_clear_o,
+    input  b_clear_ack_i,
+    output b_isolate_o,
+    input  b_isolate_ack_i
+);
+
+    // Internal signals
+    reg  a_isolate_req, b_isolate_req;
+    reg  a_clear_req, b_clear_req;
+    reg  a_clear_req_sync, b_clear_req_sync;
+    reg  a_isolate_req_sync, b_isolate_req_sync;
+    reg  a_clear_done, b_clear_done;
+    reg  a_isolate_done, b_isolate_done;
+    reg [1:0] a_clear_state, b_clear_state;
+
+    // Sync signals between domains
+    sync_cell #(.SYNC_STAGES(SYNC_STAGES)) sync_a_clear_req (
+        .clk_i(b_clk_i),
+        .rst_ni(b_rst_ni),
+        .d_i(a_clear_i),
+        .q_o(a_clear_req_sync)
+    );
+
+    sync_cell #(.SYNC_STAGES(SYNC_STAGES)) sync_b_clear_req (
+        .clk_i(a_clk_i),
+        .rst_ni(a_rst_ni),
+        .d_i(b_clear_i),
+        .q_o(b_clear_req_sync)
+    );
+
+    sync_cell #(.SYNC_STAGES(SYNC_STAGES)) sync_a_isolate_req (
+        .clk_i(b_clk_i),
+        .rst_ni(b_rst_ni),
+        .d_i(a_isolate_req),
+        .q_o(a_isolate_req_sync)
+    );
+
+    sync_cell #(.SYNC_STAGES(SYNC_STAGES)) sync_b_isolate_req (
+        .clk_i(a_clk_i),
+        .rst_ni(a_rst_ni),
+        .d_i(b_isolate_req),
+        .q_o(b_isolate_req_sync)
+    );
+
+    // FSM for domain A
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            a_clear_o <= 0;
+            a_isolate_o <= 0;
+            a_clear_state <= 2'b00;
+        end else begin
+            case (a_clear_state)
+                2'b00: begin // IDLE
+                    a_isolate_req <= a_clear_i | b_clear_req_sync;
+                    if (a_isolate_req & a_isolate_ack_i) begin
+                        a_clear_state <= 2'b01; // ISOLATE
+                    end
+                end
+                2'b01: begin // ISOLATE
+                    a_isolate_o <= 1;
+                    if (b_isolate_req_sync & b_isolate_ack_i) begin
+                        a_clear_state <= 2'b10; // CLEAR
+                    end
+                end
+                2'b10: begin // CLEAR
+                    a_clear_o <= 1;
+                    if (a_clear_ack_i & b_clear_ack_i) begin
+                        a_clear_state <= 2'b11; // RELEASE
+                    end
+                end
+                2'b11: begin // RELEASE
+                    a_isolate_o <= 0;
+                    a_clear_o <= 0;
+                    a_clear_state <= 2'b00; // IDLE
+                end
+            endcase
+        end
+    end
+
+    // FSM for domain B
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            b_clear_o <= 0;
+            b_isolate_o <= 0;
+            b_clear_state <= 2'b00;
+        end else begin
+            case (b_clear_state)
+                2'b00: begin // IDLE
+                    b_isolate_req <= b_clear_i | a_clear_req_sync;
+                    if (b_isolate_req & b_isolate_ack_i) begin
+                        b_clear_state <= 2'b01; // ISOLATE
+                    end
+                end
+                2'b01: begin // ISOLATE
+                    b_isolate_o <= 1;
+                    if (a_isolate_req_sync & a_isolate_ack_i) begin
+                        b_clear_state <= 2'b10; // CLEAR
+                    end
+                end
+                2'b10: begin // CLEAR
+                    b_clear_o <= 1;
+                    if (a_clear_ack_i & b_clear_ack_i) begin
+                        b_clear_state <= 2'b11; // RELEASE
+                    end
+                end
+                2'b11: begin // RELEASE
+                    b_isolate_o <= 0;
+                    b_clear_o <= 0;
+                    b_clear_state <= 2'b00; // IDLE
+                end
+            endcase
+        end
+    end
+
+endmodule
+
+// Synchronizer cell module
+module sync_cell #(
+    parameter SYNC_STAGES = 2
+)(
+    input  clk_i,
+    input  rst_ni,
+    input  d_i,
+    output q_o
+);
+
+    reg [SYNC_STAGES-1:0] sync_reg;
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            sync_reg <= {SYNC_STAGES{1'b0}};
+        end else begin
+            sync_reg <= {sync_reg[SYNC_STAGES-2:0], d_i};
+        end
+    end
+
+    assign q_o = sync_reg[SYNC_STAGES-1];
+
+endmodule
+```

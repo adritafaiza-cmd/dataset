@@ -1,0 +1,296 @@
+module uart_top (
+    input wire wb_clk_i,
+    input wire wb_rst_i,
+    input wire [7:0] wb_adr_i,
+    input wire [31:0] wb_dat_i,
+    output reg [31:0] wb_dat_o,
+    input wire wb_we_i,
+    input wire wb_stb_i,
+    input wire wb_cyc_i,
+    output reg wb_ack_o,
+    input wire [3:0] wb_sel_i,
+    output reg int_o,
+    output reg stx_pad_o,
+    input wire srx_pad_i,
+    output reg rts_pad_o,
+    input wire cts_pad_i,
+    output reg dtr_pad_o,
+    input wire dsr_pad_i,
+    input wire ri_pad_i,
+    input wire dcd_pad_i
+);
+
+    reg [31:0] reg_data_i;
+    reg [31:0] reg_data_o;
+    reg [7:0] reg_addr;
+    reg reg_write;
+    reg reg_read;
+
+    // Wishbone Slave Interface
+    wishbone_slave wb_slave_inst (
+        .wb_clk_i(wb_clk_i),
+        .wb_rst_i(wb_rst_i),
+        .wb_adr_i(wb_adr_i),
+        .wb_dat_i(wb_dat_i),
+        .wb_dat_o(wb_dat_o),
+        .wb_we_i(wb_we_i),
+        .wb_stb_i(wb_stb_i),
+        .wb_cyc_i(wb_cyc_i),
+        .wb_ack_o(wb_ack_o),
+        .wb_sel_i(wb_sel_i),
+        .reg_data_i(reg_data_i),
+        .reg_data_o(reg_data_o),
+        .reg_addr(reg_addr),
+        .reg_write(reg_write),
+        .reg_read(reg_read)
+    );
+
+    // UART Core Functionality
+    uart_core uart_core_inst (
+        .wb_clk_i(wb_clk_i),
+        .wb_rst_i(wb_rst_i),
+        .reg_data_i(reg_data_o),
+        .reg_data_o(reg_data_i),
+        .reg_addr(reg_addr),
+        .reg_write(reg_write),
+        .reg_read(reg_read),
+        .stx_pad_o(stx_pad_o),
+        .srx_pad_i(srx_pad_i),
+        .int_o(int_o),
+        .rts_pad_o(rts_pad_o),
+        .cts_pad_i(cts_pad_i),
+        .dtr_pad_o(dtr_pad_o),
+        .dsr_pad_i(dsr_pad_i),
+        .ri_pad_i(ri_pad_i),
+        .dcd_pad_i(dcd_pad_i)
+    );
+
+endmodule
+
+module wishbone_slave (
+    input wire wb_clk_i,
+    input wire wb_rst_i,
+    input wire [7:0] wb_adr_i,
+    input wire [31:0] wb_dat_i,
+    output reg [31:0] wb_dat_o,
+    input wire wb_we_i,
+    input wire wb_stb_i,
+    input wire wb_cyc_i,
+    output reg wb_ack_o,
+    input wire [3:0] wb_sel_i,
+    input wire [31:0] reg_data_i,
+    output reg [31:0] reg_data_o,
+    output reg [7:0] reg_addr,
+    output reg reg_write,
+    output reg reg_read
+);
+
+    reg [31:0] registers [0:15]; // 16 registers for 16550 UART
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            wb_ack_o <= 0;
+            reg_addr <= 0;
+            reg_write <= 0;
+            reg_read <= 0;
+            reg_data_o <= 0;
+        end else begin
+            wb_ack_o <= 0;
+            reg_write <= 0;
+            reg_read <= 0;
+
+            if (wb_cyc_i && wb_stb_i) begin
+                reg_addr <= wb_adr_i;
+                reg_data_o <= wb_dat_i;
+
+                if (wb_we_i) begin
+                    reg_write <= 1;
+                    wb_ack_o <= 1;
+                    case (wb_adr_i)
+                        0: registers[0] <= wb_dat_i; // THR
+                        1: registers[1] <= wb_dat_i; // IER
+                        2: registers[2] <= wb_dat_i; // FCR
+                        3: registers[3] <= wb_dat_i; // LCR
+                        4: registers[4] <= wb_dat_i; // MCR
+                        5: registers[5] <= wb_dat_i; // LSR
+                        6: registers[6] <= wb_dat_i; // MSR
+                        7: registers[7] <= wb_dat_i; // SCR
+                        8: registers[8] <= wb_dat_i; // DLL
+                        9: registers[9] <= wb_dat_i; // DLM
+                        default: ;
+                    endcase
+                end else begin
+                    reg_read <= 1;
+                    wb_ack_o <= 1;
+                    case (wb_adr_i)
+                        0: wb_dat_o <= registers[0]; // RBR
+                        1: wb_dat_o <= registers[1]; // IER
+                        2: wb_dat_o <= registers[2]; // IIR
+                        3: wb_dat_o <= registers[3]; // LCR
+                        4: wb_dat_o <= registers[4]; // MCR
+                        5: wb_dat_o <= registers[5]; // LSR
+                        6: wb_dat_o <= registers[6]; // MSR
+                        7: wb_dat_o <= registers[7]; // SCR
+                        8: wb_dat_o <= registers[8]; // DLL
+                        9: wb_dat_o <= registers[9]; // DLM
+                        default: wb_dat_o <= 32'h0;
+                    endcase
+                end
+            end
+        end
+    end
+
+endmodule
+
+module uart_core (
+    input wire wb_clk_i,
+    input wire wb_rst_i,
+    input wire [31:0] reg_data_i,
+    output reg [31:0] reg_data_o,
+    input wire [7:0] reg_addr,
+    input wire reg_write,
+    input wire reg_read,
+    output reg stx_pad_o,
+    input wire srx_pad_i,
+    output reg int_o,
+    output reg rts_pad_o,
+    input wire cts_pad_i,
+    output reg dtr_pad_o,
+    input wire dsr_pad_i,
+    input wire ri_pad_i,
+    input wire dcd_pad_i
+);
+
+    // Modem Control Register (MCR)
+    reg [7:0] mcr;
+    // Line Control Register (LCR)
+    reg [7:0] lcr;
+    // Line Status Register (LSR)
+    reg [7:0] lsr;
+    // Modem Status Register (MSR)
+    reg [7:0] msr;
+    // Interrupt Enable Register (IER)
+    reg [7:0] ier;
+
+    // FIFO Control Register (FCR)
+    reg [7:0] fcr;
+
+    // Transmit Holding Register (THR)
+    reg [7:0] thr;
+    // Receiver Buffer Register (RBR)
+    reg [7:0] rbr;
+
+    // Baud Rate Divisors (DLL and DLM)
+    reg [7:0] dll;
+    reg [7:0] dlm;
+
+    // UART State
+    reg transmitting;
+    reg receiving;
+
+    // FIFOs
+    reg [7:0] tx_fifo [0:15];
+    reg [3:0] tx_fifo_wr_ptr;
+    reg [3:0] tx_fifo_rd_ptr;
+    reg [3:0] tx_fifo_count;
+
+    reg [7:0] rx_fifo [0:15];
+    reg [3:0] rx_fifo_wr_ptr;
+    reg [3:0] rx_fifo_rd_ptr;
+    reg [3:0] rx_fifo_count;
+
+    // Modem Signals
+    assign rts_pad_o = mcr[1];
+    assign dtr_pad_o = mcr[0];
+
+    // Interrupt
+    assign int_o = (lsr[0] & ier[0]) | (lsr[6] & ier[2]) | (msr[0] & ier[3]);
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            transmitting <= 0;
+            receiving <= 0;
+            tx_fifo_wr_ptr <= 0;
+            tx_fifo_rd_ptr <= 0;
+            tx_fifo_count <= 0;
+            rx_fifo_wr_ptr <= 0;
+            rx_fifo_rd_ptr <= 0;
+            rx_fifo_count <= 0;
+            thr <= 0;
+            rbr <= 0;
+            mcr <= 0;
+            lcr <= 0;
+            lsr <= 0;
+            msr <= 0;
+            ier <= 0;
+            fcr <= 0;
+            dll <= 0;
+            dlm <= 0;
+        end else begin
+            // Write Register
+            if (reg_write) begin
+                case (reg_addr)
+                    0: thr <= reg_data_i[7:0];
+                    1: ier <= reg_data_i[7:0];
+                    2: fcr <= reg_data_i[7:0];
+                    3: lcr <= reg_data_i[7:0];
+                    4: mcr <= reg_data_i[7:0];
+                    8: dll <= reg_data_i[7:0];
+                    9: dlm <= reg_data_i[7:0];
+                    default: ;
+                endcase
+            end
+
+            // Read Register
+            reg_data_o <= 32'h0;
+            if (reg_read) begin
+                case (reg_addr)
+                    0: reg_data_o <= {24'h0, rbr};
+                    1: reg_data_o <= {24'h0, ier};
+                    2: reg_data_o <= {24'h0, lsr};
+                    3: reg_data_o <= {24'h0, lcr};
+                    4: reg_data_o <= {24'h0, mcr};
+                    5: reg_data_o <= {24'h0, lsr};
+                    6: reg_data_o <= {24'h0, msr};
+                    8: reg_data_o <= {24'h0, dll};
+                    9: reg_data_o <= {24'h0, dlm};
+                    default: reg_data_o <= 32'h0;
+                endcase
+            end
+
+            // Transmitting Logic
+            if (tx_fifo_count > 0) begin
+                if (!transmitting && !cts_pad_i) begin
+                    stx_pad_o <= tx_fifo[tx_fifo_rd_ptr];
+                    tx_fifo_rd_ptr <= tx_fifo_rd_ptr + 1;
+                    tx_fifo_count <= tx_fifo_count - 1;
+                    transmitting <= 1;
+                end else if (transmitting) begin
+                    transmitting <= 0;
+                    lsr[6] <= 1; // THRE interrupt
+                end
+            end else begin
+                stx_pad_o <= 1;
+            end
+
+            // Receiving Logic
+            if (srx_pad_i) begin
+                if (rx_fifo_count < 16) begin
+                    rx_fifo[rx_fifo_wr_ptr] <= srx_pad_i;
+                    rx_fifo_wr_ptr <= rx_fifo_wr_ptr + 1;
+                    rx_fifo_count <= rx_fifo_count + 1;
+                    lsr[0] <= 1; // DR interrupt
+                    receiving <= 1;
+                end
+            end else if (receiving) begin
+                receiving <= 0;
+            end
+
+            // Update Modem Status Register
+            msr[0] <= dsr_pad_i;
+            msr[1] <= ri_pad_i;
+            msr[2] <= dcd_pad_i;
+        end
+    end
+
+endmodule

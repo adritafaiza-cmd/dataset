@@ -1,0 +1,119 @@
+module apbxclk #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		parameter [0:0]	OPT_REGISTERED = 1'b0,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH
+	) (
+		input	wire			S_APB_PCLK, S_PRESETn,
+		input	wire			S_APB_PSEL,
+		input	wire			S_APB_PENABLE,
+		output	reg			S_APB_PREADY,
+		input	wire	[AW-1:0]	S_APB_PADDR,
+		input	wire			S_APB_PWRITE,
+		input	wire	[DW-1:0]	S_APB_PWDATA,
+		input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+		input	wire	[2:0]		S_APB_PPROT,
+		output	wire	[DW-1:0]	S_APB_PRDATA,
+		output	wire			S_APB_PSLVERR,
+		input	wire			M_APB_PCLK,
+		output	reg			M_PRESETn,
+		output	reg			M_APB_PSEL,
+		output	reg			M_APB_PENABLE,
+		input	wire			M_APB_PREADY,
+		output	wire	[AW-1:0]	M_APB_PADDR,
+		output	wire			M_APB_PWRITE,
+		output	wire	[DW-1:0]	M_APB_PWDATA,
+		output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+		output	wire	[2:0]		M_APB_PPROT,
+		input	wire	[DW-1:0]	M_APB_PRDATA,
+		input	wire			M_APB_PSLVERR
+	);
+
+	// Internal signals
+	reg [AW-1:0]	s_addr_reg;
+	reg			s_write_reg;
+	reg [DW-1:0]	s_wdata_reg;
+	reg [DW/8-1:0]	s_wstrb_reg;
+	reg [2:0]		s_prot_reg;
+	reg [DW-1:0]	m_rdata_reg;
+	reg			m_slverr_reg;
+	reg			s_req_valid;
+	reg			m_req_valid;
+
+	// Source clock domain logic
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			S_APB_PREADY <= 1'b0;
+			s_req_valid <= 1'b0;
+		end else begin
+			if (S_APB_PSEL && S_APB_PENABLE && !s_req_valid) begin
+				s_addr_reg <= S_APB_PADDR;
+				s_write_reg <= S_APB_PWRITE;
+				s_wdata_reg <= S_APB_PWDATA;
+				s_wstrb_reg <= S_APB_PWSTRB;
+				s_prot_reg <= S_APB_PPROT;
+				s_req_valid <= 1'b1;
+				S_APB_PREADY <= 1'b0;
+			end else if (M_APB_PREADY && m_req_valid) begin
+				S_APB_PREADY <= 1'b1;
+				s_req_valid <= 1'b0;
+			end
+		end
+	end
+
+	// Destination clock domain logic
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			M_PRESETn <= 1'b0;
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			m_req_valid <= 1'b0;
+		end else begin
+			M_PRESETn <= 1'b1;
+			if (s_req_valid && !m_req_valid) begin
+				M_APB_PSEL <= 1'b1;
+				M_APB_PENABLE <= 1'b0;
+				m_req_valid <= 1'b1;
+			end else if (M_APB_PENABLE && M_APB_PREADY) begin
+				M_APB_PSEL <= 1'b0;
+				M_APB_PENABLE <= 1'b0;
+				m_req_valid <= 1'b0;
+			end else if (M_APB_PSEL && !M_APB_PENABLE) begin
+				M_APB_PENABLE <= 1'b1;
+			end
+		end
+	end
+
+	// Register crossing for payload and response fields if OPT_REGISTERED is set
+	generate
+		if (OPT_REGISTERED) begin : registered
+			reg [DW-1:0]	m_rdata_reg_reg;
+			reg			m_slverr_reg_reg;
+
+			always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+				if (!S_PRESETn) begin
+					m_rdata_reg_reg <= 0;
+					m_slverr_reg_reg <= 0;
+				end else if (M_APB_PREADY && m_req_valid) begin
+					m_rdata_reg_reg <= M_APB_PRDATA;
+					m_slverr_reg_reg <= M_APB_PSLVERR;
+				end
+			end
+
+			assign S_APB_PRDATA = m_rdata_reg_reg;
+			assign S_APB_PSLVERR = m_slverr_reg_reg;
+		end else begin : non_registered
+			assign S_APB_PRDATA = M_APB_PRDATA;
+			assign S_APB_PSLVERR = M_APB_PSLVERR;
+		end
+	endgenerate
+
+	// Assignments for M_APB interface
+	assign M_APB_PADDR = s_addr_reg;
+	assign M_APB_PWRITE = s_write_reg;
+	assign M_APB_PWDATA = s_wdata_reg;
+	assign M_APB_PWSTRB = s_wstrb_reg;
+	assign M_APB_PPROT = s_prot_reg;
+
+endmodule

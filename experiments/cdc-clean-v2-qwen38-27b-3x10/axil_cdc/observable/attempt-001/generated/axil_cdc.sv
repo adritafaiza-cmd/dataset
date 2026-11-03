@@ -1,0 +1,355 @@
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ============================================================
+    // Synchronous reset synchronizers
+    // ============================================================
+    reg [1:0] s_rst_sync;
+    reg [1:0] m_rst_sync;
+
+    always @(posedge s_clk)
+        s_rst_sync <= {s_rst_sync[0], s_rst};
+
+    always @(posedge m_clk)
+        m_rst_sync <= {m_rst_sync[0], m_rst};
+
+    wire s_rst_n = ~s_rst_sync[1];
+    wire m_rst_n = ~m_rst_sync[1];
+
+    // ============================================================
+    // Handshake CDC primitives
+    // ============================================================
+
+    // Request from S to M: S asserts req, M acks, S deasserts req, M deasserts ack
+    // Data is stable while req is high.
+
+    // AW channel: S -> M
+    reg s_aw_req;
+    reg [ADDR_WIDTH-1:0] s_aw_addr;
+    reg [2:0] s_aw_prot;
+    reg m_aw_ack;
+    reg [1:0] m_aw_ack_sync;
+
+    // W channel: S -> M
+    reg s_w_req;
+    reg [DATA_WIDTH-1:0] s_w_data;
+    reg [STRB_WIDTH-1:0] s_w_strb;
+    reg m_w_ack;
+    reg [1:0] m_w_ack_sync;
+
+    // AR channel: S -> M
+    reg s_ar_req;
+    reg [ADDR_WIDTH-1:0] s_ar_addr;
+    reg [2:0] s_ar_prot;
+    reg m_ar_ack;
+    reg [1:0] m_ar_ack_sync;
+
+    // B response: M -> S
+    reg m_b_req;
+    reg [1:0] m_b_resp;
+    reg s_b_ack;
+    reg [1:0] s_b_ack_sync;
+
+    // R response: M -> S
+    reg m_r_req;
+    reg [DATA_WIDTH-1:0] m_r_data;
+    reg [1:0] m_r_resp;
+    reg s_r_ack;
+    reg [1:0] s_r_ack_sync;
+
+    // ============================================================
+    // S-domain: AW request generation
+    // ============================================================
+    wire s_aw_handshake = s_aw_req & m_aw_ack_sync[1];
+    wire s_aw_ready_internal = ~s_aw_req | s_aw_handshake;
+
+    assign s_axil_awready = s_aw_ready_internal;
+
+    always @(posedge s_clk) begin
+        if (!s_rst_n) begin
+            s_aw_req <= 1'b0;
+            s_aw_addr <= {ADDR_WIDTH{1'b0}};
+            s_aw_prot <= 3'b0;
+        end else begin
+            if (s_axil_awvalid && s_axil_awready) begin
+                s_aw_req <= 1'b1;
+                s_aw_addr <= s_axil_awaddr;
+                s_aw_prot <= s_axil_awprot;
+            end else if (s_aw_handshake) begin
+                s_aw_req <= 1'b0;
+            end
+        end
+    end
+
+    // M-domain: AW ack
+    always @(posedge m_clk) begin
+        if (!m_rst_n) begin
+            m_aw_ack <= 1'b0;
+        end else begin
+            if (s_aw_req && !m_aw_ack) begin
+                m_aw_ack <= 1'b1;
+            end else if (!s_aw_req && m_aw_ack) begin
+                m_aw_ack <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge m_clk)
+        m_aw_ack_sync <= {m_aw_ack_sync[0], m_aw_ack};
+
+    // ============================================================
+    // S-domain: W request generation
+    // ============================================================
+    wire s_w_handshake = s_w_req & m_w_ack_sync[1];
+    wire s_w_ready_internal = ~s_w_req | s_w_handshake;
+
+    assign s_axil_wready = s_w_ready_internal;
+
+    always @(posedge s_clk) begin
+        if (!s_rst_n) begin
+            s_w_req <= 1'b0;
+            s_w_data <= {DATA_WIDTH{1'b0}};
+            s_w_strb <= {STRB_WIDTH{1'b0}};
+        end else begin
+            if (s_axil_wvalid && s_axil_wready) begin
+                s_w_req <= 1'b1;
+                s_w_data <= s_axil_wdata;
+                s_w_strb <= s_axil_wstrb;
+            end else if (s_w_handshake) begin
+                s_w_req <= 1'b0;
+            end
+        end
+    end
+
+    // M-domain: W ack
+    always @(posedge m_clk) begin
+        if (!m_rst_n) begin
+            m_w_ack <= 1'b0;
+        end else begin
+            if (s_w_req && !m_w_ack) begin
+                m_w_ack <= 1'b1;
+            end else if (!s_w_req && m_w_ack) begin
+                m_w_ack <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge m_clk)
+        m_w_ack_sync <= {m_w_ack_sync[0], m_w_ack};
+
+    // ============================================================
+    // S-domain: AR request generation
+    // ============================================================
+    wire s_ar_handshake = s_ar_req & m_ar_ack_sync[1];
+    wire s_ar_ready_internal = ~s_ar_req | s_ar_handshake;
+
+    assign s_axil_arready = s_ar_ready_internal;
+
+    always @(posedge s_clk) begin
+        if (!s_rst_n) begin
+            s_ar_req <= 1'b0;
+            s_ar_addr <= {ADDR_WIDTH{1'b0}};
+            s_ar_prot <= 3'b0;
+        end else begin
+            if (s_axil_arvalid && s_axil_arready) begin
+                s_ar_req <= 1'b1;
+                s_ar_addr <= s_axil_araddr;
+                s_ar_prot <= s_axil_arprot;
+            end else if (s_ar_handshake) begin
+                s_ar_req <= 1'b0;
+            end
+        end
+    end
+
+    // M-domain: AR ack
+    always @(posedge m_clk) begin
+        if (!m_rst_n) begin
+            m_ar_ack <= 1'b0;
+        end else begin
+            if (s_ar_req && !m_ar_ack) begin
+                m_ar_ack <= 1'b1;
+            end else if (!s_ar_req && m_ar_ack) begin
+                m_ar_ack <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge m_clk)
+        m_ar_ack_sync <= {m_ar_ack_sync[0], m_ar_ack};
+
+    // ============================================================
+    // M-domain: Drive master AXI-Lite signals
+    // ============================================================
+    // AW channel
+    assign m_axil_awaddr  = s_aw_addr;
+    assign m_axil_awprot  = s_aw_prot;
+    assign m_axil_awvalid = s_aw_req;
+
+    // W channel
+    assign m_axil_wdata  = s_w_data;
+    assign m_axil_wstrb  = s_w_strb;
+    assign m_axil_wvalid = s_w_req;
+
+    // AR channel
+    assign m_axil_araddr  = s_ar_addr;
+    assign m_axil_arprot  = s_ar_prot;
+    assign m_axil_arvalid = s_ar_req;
+
+    // ============================================================
+    // M-domain: B response capture
+    // ============================================================
+    // When m_axil_bvalid is high, capture the response and set m_b_req
+    // s_b_ack is from S-domain, synchronized to M-domain
+    wire m_b_handshake = m_b_req & s_b_ack_sync[1];
+
+    always @(posedge m_clk) begin
+        if (!m_rst_n) begin
+            m_b_req  <= 1'b0;
+            m_b_resp <= 2'b0;
+        end else begin
+            if (m_axil_bvalid && !m_b_req) begin
+                m_b_req  <= 1'b1;
+                m_b_resp <= m_axil_bresp;
+            end else if (m_b_handshake) begin
+                m_b_req <= 1'b0;
+            end
+        end
+    end
+
+    assign m_axil_bready = ~m_b_req | m_b_handshake;
+
+    // S-domain: B ack
+    always @(posedge s_clk) begin
+        if (!s_rst_n) begin
+            s_b_ack <= 1'b0;
+        end else begin
+            if (m_b_req_sync[1] && !s_b_ack) begin
+                s_b_ack <= 1'b1;
+            end else if (!m_b_req_sync[1] && s_b_ack) begin
+                s_b_ack <= 1'b0;
+            end
+        end
+    end
+
+    reg [1:0] m_b_req_sync;
+    always @(posedge s_clk)
+        m_b_req_sync <= {m_b_req_sync[0], m_b_req};
+
+    always @(posedge m_clk)
+        s_b_ack_sync <= {s_b_ack_sync[0], s_b_ack};
+
+    // ============================================================
+    // M-domain: R response capture
+    // ============================================================
+    wire m_r_handshake = m_r_req & s_r_ack_sync[1];
+
+    always @(posedge m_clk) begin
+        if (!m_rst_n) begin
+            m_r_req  <= 1'b0;
+            m_r_data <= {DATA_WIDTH{1'b0}};
+            m_r_resp <= 2'b0;
+        end else begin
+            if (m_axil_rvalid && !m_r_req) begin
+                m_r_req  <= 1'b1;
+                m_r_data <= m_axil_rdata;
+                m_r_resp <= m_axil_rresp;
+            end else if (m_r_handshake) begin
+                m_r_req <= 1'b0;
+            end
+        end
+    end
+
+    assign m_axil_rready = ~m_r_req | m_r_handshake;
+
+    // S-domain: R ack
+    always @(posedge s_clk) begin
+        if (!s_rst_n) begin
+            s_r_ack <= 1'b0;
+        end else begin
+            if (m_r_req_sync[1] && !s_r_ack) begin
+                s_r_ack <= 1'b1;
+            end else if (!m_r_req_sync[1] && s_r_ack) begin
+                s_r_ack <= 1'b0;
+            end
+        end
+    end
+
+    reg [1:0] m_r_req_sync;
+    always @(posedge s_clk)
+        m_r_req_sync <= {m_r_req_sync[0], m_r_req};
+
+    always @(posedge m_clk)
+        s_r_ack_sync <= {s_r_ack_sync[0], s_r_ack};
+
+    // ============================================================
+    // S-domain: Drive slave AXI-Lite response signals
+    // ============================================================
+    // B response
+    assign s_axil_bresp  = m_b_resp_sync[1];
+    assign s_axil_bvalid = m_b_req_sync[1];
+
+    reg [1:0] m_b_resp_sync;
+    always @(posedge s_clk)
+        m_b_resp_sync <= {m_b_resp_sync[0], m_b_resp};
+
+    // R response
+    assign s_axil_rdata  = m_r_data_sync[1];
+    assign s_axil_rresp  = m_r_resp_sync[1];
+    assign s_axil_rvalid = m_r_req_sync[1];
+
+    reg [DATA_WIDTH-1:0] m_r_data_sync;
+    reg [1:0] m_r_resp_sync;
+    always @(posedge s_clk) begin
+        m_r_data_sync <= {m_r_data_sync[DATA_WIDTH-2:0], m_r_data};
+        m_r_resp_sync <= {m_r_resp_sync[0], m_r_resp};
+    end
+
+endmodule

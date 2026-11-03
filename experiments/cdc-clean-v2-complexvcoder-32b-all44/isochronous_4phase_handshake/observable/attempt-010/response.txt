@@ -1,0 +1,158 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "isochronous_4phase_handshake",
+            "function": "Implement a four-phase valid/ready handshake between related clocks.",
+            "parameters": [],
+            "ports": [
+                {"name": "src_clk_i", "direction": "input", "width": 1, "clock_domain": "src_clk_i"},
+                {"name": "src_rst_ni", "direction": "input", "width": 1, "clock_domain": "src_clk_i"},
+                {"name": "src_valid_i", "direction": "input", "width": 1, "clock_domain": "src_clk_i"},
+                {"name": "src_ready_o", "direction": "output", "width": 1, "clock_domain": "src_clk_i"},
+                {"name": "dst_clk_i", "direction": "input", "width": 1, "clock_domain": "dst_clk_i"},
+                {"name": "dst_rst_ni", "direction": "input", "width": 1, "clock_domain": "dst_clk_i"},
+                {"name": "dst_valid_o", "direction": "output", "width": 1, "clock_domain": "dst_clk_i"},
+                {"name": "dst_ready_i", "direction": "input", "width": 1, "clock_domain": "dst_clk_i"}
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {"name": "src_phase", "width": 2, "clock_domain": "src_clk_i"},
+                {"name": "dst_phase", "width": 2, "clock_domain": "dst_clk_i"},
+                {"name": "src_valid_sync", "width": 1, "clock_domain": "dst_clk_i"},
+                {"name": "dst_ready_sync", "width": 1, "clock_domain": "src_clk_i"}
+            ],
+            "behavior": [
+                "The module implements a four-phase handshake between two related clocks, src_clk_i and dst_clk_i.",
+                "The phases are tracked using two 2-bit counters, src_phase and dst_phase, in their respective clock domains.",
+                "The src_valid_i signal is synchronized to the dst_clk_i domain using a synchronizer chain to src_valid_sync.",
+                "The dst_ready_i signal is synchronized to the src_clk_i domain using a synchronizer chain to dst_ready_sync.",
+                "The src_ready_o signal is asserted when the src_phase matches the expected phase for the handshake and dst_ready_sync is high.",
+                "The dst_valid_o signal is asserted when the dst_phase matches the expected phase for the handshake and src_valid_sync is high.",
+                "The phases are advanced based on the successful completion of the handshake.",
+                "Reset semantics ensure that no transfers are accepted or reported after reset."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module isochronous_4phase_handshake (
+    input  src_clk_i,
+    input  src_rst_ni,
+    input  src_valid_i,
+    output src_ready_o,
+    input  dst_clk_i,
+    input  dst_rst_ni,
+    output dst_valid_o,
+    input  dst_ready_i
+);
+
+    // Internal signals
+    reg [1:0] src_phase;
+    reg [1:0] dst_phase;
+    reg       src_valid_sync;
+    reg       dst_ready_sync;
+
+    // Synchronizer for src_valid_i to dst_clk_i domain
+    reg [1:0] src_valid_sync_chain;
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            src_valid_sync_chain <= 2'b00;
+            src_valid_sync <= 1'b0;
+        end else begin
+            src_valid_sync_chain <= {src_valid_sync_chain[0], src_valid_i};
+            src_valid_sync <= src_valid_sync_chain[1];
+        end
+    end
+
+    // Synchronizer for dst_ready_i to src_clk_i domain
+    reg [1:0] dst_ready_sync_chain;
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            dst_ready_sync_chain <= 2'b00;
+            dst_ready_sync <= 1'b0;
+        end else begin
+            dst_ready_sync_chain <= {dst_ready_sync_chain[0], dst_ready_i};
+            dst_ready_sync <= dst_ready_sync_chain[1];
+        end
+    end
+
+    // Source side logic
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            src_phase <= 2'b00;
+            src_ready_o <= 1'b0;
+        end else begin
+            case (src_phase)
+                2'b00: begin
+                    if (src_valid_i && dst_ready_sync) begin
+                        src_phase <= 2'b01;
+                        src_ready_o <= 1'b1;
+                    end else begin
+                        src_ready_o <= 1'b0;
+                    end
+                end
+                2'b01: begin
+                    src_phase <= 2'b10;
+                    src_ready_o <= 1'b0;
+                end
+                2'b10: begin
+                    if (src_valid_i && dst_ready_sync) begin
+                        src_phase <= 2'b11;
+                        src_ready_o <= 1'b1;
+                    end else begin
+                        src_ready_o <= 1'b0;
+                    end
+                end
+                2'b11: begin
+                    src_phase <= 2'b00;
+                    src_ready_o <= 1'b0;
+                end
+                default: src_phase <= 2'b00;
+            endcase
+        end
+    end
+
+    // Destination side logic
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            dst_phase <= 2'b00;
+            dst_valid_o <= 1'b0;
+        end else begin
+            case (dst_phase)
+                2'b00: begin
+                    if (src_valid_sync && dst_ready_i) begin
+                        dst_phase <= 2'b01;
+                        dst_valid_o <= 1'b1;
+                    end else begin
+                        dst_valid_o <= 1'b0;
+                    end
+                end
+                2'b01: begin
+                    dst_phase <= 2'b10;
+                    dst_valid_o <= 1'b0;
+                end
+                2'b10: begin
+                    if (src_valid_sync && dst_ready_i) begin
+                        dst_phase <= 2'b11;
+                        dst_valid_o <= 1'b1;
+                    end else begin
+                        dst_valid_o <= 1'b0;
+                    end
+                end
+                2'b11: begin
+                    dst_phase <= 2'b00;
+                    dst_valid_o <= 1'b0;
+                end
+                default: dst_phase <= 2'b00;
+            endcase
+        end
+    end
+
+endmodule
+```

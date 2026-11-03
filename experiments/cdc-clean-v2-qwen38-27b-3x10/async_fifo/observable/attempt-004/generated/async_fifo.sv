@@ -1,0 +1,180 @@
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam AWIDTH = ASIZE + 1;
+    localparam DEPTH  = 1 << ASIZE;
+
+    // Write domain
+    reg  [AWIDTH-1:0] wptr;
+    reg  [AWIDTH-1:0] wptr_gray;
+    reg  [AWIDTH-1:0] rptr_gray_w;
+    reg  [AWIDTH-1:0] rptr_gray_w_d1;
+    reg  [AWIDTH-1:0] rptr_gray_w_d2;
+
+    // Read domain
+    reg  [AWIDTH-1:0] rptr;
+    reg  [AWIDTH-1:0] rptr_gray;
+    reg  [AWIDTH-1:0] wptr_gray_r;
+    reg  [AWIDTH-1:0] wptr_gray_r_d1;
+    reg  [AWIDTH-1:0] wptr_gray_r_d2;
+
+    // Storage
+    reg  [DSIZE-1:0] mem [0:DEPTH-1];
+
+    // Gray code conversion
+    function [AWIDTH-1:0] bin2gray;
+        input [AWIDTH-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    // Write pointer update
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr      <= {AWIDTH{1'b0}};
+            wptr_gray <= {AWIDTH{1'b0}};
+        end else if (winc && !wfull) begin
+            wptr      <= wptr + 1'b1;
+            wptr_gray <= bin2gray(wptr + 1'b1);
+        end
+    end
+
+    // Synchronize read pointer gray into write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_w  <= {AWIDTH{1'b0}};
+            rptr_gray_w_d1 <= {AWIDTH{1'b0}};
+            rptr_gray_w_d2 <= {AWIDTH{1'b0}};
+        end else begin
+            rptr_gray_w    <= rptr_gray;
+            rptr_gray_w_d1 <= rptr_gray_w;
+            rptr_gray_w_d2 <= rptr_gray_w_d1;
+        end
+    end
+
+    // Read pointer update
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr      <= {AWIDTH{1'b0}};
+            rptr_gray <= {AWIDTH{1'b0}};
+        end else if (rinc && !rempty) begin
+            rptr      <= rptr + 1'b1;
+            rptr_gray <= bin2gray(rptr + 1'b1);
+        end
+    end
+
+    // Synchronize write pointer gray into read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_gray_r    <= {AWIDTH{1'b0}};
+            wptr_gray_r_d1 <= {AWIDTH{1'b0}};
+            wptr_gray_r_d2 <= {AWIDTH{1'b0}};
+        end else begin
+            wptr_gray_r    <= wptr_gray;
+            wptr_gray_r_d1 <= wptr_gray_r;
+            wptr_gray_r_d2 <= wptr_gray_r_d1;
+        end
+    end
+
+    // Write data
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            // No specific reset needed for mem, but we can leave it
+        end else if (winc && !wfull) begin
+            mem[wptr[ASIZE-1:0]] <= wdata;
+        end
+    end
+
+    // Read data
+    reg  [DSIZE-1:0] rdata_reg;
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rdata_reg <= {DSIZE{1'b0}};
+        end else if (rinc && !rempty) begin
+            rdata_reg <= mem[rptr[ASIZE-1:0]];
+        end
+    end
+
+    assign rdata = rdata_reg;
+
+    // Full/Empty flags
+    // In write domain: full when wptr_gray == rptr_gray_w_d2 with MSB different
+    // Actually, for a FIFO of depth 2^ASIZE, we use AWIDTH = ASIZE+1 bits.
+    // Full: wptr_gray == rptr_gray_w_d2 but the MSB (bit ASIZE) differs.
+    // Empty: wptr_gray_r_d2 == rptr_gray
+
+    wire wfull_internal;
+    wire rempty_internal;
+
+    assign wfull_internal = (wptr_gray == rptr_gray_w_d2) && (wptr[ASIZE] != rptr_gray_w_d2[ASIZE]);
+    assign rempty_internal = (wptr_gray_r_d2 == rptr_gray);
+
+    assign wfull   = wfull_internal;
+    assign rempty  = rempty_internal;
+
+    // Almost full/empty flags
+    // awfull: full or (full - 1)
+    // arempty: empty or (empty + 1)
+    // For simplicity, awfull = wfull || (wptr_gray == rptr_gray_w_d2 + 1) ... 
+    // Actually, let's compute the difference.
+    // A simpler approach: awfull is high when the number of free slots <= 1
+    // arempty is high when the number of stored words <= 1
+
+    // Let's compute the gray code difference to get the count.
+    // But a simpler way: 
+    // awfull: wfull or (wptr_gray == rptr_gray_w_d2 ^ (1 << (ASIZE-1))) ... no.
+    // Let's just use the binary pointers for the almost flags, but they are in different domains.
+    // We can compute awfull in the write domain using the synchronized rptr_gray.
+    // awfull: the write pointer is within 1 of the read pointer (wrapping).
+    // This means wptr_gray == rptr_gray_w_d2 (full) or wptr_gray == rptr_gray_w_d2 + 1 (almost full, 1 slot free)
+    // But we need to be careful with the gray code comparison.
+    
+    // A robust way: convert the synchronized gray to binary and compare.
+    function [AWIDTH-1:0] gray2bin;
+        input [AWIDTH-1:0] gray;
+        integer i;
+        begin
+            gray2bin[AWIDTH-1] = gray[AWIDTH-1];
+            for (i = AWIDTH-2; i >= 0; i = i - 1)
+                gray2bin[i] = gray2bin[i+1] ^ gray[i];
+        end
+    endfunction
+
+    wire [AWIDTH-1:0] rptr_bin_w;
+    wire [AWIDTH-1:0] wptr_bin_r;
+
+    assign rptr_bin_w = gray2bin(rptr_gray_w_d2);
+    assign wptr_bin_r = gray2bin(wptr_gray_r_d2);
+
+    // awfull: wptr is 0 or 1 ahead of rptr (in the circular sense)
+    // i.e., (wptr - rptr) mod 2^AWIDTH is 0 or 1
+    wire [AWIDTH-1:0] wdiff_w;
+    assign wdiff_w = wptr - rptr_bin_w;
+
+    assign awfull = wfull_internal || (wdiff_w == 1'b1);
+
+    // arempty: wptr is 0 or 1 ahead of rptr
+    wire [AWIDTH-1:0] rdiff_r;
+    assign rdiff_r = wptr_bin_r - rptr;
+
+    assign arempty = rempty_internal || (rdiff_r == 1'b1);
+
+endmodule

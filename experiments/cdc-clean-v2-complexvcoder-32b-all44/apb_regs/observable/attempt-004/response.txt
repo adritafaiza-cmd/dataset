@@ -1,0 +1,152 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "apb_regs",
+      "function": "APB-mapped register file with specified layout and behavior.",
+      "parameters": [
+        { "name": "NoApbRegs", "value": "32'd0" },
+        { "name": "ApbAddrWidth", "value": "32'd0" },
+        { "name": "AddrOffset", "value": "32'd4" },
+        { "name": "ApbDataWidth", "value": "32'd0" },
+        { "name": "RegDataWidth", "value": "32'd0" },
+        { "name": "ReadOnly", "value": "32'h0" },
+        { "name": "req_t", "value": "logic" },
+        { "name": "resp_t", "value": "logic" },
+        { "name": "apb_addr_t", "value": "logic[ApbAddrWidth-1:0]" },
+        { "name": "reg_data_t", "value": "logic[RegDataWidth-1:0]" }
+      ],
+      "ports": [
+        { "name": "pclk_i", "direction": "input", "width": 1, "clock_domain": "pclk_i" },
+        { "name": "preset_ni", "direction": "input", "width": 1, "clock_domain": "pclk_i" },
+        { "name": "req_i", "direction": "input", "width": 1, "clock_domain": "pclk_i" },
+        { "name": "resp_o", "direction": "output", "width": 1, "clock_domain": "pclk_i" },
+        { "name": "base_addr_i", "direction": "input", "width": "ApbAddrWidth", "clock_domain": "pclk_i" },
+        { "name": "reg_init_i", "direction": "input", "width": "NoApbRegs*RegDataWidth", "clock_domain": "pclk_i" },
+        { "name": "reg_q_o", "direction": "output", "width": "NoApbRegs*RegDataWidth", "clock_domain": "pclk_i" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        { "name": "reg_file", "width": "NoApbRegs*RegDataWidth" },
+        { "name": "reg_addr", "width": "ApbAddrWidth" },
+        { "name": "reg_index", "width": "$clog2(NoApbRegs)" },
+        { "name": "psel", "width": 1 },
+        { "name": "penable", "width": 1 },
+        { "name": "pwrite", "width": 1 },
+        { "name": "pstrb", "width": "ApbDataWidth/8" },
+        { "name": "pwdata", "width": "ApbDataWidth" },
+        { "name": "prdata", "width": "ApbDataWidth" },
+        { "name": "reg_wr_en", "width": 1 },
+        { "name": "reg_wr_data", "width": "RegDataWidth" },
+        { "name": "reg_rd_data", "width": "RegDataWidth" }
+      ],
+      "behavior": [
+        "On reset (preset_ni is low), writable registers in reg_file are set to zero and read-only registers are set to reg_init_i.",
+        "reg_addr is calculated as (req_i.addr - base_addr_i) / AddrOffset.",
+        "reg_index is the index into reg_file derived from reg_addr.",
+        "psel, penable, pwrite, pstrb, and pwdata are extracted from req_i.",
+        "If psel and penable are high and pwrite is high, reg_wr_en is set to high.",
+        "reg_wr_data is computed by byte-wise updating of reg_file[reg_index] using pwdata where pstrb indicates.",
+        "If ReadOnly[reg_index] is high, reg_wr_en is ignored and reg_file[reg_index] remains unchanged.",
+        "reg_rd_data is set to reg_file[reg_index].",
+        "resp_o is generated based on the success of the APB transaction.",
+        "reg_q_o reflects the current state of reg_file."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd8,
+  parameter int unsigned        ApbAddrWidth = 32'd32,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd32,
+  parameter int unsigned        RegDataWidth = 32'd32,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type                apb_addr_t   = logic[ApbAddrWidth-1:0],
+  parameter type                reg_data_t   = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  localparam int unsigned RegAddrWidth = $clog2(NoApbRegs);
+
+  reg_data_t [NoApbRegs-1:0] reg_file;
+  apb_addr_t                 reg_addr;
+  logic [RegAddrWidth-1:0]   reg_index;
+  logic                      psel;
+  logic                      penable;
+  logic                      pwrite;
+  logic [ApbDataWidth/8-1:0] pstrb;
+  reg_data_t                 pwdata;
+  reg_data_t                 prdata;
+  logic                      reg_wr_en;
+  reg_data_t                 reg_wr_data;
+  reg_data_t                 reg_rd_data;
+
+  // Decode APB signals
+  assign reg_addr = (req_i.addr - base_addr_i) / AddrOffset;
+  assign reg_index = reg_addr[RegAddrWidth-1:0];
+  assign psel = req_i.psel;
+  assign penable = req_i.penable;
+  assign pwrite = req_i.pwrite;
+  assign pstrb = req_i.pstrb;
+  assign pwdata = req_i.pwdata;
+
+  // Write enable generation
+  assign reg_wr_en = psel && penable && pwrite;
+
+  // Write data generation with byte-wise update
+  genvar i;
+  generate
+    for (i = 0; i < ApbDataWidth/8; i = i + 1) begin : gen_byte_update
+      assign reg_wr_data[i*8 +: 8] = pstrb[i] ? pwdata[i*8 +: 8] : reg_file[reg_index][i*8 +: 8];
+    end
+  endgenerate
+
+  // Register file update
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int j = 0; j < NoApbRegs; j = j + 1) begin
+        if (ReadOnly[j])
+          reg_file[j] <= reg_init_i[j];
+        else
+          reg_file[j] <= '0;
+      end
+    end else if (reg_wr_en && !ReadOnly[reg_index]) begin
+      reg_file[reg_index] <= reg_wr_data;
+    end
+  end
+
+  // Read data generation
+  assign reg_rd_data = reg_file[reg_index];
+
+  // Response generation
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      resp_o <= 1'b0;
+    end else if (psel && penable) begin
+      resp_o <= 1'b1;
+    end else begin
+      resp_o <= 1'b0;
+    end
+  end
+
+  // Output the current state of the register file
+  assign reg_q_o = reg_file;
+
+endmodule
+```

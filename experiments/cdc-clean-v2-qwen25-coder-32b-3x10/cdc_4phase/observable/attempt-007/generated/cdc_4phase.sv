@@ -1,0 +1,109 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source side signals
+  logic [WIDTH-1:0] src_data_sync;
+  logic src_valid_sync;
+  logic src_ready_sync;
+
+  // Destination side signals
+  logic [WIDTH-1:0] dst_data_sync;
+  logic dst_valid_sync;
+  logic dst_ready_sync;
+
+  // Four-phase handshake signals
+  logic [1:0] src_phase;
+  logic [1:0] dst_phase;
+
+  // Synchronization registers
+  logic [WIDTH-1:0] sync_data [3:0];
+  logic sync_valid [3:0];
+  logic sync_ready [3:0];
+
+  // Source side
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_phase <= 2'b00;
+      src_data_sync <= RESET_MSG;
+      src_valid_sync <= SEND_RESET_MSG;
+    end else begin
+      // Update phase
+      if (src_valid_i && src_ready_o) begin
+        src_phase <= src_phase + 1;
+      end
+
+      // Synchronize data and valid
+      sync_data[src_phase] <= src_data_i;
+      sync_valid[src_phase] <= src_valid_i;
+
+      // Update synchronized valid and data
+      src_data_sync <= sync_data[src_phase];
+      src_valid_sync <= sync_valid[src_phase];
+    end
+  end
+
+  // Source ready signal
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_ready_o <= 1'b0;
+    end else begin
+      src_ready_o <= sync_ready[src_phase];
+    end
+  end
+
+  // Destination side
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_phase <= 2'b00;
+      dst_data_sync <= RESET_MSG;
+      dst_valid_sync <= SEND_RESET_MSG;
+    end else begin
+      // Update phase
+      if (dst_valid_sync && dst_ready_i) begin
+        dst_phase <= dst_phase + 1;
+      end
+
+      // Synchronize ready
+      sync_ready[dst_phase] <= dst_ready_i;
+
+      // Update synchronized ready
+      dst_ready_sync <= sync_ready[dst_phase];
+
+      // Update synchronized data and valid
+      dst_data_sync <= sync_data[dst_phase];
+      dst_valid_sync <= sync_valid[dst_phase];
+    end
+  end
+
+  // Destination valid and data signals
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_o <= RESET_MSG;
+      dst_valid_o <= SEND_RESET_MSG;
+    end else begin
+      if (dst_ready_i && dst_valid_sync) begin
+        dst_data_o <= dst_data_sync;
+        dst_valid_o <= dst_valid_sync;
+      end else if (!DECOUPLED) begin
+        dst_data_o <= dst_data_sync;
+        dst_valid_o <= dst_valid_sync;
+      end
+    end
+  end
+
+endmodule

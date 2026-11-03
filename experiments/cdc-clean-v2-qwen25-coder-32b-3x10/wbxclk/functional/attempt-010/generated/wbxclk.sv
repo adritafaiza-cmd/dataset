@@ -1,0 +1,146 @@
+module wbxclk #(
+        parameter AW=32,
+                  DW=32,
+                  LGFIFO = 5
+) (
+        input wire i_wb_clk, i_reset,
+        input wire i_wb_cyc, i_wb_stb, i_wb_we,
+        input wire [(AW-1):0] i_wb_addr,
+        input wire [(DW-1):0] i_wb_data,
+        input wire [(DW/8-1):0] i_wb_sel,
+        output wire o_wb_stall,
+        output reg o_wb_ack,
+        output reg [(DW-1):0] o_wb_data,
+        output reg o_wb_err,
+        input wire i_xclk_clk,
+        output reg o_xclk_cyc,
+        output reg o_xclk_stb,
+        output reg o_xclk_we,
+        output reg [(AW-1):0] o_xclk_addr,
+        output reg [(DW-1):0] o_xclk_data,
+        output reg [(DW/8-1):0] o_xclk_sel,
+        input wire i_xclk_stall,
+        input wire i_xclk_ack,
+        input wire [(DW-1):0] i_xclk_data,
+        input wire i_xclk_err
+);
+
+    // FIFO for Wishbone to XCLK
+    reg [AW-1:0] wb_addr_fifo [0:(1<<LGFIFO)-1];
+    reg [DW-1:0] wb_data_fifo [0:(1<<LGFIFO)-1];
+    reg [DW/8-1:0] wb_sel_fifo [0:(1<<LGFIFO)-1];
+    reg wb_we_fifo [0:(1<<LGFIFO)-1];
+    reg wb_cyc_fifo [0:(1<<LGFIFO)-1];
+    reg wb_stb_fifo [0:(1<<LGFIFO)-1];
+    reg [$clog2(1<<LGFIFO)-1:0] wb_fifo_wr_ptr, wb_fifo_rd_ptr;
+    reg wb_fifo_full, wb_fifo_empty;
+
+    // FIFO for XCLK to Wishbone
+    reg [DW-1:0] xclk_data_fifo [0:(1<<LGFIFO)-1];
+    reg xclk_err_fifo [0:(1<<LGFIFO)-1];
+    reg [$clog2(1<<LGFIFO)-1:0] xclk_fifo_wr_ptr, xclk_fifo_rd_ptr;
+    reg xclk_fifo_full, xclk_fifo_empty;
+
+    // FIFO write and read pointers
+    always @(posedge i_wb_clk or posedge i_reset) begin
+        if (i_reset) begin
+            wb_fifo_wr_ptr <= 0;
+            wb_fifo_rd_ptr <= 0;
+            wb_fifo_full <= 0;
+            wb_fifo_empty <= 1;
+        end else begin
+            if (i_wb_stb && !wb_fifo_full && i_wb_cyc) begin
+                wb_addr_fifo[wb_fifo_wr_ptr] <= i_wb_addr;
+                wb_data_fifo[wb_fifo_wr_ptr] <= i_wb_data;
+                wb_sel_fifo[wb_fifo_wr_ptr] <= i_wb_sel;
+                wb_we_fifo[wb_fifo_wr_ptr] <= i_wb_we;
+                wb_cyc_fifo[wb_fifo_wr_ptr] <= i_wb_cyc;
+                wb_stb_fifo[wb_fifo_wr_ptr] <= i_wb_stb;
+                wb_fifo_wr_ptr <= wb_fifo_wr_ptr + 1;
+                wb_fifo_empty <= 0;
+                if (wb_fifo_wr_ptr == wb_fifo_rd_ptr - 1)
+                    wb_fifo_full <= 1;
+            end
+            if (i_xclk_ack && !wb_fifo_empty) begin
+                wb_fifo_rd_ptr <= wb_fifo_rd_ptr + 1;
+                wb_fifo_full <= 0;
+                if (wb_fifo_wr_ptr == wb_fifo_rd_ptr)
+                    wb_fifo_empty <= 1;
+            end
+        end
+    end
+
+    // FIFO write and read pointers
+    always @(posedge i_xclk_clk or posedge i_reset) begin
+        if (i_reset) begin
+            xclk_fifo_wr_ptr <= 0;
+            xclk_fifo_rd_ptr <= 0;
+            xclk_fifo_full <= 0;
+            xclk_fifo_empty <= 1;
+        end else begin
+            if (i_xclk_ack && !xclk_fifo_full) begin
+                xclk_data_fifo[xclk_fifo_wr_ptr] <= i_xclk_data;
+                xclk_err_fifo[xclk_fifo_wr_ptr] <= i_xclk_err;
+                xclk_fifo_wr_ptr <= xclk_fifo_wr_ptr + 1;
+                xclk_fifo_empty <= 0;
+                if (xclk_fifo_wr_ptr == xclk_fifo_rd_ptr - 1)
+                    xclk_fifo_full <= 1;
+            end
+            if (o_wb_ack && !xclk_fifo_empty) begin
+                xclk_fifo_rd_ptr <= xclk_fifo_rd_ptr + 1;
+                xclk_fifo_full <= 0;
+                if (xclk_fifo_wr_ptr == xclk_fifo_rd_ptr)
+                    xclk_fifo_empty <= 1;
+            end
+        end
+    end
+
+    // FIFO full and empty flags
+    assign wb_fifo_full = (wb_fifo_wr_ptr == wb_fifo_rd_ptr - 1) || (wb_fifo_wr_ptr == (1<<LGFIFO) - 1 && wb_fifo_rd_ptr == 0);
+    assign wb_fifo_empty = wb_fifo_wr_ptr == wb_fifo_rd_ptr;
+    assign xclk_fifo_full = (xclk_fifo_wr_ptr == xclk_fifo_rd_ptr - 1) || (xclk_fifo_wr_ptr == (1<<LGFIFO) - 1 && xclk_fifo_rd_ptr == 0);
+    assign xclk_fifo_empty = xclk_fifo_wr_ptr == xclk_fifo_rd_ptr;
+
+    // Wishbone to XCLK signals
+    assign o_wb_stall = wb_fifo_full;
+    always @(posedge i_wb_clk or posedge i_reset) begin
+        if (i_reset) begin
+            o_xclk_cyc <= 0;
+            o_xclk_stb <= 0;
+            o_xclk_we <= 0;
+            o_xclk_addr <= 0;
+            o_xclk_data <= 0;
+            o_xclk_sel <= 0;
+        end else begin
+            if (!wb_fifo_empty && !i_xclk_stall) begin
+                o_xclk_cyc <= wb_cyc_fifo[wb_fifo_rd_ptr];
+                o_xclk_stb <= wb_stb_fifo[wb_fifo_rd_ptr];
+                o_xclk_we <= wb_we_fifo[wb_fifo_rd_ptr];
+                o_xclk_addr <= wb_addr_fifo[wb_fifo_rd_ptr];
+                o_xclk_data <= wb_data_fifo[wb_fifo_rd_ptr];
+                o_xclk_sel <= wb_sel_fifo[wb_fifo_rd_ptr];
+            end else begin
+                o_xclk_cyc <= 0;
+                o_xclk_stb <= 0;
+            end
+        end
+    end
+
+    // XCLK to Wishbone signals
+    always @(posedge i_xclk_clk or posedge i_reset) begin
+        if (i_reset) begin
+            o_wb_ack <= 0;
+            o_wb_data <= 0;
+            o_wb_err <= 0;
+        end else begin
+            if (!xclk_fifo_empty && i_xclk_ack) begin
+                o_wb_ack <= 1;
+                o_wb_data <= xclk_data_fifo[xclk_fifo_rd_ptr];
+                o_wb_err <= xclk_err_fifo[xclk_fifo_rd_ptr];
+            end else begin
+                o_wb_ack <= 0;
+            end
+        end
+    end
+
+endmodule

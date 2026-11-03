@@ -1,0 +1,122 @@
+```verilog
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+
+    // FIFO for requests from source to destination
+    reg [ADDR_WIDTH-1:0]       req_addr_ff [DEPTH-1:0];
+    reg [DATA_WIDTH-1:0]       req_wdata_ff [DEPTH-1:0];
+    reg [DATA_WIDTH/8-1:0]     req_strb_ff [DEPTH-1:0];
+    reg [2:0]                  req_prot_ff [DEPTH-1:0];
+    reg                        req_write_ff [DEPTH-1:0];
+    reg [$clog2(DEPTH)-1:0]    req_wr_ptr;
+    reg [$clog2(DEPTH)-1:0]    req_rd_ptr;
+    reg [$clog2(DEPTH):0]      req_count;
+
+    // FIFO for responses from destination to source
+    reg [DATA_WIDTH-1:0]       resp_rdata_ff [DEPTH-1:0];
+    reg                        resp_slverr_ff [DEPTH-1:0];
+    reg [$clog2(DEPTH)-1:0]    resp_wr_ptr;
+    reg [$clog2(DEPTH)-1:0]    resp_rd_ptr;
+    reg [$clog2(DEPTH):0]      resp_count;
+
+    // Source side logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            req_wr_ptr <= 0;
+            req_count <= 0;
+            src_pready_o <= 1;
+        end else begin
+            if (src_psel_i && src_penable_i && src_pready_o) begin
+                if (req_count < DEPTH) begin
+                    req_addr_ff[req_wr_ptr] <= src_paddr_i;
+                    req_wdata_ff[req_wr_ptr] <= src_pwdata_i;
+                    req_strb_ff[req_wr_ptr] <= src_pstrb_i;
+                    req_prot_ff[req_wr_ptr] <= src_pprot_i;
+                    req_write_ff[req_wr_ptr] <= src_pwrite_i;
+                    req_wr_ptr <= req_wr_ptr + 1;
+                    req_count <= req_count + 1;
+                    src_pready_o <= 0;
+                end
+            end else if (resp_count > 0) begin
+                resp_rd_ptr <= resp_rd_ptr + 1;
+                resp_count <= resp_count - 1;
+                src_pready_o <= 1;
+            end
+        end
+    end
+
+    // Destination side logic
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            req_rd_ptr <= 0;
+            resp_wr_ptr <= 0;
+            resp_count <= 0;
+            dst_psel_o <= 0;
+            dst_penable_o <= 0;
+        end else begin
+            if (req_count > 0 && !dst_psel_o) begin
+                dst_psel_o <= 1;
+                dst_penable_o <= 1;
+                dst_pwrite_o <= req_write_ff[req_rd_ptr];
+                dst_paddr_o <= req_addr_ff[req_rd_ptr];
+                dst_pwdata_o <= req_wdata_ff[req_rd_ptr];
+                dst_pstrb_o <= req_strb_ff[req_rd_ptr];
+                dst_pprot_o <= req_prot_ff[req_rd_ptr];
+            end else if (dst_psel_o && dst_penable_o && dst_pready_i) begin
+                dst_psel_o <= 0;
+                dst_penable_o <= 0;
+                if (resp_count < DEPTH) begin
+                    resp_rdata_ff[resp_wr_ptr] <= dst_prdata_i;
+                    resp_slverr_ff[resp_wr_ptr] <= dst_pslverr_i;
+                    resp_wr_ptr <= resp_wr_ptr + 1;
+                    resp_count <= resp_count + 1;
+                end
+                req_rd_ptr <= req_rd_ptr + 1;
+                req_count <= req_count - 1;
+            end
+        end
+    end
+
+    // Source side response output
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_prdata_o <= 0;
+            src_pslverr_o <= 0;
+        end else if (resp_count > 0) begin
+            src_prdata_o <= resp_rdata_ff[resp_rd_ptr];
+            src_pslverr_o <= resp_slverr_ff[resp_rd_ptr];
+        end
+    end
+
+endmodule
+```<|im_end|>

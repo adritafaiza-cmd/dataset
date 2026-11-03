@@ -1,0 +1,358 @@
+module axixclk #(
+		parameter integer C_S_AXI_ID_WIDTH	= 2,
+		parameter integer C_S_AXI_DATA_WIDTH	= 32,
+		parameter integer C_S_AXI_ADDR_WIDTH	= 6,
+		parameter [0:0]	OPT_WRITE_ONLY = 1'b0,
+		parameter [0:0]	OPT_READ_ONLY = 1'b0,
+		parameter	XCLOCK_FFS = 2,
+		parameter	LGFIFO = 5
+	) (
+		input	wire				S_AXI_ACLK,
+		input	wire				S_AXI_ARESETN,
+		input	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_AWID,
+		input	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	S_AXI_AWADDR,
+		input	wire [7 : 0]			S_AXI_AWLEN,
+		input	wire [2 : 0]			S_AXI_AWSIZE,
+		input	wire [1 : 0]			S_AXI_AWBURST,
+		input	wire				S_AXI_AWLOCK,
+		input	wire [3 : 0]			S_AXI_AWCACHE,
+		input	wire [2 : 0]			S_AXI_AWPROT,
+		input	wire [3 : 0]			S_AXI_AWQOS,
+		input	wire				S_AXI_AWVALID,
+		output	wire				S_AXI_AWREADY,
+		input	wire [C_S_AXI_DATA_WIDTH-1 : 0]	S_AXI_WDATA,
+		input	wire [(C_S_AXI_DATA_WIDTH/8)-1 : 0] S_AXI_WSTRB,
+		input	wire				S_AXI_WLAST,
+		input	wire				S_AXI_WVALID,
+		output	wire				S_AXI_WREADY,
+		output	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_BID,
+		output	wire [1 : 0]			S_AXI_BRESP,
+		output	wire				S_AXI_BVALID,
+		input	wire				S_AXI_BREADY,
+		input	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_ARID,
+		input	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	S_AXI_ARADDR,
+		input	wire [7 : 0]			S_AXI_ARLEN,
+		input	wire [2 : 0]			S_AXI_ARSIZE,
+		input	wire [1 : 0]			S_AXI_ARBURST,
+		input	wire				S_AXI_ARLOCK,
+		input	wire [3 : 0]			S_AXI_ARCACHE,
+		input	wire [2 : 0]			S_AXI_ARPROT,
+		input	wire [3 : 0]			S_AXI_ARQOS,
+		input	wire				S_AXI_ARVALID,
+		output	wire				S_AXI_ARREADY,
+		output	wire [C_S_AXI_ID_WIDTH-1 : 0]	S_AXI_RID,
+		output	wire [C_S_AXI_DATA_WIDTH-1 : 0]	S_AXI_RDATA,
+		output	wire [1 : 0]			S_AXI_RRESP,
+		output	wire				S_AXI_RLAST,
+		output	wire				S_AXI_RVALID,
+		input	wire				S_AXI_RREADY,
+		input	wire				M_AXI_ACLK,
+		output	wire				M_AXI_ARESETN,
+		output	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_AWID,
+		output	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	M_AXI_AWADDR,
+		output	wire [7 : 0]			M_AXI_AWLEN,
+		output	wire [2 : 0]			M_AXI_AWSIZE,
+		output	wire [1 : 0]			M_AXI_AWBURST,
+		output	wire				M_AXI_AWLOCK,
+		output	wire [3 : 0]			M_AXI_AWCACHE,
+		output	wire [2 : 0]			M_AXI_AWPROT,
+		output	wire [3 : 0]			M_AXI_AWQOS,
+		output	wire				M_AXI_AWVALID,
+		input	wire				M_AXI_AWREADY,
+		output	wire [C_S_AXI_DATA_WIDTH-1 : 0]	M_AXI_WDATA,
+		output	wire [(C_S_AXI_DATA_WIDTH/8)-1 : 0] M_AXI_WSTRB,
+		output	wire				M_AXI_WLAST,
+		output	wire				M_AXI_WVALID,
+		input	wire				M_AXI_WREADY,
+		input	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_BID,
+		input	wire [1 : 0]			M_AXI_BRESP,
+		input	wire				M_AXI_BVALID,
+		output	wire				M_AXI_BREADY,
+		output	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_ARID,
+		output	wire [C_S_AXI_ADDR_WIDTH-1 : 0]	M_AXI_ARADDR,
+		output	wire [7 : 0]			M_AXI_ARLEN,
+		output	wire [2 : 0]			M_AXI_ARSIZE,
+		output	wire [1 : 0]			M_AXI_ARBURST,
+		output	wire				M_AXI_ARLOCK,
+		output	wire [3 : 0]			M_AXI_ARCACHE,
+		output	wire [2 : 0]			M_AXI_ARPROT,
+		output	wire [3 : 0]			M_AXI_ARQOS,
+		output	wire				M_AXI_ARVALID,
+		input	wire				M_AXI_ARREADY,
+		input	wire [C_S_AXI_ID_WIDTH-1 : 0]	M_AXI_RID,
+		input	wire [C_S_AXI_DATA_WIDTH-1 : 0]	M_AXI_RDATA,
+		input	wire [1 : 0]			M_AXI_RRESP,
+		input	wire				M_AXI_RLAST,
+		input	wire				M_AXI_RVALID,
+		output	wire				M_AXI_RREADY
+	);
+
+	// Clock-domain crossing for AW channel
+	reg [C_S_AXI_ID_WIDTH-1:0] awid_reg;
+	reg [C_S_AXI_ADDR_WIDTH-1:0] awaddr_reg;
+	reg [7:0] awlen_reg;
+	reg [2:0] awsize_reg;
+	reg [1:0] awburst_reg;
+	reg awlock_reg;
+	reg [3:0] awcache_reg;
+	reg [2:0] awprot_reg;
+	reg [3:0] awqos_reg;
+	reg awvalid_reg;
+	reg awready_reg;
+
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			awid_reg <= 0;
+			awaddr_reg <= 0;
+			awlen_reg <= 0;
+			awsize_reg <= 0;
+			awburst_reg <= 0;
+			awlock_reg <= 0;
+			awcache_reg <= 0;
+			awprot_reg <= 0;
+			awqos_reg <= 0;
+			awvalid_reg <= 0;
+			awready_reg <= 0;
+		end else begin
+			if (S_AXI_AWVALID && awready_reg) begin
+				awid_reg <= S_AXI_AWID;
+				awaddr_reg <= S_AXI_AWADDR;
+				awlen_reg <= S_AXI_AWLEN;
+				awsize_reg <= S_AXI_AWSIZE;
+				awburst_reg <= S_AXI_AWBURST;
+				awlock_reg <= S_AXI_AWLOCK;
+				awcache_reg <= S_AXI_AWCACHE;
+				awprot_reg <= S_AXI_AWPROT;
+				awqos_reg <= S_AXI_AWQOS;
+				awvalid_reg <= 1;
+			end else if (M_AXI_AWREADY) begin
+				awvalid_reg <= 0;
+			end
+			awready_reg <= M_AXI_AWREADY;
+		end
+	end
+
+	assign M_AXI_AWID = awid_reg;
+	assign M_AXI_AWADDR = awaddr_reg;
+	assign M_AXI_AWLEN = awlen_reg;
+	assign M_AXI_AWSIZE = awsize_reg;
+	assign M_AXI_AWBURST = awburst_reg;
+	assign M_AXI_AWLOCK = awlock_reg;
+	assign M_AXI_AWCACHE = awcache_reg;
+	assign M_AXI_AWPROT = awprot_reg;
+	assign M_AXI_AWQOS = awqos_reg;
+	assign M_AXI_AWVALID = awvalid_reg;
+	assign S_AXI_AWREADY = awready_reg;
+
+	// Clock-domain crossing for W channel
+	reg [C_S_AXI_DATA_WIDTH-1:0] wdata_reg;
+	reg [(C_S_AXI_DATA_WIDTH/8)-1:0] wstrb_reg;
+	reg wlast_reg;
+	reg wvalid_reg;
+	reg wready_reg;
+
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			wdata_reg <= 0;
+			wstrb_reg <= 0;
+			wlast_reg <= 0;
+			wvalid_reg <= 0;
+			wready_reg <= 0;
+		end else begin
+			if (S_AXI_WVALID && wready_reg) begin
+				wdata_reg <= S_AXI_WDATA;
+				wstrb_reg <= S_AXI_WSTRB;
+				wlast_reg <= S_AXI_WLAST;
+				wvalid_reg <= 1;
+			end else if (M_AXI_WREADY) begin
+				wvalid_reg <= 0;
+			end
+			wready_reg <= M_AXI_WREADY;
+		end
+	end
+
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			M_AXI_WDATA <= 0;
+			M_AXI_WSTRB <= 0;
+			M_AXI_WLAST <= 0;
+			M_AXI_WVALID <= 0;
+		end else begin
+			if (wvalid_reg) begin
+				M_AXI_WDATA <= wdata_reg;
+				M_AXI_WSTRB <= wstrb_reg;
+				M_AXI_WLAST <= wlast_reg;
+				M_AXI_WVALID <= 1;
+			end else begin
+				M_AXI_WVALID <= 0;
+			end
+		end
+	end
+
+	assign S_AXI_WREADY = wready_reg;
+
+	// Clock-domain crossing for B channel
+	reg [C_S_AXI_ID_WIDTH-1:0] bid_reg;
+	reg [1:0] bresp_reg;
+	reg bvalid_reg;
+	reg bready_reg;
+
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			bid_reg <= 0;
+			bresp_reg <= 0;
+			bvalid_reg <= 0;
+			bready_reg <= 0;
+		end else begin
+			if (M_AXI_BVALID && !bvalid_reg) begin
+				bid_reg <= M_AXI_BID;
+				bresp_reg <= M_AXI_BRESP;
+				bvalid_reg <= 1;
+			end else if (S_AXI_BREADY) begin
+				bvalid_reg <= 0;
+			end
+			bready_reg <= S_AXI_BREADY;
+		end
+	end
+
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			S_AXI_BID <= 0;
+			S_AXI_BRESP <= 0;
+			S_AXI_BVALID <= 0;
+		end else begin
+			if (bvalid_reg) begin
+				S_AXI_BID <= bid_reg;
+				S_AXI_BRESP <= bresp_reg;
+				S_AXI_BVALID <= 1;
+			end else begin
+				S_AXI_BVALID <= 0;
+			end
+		end
+	end
+
+	assign M_AXI_BREADY = bready_reg;
+
+	// Clock-domain crossing for AR channel
+	reg [C_S_AXI_ID_WIDTH-1:0] arid_reg;
+	reg [C_S_AXI_ADDR_WIDTH-1:0] araddr_reg;
+	reg [7:0] arlen_reg;
+	reg [2:0] arsize_reg;
+	reg [1:0] arburst_reg;
+	reg arlock_reg;
+	reg [3:0] arcache_reg;
+	reg [2:0] arprot_reg;
+	reg [3:0] arqos_reg;
+	reg arvalid_reg;
+	reg arready_reg;
+
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			arid_reg <= 0;
+			araddr_reg <= 0;
+			arlen_reg <= 0;
+			arsize_reg <= 0;
+			arburst_reg <= 0;
+			arlock_reg <= 0;
+			arcache_reg <= 0;
+			arprot_reg <= 0;
+			arqos_reg <= 0;
+			arvalid_reg <= 0;
+			arready_reg <= 0;
+		end else begin
+			if (S_AXI_ARVALID && arready_reg) begin
+				arid_reg <= S_AXI_ARID;
+				araddr_reg <= S_AXI_ARADDR;
+				arlen_reg <= S_AXI_ARLEN;
+				arsize_reg <= S_AXI_ARSIZE;
+				arburst_reg <= S_AXI_ARBURST;
+				arlock_reg <= S_AXI_ARLOCK;
+				arcache_reg <= S_AXI_ARCACHE;
+				arprot_reg <= S_AXI_ARPROT;
+				arqos_reg <= S_AXI_ARQOS;
+				arvalid_reg <= 1;
+			end else if (M_AXI_ARREADY) begin
+				arvalid_reg <= 0;
+			end
+			arready_reg <= M_AXI_ARREADY;
+		end
+	end
+
+	assign M_AXI_ARID = arid_reg;
+	assign M_AXI_ARADDR = araddr_reg;
+	assign M_AXI_ARLEN = arlen_reg;
+	assign M_AXI_ARSIZE = arsize_reg;
+	assign M_AXI_ARBURST = arburst_reg;
+	assign M_AXI_ARLOCK = arlock_reg;
+	assign M_AXI_ARCACHE = arcache_reg;
+	assign M_AXI_ARPROT = arprot_reg;
+	assign M_AXI_ARQOS = arqos_reg;
+	assign M_AXI_ARVALID = arvalid_reg;
+	assign S_AXI_ARREADY = arready_reg;
+
+	// Clock-domain crossing for R channel
+	reg [C_S_AXI_ID_WIDTH-1:0] rid_reg;
+	reg [C_S_AXI_DATA_WIDTH-1:0] rdata_reg;
+	reg [1:0] rresp_reg;
+	reg rlast_reg;
+	reg rvalid_reg;
+	reg rready_reg;
+
+	always @(posedge M_AXI_ACLK or negedge M_AXI_ARESETN) begin
+		if (!M_AXI_ARESETN) begin
+			rid_reg <= 0;
+			rdata_reg <= 0;
+			rresp_reg <= 0;
+			rlast_reg <= 0;
+			rvalid_reg <= 0;
+			rready_reg <= 0;
+		end else begin
+			if (M_AXI_RVALID && !rvalid_reg) begin
+				rid_reg <= M_AXI_RID;
+				rdata_reg <= M_AXI_RDATA;
+				rresp_reg <= M_AXI_RRESP;
+				rlast_reg <= M_AXI_RLAST;
+				rvalid_reg <= 1;
+			end else if (S_AXI_RREADY) begin
+				rvalid_reg <= 0;
+			end
+			rready_reg <= S_AXI_RREADY;
+		end
+	end
+
+	always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			S_AXI_RID <= 0;
+			S_AXI_RDATA <= 0;
+			S_AXI_RRESP <= 0;
+			S_AXI_RLAST <= 0;
+			S_AXI_RVALID <= 0;
+		end else begin
+			if (rvalid_reg) begin
+				S_AXI_RID <= rid_reg;
+				S_AXI_RDATA <= rdata_reg;
+				S_AXI_RRESP <= rresp_reg;
+				S_AXI_RLAST <= rlast_reg;
+				S_AXI_RVALID <= 1;
+			end else begin
+				S_AXI_RVALID <= 0;
+			end
+		end
+	end
+
+	assign M_AXI_RREADY = rready_reg;
+
+	// Reset signal crossing
+	reg [XCLOCK_FFS-1:0] reset_sync;
+
+	always @(posedge M_AXI_ACLK or negedge S_AXI_ARESETN) begin
+		if (!S_AXI_ARESETN) begin
+			reset_sync <= {XCLOCK_FFS{1'b1}};
+		end else begin
+			reset_sync <= {reset_sync[XCLOCK_FFS-2:0], 1'b0};
+		end
+	end
+
+	assign M_AXI_ARESETN = ~reset_sync[XCLOCK_FFS-1];
+
+endmodule

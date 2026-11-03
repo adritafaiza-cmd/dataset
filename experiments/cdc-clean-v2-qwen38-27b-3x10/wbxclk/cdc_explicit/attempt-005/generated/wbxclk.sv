@@ -1,0 +1,188 @@
+module wbxclk #(
+	parameter	AW=32,
+			DW=32,
+			LGFIFO = 5
+) (
+	input	wire			i_wb_clk, i_reset,
+	input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+	input	wire	[(AW-1):0]	i_wb_addr,
+	input	wire	[(DW-1):0]	i_wb_data,
+	input	wire	[(DW/8-1):0]	i_wb_sel,
+	output	wire			o_wb_stall,
+	output	reg			o_wb_ack,
+	output	reg	[(DW-1):0]	o_wb_data,
+	output	reg			o_wb_err,
+	input	wire			i_xclk_clk,
+	output	reg			o_xclk_cyc,
+	output	reg			o_xclk_stb,
+	output	reg			o_xclk_we,
+	output	reg	[(AW-1):0]	o_xclk_addr,
+	output	reg	[(DW-1):0]	o_xclk_data,
+	output	reg	[(DW/8-1):0]	o_xclk_sel,
+	input	wire			i_xclk_stall,
+	input	wire			i_xclk_ack,
+	input	wire	[(DW-1):0]	i_xclk_data,
+	input	wire			i_xclk_err
+);
+
+	localparam FIFO_DEPTH = 1 << LGFIFO;
+	localparam FIFO_PTR_W = LGFIFO;
+	localparam FIFO_FULL_THRESH = FIFO_DEPTH - 1;
+
+	// Reset synchronizers
+	reg [1:0] rst_sync_wb;
+	reg [1:0] rst_sync_xclk;
+
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset)
+			rst_sync_wb <= 2'b00;
+		else
+			rst_sync_wb <= {rst_sync_wb[0], 1'b1};
+	end
+
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset)
+			rst_sync_xclk <= 2'b00;
+		else
+			rst_sync_xclk <= {rst_sync_xclk[0], 1'b1};
+	end
+
+	wire wb_rst = ~rst_sync_wb[1];
+	wire xclk_rst = ~rst_sync_xclk[1];
+
+	// FIFO storage
+	reg [DW-1:0] fifo_data [0:FIFO_DEPTH-1];
+	reg [AW-1:0] fifo_addr [0:FIFO_DEPTH-1];
+	reg [DW/8-1:0] fifo_sel [0:FIFO_DEPTH-1];
+	reg fifo_we [0:FIFO_DEPTH-1];
+
+	// Pointers
+	reg [FIFO_PTR_W:0] wr_ptr;
+	reg [FIFO_PTR_W:0] rd_ptr;
+
+	// Write side (WB clock)
+	wire wb_write = i_wb_cyc & i_wb_stb & ~o_wb_stall;
+
+	// Read side (XCLK clock)
+	reg xclk_read;
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset)
+			xclk_read <= 1'b0;
+		else
+			xclk_read <= ~xclk_rst & (rd_ptr[FIFO_PTR_W-1:0] != wr_ptr[FIFO_PTR_W-1:0]);
+	end
+
+	// FIFO write
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			wr_ptr <= {(FIFO_PTR_W+1){1'b0}};
+		end else if (wb_write) begin
+			fifo_data[wr_ptr[FIFO_PTR_W-1:0]] <= i_wb_data;
+			fifo_addr[wr_ptr[FIFO_PTR_W-1:0]] <= i_wb_addr;
+			fifo_sel[wr_ptr[FIFO_PTR_W-1:0]] <= i_wb_sel;
+			fifo_we[wr_ptr[FIFO_PTR_W-1:0]] <= i_wb_we;
+			wr_ptr <= wr_ptr + 1'b1;
+		end
+	end
+
+	// FIFO read
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rd_ptr <= {(FIFO_PTR_W+1){1'b0}};
+		end else if (xclk_read) begin
+			rd_ptr <= rd_ptr + 1'b1;
+		end
+	end
+
+	// Stall logic
+	wire [FIFO_PTR_W:0] fifo_count = wr_ptr - rd_ptr;
+	assign o_wb_stall = (fifo_count >= FIFO_FULL_THRESH);
+
+	// XCLK output stage
+	reg [DW-1:0] xclk_data_reg;
+	reg [AW-1:0] xclk_addr_reg;
+	reg [DW/8-1:0] xclk_sel_reg;
+	reg xclk_we_reg;
+	reg xclk_valid;
+
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			xclk_data_reg <= {(DW){1'b0}};
+			xclk_addr_reg <= {(AW){1'b0}};
+			xclk_sel_reg <= {(DW/8){1'b0}};
+			xclk_we_reg <= 1'b0;
+			xclk_valid <= 1'b0;
+		end else if (xclk_read) begin
+			xclk_data_reg <= fifo_data[rd_ptr[FIFO_PTR_W-1:0]];
+			xclk_addr_reg <= fifo_addr[rd_ptr[FIFO_PTR_W-1:0]];
+			xclk_sel_reg <= fifo_sel[rd_ptr[FIFO_PTR_W-1:0]];
+			xclk_we_reg <= fifo_we[rd_ptr[FIFO_PTR_W-1:0]];
+			xclk_valid <= 1'b1;
+		end else if (i_xclk_ack) begin
+			xclk_valid <= 1'b0;
+		end
+	end
+
+	assign o_xclk_cyc = xclk_valid;
+	assign o_xclk_stb = xclk_valid;
+	assign o_xclk_we = xclk_we_reg;
+	assign o_xclk_addr = xclk_addr_reg;
+	assign o_xclk_data = xclk_data_reg;
+	assign o_xclk_sel = xclk_sel_reg;
+
+	// WB response stage
+	reg wb_ack_pending;
+	reg [DW-1:0] wb_data_reg;
+	reg wb_err_reg;
+
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			wb_ack_pending <= 1'b0;
+			wb_data_reg <= {(DW){1'b0}};
+			wb_err_reg <= 1'b0;
+			o_wb_ack <= 1'b0;
+			o_wb_data <= {(DW){1'b0}};
+			o_wb_err <= 1'b0;
+		end else begin
+			if (wb_ack_pending) begin
+				o_wb_ack <= 1'b1;
+				o_wb_data <= wb_data_reg;
+				o_wb_err <= wb_err_reg;
+				wb_ack_pending <= 1'b0;
+			end else begin
+				o_wb_ack <= 1'b0;
+			end
+		end
+	end
+
+	// Synchronize xclk_ack and xclk_err/data to WB domain
+	reg [1:0] xclk_ack_sync;
+	reg [1:0] xclk_err_sync;
+	reg [DW-1:0] xclk_data_sync;
+
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			xclk_ack_sync <= 2'b00;
+			xclk_err_sync <= 2'b00;
+			xclk_data_sync <= {(DW){1'b0}};
+		end else begin
+			xclk_ack_sync <= {xclk_ack_sync[0], i_xclk_ack};
+			xclk_err_sync <= {xclk_err_sync[0], i_xclk_err};
+			xclk_data_sync <= i_xclk_data;
+		end
+	end
+
+	// Capture response when ack is seen in WB domain
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			wb_ack_pending <= 1'b0;
+			wb_data_reg <= {(DW){1'b0}};
+			wb_err_reg <= 1'b0;
+		end else if (xclk_ack_sync[1] & ~xclk_ack_sync[0]) begin
+			wb_ack_pending <= 1'b1;
+			wb_data_reg <= xclk_data_sync;
+			wb_err_reg <= xclk_err_sync[1];
+		end
+	end
+
+endmodule

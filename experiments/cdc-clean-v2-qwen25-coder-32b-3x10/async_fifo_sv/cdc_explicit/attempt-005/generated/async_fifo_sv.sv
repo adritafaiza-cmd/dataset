@@ -1,0 +1,130 @@
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam DEPTH = 2**ADDR_WIDTH;
+    localparam ADDR_WIDTH_PLUS1 = ADDR_WIDTH + 1;
+
+    // Write domain signals
+    reg [ADDR_WIDTH_PLUS1-1:0] wr_ptr, wr_ptr_gray;
+    reg [ADDR_WIDTH_PLUS1-1:0] rd_ptr_gray_sync_w [SYNC_STAGES-1:0];
+    reg [ADDR_WIDTH_PLUS1-1:0] rd_ptr_gray_sync_w_final;
+
+    // Read domain signals
+    reg [ADDR_WIDTH_PLUS1-1:0] rd_ptr, rd_ptr_gray;
+    reg [ADDR_WIDTH_PLUS1-1:0] wr_ptr_gray_sync_r [SYNC_STAGES-1:0];
+    reg [ADDR_WIDTH_PLUS1-1:0] wr_ptr_gray_sync_r_final;
+
+    // Memory array
+    reg [DATA_WIDTH-1:0] mem [DEPTH-1:0];
+
+    // Binary to Gray conversion
+    function [ADDR_WIDTH_PLUS1-1:0] bin2gray;
+        input [ADDR_WIDTH_PLUS1-1:0] bin;
+        bin2gray = bin ^ (bin >> 1);
+    endfunction
+
+    // Gray to Binary conversion
+    function [ADDR_WIDTH_PLUS1-1:0] gray2bin;
+        input [ADDR_WIDTH_PLUS1-1:0] gray;
+        integer i;
+        reg [ADDR_WIDTH_PLUS1-1:0] bin;
+        bin = gray;
+        for (i = ADDR_WIDTH_PLUS1-2; i >= 0; i = i - 1) begin
+            bin[i] = bin[i+1] ^ gray[i];
+        end
+        gray2bin = bin;
+    endfunction
+
+    // Write domain logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wr_ptr <= 0;
+            wr_ptr_gray <= 0;
+        end else if (winc && !wfull) begin
+            wr_ptr <= wr_ptr + 1;
+            wr_ptr_gray <= bin2gray(wr_ptr + 1);
+        end
+    end
+
+    // Synchronize read pointer to write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rd_ptr_gray_sync_w <= '{default:0};
+        end else begin
+            rd_ptr_gray_sync_w[0] <= rd_ptr_gray;
+            for (int i = 1; i < SYNC_STAGES; i = i + 1) begin
+                rd_ptr_gray_sync_w[i] <= rd_ptr_gray_sync_w[i-1];
+            end
+        end
+    end
+
+    assign rd_ptr_gray_sync_w_final = rd_ptr_gray_sync_w[SYNC_STAGES-1];
+
+    // Write full condition
+    assign wfull = (wr_ptr_gray + 1) == rd_ptr_gray_sync_w_final;
+
+    // Write address
+    assign waddr = wr_ptr;
+
+    // Write data to memory
+    always @(posedge wclk) begin
+        if (winc && !wfull) begin
+            mem[wr_ptr[ADDR_WIDTH-1:0]] <= wdata;
+        end
+    end
+
+    // Read domain logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rd_ptr <= 0;
+            rd_ptr_gray <= 0;
+        end else if (rinc && !rempty) begin
+            rd_ptr <= rd_ptr + 1;
+            rd_ptr_gray <= bin2gray(rd_ptr + 1);
+        end
+    end
+
+    // Synchronize write pointer to read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wr_ptr_gray_sync_r <= '{default:0};
+        end else begin
+            wr_ptr_gray_sync_r[0] <= wr_ptr_gray;
+            for (int i = 1; i < SYNC_STAGES; i = i + 1) begin
+                wr_ptr_gray_sync_r[i] <= wr_ptr_gray_sync_r[i-1];
+            end
+        end
+    end
+
+    assign wr_ptr_gray_sync_r_final = wr_ptr_gray_sync_r[SYNC_STAGES-1];
+
+    // Read empty condition
+    assign rempty = wr_ptr_gray_sync_r_final == rd_ptr_gray;
+
+    // Read address
+    assign raddr = rd_ptr;
+
+    // Read data from memory
+    always @(posedge rclk) begin
+        if (rinc && !rempty) begin
+            rdata <= mem[rd_ptr[ADDR_WIDTH-1:0]];
+        end
+    end
+
+endmodule

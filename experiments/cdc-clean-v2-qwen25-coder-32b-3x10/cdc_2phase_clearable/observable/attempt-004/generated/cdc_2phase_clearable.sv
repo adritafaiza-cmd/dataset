@@ -1,0 +1,183 @@
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source side signals
+  logic src_clear_synced;
+  logic src_clear_req;
+  logic src_clear_ack;
+  logic src_clear_pending;
+  logic [WIDTH-1:0] src_data_reg;
+  logic src_valid_reg;
+  logic src_ready;
+
+  // Destination side signals
+  logic dst_clear_synced;
+  logic dst_clear_req;
+  logic dst_clear_ack;
+  logic dst_clear_pending;
+  logic [WIDTH-1:0] dst_data_reg;
+  logic dst_valid_reg;
+  logic dst_ready;
+
+  // Synchronization for clear signal from source to destination
+  logic [SYNC_STAGES-1:0] src_clear_sync;
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_clear_sync <= '0;
+    end else begin
+      src_clear_sync <= {src_clear_sync[SYNC_STAGES-2:0], src_clear_i};
+    end
+  end
+  assign src_clear_synced = src_clear_sync[SYNC_STAGES-1];
+
+  // Synchronization for clear signal from destination to source
+  logic [SYNC_STAGES-1:0] dst_clear_sync;
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      dst_clear_sync <= '0;
+    end else begin
+      dst_clear_sync <= {dst_clear_sync[SYNC_STAGES-2:0], dst_clear_i};
+    end
+  end
+  assign dst_clear_synced = dst_clear_sync[SYNC_STAGES-1];
+
+  // Source side clear request and acknowledgment
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_clear_req <= 0;
+      src_clear_ack <= 0;
+    end else begin
+      if (src_clear_i && !src_clear_req) begin
+        src_clear_req <= 1;
+      end else if (src_clear_ack) begin
+        src_clear_req <= 0;
+        src_clear_ack <= 0;
+      end
+    end
+  end
+
+  // Destination side clear request and acknowledgment
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_clear_req <= 0;
+      dst_clear_ack <= 0;
+    end else begin
+      if (dst_clear_i && !dst_clear_req) begin
+        dst_clear_req <= 1;
+      end else if (dst_clear_ack) begin
+        dst_clear_req <= 0;
+        dst_clear_ack <= 0;
+      end
+    end
+  end
+
+  // Source side clear pending
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_clear_pending <= 0;
+    end else begin
+      if (src_clear_req && !src_clear_synced) begin
+        src_clear_pending <= 1;
+      end else if (src_clear_synced) begin
+        src_clear_pending <= 0;
+      end
+    end
+  end
+
+  // Destination side clear pending
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_clear_pending <= 0;
+    end else begin
+      if (dst_clear_req && !dst_clear_synced) begin
+        dst_clear_pending <= 1;
+      end else if (dst_clear_synced) begin
+        dst_clear_pending <= 0;
+      end
+    end
+  end
+
+  // Source side valid/ready handshake
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_reg <= '0;
+      src_valid_reg <= 0;
+    end else begin
+      if (src_valid_i && src_ready) begin
+        src_data_reg <= src_data_i;
+        src_valid_reg <= 1;
+      end else if (dst_ready) begin
+        src_valid_reg <= 0;
+      end
+    end
+  end
+
+  // Destination side valid/ready handshake
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_reg <= '0;
+      dst_valid_reg <= 0;
+    end else begin
+      if (src_valid_reg && !dst_valid_reg) begin
+        dst_data_reg <= src_data_reg;
+        dst_valid_reg <= 1;
+      end else if (dst_ready) begin
+        dst_valid_reg <= 0;
+      end
+    end
+  end
+
+  // Source side ready signal
+  assign src_ready = !src_valid_reg || (dst_ready && src_valid_reg);
+
+  // Destination side ready signal
+  assign dst_ready = !dst_valid_reg || (src_ready && dst_valid_reg);
+
+  // Clear acknowledgment from destination to source
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_clear_ack <= 0;
+    end else begin
+      if (dst_clear_synced) begin
+        src_clear_ack <= 1;
+      end
+    end
+  end
+
+  // Clear acknowledgment from source to destination
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_clear_ack <= 0;
+    end else begin
+      if (src_clear_synced) begin
+        dst_clear_ack <= 1;
+      end
+    end
+  end
+
+  // Output assignments
+  assign src_clear_pending_o = src_clear_pending;
+  assign dst_clear_pending_o = dst_clear_pending;
+  assign dst_data_o = dst_data_reg;
+  assign dst_valid_o = dst_valid_reg;
+  assign src_ready_o = src_ready;
+
+endmodule

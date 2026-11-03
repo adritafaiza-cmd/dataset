@@ -1,0 +1,136 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "data_sync",
+            "function": "Multi-bit destination-clock data synchronizer",
+            "parameters": [
+                {
+                    "name": "STAGES",
+                    "value": 2
+                },
+                {
+                    "name": "DWIDTH",
+                    "value": 8
+                }
+            ],
+            "ports": [
+                {
+                    "name": "clk",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "rstn",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "din",
+                    "direction": "input",
+                    "width": "DWIDTH",
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "dready_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "dout",
+                    "direction": "output",
+                    "width": "DWIDTH",
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "dready_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {
+                    "name": "sync_reg",
+                    "width": "DWIDTH",
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "dready_o_reg",
+                    "width": 1,
+                    "clock_domain": "clk"
+                },
+                {
+                    "name": "dready_o_next",
+                    "width": 1,
+                    "clock_domain": "clk"
+                }
+            ],
+            "behavior": [
+                "On reset (rstn low), dready_o is set low.",
+                "When dready_i is high, the data from din is synchronized through a series of STAGES registers to dout.",
+                "After synchronization, dready_o is pulsed high to indicate the availability of new data in dout.",
+                "The synchronization chain ensures that multi-bit dout remains coherent across the clock domain.",
+                "Reset release is safe in the clk domain, ensuring no unsafe CDC/RDC crossings."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module data_sync #(
+    parameter STAGES = 2,
+    parameter DWIDTH = 8
+)(
+    input                  clk,
+    input                  rstn,
+    input  [DWIDTH-1:0]    din,
+    input                  dready_i,
+    output reg [DWIDTH-1:0] dout,
+    output reg             dready_o
+);
+
+    // Internal signals
+    reg [DWIDTH-1:0] sync_reg [0:STAGES-1];
+    reg              dready_o_reg;
+    reg              dready_o_next;
+
+    // Synchronization chain
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            for (int i = 0; i < STAGES; i = i + 1) begin
+                sync_reg[i] <= {DWIDTH{1'b0}};
+            end
+            dready_o_reg <= 1'b0;
+        end else begin
+            // Shift data through the synchronization stages
+            sync_reg[0] <= din;
+            for (int i = 1; i < STAGES; i = i + 1) begin
+                sync_reg[i] <= sync_reg[i-1];
+            end
+            // Output the last stage of the synchronization chain
+            dout <= sync_reg[STAGES-1];
+
+            // Pulse dready_o when dready_i is high
+            dready_o_next <= dready_i;
+            if (dready_i && !dready_o_reg) begin
+                dready_o_reg <= 1'b1;
+            end else if (dready_o_reg) begin
+                dready_o_reg <= 1'b0;
+            end
+        end
+    end
+
+    // Assign the output handshake signal
+    assign dready_o = dready_o_reg;
+
+endmodule
+```

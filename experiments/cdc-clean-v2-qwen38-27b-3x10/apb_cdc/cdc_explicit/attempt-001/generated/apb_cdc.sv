@@ -1,0 +1,317 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH;
+
+    // Source domain state
+    reg [ADDR_WIDTH-1:0] src_addr_r;
+    reg [DATA_WIDTH-1:0] src_wdata_r;
+    reg [DATA_WIDTH/8-1:0] src_strb_r;
+    reg [2:0] src_prot_r;
+    reg src_write_r;
+    reg src_valid_r;
+    reg src_pready_o_r;
+    reg [DATA_WIDTH-1:0] src_prdata_r;
+    reg src_pslverr_r;
+
+    // Destination domain state
+    reg [ADDR_WIDTH-1:0] dst_addr_r;
+    reg [DATA_WIDTH-1:0] dst_wdata_r;
+    reg [DATA_WIDTH/8-1:0] dst_strb_r;
+    reg [2:0] dst_prot_r;
+    reg dst_write_r;
+    reg dst_valid_r;
+    reg dst_psel_o_r;
+    reg dst_penable_o_r;
+    reg dst_pwrite_o_r;
+    reg [ADDR_WIDTH-1:0] dst_paddr_o_r;
+    reg [DATA_WIDTH-1:0] dst_pwdata_o_r;
+    reg [DATA_WIDTH/8-1:0] dst_pstrb_o_r;
+    reg [2:0] dst_pprot_o_r;
+
+    // FIFO pointers
+    reg [PTR_W-1:0] src_wr_ptr;
+    reg [PTR_W-1:0] dst_rd_ptr;
+
+    // Synchronization signals
+    // src_wr_ptr synchronized to dst domain
+    reg [PTR_W-1:0] src_wr_ptr_sync1;
+    reg [PTR_W-1:0] src_wr_ptr_sync2;
+    reg [PTR_W-1:0] src_wr_ptr_sync3;
+
+    // dst_rd_ptr synchronized to src domain
+    reg [PTR_W-1:0] dst_rd_ptr_sync1;
+    reg [PTR_W-1:0] dst_rd_ptr_sync2;
+    reg [PTR_W-1:0] dst_rd_ptr_sync3;
+
+    // dst_pready synchronized to src domain
+    reg dst_pready_sync1;
+    reg dst_pready_sync2;
+    reg dst_pready_sync3;
+
+    // dst_prdata and dst_pslverr synchronized to src domain
+    // Use a handshake to ensure coherent multi-bit transfer
+    reg dst_resp_valid_r;
+    reg [DATA_WIDTH-1:0] dst_prdata_r;
+    reg dst_pslverr_r;
+
+    reg dst_resp_valid_sync1;
+    reg dst_resp_valid_sync2;
+    reg dst_resp_valid_sync3;
+
+    // For coherent data transfer, use a toggle-based handshake
+    reg dst_resp_toggle_r;
+    reg dst_resp_toggle_sync1;
+    reg dst_resp_toggle_sync2;
+    reg dst_resp_toggle_sync3;
+
+    // Source domain: detect when FIFO is not full
+    wire [PTR_W-1:0] dst_rd_ptr_src = dst_rd_ptr_sync3;
+    wire src_fifo_full = (src_wr_ptr == dst_rd_ptr_src) && (src_wr_ptr[PTR_W-1] != dst_rd_ptr_src[PTR_W-1]);
+    // Actually for a simple FIFO with LOG_DEPTH, full when pointers match and MSB differs
+    // Let's use a simpler approach: track count or use standard FIFO full logic
+    // For a FIFO of depth DEPTH, full when (src_wr_ptr - dst_rd_ptr_src) == DEPTH
+    // Since pointers wrap, we can check:
+    wire src_fifo_full_simple = (src_wr_ptr == dst_rd_ptr_src) && (src_wr_ptr[PTR_W-1] != dst_rd_ptr_src[PTR_W-1]);
+    // This works for power-of-2 FIFOs where we use an extra bit for full/empty
+    // But we only have PTR_W bits. Let's use a different approach.
+    // Actually, with PTR_W bits, we can represent 2^PTR_W states. For a FIFO of depth 2^(PTR_W-1),
+    // we need PTR_W bits with the MSB indicating full/empty.
+    // Let's redefine: use PTR_W bits where the MSB is the "extra" bit for full/empty detection.
+    // So the actual pointer is PTR_W-1 bits, and we have one extra bit.
+    // But the parameter is LOG_DEPTH, so DEPTH = 2^LOG_DEPTH.
+    // We need LOG_DEPTH+1 bits for the pointer to distinguish full from empty.
+    // Let's adjust: use LOG_DEPTH+1 bits for pointers.
+
+    // Redefine with correct pointer width
+    localparam PTR_W2 = LOG_DEPTH + 1;
+
+    reg [PTR_W2-1:0] src_wr_ptr2;
+    reg [PTR_W2-1:0] dst_rd_ptr2;
+
+    reg [PTR_W2-1:0] src_wr_ptr2_sync1;
+    reg [PTR_W2-1:0] src_wr_ptr2_sync2;
+    reg [PTR_W2-1:0] src_wr_ptr2_sync3;
+
+    reg [PTR_W2-1:0] dst_rd_ptr2_sync1;
+    reg [PTR_W2-1:0] dst_rd_ptr2_sync2;
+    reg [PTR_W2-1:0] dst_rd_ptr2_sync3;
+
+    wire [PTR_W2-1:0] dst_rd_ptr2_src = dst_rd_ptr2_sync3;
+    wire src_fifo_full2 = (src_wr_ptr2 == dst_rd_ptr2_src);
+    // For a FIFO with PTR_W2 bits, full when pointers are equal (with the extra bit)
+    // Actually, standard approach: full when (src_wr_ptr2 - dst_rd_ptr2_src) == DEPTH
+    // With PTR_W2 = LOG_DEPTH+1 bits, DEPTH = 2^LOG_DEPTH
+    // Full when the lower LOG_DEPTH bits are equal and the MSB differs
+    wire src_fifo_full2_correct = (src_wr_ptr2[LOG_DEPTH-1:0] == dst_rd_ptr2_src[LOG_DEPTH-1:0]) && 
+                                   (src_wr_ptr2[LOG_DEPTH] != dst_rd_ptr2_src[LOG_DEPTH]);
+
+    // Destination domain: detect when FIFO is not empty
+    wire [PTR_W2-1:0] src_wr_ptr2_dst = src_wr_ptr2_sync3;
+    wire dst_fifo_empty2 = (dst_rd_ptr2 == src_wr_ptr2_dst);
+    wire dst_fifo_empty2_correct = (dst_rd_ptr2[LOG_DEPTH-1:0] == src_wr_ptr2_dst[LOG_DEPTH-1:0]) && 
+                                    (dst_rd_ptr2[LOG_DEPTH] == src_wr_ptr2_dst[LOG_DEPTH]);
+
+    // Source domain logic
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_addr_r <= {ADDR_WIDTH{1'b0}};
+            src_wdata_r <= {DATA_WIDTH{1'b0}};
+            src_strb_r <= {(DATA_WIDTH/8){1'b0}};
+            src_prot_r <= 3'b000;
+            src_write_r <= 1'b0;
+            src_valid_r <= 1'b0;
+            src_pready_o_r <= 1'b0;
+            src_prdata_r <= {DATA_WIDTH{1'b0}};
+            src_pslverr_r <= 1'b0;
+            src_wr_ptr2 <= {PTR_W2{1'b0}};
+        end else begin
+            // APB source interface
+            if (src_psel_i && !src_penable_i) begin
+                // Setup phase: capture request
+                if (!src_fifo_full2_correct) begin
+                    src_addr_r <= src_paddr_i;
+                    src_wdata_r <= src_pwdata_i;
+                    src_strb_r <= src_pstrb_i;
+                    src_prot_r <= src_pprot_i;
+                    src_write_r <= src_pwrite_i;
+                    src_valid_r <= 1'b1;
+                    src_wr_ptr2 <= src_wr_ptr2 + 1'b1;
+                end
+            end
+
+            // Handle response from destination
+            if (dst_resp_toggle_sync3 != dst_resp_toggle_sync2) begin
+                // New response available
+                src_prdata_r <= dst_prdata_r;
+                src_pslverr_r <= dst_pslverr_r;
+                src_pready_o_r <= 1'b1;
+                src_valid_r <= 1'b0;
+            end else begin
+                src_pready_o_r <= 1'b0;
+            end
+        end
+    end
+
+    // Destination domain logic
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_addr_r <= {ADDR_WIDTH{1'b0}};
+            dst_wdata_r <= {DATA_WIDTH{1'b0}};
+            dst_strb_r <= {(DATA_WIDTH/8){1'b0}};
+            dst_prot_r <= 3'b000;
+            dst_write_r <= 1'b0;
+            dst_valid_r <= 1'b0;
+            dst_psel_o_r <= 1'b0;
+            dst_penable_o_r <= 1'b0;
+            dst_pwrite_o_r <= 1'b0;
+            dst_paddr_o_r <= {ADDR_WIDTH{1'b0}};
+            dst_pwdata_o_r <= {DATA_WIDTH{1'b0}};
+            dst_pstrb_o_r <= {(DATA_WIDTH/8){1'b0}};
+            dst_pprot_o_r <= 3'b000;
+            dst_rd_ptr2 <= {PTR_W2{1'b0}};
+            dst_resp_valid_r <= 1'b0;
+            dst_prdata_r <= {DATA_WIDTH{1'b0}};
+            dst_pslverr_r <= 1'b0;
+            dst_resp_toggle_r <= 1'b0;
+        end else begin
+            // Check if FIFO has data
+            if (!dst_fifo_empty2_correct && !dst_valid_r) begin
+                // Load new request from FIFO
+                dst_addr_r <= src_addr_r;
+                dst_wdata_r <= src_wdata_r;
+                dst_strb_r <= src_strb_r;
+                dst_prot_r <= src_prot_r;
+                dst_write_r <= src_write_r;
+                dst_valid_r <= 1'b1;
+                dst_rd_ptr2 <= dst_rd_ptr2 + 1'b1;
+            end
+
+            // APB destination interface
+            if (dst_valid_r) begin
+                if (!dst_psel_o_r) begin
+                    // Setup phase
+                    dst_psel_o_r <= 1'b1;
+                    dst_penable_o_r <= 1'b0;
+                    dst_pwrite_o_r <= dst_write_r;
+                    dst_paddr_o_r <= dst_addr_r;
+                    dst_pwdata_o_r <= dst_wdata_r;
+                    dst_pstrb_o_r <= dst_strb_r;
+                    dst_pprot_o_r <= dst_prot_r;
+                end else if (!dst_penable_o_r) begin
+                    // Access phase
+                    dst_penable_o_r <= 1'b1;
+                end else begin
+                    // dst_pready_i should be high to complete
+                    if (dst_pready_i) begin
+                        dst_psel_o_r <= 1'b0;
+                        dst_penable_o_r <= 1'b0;
+                        dst_valid_r <= 1'b0;
+                        // Capture response
+                        dst_prdata_r <= dst_prdata_i;
+                        dst_pslverr_r <= dst_pslverr_i;
+                        dst_resp_toggle_r <= ~dst_resp_toggle_r;
+                    end
+                end
+            end
+        end
+    end
+
+    // Synchronization: src_wr_ptr2 to dst domain
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            src_wr_ptr2_sync1 <= {PTR_W2{1'b0}};
+            src_wr_ptr2_sync2 <= {PTR_W2{1'b0}};
+            src_wr_ptr2_sync3 <= {PTR_W2{1'b0}};
+        end else begin
+            src_wr_ptr2_sync1 <= src_wr_ptr2;
+            src_wr_ptr2_sync2 <= src_wr_ptr2_sync1;
+            src_wr_ptr2_sync3 <= src_wr_ptr2_sync2;
+        end
+    end
+
+    // Synchronization: dst_rd_ptr2 to src domain
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            dst_rd_ptr2_sync1 <= {PTR_W2{1'b0}};
+            dst_rd_ptr2_sync2 <= {PTR_W2{1'b0}};
+            dst_rd_ptr2_sync3 <= {PTR_W2{1'b0}};
+        end else begin
+            dst_rd_ptr2_sync1 <= dst_rd_ptr2;
+            dst_rd_ptr2_sync2 <= dst_rd_ptr2_sync1;
+            dst_rd_ptr2_sync3 <= dst_rd_ptr2_sync2;
+        end
+    end
+
+    // Synchronization: dst_resp_toggle to src domain
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            dst_resp_toggle_sync1 <= 1'b0;
+            dst_resp_toggle_sync2 <= 1'b0;
+            dst_resp_toggle_sync3 <= 1'b0;
+        end else begin
+            dst_resp_toggle_sync1 <= dst_resp_toggle_r;
+            dst_resp_toggle_sync2 <= dst_resp_toggle_sync1;
+            dst_resp_toggle_sync3 <= dst_resp_toggle_sync2;
+        end
+    end
+
+    // Synchronization: dst_prdata and dst_pslverr to src domain
+    // These are captured in dst domain and need to be synchronized
+    // Since they change only when dst_resp_toggle_r changes, we can synchronize them
+    // using the toggle as a valid indicator
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            dst_prdata_r <= {DATA_WIDTH{1'b0}};
+            dst_pslverr_r <= 1'b0;
+        end else begin
+            // When toggle changes, capture the data
+            if (dst_resp_toggle_sync3 != dst_resp_toggle_sync2) begin
+                dst_prdata_r <= dst_prdata_i;
+                dst_pslverr_r <= dst_pslverr_i;
+            end
+        end
+    end
+
+    // Assign outputs
+    assign src_pready_o = src_pready_o_r;
+    assign src_prdata_o = src_prdata_r;
+    assign src_pslverr_o = src_pslverr_r;
+    assign dst_psel_o = dst_psel_o_r;
+    assign dst_penable_o = dst_penable_o_r;
+    assign dst_pwrite_o = dst_pwrite_o_r;
+    assign dst_paddr_o = dst_paddr_o_r;
+    assign dst_pwdata_o = dst_pwdata_o_r;
+    assign dst_pstrb_o = dst_pstrb_o_r;
+    assign dst_pprot_o = dst_pprot_o_r;
+
+endmodule

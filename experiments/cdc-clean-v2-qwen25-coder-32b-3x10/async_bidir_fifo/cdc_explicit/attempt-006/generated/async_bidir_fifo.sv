@@ -1,0 +1,128 @@
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam AFULL_THRESHOLD = DEPTH - 2;
+  localparam AEMPTY_THRESHOLD = 1;
+
+  // FIFO for A to B direction
+  reg [DSIZE-1:0] mem_a2b [DEPTH-1:0];
+  reg [ASIZE:0] wr_ptr_a2b, rd_ptr_a2b;
+  reg [ASIZE:0] wr_ptr_a2b_sync, rd_ptr_a2b_sync;
+
+  // FIFO for B to A direction
+  reg [DSIZE-1:0] mem_b2a [DEPTH-1:0];
+  reg [ASIZE:0] wr_ptr_b2a, rd_ptr_b2a;
+  reg [ASIZE:0] wr_ptr_b2a_sync, rd_ptr_b2a_sync;
+
+  // Synchronization for pointers
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      wr_ptr_b2a_sync <= 0;
+      rd_ptr_b2a_sync <= 0;
+    end else begin
+      wr_ptr_b2a_sync <= wr_ptr_b2a;
+      rd_ptr_b2a_sync <= rd_ptr_b2a;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      wr_ptr_a2b_sync <= 0;
+      rd_ptr_a2b_sync <= 0;
+    end else begin
+      wr_ptr_a2b_sync <= wr_ptr_a2b;
+      rd_ptr_a2b_sync <= rd_ptr_a2b;
+    end
+  end
+
+  // Write and read logic for A to B direction
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      wr_ptr_a2b <= 0;
+      rd_ptr_a2b <= 0;
+    end else if (a_dir && !a_full) begin
+      mem_a2b[wr_ptr_a2b[ASIZE-1:0]] <= a_wdata;
+      wr_ptr_a2b <= wr_ptr_a2b + 1;
+    end else if (!a_dir && !a_empty) begin
+      rd_ptr_a2b <= rd_ptr_a2b + 1;
+    end
+  end
+
+  // Write and read logic for B to A direction
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      wr_ptr_b2a <= 0;
+      rd_ptr_b2a <= 0;
+    end else if (b_dir && !b_full) begin
+      mem_b2a[wr_ptr_b2a[ASIZE-1:0]] <= b_wdata;
+      wr_ptr_b2a <= wr_ptr_b2a + 1;
+    end else if (!b_dir && !b_empty) begin
+      rd_ptr_b2a <= rd_ptr_b2a + 1;
+    end
+  end
+
+  // Flags for A to B direction
+  wire [ASIZE:0] a2b_full_count = wr_ptr_a2b - rd_ptr_a2b_sync;
+  wire [ASIZE:0] a2b_empty_count = rd_ptr_a2b - wr_ptr_a2b_sync;
+
+  assign a_full = (a2b_full_count >= DEPTH);
+  assign a_afull = (a2b_full_count >= AFULL_THRESHOLD);
+  assign a_empty = (a2b_empty_count >= DEPTH);
+  assign a_aempty = (a2b_empty_count >= AEMPTY_THRESHOLD);
+
+  // Flags for B to A direction
+  wire [ASIZE:0] b2a_full_count = wr_ptr_b2a - rd_ptr_b2a_sync;
+  wire [ASIZE:0] b2a_empty_count = rd_ptr_b2a - wr_ptr_b2a_sync;
+
+  assign b_full = (b2a_full_count >= DEPTH);
+  assign b_afull = (b2a_full_count >= AFULL_THRESHOLD);
+  assign b_empty = (b2a_empty_count >= DEPTH);
+  assign b_aempty = (b2a_empty_count >= AEMPTY_THRESHOLD);
+
+  // Data output for A to B direction
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_rdata <= 0;
+    end else if (!b_dir && !b_empty) begin
+      b_rdata <= mem_a2b[rd_ptr_b2a[ASIZE-1:0]];
+    end
+  end
+
+  // Data output for B to A direction
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_rdata <= 0;
+    end else if (!a_dir && !a_empty) begin
+      a_rdata <= mem_b2a[rd_ptr_a2b[ASIZE-1:0]];
+    end
+  end
+
+endmodule

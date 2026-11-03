@@ -1,0 +1,280 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // SPI clock domain signals
+    reg [N-1:0] tx_word_sclk;
+    reg [N-1:0] rx_word_sclk;
+    reg [N-1:0] tx_word_sclk_d1;
+    reg [N-1:0] rx_word_sclk_d1;
+    reg [N-1:0] tx_word_sclk_d2;
+    reg [N-1:0] rx_word_sclk_d2;
+    reg         tx_valid_sclk;
+    reg         tx_valid_sclk_d1;
+    reg         tx_valid_sclk_d2;
+    reg         rx_valid_sclk;
+    reg         rx_valid_sclk_d1;
+    reg         rx_valid_sclk_d2;
+    reg         tx_done_sclk;
+    reg         tx_done_sclk_d1;
+    reg         tx_done_sclk_d2;
+    reg         rx_done_sclk;
+    reg         rx_done_sclk_d1;
+    reg         rx_done_sclk_d2;
+
+    // Parallel clock domain signals
+    reg [N-1:0] tx_word_pclk;
+    reg [N-1:0] rx_word_pclk;
+    reg         tx_valid_pclk;
+    reg         rx_valid_pclk;
+    reg         tx_done_pclk;
+    reg         rx_done_pclk;
+
+    // State machine in sclk domain
+    localparam S_IDLE = 2'd0;
+    localparam S_TX   = 2'd1;
+    localparam S_RX   = 2'd2;
+    localparam S_DONE = 2'd3;
+
+    reg [1:0] state_sclk;
+    reg [N-1:0] bit_count_sclk;
+    reg [N-1:0] tx_shift_sclk;
+    reg [N-1:0] rx_shift_sclk;
+
+    // 2x clock divider for SPI
+    reg [SPI_2X_CLK_DIV-1:0] div_counter_sclk;
+    wire div_tick_sclk = (div_counter_sclk == SPI_2X_CLK_DIV - 1);
+
+    // SCK generation
+    reg sck_phase_sclk;
+
+    // MOSI output
+    assign spi_mosi_o = tx_shift_sclk[N-1];
+
+    // Synchronization for tx_valid from pclk to sclk
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            tx_valid_sclk_d1 <= 1'b0;
+            tx_valid_sclk_d2 <= 1'b0;
+        end else begin
+            tx_valid_sclk_d1 <= tx_valid_pclk;
+            tx_valid_sclk_d2 <= tx_valid_sclk_d1;
+        end
+    end
+
+    // Synchronization for tx_word from pclk to sclk
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            tx_word_sclk_d1 <= {N{1'b0}};
+            tx_word_sclk_d2 <= {N{1'b0}};
+        end else begin
+            tx_word_sclk_d1 <= tx_word_pclk;
+            tx_word_sclk_d2 <= tx_word_sclk_d1;
+        end
+    end
+
+    // Synchronization for tx_done from sclk to pclk
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            tx_done_sclk_d1 <= 1'b0;
+            tx_done_sclk_d2 <= 1'b0;
+        end else begin
+            tx_done_sclk_d1 <= tx_done_sclk;
+            tx_done_sclk_d2 <= tx_done_sclk_d1;
+        end
+    end
+
+    // Synchronization for rx_done from sclk to pclk
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            rx_done_sclk_d1 <= 1'b0;
+            rx_done_sclk_d2 <= 1'b0;
+        end else begin
+            rx_done_sclk_d1 <= rx_done_sclk;
+            rx_done_sclk_d2 <= rx_done_sclk_d1;
+        end
+    end
+
+    // Synchronization for rx_word from sclk to pclk
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            rx_word_sclk_d1 <= {N{1'b0}};
+            rx_word_sclk_d2 <= {N{1'b0}};
+        end else begin
+            rx_word_sclk_d1 <= rx_word_sclk;
+            rx_word_sclk_d2 <= rx_word_sclk_d1;
+        end
+    end
+
+    // Synchronization for rx_valid from sclk to pclk
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            rx_valid_sclk_d1 <= 1'b0;
+            rx_valid_sclk_d2 <= 1'b0;
+        end else begin
+            rx_valid_sclk_d1 <= rx_valid_sclk;
+            rx_valid_sclk_d2 <= rx_valid_sclk_d1;
+        end
+    end
+
+    // Synchronization for tx_done from sclk to pclk (already done above)
+    // Synchronization for rx_done from sclk to pclk (already done above)
+
+    // SPI state machine in sclk domain
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state_sclk     <= S_IDLE;
+            bit_count_sclk <= {N{1'b0}};
+            tx_shift_sclk  <= {N{1'b0}};
+            rx_shift_sclk  <= {N{1'b0}};
+            tx_word_sclk   <= {N{1'b0}};
+            rx_word_sclk   <= {N{1'b0}};
+            tx_valid_sclk  <= 1'b0;
+            rx_valid_sclk  <= 1'b0;
+            tx_done_sclk   <= 1'b0;
+            rx_done_sclk   <= 1'b0;
+            spi_ssel_o     <= 1'b1;
+            spi_sck_o      <= 1'b0;
+            sck_phase_sclk <= 1'b0;
+            div_counter_sclk <= {SPI_2X_CLK_DIV{1'b0}};
+        end else begin
+            // Default: clear one-shot signals
+            tx_done_sclk <= 1'b0;
+            rx_done_sclk <= 1'b0;
+
+            // Divider
+            if (div_counter_sclk == SPI_2X_CLK_DIV - 1) begin
+                div_counter_sclk <= {SPI_2X_CLK_DIV{1'b0}};
+            end else begin
+                div_counter_sclk <= div_counter_sclk + 1'b1;
+            end
+
+            case (state_sclk)
+                S_IDLE: begin
+                    spi_ssel_o <= 1'b1;
+                    spi_sck_o  <= 1'b0;
+                    if (tx_valid_sclk_d2) begin
+                        tx_word_sclk  <= tx_word_sclk_d2;
+                        tx_shift_sclk <= tx_word_sclk_d2;
+                        bit_count_sclk <= {N{1'b0}};
+                        rx_shift_sclk  <= {N{1'b0}};
+                        tx_valid_sclk  <= 1'b0;
+                        spi_ssel_o     <= 1'b0;
+                        state_sclk     <= S_TX;
+                    end
+                end
+
+                S_TX: begin
+                    if (div_tick_sclk) begin
+                        if (!sck_phase_sclk) begin
+                            // Rising edge of SCK: shift out MSB, sample MISO
+                            spi_sck_o <= 1'b1;
+                            sck_phase_sclk <= 1'b1;
+                            tx_shift_sclk <= {tx_shift_sclk[N-2:0], 1'b0};
+                            rx_shift_sclk <= {spi_miso_i, rx_shift_sclk[N-1:0]};
+                            if (bit_count_sclk == N-1) begin
+                                rx_word_sclk <= {spi_miso_i, rx_shift_sclk[N-1:0]};
+                                rx_valid_sclk <= 1'b1;
+                                state_sclk <= S_DONE;
+                            end else begin
+                                bit_count_sclk <= bit_count_sclk + 1'b1;
+                            end
+                        end else begin
+                            // Falling edge of SCK
+                            spi_sck_o <= 1'b0;
+                            sck_phase_sclk <= 1'b0;
+                        end
+                    end
+                end
+
+                S_DONE: begin
+                    spi_ssel_o <= 1'b1;
+                    spi_sck_o  <= 1'b0;
+                    tx_done_sclk <= 1'b1;
+                    rx_done_sclk <= 1'b1;
+                    state_sclk <= S_IDLE;
+                end
+
+                default: begin
+                    state_sclk <= S_IDLE;
+                end
+            end
+        end
+    end
+
+    // Parallel clock domain logic
+    reg wr_ack_pclk_d1;
+    reg do_valid_pclk_d1;
+
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            tx_word_pclk   <= {N{1'b0}};
+            rx_word_pclk   <= {N{1'b0}};
+            tx_valid_pclk  <= 1'b0;
+            rx_valid_pclk  <= 1'b0;
+            tx_done_pclk   <= 1'b0;
+            rx_done_pclk   <= 1'b0;
+            di_req_o       <= 1'b0;
+            wr_ack_o       <= 1'b0;
+            do_valid_o     <= 1'b0;
+            do_o           <= {N{1'b0}};
+            wr_ack_pclk_d1 <= 1'b0;
+            do_valid_pclk_d1 <= 1'b0;
+        end else begin
+            // Default: clear one-shot outputs
+            wr_ack_o   <= 1'b0;
+            do_valid_o <= 1'b0;
+
+            // Accept new word when idle and wren is asserted
+            if (di_req_o && wren_i) begin
+                tx_word_pclk  <= di_i;
+                tx_valid_pclk <= 1'b1;
+                di_req_o      <= 1'b0;
+                wr_ack_o      <= 1'b1;
+            end
+
+            // Handle completion from sclk domain
+            if (tx_done_sclk_d2) begin
+                tx_done_pclk <= 1'b1;
+            end else begin
+                tx_done_pclk <= 1'b0;
+            end
+
+            if (rx_done_sclk_d2) begin
+                rx_done_pclk <= 1'b1;
+            end else begin
+                rx_done_pclk <= 1'b0;
+            end
+
+            if (rx_valid_sclk_d2) begin
+                rx_word_pclk  <= rx_word_sclk_d2;
+                rx_valid_pclk <= 1'b1;
+            end else begin
+                rx_valid_pclk <= 1'b0;
+            end
+
+            // When both tx and rx are done, present the result
+            if (tx_done_pclk && rx_done_pclk) begin
+                do_o       <= rx_word_pclk;
+                do_valid_o <= 1'b1;
+                di_req_o   <= 1'b1;
+            end
+        end
+    end
+
+endmodule

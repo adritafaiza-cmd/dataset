@@ -1,0 +1,84 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain: hold the payload and generate a request pulse
+  reg [WIDTH-1:0] src_hold_data;
+  reg             src_req;
+  reg             src_ack_sync;
+
+  // Destination domain: synchronize request, hold payload, generate ack
+  reg             dst_req_sync1;
+  reg             dst_req_sync2;
+  reg [WIDTH-1:0] dst_hold_data;
+  reg             dst_ack;
+  reg             dst_ack_sync1;
+  reg             dst_ack_sync2;
+
+  // Source domain: synchronize ack back
+  reg             src_ack_sync1;
+  reg             src_ack_sync2;
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_hold_data <= {WIDTH{1'b0}};
+      src_req       <= 1'b0;
+      src_ack_sync1 <= 1'b0;
+      src_ack_sync2 <= 1'b0;
+    end else begin
+      src_ack_sync1 <= src_ack_sync2;
+      src_ack_sync2 <= dst_ack_sync2;
+
+      if (src_valid_i && !src_req) begin
+        src_hold_data <= src_data_i;
+        src_req       <= 1'b1;
+      end else if (src_req && src_ack_sync2) begin
+        src_req <= 1'b0;
+      end
+    end
+  end
+
+  assign src_ready_o = !src_req;
+
+  // Destination domain: synchronize request
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req_sync1 <= 1'b0;
+      dst_req_sync2 <= 1'b0;
+      dst_hold_data <= {WIDTH{1'b0}};
+      dst_ack       <= 1'b0;
+      dst_ack_sync1 <= 1'b0;
+      dst_ack_sync2 <= 1'b0;
+    end else begin
+      dst_req_sync1 <= src_req;
+      dst_req_sync2 <= dst_req_sync1;
+
+      // Capture data when request is seen and not already holding
+      if (dst_req_sync2 && !dst_ack) begin
+        dst_hold_data <= src_hold_data;
+        dst_ack       <= 1'b1;
+      end else if (dst_ack && dst_valid_o && dst_ready_i) begin
+        dst_ack <= 1'b0;
+      end
+
+      dst_ack_sync1 <= dst_ack;
+      dst_ack_sync2 <= dst_ack_sync1;
+    end
+  end
+
+  assign dst_valid_o = dst_ack;
+  assign dst_data_o  = dst_hold_data;
+
+endmodule

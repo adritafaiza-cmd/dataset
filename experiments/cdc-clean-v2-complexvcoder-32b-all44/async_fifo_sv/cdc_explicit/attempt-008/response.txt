@@ -1,0 +1,217 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "async_fifo_sv",
+            "function": "Asynchronous FIFO with 2**ADDR_WIDTH entries of DATA_WIDTH bits",
+            "parameters": [
+                { "name": "DATA_WIDTH", "value": 8 },
+                { "name": "ADDR_WIDTH", "value": 4 },
+                { "name": "SYNC_STAGES", "value": 2 }
+            ],
+            "ports": [
+                { "name": "wclk", "direction": "input", "width": 1, "clock_domain": "wclk" },
+                { "name": "wrst_n", "direction": "input", "width": 1, "clock_domain": "wclk" },
+                { "name": "winc", "direction": "input", "width": 1, "clock_domain": "wclk" },
+                { "name": "wdata", "direction": "input", "width": "DATA_WIDTH", "clock_domain": "wclk" },
+                { "name": "wfull", "direction": "output", "width": 1, "clock_domain": "wclk" },
+                { "name": "waddr", "direction": "output", "width": "ADDR_WIDTH+1", "clock_domain": "wclk" },
+                { "name": "rclk", "direction": "input", "width": 1, "clock_domain": "rclk" },
+                { "name": "rrst_n", "direction": "input", "width": 1, "clock_domain": "rclk" },
+                { "name": "rinc", "direction": "input", "width": 1, "clock_domain": "rclk" },
+                { "name": "rdata", "direction": "output", "width": "DATA_WIDTH", "clock_domain": "rclk" },
+                { "name": "rempty", "direction": "output", "width": 1, "clock_domain": "rclk" },
+                { "name": "raddr", "direction": "output", "width": "ADDR_WIDTH+1", "clock_domain": "rclk" }
+            ],
+            "instances": [
+                { "module": "sync_reg", "name": "sync_rptr_gray_wclk", "function": "Gray code synchronization", "connections": [ { "from": "rptr_gray", "to": "data_in" }, { "from": "wclk", "to": "clk" }, { "from": "wrst_n", "to": "rst_n" } ] },
+                { "module": "sync_reg", "name": "sync_wptr_gray_rclk", "function": "Gray code synchronization", "connections": [ { "from": "wptr_gray", "to": "data_in" }, { "from": "rclk", "to": "clk" }, { "from": "rrst_n", "to": "rst_n" } ] }
+            ],
+            "connections": [
+                { "from": "sync_rptr_gray_wclk.data_out", "to": "rptr_gray_sync_wclk" },
+                { "from": "sync_wptr_gray_rclk.data_out", "to": "wptr_gray_sync_rclk" }
+            ],
+            "internal_signals": [
+                { "name": "wptr", "width": "ADDR_WIDTH+1" },
+                { "name": "wptr_gray", "width": "ADDR_WIDTH+1" },
+                { "name": "wptr_gray_sync_rclk", "width": "ADDR_WIDTH+1" },
+                { "name": "rptr", "width": "ADDR_WIDTH+1" },
+                { "name": "rptr_gray", "width": "ADDR_WIDTH+1" },
+                { "name": "rptr_gray_sync_wclk", "width": "ADDR_WIDTH+1" },
+                { "name": "mem", "width": "DATA_WIDTH", "depth": "2**(ADDR_WIDTH+1)" },
+                { "name": "wfull_raw", "width": 1 },
+                { "name": "rempty_raw", "width": 1 },
+                { "name": "wptr_bin", "width": "ADDR_WIDTH+1" },
+                { "name": "rptr_bin", "width": "ADDR_WIDTH+1" }
+            ],
+            "behavior": [
+                "Reset behavior: After reset, wfull is low and rempty is high.",
+                "Write operation: A write is accepted when winc is high and wfull is low.",
+                "Read operation: A read is accepted when rinc is high and rempty is low.",
+                "Data is written into the memory array at the wptr address and wptr is incremented.",
+                "Data is read from the memory array at the rptr address and rptr is incremented.",
+                "wptr_gray and rptr_gray are the gray codes of wptr and rptr respectively.",
+                "wptr_gray_sync_rclk and rptr_gray_sync_wclk are the synchronized gray codes of rptr and wptr in the respective clock domains.",
+                "wfull_raw is high when the FIFO is full and rempty_raw is high when the FIFO is empty.",
+                "wptr_bin and rptr_bin are the binary values of wptr_gray and rptr_gray respectively.",
+                "wfull is high when wptr_gray_sync_rclk is equal to the gray code of (rptr_bin + 1).",
+                "rempty is high when wptr_gray_sync_rclk is equal to rptr_gray_sync_wclk."
+            ]
+        },
+        {
+            "Top_module_name": "sync_reg",
+            "function": "Synchronizer with multiple stages",
+            "parameters": [
+                { "name": "DATA_WIDTH", "value": 1 }
+            ],
+            "ports": [
+                { "name": "clk", "direction": "input", "width": 1, "clock_domain": "any" },
+                { "name": "rst_n", "direction": "input", "width": 1, "clock_domain": "any" },
+                { "name": "data_in", "direction": "input", "width": "DATA_WIDTH", "clock_domain": "source" },
+                { "name": "data_out", "direction": "output", "width": "DATA_WIDTH", "clock_domain": "destination" }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                { "name": "sync_stage", "width": "DATA_WIDTH", "depth": "SYNC_STAGES" }
+            ],
+            "behavior": [
+                "Synchronizes data from source clock domain to destination clock domain using multiple stages.",
+                "Reset behavior: On active-low reset, all stages are set to 0."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    // Internal signals
+    reg [ADDR_WIDTH:0] wptr, wptr_gray, wptr_gray_sync_rclk, wptr_bin;
+    reg [ADDR_WIDTH:0] rptr, rptr_gray, rptr_gray_sync_wclk, rptr_bin;
+    reg [DATA_WIDTH-1:0] mem [0:(2**(ADDR_WIDTH+1))-1];
+    reg wfull_raw, rempty_raw;
+
+    // Binary to Gray code conversion
+    function [ADDR_WIDTH:0] bin_to_gray;
+        input [ADDR_WIDTH:0] bin;
+        bin_to_gray = bin ^ (bin >> 1);
+    endfunction
+
+    // Gray to Binary code conversion
+    function [ADDR_WIDTH:0] gray_to_bin;
+        input [ADDR_WIDTH:0] gray;
+        integer i;
+        reg [ADDR_WIDTH:0] bin;
+        bin = gray;
+        for (i = ADDR_WIDTH; i > 0; i = i - 1) begin
+            bin[i-1] = bin[i] ^ bin[i-1];
+        end
+        gray_to_bin = bin;
+    endfunction
+
+    // Write domain logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= 0;
+            wptr_gray <= 0;
+            wfull_raw <= 0;
+        end else begin
+            if (!wfull_raw && winc) begin
+                mem[wptr] <= wdata;
+                wptr <= wptr + 1;
+                wptr_gray <= bin_to_gray(wptr + 1);
+            end
+            wfull_raw <= (wptr_gray == rptr_gray_sync_wclk);
+        end
+    end
+
+    // Read domain logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= 0;
+            rptr_gray <= 0;
+            rempty_raw <= 1;
+        end else begin
+            if (!rempty_raw && rinc) begin
+                rptr <= rptr + 1;
+                rptr_gray <= bin_to_gray(rptr + 1);
+            end
+            rempty_raw <= (wptr_gray_sync_rclk == rptr_gray_sync_wclk);
+        end
+    end
+
+    // Synchronization registers for crossing clock domains
+    sync_reg #(.DATA_WIDTH(ADDR_WIDTH+1))
+    sync_rptr_gray_wclk (
+        .clk(wclk),
+        .rst_n(wrst_n),
+        .data_in(rptr_gray),
+        .data_out(rptr_gray_sync_wclk)
+    );
+
+    sync_reg #(.DATA_WIDTH(ADDR_WIDTH+1))
+    sync_wptr_gray_rclk (
+        .clk(rclk),
+        .rst_n(rrst_n),
+        .data_in(wptr_gray),
+        .data_out(wptr_gray_sync_rclk)
+    );
+
+    // Outputs
+    assign wfull = wfull_raw;
+    assign rempty = rempty_raw;
+    assign waddr = wptr;
+    assign raddr = rptr;
+    assign rdata = mem[rptr];
+
+endmodule
+
+module sync_reg #(
+    parameter DATA_WIDTH = 1
+)(
+    input  wire                    clk,
+    input  wire                    rst_n,
+    input  wire [DATA_WIDTH-1:0]   data_in,
+    output wire [DATA_WIDTH-1:0]   data_out
+);
+
+    reg [DATA_WIDTH-1:0] sync_stage [0:SYNC_STAGES-1];
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (int i = 0; i < SYNC_STAGES; i = i + 1) begin
+                sync_stage[i] <= 0;
+            end
+        end else begin
+            sync_stage[0] <= data_in;
+            for (int i = 1; i < SYNC_STAGES; i = i + 1) begin
+                sync_stage[i] <= sync_stage[i-1];
+            end
+        end
+    end
+
+    assign data_out = sync_stage[SYNC_STAGES-1];
+
+endmodule
+```

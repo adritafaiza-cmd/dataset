@@ -1,0 +1,121 @@
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd32,
+  parameter int unsigned        ApbAddrWidth = 32'd32,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd32,
+  parameter int unsigned        RegDataWidth = 32'd32,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type                apb_addr_t   = logic[ApbAddrWidth-1:0],
+  parameter type                reg_data_t   = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Internal signals
+  reg_data_t [NoApbRegs-1:0] reg_file;
+  logic [NoApbRegs-1:0]      reg_addr;
+  logic                      write_enable;
+  reg_data_t                 read_data;
+  reg_data_t                 write_data;
+  logic [ApbDataWidth/8-1:0] byte_strobe;
+  reg_data_t                 write_mask;
+
+  // Decode APB address to determine the target register
+  always_comb begin
+    reg_addr = '0;
+    if (req_i) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        if (base_addr_i[ApbAddrWidth-1:AddrOffset] == i) begin
+          reg_addr[i] = 1'b1;
+        end
+      end
+    end
+  end
+
+  // Generate write enable signal based on APB control signals (psel, penable)
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      write_enable <= 1'b0;
+    end else begin
+      if (req_i) begin
+        write_enable <= 1'b1;
+      end else begin
+        write_enable <= 1'b0;
+      end
+    end
+  end
+
+  // Generate byte_strobe based on the APB byte strobe input
+  always_comb begin
+    byte_strobe = '0;
+    if (req_i) begin
+      byte_strobe = req_i.byte_strobe; // Assuming byte_strobe is part of req_i
+    end
+  end
+
+  // Combine byte_strobe and ReadOnly to create a write_mask
+  always_comb begin
+    write_mask = '0;
+    for (int i = 0; i < NoApbRegs; i++) begin
+      if (reg_addr[i] && !ReadOnly[i]) begin
+        for (int j = 0; j < ApbDataWidth/8; j++) begin
+          if (byte_strobe[j]) begin
+            write_mask[j*8 +: 8] = 8'b11111111;
+          end
+        end
+      end
+    end
+  end
+
+  // On a write cycle, update the target register in reg_file with write_data, masked by write_mask
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        if (ReadOnly[i]) begin
+          reg_file[i] <= reg_init_i[i];
+        end else begin
+          reg_file[i] <= '0;
+        end
+      end
+    end else if (write_enable) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        if (reg_addr[i] && !ReadOnly[i]) begin
+          reg_file[i] <= (reg_file[i] & ~write_mask) | (write_data & write_mask);
+        end
+      end
+    end
+  end
+
+  // On a read cycle, drive read_data with the value of the target register from reg_file
+  always_comb begin
+    read_data = '0;
+    for (int i = 0; i < NoApbRegs; i++) begin
+      if (reg_addr[i]) begin
+        read_data = reg_file[i];
+      end
+    end
+  end
+
+  // Drive reg_q_o with the current state of reg_file
+  assign reg_q_o = reg_file;
+
+  // Drive resp_o high on successful APB transaction
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      resp_o <= 1'b0;
+    end else if (write_enable) begin
+      resp_o <= 1'b1;
+    end else begin
+      resp_o <= 1'b0;
+    end
+  end
+
+endmodule

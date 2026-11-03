@@ -1,0 +1,156 @@
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam AWIDTH = ASIZE + 1;
+    localparam DEPTH  = 1 << ASIZE;
+    localparam AWFULL_THRESH = DEPTH - 1;
+    localparam AEMPTY_THRESH = 1;
+
+    // Write domain
+    reg [AWIDTH-1:0] wptr;
+    reg [AWIDTH-1:0] wptr_gray;
+    reg [AWIDTH-1:0] rptr_gray_w;
+    reg [AWIDTH-1:0] rptr_gray_w_d1;
+    reg [AWIDTH-1:0] rptr_gray_w_d2;
+    reg [AWIDTH-1:0] rptr_bin_w;
+    reg [AWIDTH-1:0] rptr_bin_w_d1;
+    reg [AWIDTH-1:0] rptr_bin_w_d2;
+
+    // Read domain
+    reg [AWIDTH-1:0] rptr;
+    reg [AWIDTH-1:0] rptr_gray;
+    reg [AWIDTH-1:0] wptr_gray_r;
+    reg [AWIDTH-1:0] wptr_gray_r_d1;
+    reg [AWIDTH-1:0] wptr_gray_r_d2;
+    reg [AWIDTH-1:0] wptr_bin_r;
+    reg [AWIDTH-1:0] wptr_bin_r_d1;
+    reg [AWIDTH-1:0] wptr_bin_r_d2;
+
+    // Memory
+    reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+    // Gray code conversion
+    function [AWIDTH-1:0] bin2gray;
+        input [AWIDTH-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    function [AWIDTH-1:0] gray2bin;
+        input [AWIDTH-1:0] gray;
+        reg [AWIDTH-1:0] bin;
+        integer i;
+        begin
+            bin[AWIDTH-1] = gray[AWIDTH-1];
+            for (i = AWIDTH-2; i >= 0; i = i - 1)
+                bin[i] = gray[i] ^ bin[i+1];
+            gray2bin = bin;
+        end
+    endfunction
+
+    // Write clock domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {AWIDTH{1'b0}};
+            wptr_gray <= {AWIDTH{1'b0}};
+            rptr_gray_w <= {AWIDTH{1'b0}};
+            rptr_gray_w_d1 <= {AWIDTH{1'b0}};
+            rptr_gray_w_d2 <= {AWIDTH{1'b0}};
+            rptr_bin_w <= {AWIDTH{1'b0}};
+            rptr_bin_w_d1 <= {AWIDTH{1'b0}};
+            rptr_bin_w_d2 <= {AWIDTH{1'b0}};
+        end else begin
+            rptr_gray_w_d1 <= rptr_gray_w;
+            rptr_gray_w_d2 <= rptr_gray_w_d1;
+            rptr_bin_w <= gray2bin(rptr_gray_w_d2);
+            rptr_bin_w_d1 <= rptr_bin_w;
+            rptr_bin_w_d2 <= rptr_bin_w_d1;
+
+            if (winc && !wfull) begin
+                mem[wptr[ASIZE-1:0]] <= wdata;
+                wptr <= wptr + 1'b1;
+                wptr_gray <= bin2gray(wptr + 1'b1);
+            end
+        end
+    end
+
+    // Read clock domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= {AWIDTH{1'b0}};
+            rptr_gray <= {AWIDTH{1'b0}};
+            wptr_gray_r <= {AWIDTH{1'b0}};
+            wptr_gray_r_d1 <= {AWIDTH{1'b0}};
+            wptr_gray_r_d2 <= {AWIDTH{1'b0}};
+            wptr_bin_r <= {AWIDTH-1:0}'(0);
+            wptr_bin_r_d1 <= {AWIDTH{1'b0}};
+            wptr_bin_r_d2 <= {AWIDTH{1'b0}};
+        end else begin
+            wptr_gray_r_d1 <= wptr_gray_r;
+            wptr_gray_r_d2 <= wptr_gray_r_d1;
+            wptr_bin_r <= gray2bin(wptr_gray_r_d2);
+            wptr_bin_r_d1 <= wptr_bin_r;
+            wptr_bin_r_d2 <= wptr_bin_r_d1;
+
+            if (rinc && !rempty) begin
+                rptr <= rptr + 1'b1;
+                rptr_gray <= bin2gray(rptr + 1'b1);
+            end
+        end
+    end
+
+    // Cross-domain synchronization
+    // Write pointer gray -> read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_gray_r <= {AWIDTH{1'b0}};
+        end else begin
+            wptr_gray_r <= wptr_gray;
+        end
+    end
+
+    // Read pointer gray -> write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_gray_w <= {AWIDTH{1'b0}};
+        end else begin
+            rptr_gray_w <= rptr_gray;
+        end
+    end
+
+    // Status signals
+    wire [AWIDTH-1:0] wptr_bin_w = wptr;
+    wire [AWIDTH-1:0] rptr_bin_r = rptr;
+
+    // In write domain: compare wptr_bin with rptr_bin_w (synchronized)
+    wire [AWIDTH-1:0] wfull_diff = wptr_bin_w - rptr_bin_w_d2;
+    wire wfull = (wfull_diff == DEPTH);
+    wire awfull = (wfull_diff >= AWFULL_THRESH);
+
+    // In read domain: compare wptr_bin_r (synchronized) with rptr_bin
+    wire [AWIDTH-1:0] rempty_diff = wptr_bin_r_d2 - rptr_bin_r;
+    wire rempty = (rempty_diff == 0);
+    wire arempty = (rempty_diff <= AEMPTY_THRESH);
+
+    // Output data
+    assign rdata = mem[rptr[ASIZE-1:0]];
+
+endmodule

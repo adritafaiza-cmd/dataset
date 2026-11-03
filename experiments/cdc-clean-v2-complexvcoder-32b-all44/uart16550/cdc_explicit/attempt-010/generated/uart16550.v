@@ -1,0 +1,387 @@
+module uart_top (
+    input wire wb_clk_i,
+    input wire wb_rst_i,
+    input wire [7:0] wb_adr_i,
+    input wire [31:0] wb_dat_i,
+    output reg [31:0] wb_dat_o,
+    input wire wb_we_i,
+    input wire wb_stb_i,
+    input wire wb_cyc_i,
+    output reg wb_ack_o,
+    input wire [3:0] wb_sel_i,
+    output reg int_o,
+    output reg stx_pad_o,
+    input wire srx_pad_i,
+    output reg rts_pad_o,
+    input wire cts_pad_i,
+    output reg dtr_pad_o,
+    input wire dsr_pad_i,
+    input wire ri_pad_i,
+    input wire dcd_pad_i
+);
+
+    // Internal signals for CDC
+    reg [31:0] reg_data;
+    reg ack;
+
+    // Clock-domain crossing signals
+    reg [31:0] wb_dat_i_synced;
+    reg wb_we_i_synced;
+    reg wb_stb_i_synced;
+    reg wb_cyc_i_synced;
+    reg [3:0] wb_sel_i_synced;
+
+    // CDC synchronizer for Wishbone signals
+    reg [3:0] wb_dat_i_sync [3:0];
+    reg wb_we_i_sync [2:0];
+    reg wb_stb_i_sync [2:0];
+    reg wb_cyc_i_sync [2:0];
+    reg [3:0] wb_sel_i_sync [3:0];
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            wb_dat_i_sync <= {4{32'b0}};
+            wb_we_i_sync <= 3'b0;
+            wb_stb_i_sync <= 3'b0;
+            wb_cyc_i_sync <= 3'b0;
+            wb_sel_i_sync <= {4{4'b0}};
+        end else begin
+            wb_dat_i_sync[0] <= wb_dat_i;
+            wb_dat_i_sync[1] <= wb_dat_i_sync[0];
+            wb_dat_i_sync[2] <= wb_dat_i_sync[1];
+            wb_dat_i_sync[3] <= wb_dat_i_sync[2];
+            wb_dat_i_synced <= wb_dat_i_sync[3];
+
+            wb_we_i_sync[0] <= wb_we_i;
+            wb_we_i_sync[1] <= wb_we_i_sync[0];
+            wb_we_i_sync[2] <= wb_we_i_sync[1];
+            wb_we_i_synced <= wb_we_i_sync[2];
+
+            wb_stb_i_sync[0] <= wb_stb_i;
+            wb_stb_i_sync[1] <= wb_stb_i_sync[0];
+            wb_stb_i_sync[2] <= wb_stb_i_sync[1];
+            wb_stb_i_synced <= wb_stb_i_sync[2];
+
+            wb_cyc_i_sync[0] <= wb_cyc_i;
+            wb_cyc_i_sync[1] <= wb_cyc_i_sync[0];
+            wb_cyc_i_sync[2] <= wb_cyc_i_sync[1];
+            wb_cyc_i_synced <= wb_cyc_i_sync[2];
+
+            wb_sel_i_sync[0] <= wb_sel_i;
+            wb_sel_i_sync[1] <= wb_sel_i_sync[0];
+            wb_sel_i_sync[2] <= wb_sel_i_sync[1];
+            wb_sel_i_sync[3] <= wb_sel_i_sync[2];
+            wb_sel_i_synced <= wb_sel_i_sync[3];
+        end
+    end
+
+    // Instantiate Wishbone slave
+    wishbone_slave wb_slave_inst (
+        .clk(wb_clk_i),
+        .rst(wb_rst_i),
+        .adr(wb_adr_i),
+        .dat_i(wb_dat_i_synced),
+        .dat_o(wb_dat_o),
+        .we(wb_we_i_synced),
+        .stb(wb_stb_i_synced),
+        .cyc(wb_cyc_i_synced),
+        .ack(wb_ack_o),
+        .sel(wb_sel_i_synced),
+        .reg_data(reg_data),
+        .ack_o(ack)
+    );
+
+    // Instantiate UART core
+    uart_core uart_core_inst (
+        .clk(wb_clk_i),
+        .rst(wb_rst_i),
+        .stx(stx_pad_o),
+        .srx(srx_pad_i),
+        .int(int_o),
+        .reg_data(reg_data),
+        .ack(ack)
+    );
+
+    // Instantiate modem control
+    modem_control modem_control_inst (
+        .clk(wb_clk_i),
+        .rst(wb_rst_i),
+        .rts(rts_pad_o),
+        .cts(cts_pad_i),
+        .dtr(dtr_pad_o),
+        .dsr(dsr_pad_i),
+        .ri(ri_pad_i),
+        .dcd(dcd_pad_i),
+        .reg_data(reg_data),
+        .ack(ack)
+    );
+
+endmodule
+
+module wishbone_slave (
+    input wire clk,
+    input wire rst,
+    input wire [7:0] adr,
+    input wire [31:0] dat_i,
+    output reg [31:0] dat_o,
+    input wire we,
+    input wire stb,
+    input wire cyc,
+    output reg ack,
+    input wire [3:0] sel,
+    output reg [31:0] reg_data,
+    input wire ack_o
+);
+
+    reg [31:0] registers [0:15];
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            reg_data <= 32'b0;
+            ack <= 1'b0;
+        end else begin
+            if (cyc && stb) begin
+                if (we) begin
+                    case (adr)
+                        8'h00: registers[0] <= dat_i;
+                        8'h01: registers[1] <= dat_i;
+                        8'h02: registers[2] <= dat_i;
+                        8'h03: registers[3] <= dat_i;
+                        8'h04: registers[4] <= dat_i;
+                        8'h05: registers[5] <= dat_i;
+                        8'h06: registers[6] <= dat_i;
+                        8'h07: registers[7] <= dat_i;
+                        8'h08: registers[8] <= dat_i;
+                        8'h09: registers[9] <= dat_i;
+                        8'h0A: registers[10] <= dat_i;
+                        8'h0B: registers[11] <= dat_i;
+                        8'h0C: registers[12] <= dat_i;
+                        8'h0D: registers[13] <= dat_i;
+                        8'h0E: registers[14] <= dat_i;
+                        8'h0F: registers[15] <= dat_i;
+                    endcase
+                end else begin
+                    case (adr)
+                        8'h00: dat_o <= registers[0];
+                        8'h01: dat_o <= registers[1];
+                        8'h02: dat_o <= registers[2];
+                        8'h03: dat_o <= registers[3];
+                        8'h04: dat_o <= registers[4];
+                        8'h05: dat_o <= registers[5];
+                        8'h06: dat_o <= registers[6];
+                        8'h07: dat_o <= registers[7];
+                        8'h08: dat_o <= registers[8];
+                        8'h09: dat_o <= registers[9];
+                        8'h0A: dat_o <= registers[10];
+                        8'h0B: dat_o <= registers[11];
+                        8'h0C: dat_o <= registers[12];
+                        8'h0D: dat_o <= registers[13];
+                        8'h0E: dat_o <= registers[14];
+                        8'h0F: dat_o <= registers[15];
+                    endcase
+                end
+                reg_data <= dat_o;
+                ack <= 1'b1;
+            end else begin
+                ack <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+
+module uart_core (
+    input wire clk,
+    input wire rst,
+    output reg stx,
+    input wire srx,
+    output reg int,
+    input wire [31:0] reg_data,
+    input wire ack
+);
+
+    reg [7:0] tx_fifo [0:15];
+    reg [3:0] tx_fifo_wr_ptr;
+    reg [3:0] tx_fifo_rd_ptr;
+    reg [3:0] tx_fifo_cnt;
+    reg [7:0] rx_fifo [0:15];
+    reg [3:0] rx_fifo_wr_ptr;
+    reg [3:0] rx_fifo_rd_ptr;
+    reg [3:0] rx_fifo_cnt;
+
+    // Baud rate divisor
+    reg [15:0] baud_divisor;
+
+    // UART state machine
+    reg [3:0] tx_state;
+    reg [3:0] rx_state;
+
+    // TX state machine
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            tx_fifo_wr_ptr <= 4'b0;
+            tx_fifo_rd_ptr <= 4'b0;
+            tx_fifo_cnt <= 4'b0;
+            stx <= 1'b1;
+            tx_state <= 4'b0;
+        end else begin
+            case (tx_state)
+                4'b0000: begin // IDLE
+                    if (tx_fifo_cnt > 4'b0) begin
+                        tx_state <= 4'b0001;
+                    end
+                end
+                4'b0001: begin // START BIT
+                    stx <= 1'b0;
+                    tx_state <= 4'b0010;
+                end
+                4'b0010: begin // DATA BIT 0
+                    stx <= tx_fifo[tx_fifo_rd_ptr][0];
+                    tx_state <= 4'b0011;
+                end
+                4'b0011: begin // DATA BIT 1
+                    stx <= tx_fifo[tx_fifo_rd_ptr][1];
+                    tx_state <= 4'b0100;
+                end
+                4'b0100: begin // DATA BIT 2
+                    stx <= tx_fifo[tx_fifo_rd_ptr][2];
+                    tx_state <= 4'b0101;
+                end
+                4'b0101: begin // DATA BIT 3
+                    stx <= tx_fifo[tx_fifo_rd_ptr][3];
+                    tx_state <= 4'b0110;
+                end
+                4'b0110: begin // DATA BIT 4
+                    stx <= tx_fifo[tx_fifo_rd_ptr][4];
+                    tx_state <= 4'b0111;
+                end
+                4'b0111: begin // DATA BIT 5
+                    stx <= tx_fifo[tx_fifo_rd_ptr][5];
+                    tx_state <= 4'b1000;
+                end
+                4'b1000: begin // DATA BIT 6
+                    stx <= tx_fifo[tx_fifo_rd_ptr][6];
+                    tx_state <= 4'b1001;
+                end
+                4'b1001: begin // DATA BIT 7
+                    stx <= tx_fifo[tx_fifo_rd_ptr][7];
+                    tx_state <= 4'b1010;
+                end
+                4'b1010: begin // STOP BIT
+                    stx <= 1'b1;
+                    tx_fifo_rd_ptr <= tx_fifo_rd_ptr + 4'b1;
+                    tx_fifo_cnt <= tx_fifo_cnt - 4'b1;
+                    tx_state <= 4'b0000;
+                end
+            endcase
+        end
+    end
+
+    // RX state machine
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rx_fifo_wr_ptr <= 4'b0;
+            rx_fifo_rd_ptr <= 4'b0;
+            rx_fifo_cnt <= 4'b0;
+            rx_state <= 4'b0;
+        end else begin
+            case (rx_state)
+                4'b0000: begin // IDLE
+                    if (srx == 1'b0) begin
+                        rx_state <= 4'b0001;
+                    end
+                end
+                4'b0001: begin // START BIT
+                    rx_state <= 4'b0010;
+                end
+                4'b0010: begin // DATA BIT 0
+                    rx_fifo[rx_fifo_wr_ptr][0] <= srx;
+                    rx_state <= 4'b0011;
+                end
+                4'b0011: begin // DATA BIT 1
+                    rx_fifo[rx_fifo_wr_ptr][1] <= srx;
+                    rx_state <= 4'b0100;
+                end
+                4'b0100: begin // DATA BIT 2
+                    rx_fifo[rx_fifo_wr_ptr][2] <= srx;
+                    rx_state <= 4'b0101;
+                end
+                4'b0101: begin // DATA BIT 3
+                    rx_fifo[rx_fifo_wr_ptr][3] <= srx;
+                    rx_state <= 4'b0110;
+                end
+                4'b0110: begin // DATA BIT 4
+                    rx_fifo[rx_fifo_wr_ptr][4] <= srx;
+                    rx_state <= 4'b0111;
+                end
+                4'b0111: begin // DATA BIT 5
+                    rx_fifo[rx_fifo_wr_ptr][5] <= srx;
+                    rx_state <= 4'b1000;
+                end
+                4'b1000: begin // DATA BIT 6
+                    rx_fifo[rx_fifo_wr_ptr][6] <= srx;
+                    rx_state <= 4'b1001;
+                end
+                4'b1001: begin // DATA BIT 7
+                    rx_fifo[rx_fifo_wr_ptr][7] <= srx;
+                    rx_fifo_wr_ptr <= rx_fifo_wr_ptr + 4'b1;
+                    rx_fifo_cnt <= rx_fifo_cnt + 4'b1;
+                    rx_state <= 4'b0000;
+                end
+            endcase
+        end
+    end
+
+    // Register interface
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            baud_divisor <= 16'b0;
+        end else begin
+            if (ack && reg_data[7:0] == 8'h00) begin
+                baud_divisor <= reg_data[15:0];
+            end
+        end
+    end
+
+    // Interrupt generation
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            int <= 1'b0;
+        end else begin
+            if (tx_fifo_cnt == 4'b0 || rx_fifo_cnt == 4'bF) begin
+                int <= 1'b1;
+            end else begin
+                int <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+
+module modem_control (
+    input wire clk,
+    input wire rst,
+    output reg rts,
+    input wire cts,
+    output reg dtr,
+    input wire dsr,
+    input wire ri,
+    input wire dcd,
+    input wire [31:0] reg_data,
+    input wire ack
+);
+
+    // Register interface
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            rts <= 1'b0;
+            dtr <= 1'b0;
+        end else begin
+            if (ack && reg_data[7:0] == 8'h01) begin
+                rts <= reg_data[1];
+                dtr <= reg_data[0];
+            end
+        end
+    end
+
+endmodule

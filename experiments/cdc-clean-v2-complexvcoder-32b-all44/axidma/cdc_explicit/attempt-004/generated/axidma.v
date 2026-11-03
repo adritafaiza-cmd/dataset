@@ -1,0 +1,491 @@
+module axidma #(
+    parameter C_AXI_ID_WIDTH = 1,
+    parameter C_AXI_ADDR_WIDTH = 32,
+    parameter C_AXI_DATA_WIDTH = 32,
+    localparam C_AXIL_ADDR_WIDTH = 5,
+    localparam C_AXIL_DATA_WIDTH = 32,
+    parameter [0:0] OPT_UNALIGNED = 1'b1,
+    parameter [0:0] OPT_WRAPMEM = 1'b1,
+    parameter LGFIFO = LGMAXBURST+1,
+    parameter LGLEN = C_AXI_ADDR_WIDTH,
+    parameter [0:0] OPT_LOWPOWER = 1'b0,
+    parameter [0:0] OPT_CLKGATE = OPT_LOWPOWER,
+    parameter [C_AXI_ID_WIDTH-1:0] AXI_READ_ID = 0,
+    parameter [C_AXI_ID_WIDTH-1:0] AXI_WRITE_ID = 0,
+    parameter [7:0] ABORT_KEY = 8'h6d,
+    localparam ADDRLSB = $clog2(C_AXI_DATA_WIDTH)-3,
+    localparam AXILLSB = $clog2(C_AXIL_DATA_WIDTH)-3,
+    localparam LGLENW = LGLEN-ADDRLSB
+) (
+    input wire S_AXI_ACLK,
+    input wire S_AXI_ARESETN,
+    input wire S_AXIL_AWVALID,
+    output wire S_AXIL_AWREADY,
+    input wire [C_AXIL_ADDR_WIDTH-1:0] S_AXIL_AWADDR,
+    input wire [2:0] S_AXIL_AWPROT,
+    input wire S_AXIL_WVALID,
+    output wire S_AXIL_WREADY,
+    input wire [C_AXIL_DATA_WIDTH-1:0] S_AXIL_WDATA,
+    input wire [C_AXIL_DATA_WIDTH/8-1:0] S_AXIL_WSTRB,
+    output reg S_AXIL_BVALID,
+    input wire S_AXIL_BREADY,
+    output wire [1:0] S_AXIL_BRESP,
+    input wire S_AXIL_ARVALID,
+    output wire S_AXIL_ARREADY,
+    input wire [C_AXIL_ADDR_WIDTH-1:0] S_AXIL_ARADDR,
+    input wire [2:0] S_AXIL_ARPROT,
+    output reg S_AXIL_RVALID,
+    input wire S_AXIL_RREADY,
+    output reg [C_AXIL_DATA_WIDTH-1:0] S_AXIL_RDATA,
+    output wire [1:0] S_AXIL_RRESP,
+    output reg M_AXI_AWVALID,
+    input wire M_AXI_AWREADY,
+    output reg [C_AXI_ID_WIDTH-1:0] M_AXI_AWID,
+    output reg [C_AXI_ADDR_WIDTH-1:0] M_AXI_AWADDR,
+    output reg [2:0] M_AXI_AWSIZE,
+    output reg [1:0] M_AXI_AWBURST,
+    output reg M_AXI_AWLOCK,
+    output reg [3:0] M_AXI_AWCACHE,
+    output reg [2:0] M_AXI_AWPROT,
+    output reg [3:0] M_AXI_AWQOS,
+    output reg M_AXI_WVALID,
+    input wire M_AXI_WREADY,
+    output reg [C_AXI_DATA_WIDTH-1:0] M_AXI_WDATA,
+    output reg [C_AXI_DATA_WIDTH/8-1:0] M_AXI_WSTRB,
+    output reg M_AXI_WLAST,
+    input wire M_AXI_BVALID,
+    output reg M_AXI_BREADY,
+    input wire [C_AXI_ID_WIDTH-1:0] M_AXI_BID,
+    input wire [1:0] M_AXI_BRESP,
+    output reg M_AXI_ARVALID,
+    input wire M_AXI_ARREADY,
+    output wire [C_AXI_ID_WIDTH-1:0] M_AXI_ARID,
+    output reg [C_AXI_ADDR_WIDTH-1:0] M_AXI_ARADDR,
+    output wire [2:0] M_AXI_ARSIZE,
+    output wire [1:0] M_AXI_ARBURST,
+    output wire M_AXI_ARLOCK,
+    output wire [3:0] M_AXI_ARCACHE,
+    output wire [2:0] M_AXI_ARPROT,
+    output wire [3:0] M_AXI_ARQOS,
+    input wire M_AXI_RVALID,
+    output wire M_AXI_RREADY,
+    input wire [C_AXI_ID_WIDTH-1:0] M_AXI_RID,
+    input wire [C_AXI_DATA_WIDTH-1:0] M_AXI_RDATA,
+    input wire M_AXI_RLAST,
+    input wire [1:0] M_AXI_RRESP,
+    output reg o_int
+);
+
+    // Internal signals
+    reg [C_AXI_ADDR_WIDTH-1:0] source_addr, dest_addr;
+    reg [LGLEN-1:0] transfer_len;
+    reg [2:0] read_state, write_state;
+    reg [C_AXI_DATA_WIDTH-1:0] read_data_fifo, write_data_fifo;
+    reg read_data_fifo_full, read_data_fifo_empty, write_data_fifo_full, write_data_fifo_empty;
+    reg read_data_fifo_wr_en, read_data_fifo_rd_en, write_data_fifo_wr_en, write_data_fifo_rd_en;
+    reg [C_AXI_DATA_WIDTH-1:0] read_data_fifo_dout, write_data_fifo_dout;
+    reg [LGFIFO-1:0] read_data_fifo_count, write_data_fifo_count;
+    reg [C_AXI_ADDR_WIDTH-1:0] read_addr_counter, write_addr_counter;
+    reg [LGLEN-1:0] read_len_counter, write_len_counter;
+    reg read_arbiter, write_arbiter;
+    reg abort_transfer, transfer_active, read_transfer_done, write_transfer_done;
+    reg [2:0] read_burst_size, write_burst_size;
+    reg [1:0] read_burst_type, write_burst_type;
+    reg [2:0] read_prot_bits, write_prot_bits;
+    reg [3:0] read_qos, write_qos;
+    reg [3:0] read_cache_bits, write_cache_bits;
+    reg read_lock, write_lock;
+    reg read_data_valid, write_data_valid;
+    reg read_data_ready, write_data_ready;
+    reg [C_AXI_DATA_WIDTH-1:0] read_data, write_data;
+    reg [C_AXI_DATA_WIDTH/8-1:0] read_strb, write_strb;
+    reg read_last, write_last;
+    reg [1:0] read_resp, write_resp;
+    reg [C_AXI_ID_WIDTH-1:0] read_id, write_id;
+    reg axil_awready, axil_wready, axil_bvalid, axil_arready, axil_rvalid;
+    reg [C_AXIL_DATA_WIDTH-1:0] axil_rdata;
+    reg [1:0] axil_rresp;
+    reg m_axi_awvalid, m_axi_awid, m_axi_awlock, m_axi_awqos;
+    reg [C_AXI_ADDR_WIDTH-1:0] m_axi_awaddr;
+    reg [2:0] m_axi_awsize, m_axi_awprot;
+    reg [3:0] m_axi_awcache;
+    reg [1:0] m_axi_awburst;
+    reg m_axi_wvalid, m_axi_wlast;
+    reg [C_AXI_DATA_WIDTH-1:0] m_axi_wdata;
+    reg [C_AXI_DATA_WIDTH/8-1:0] m_axi_wstrb;
+    reg m_axi_bready;
+    reg m_axi_arvalid, m_axi_arlock, m_axi_arqos;
+    reg [C_AXI_ADDR_WIDTH-1:0] m_axi_araddr;
+    reg [2:0] m_axi_arsize, m_axi_arprot;
+    reg [3:0] m_axi_arcache;
+    reg [1:0] m_axi_arburst;
+    reg m_axi_rready;
+    reg [C_AXIL_DATA_WIDTH-1:0] axil_awaddr_reg;
+    reg [2:0] axil_awprot_reg;
+
+    // FIFOs
+    fifo #(
+        .WIDTH(C_AXI_DATA_WIDTH),
+        .DEPTH(1 << LGFIFO)
+    ) read_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(read_data),
+        .wr_en(read_data_fifo_wr_en),
+        .rd_en(read_data_fifo_rd_en),
+        .dout(read_data_fifo_dout),
+        .full(read_data_fifo_full),
+        .empty(read_data_fifo_empty),
+        .count(read_data_fifo_count)
+    );
+
+    fifo #(
+        .WIDTH(C_AXI_DATA_WIDTH),
+        .DEPTH(1 << LGFIFO)
+    ) write_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(write_data),
+        .wr_en(write_data_fifo_wr_en),
+        .rd_en(write_data_fifo_rd_en),
+        .dout(write_data_fifo_dout),
+        .full(write_data_fifo_full),
+        .empty(write_data_fifo_empty),
+        .count(write_data_fifo_count)
+    );
+
+    // AXIL Control Interface
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            axil_awready <= 0;
+            axil_wready <= 0;
+            axil_bvalid <= 0;
+            axil_arready <= 0;
+            axil_rvalid <= 0;
+            axil_rdata <= 0;
+            axil_rresp <= 0;
+            axil_awaddr_reg <= 0;
+            axil_awprot_reg <= 0;
+        end else begin
+            // AW Channel
+            if (axil_awready && S_AXIL_AWVALID) begin
+                axil_awready <= 0;
+                axil_awaddr_reg <= S_AXIL_AWADDR;
+                axil_awprot_reg <= S_AXIL_AWPROT;
+            end else if (!axil_awready && !axil_awready && !axil_awready) begin
+                axil_awready <= 1;
+            end
+
+            // W Channel
+            if (axil_wready && S_AXIL_WVALID) begin
+                axil_wready <= 0;
+                case (axil_awaddr_reg[4:2])
+                    3'b000: source_addr <= S_AXIL_WDATA;
+                    3'b001: dest_addr <= S_AXIL_WDATA;
+                    3'b010: transfer_len <= S_AXIL_WDATA;
+                    3'b011: read_burst_size <= S_AXIL_WDATA[2:0];
+                    3'b100: write_burst_size <= S_AXIL_WDATA[2:0];
+                    3'b101: read_burst_type <= S_AXIL_WDATA[1:0];
+                    3'b110: write_burst_type <= S_AXIL_WDATA[1:0];
+                    3'b111: transfer_active <= S_AXIL_WDATA[0];
+                    default: ;
+                endcase
+            end else if (!axil_wready) begin
+                axil_wready <= 1;
+            end
+
+            // B Channel
+            if (axil_bvalid && S_AXIL_BREADY) begin
+                axil_bvalid <= 0;
+            end else if (!axil_bvalid && (read_transfer_done || write_transfer_done)) begin
+                axil_bvalid <= 1;
+                axil_bresp <= 2'b00;
+            end
+
+            // AR Channel
+            if (axil_arready && S_AXIL_ARVALID) begin
+                axil_arready <= 0;
+            end else if (!axil_arready) begin
+                axil_arready <= 1;
+            end
+
+            // R Channel
+            if (axil_rvalid && S_AXIL_RREADY) begin
+                axil_rvalid <= 0;
+            end else if (!axil_rvalid && !axil_rvalid) begin
+                axil_rvalid <= 1;
+                axil_rdata <= 0; // Placeholder for actual data read
+                axil_rresp <= 2'b00;
+            end
+        end
+    end
+
+    // Read State Machine
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            read_state <= 0;
+            read_addr_counter <= 0;
+            read_len_counter <= 0;
+            read_data_fifo_wr_en <= 0;
+            read_arbiter <= 0;
+            read_transfer_done <= 0;
+        end else begin
+            case (read_state)
+                3'b000: begin // IDLE
+                    if (transfer_active && read_burst_size != 0) begin
+                        read_state <= 3'b001;
+                        read_addr_counter <= source_addr;
+                        read_len_counter <= transfer_len;
+                        read_arbiter <= 1;
+                    end
+                end
+                3'b001: begin // AR
+                    if (M_AXI_ARREADY) begin
+                        read_state <= 3'b010;
+                        M_AXI_ARVALID <= 1;
+                        M_AXI_ARADDR <= read_addr_counter;
+                        M_AXI_ARSIZE <= read_burst_size;
+                        M_AXI_ARBURST <= read_burst_type;
+                        M_AXI_ARPROT <= read_prot_bits;
+                        M_AXI_ARCACHE <= read_cache_bits;
+                        M_AXI_ARLOCK <= read_lock;
+                        M_AXI_ARQOS <= read_qos;
+                    end
+                end
+                3'b010: begin // R
+                    if (M_AXI_RVALID) begin
+                        read_state <= 3'b011;
+                        read_data <= M_AXI_RDATA;
+                        read_strb <= {C_AXI_DATA_WIDTH/8{1'b1}};
+                        read_last <= M_AXI_RLAST;
+                        read_resp <= M_AXI_RRESP;
+                        read_data_fifo_wr_en <= 1;
+                        M_AXI_RREADY <= 1;
+                        if (M_AXI_RLAST) begin
+                            read_state <= 3'b000;
+                            read_transfer_done <= 1;
+                            read_arbiter <= 0;
+                        end
+                    end
+                end
+                3'b011: begin // WAIT
+                    read_state <= 3'b010;
+                    read_data_fifo_wr_en <= 0;
+                    M_AXI_RREADY <= 0;
+                end
+                default: begin
+                    read_state <= 3'b000;
+                end
+            endcase
+        end
+    end
+
+    // Write State Machine
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            write_state <= 0;
+            write_addr_counter <= 0;
+            write_len_counter <= 0;
+            write_data_fifo_rd_en <= 0;
+            write_arbiter <= 0;
+            write_transfer_done <= 0;
+        end else begin
+            case (write_state)
+                3'b000: begin // IDLE
+                    if (transfer_active && write_burst_size != 0) begin
+                        write_state <= 3'b001;
+                        write_addr_counter <= dest_addr;
+                        write_len_counter <= transfer_len;
+                        write_arbiter <= 1;
+                    end
+                end
+                3'b001: begin // AW
+                    if (M_AXI_AWREADY) begin
+                        write_state <= 3'b010;
+                        M_AXI_AWVALID <= 1;
+                        M_AXI_AWADDR <= write_addr_counter;
+                        M_AXI_AWSIZE <= write_burst_size;
+                        M_AXI_AWBURST <= write_burst_type;
+                        M_AXI_AWPROT <= write_prot_bits;
+                        M_AXI_AWCACHE <= write_cache_bits;
+                        M_AXI_AWLOCK <= write_lock;
+                        M_AXI_AWQOS <= write_qos;
+                    end
+                end
+                3'b010: begin // W
+                    if (M_AXI_WREADY) begin
+                        write_state <= 3'b011;
+                        write_data_fifo_rd_en <= 1;
+                        M_AXI_WVALID <= 1;
+                        M_AXI_WDATA <= write_data_fifo_dout;
+                        M_AXI_WSTRB <= write_strb;
+                        M_AXI_WLAST <= write_last;
+                        if (write_last) begin
+                            write_state <= 3'b000;
+                            write_transfer_done <= 1;
+                            write_arbiter <= 0;
+                        end
+                    end
+                end
+                3'b011: begin // B
+                    if (M_AXI_BVALID) begin
+                        write_state <= 3'b000;
+                        write_data_fifo_rd_en <= 0;
+                        M_AXI_BREADY <= 1;
+                    end
+                end
+                default: begin
+                    write_state <= 3'b000;
+                end
+            endcase
+        end
+    end
+
+    // FIFO Read/Write Control
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            read_data_fifo_wr_en <= 0;
+            write_data_fifo_rd_en <= 0;
+        end else begin
+            if (read_state == 3'b011) begin
+                read_data_fifo_wr_en <= 0;
+            end else if (read_state == 3'b010) begin
+                read_data_fifo_wr_en <= 1;
+            end
+
+            if (write_state == 3'b011) begin
+                write_data_fifo_rd_en <= 0;
+            end else if (write_state == 3'b010) begin
+                write_data_fifo_rd_en <= 1;
+            end
+        end
+    end
+
+    // AXI Master Interface
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            M_AXI_AWVALID <= 0;
+            M_AXI_WVALID <= 0;
+            M_AXI_BREADY <= 0;
+            M_AXI_ARVALID <= 0;
+            M_AXI_RREADY <= 0;
+        end else begin
+            // AW Channel
+            if (M_AXI_AWREADY) begin
+                M_AXI_AWVALID <= 0;
+            end
+
+            // W Channel
+            if (M_AXI_WREADY) begin
+                M_AXI_WVALID <= 0;
+            end
+
+            // B Channel
+            if (M_AXI_BVALID) begin
+                M_AXI_BREADY <= 0;
+            end
+
+            // AR Channel
+            if (M_AXI_ARREADY) begin
+                M_AXI_ARVALID <= 0;
+            end
+
+            // R Channel
+            if (M_AXI_RVALID) begin
+                M_AXI_RREADY <= 0;
+            end
+        end
+    end
+
+    // Interrupt Signal
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (!S_AXI_ARESETN) begin
+            o_int <= 0;
+        end else begin
+            if (read_transfer_done || write_transfer_done) begin
+                o_int <= 1;
+            end else begin
+                o_int <= 0;
+            end
+        end
+    end
+
+    // AXIL Outputs
+    assign S_AXIL_AWREADY = axil_awready;
+    assign S_AXIL_WREADY = axil_wready;
+    assign S_AXIL_BRESP = axil_bresp;
+    assign S_AXIL_ARREADY = axil_arready;
+    assign S_AXIL_RDATA = axil_rdata;
+    assign S_AXIL_RRESP = axil_rresp;
+
+    // AXI Outputs
+    assign M_AXI_AWID = AXI_WRITE_ID;
+    assign M_AXI_AWLOCK = 0;
+    assign M_AXI_AWQOS = 0;
+    assign M_AXI_ARID = AXI_READ_ID;
+    assign M_AXI_ARLOCK = 0;
+    assign M_AXI_ARQOS = 0;
+
+endmodule
+
+module fifo #(
+    parameter WIDTH = 32,
+    parameter DEPTH = 16
+) (
+    input wire clk,
+    input wire rst,
+    input wire [WIDTH-1:0] din,
+    input wire wr_en,
+    input wire rd_en,
+    output reg [WIDTH-1:0] dout,
+    output reg full,
+    output reg empty,
+    output reg [$clog2(DEPTH)-1:0] count
+);
+
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg [$clog2(DEPTH)-1:0] wr_ptr, rd_ptr;
+    reg [$clog2(DEPTH):0] cnt;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            wr_ptr <= 0;
+            rd_ptr <= 0;
+            cnt <= 0;
+            full <= 0;
+            empty <= 1;
+            count <= 0;
+        end else begin
+            if (wr_en && !full) begin
+                mem[wr_ptr] <= din;
+                wr_ptr <= wr_ptr + 1;
+                cnt <= cnt + 1;
+            end
+            if (rd_en && !empty) begin
+                rd_ptr <= rd_ptr + 1;
+                cnt <= cnt - 1;
+            end
+
+            if (cnt == DEPTH) begin
+                full <= 1;
+            end else begin
+                full <= 0;
+            end
+
+            if (cnt == 0) begin
+                empty <= 1;
+            end else begin
+                empty <= 0;
+            end
+
+            count <= cnt;
+        end
+    end
+
+    always @(posedge clk) begin
+        if (rd_en && !empty) begin
+            dout <= mem[rd_ptr];
+        end
+    end
+
+endmodule

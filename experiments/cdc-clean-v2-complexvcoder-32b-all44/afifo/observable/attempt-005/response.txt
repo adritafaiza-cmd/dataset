@@ -1,0 +1,388 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "afifo",
+      "function": "Asynchronous FIFO with 2**LGFIFO entries of WIDTH bits",
+      "parameters": [
+        { "name": "LGFIFO", "value": "3" },
+        { "name": "WIDTH", "value": "16" },
+        { "name": "NFF", "value": "2" },
+        { "name": "WRITE_ON_POSEDGE", "value": "1'b1" },
+        { "name": "OPT_REGISTER_READS", "value": "1'b1" }
+      ],
+      "ports": [
+        { "name": "i_wclk", "direction": "input", "width": 1, "clock_domain": "write" },
+        { "name": "i_wr_reset_n", "direction": "input", "width": 1, "clock_domain": "write" },
+        { "name": "i_wr", "direction": "input", "width": 1, "clock_domain": "write" },
+        { "name": "i_wr_data", "direction": "input", "width": "WIDTH", "clock_domain": "write" },
+        { "name": "o_wr_full", "direction": "output", "width": 1, "clock_domain": "write" },
+        { "name": "i_rclk", "direction": "input", "width": 1, "clock_domain": "read" },
+        { "name": "i_rd_reset_n", "direction": "input", "width": 1, "clock_domain": "read" },
+        { "name": "i_rd", "direction": "input", "width": 1, "clock_domain": "read" },
+        { "name": "o_rd_data", "direction": "output", "width": "WIDTH", "clock_domain": "read" },
+        { "name": "o_rd_empty", "direction": "output", "width": 1, "clock_domain": "read" }
+      ],
+      "instances": [
+        { "module": "gray_counter", "name": "gray_counter_wr", "function": "Write gray counter", "connections": [] },
+        { "module": "gray_counter", "name": "gray_counter_rd", "function": "Read gray counter", "connections": [] },
+        { "module": "gray_to_bin", "name": "gray_to_bin_wr", "function": "Convert write gray to binary", "connections": [] },
+        { "module": "gray_to_bin", "name": "gray_to_bin_rd", "function": "Convert read gray to binary", "connections": [] },
+        { "module": "dual_port_ram", "name": "dual_port_ram_inst", "function": "Dual port RAM for FIFO storage", "connections": [] },
+        { "module": "sync_register", "name": "sync_wr_gray", "function": "Synchronize write gray counter to read domain", "connections": [] },
+        { "module": "sync_register", "name": "sync_rd_gray", "function": "Synchronize read gray counter to write domain", "connections": [] }
+      ],
+      "connections": [
+        { "source": "gray_counter_wr.gray", "destination": "sync_wr_gray.d" },
+        { "source": "gray_counter_rd.gray", "destination": "sync_rd_gray.d" },
+        { "source": "sync_wr_gray.q", "destination": "gray_to_bin_wr.gray" },
+        { "source": "sync_rd_gray.q", "destination": "gray_to_bin_rd.gray" },
+        { "source": "gray_to_bin_wr.bin", "destination": "dual_port_ram_inst.wr_addr" },
+        { "source": "gray_to_bin_rd.bin", "destination": "dual_port_ram_inst.rd_addr" },
+        { "source": "i_wr_data", "destination": "dual_port_ram_inst.wr_data" },
+        { "source": "i_wr", "destination": "dual_port_ram_inst.wr_en" },
+        { "source": "i_rclk", "destination": "dual_port_ram_inst.clk" },
+        { "source": "dual_port_ram_inst.rd_data", "destination": "o_rd_data" }
+      ],
+      "internal_signals": [
+        { "name": "wr_gray", "width": "LGFIFO+1" },
+        { "name": "rd_gray", "width": "LGFIFO+1" },
+        { "name": "wr_bin", "width": "LGFIFO+1" },
+        { "name": "rd_bin", "width": "LGFIFO+1" },
+        { "name": "synced_wr_gray", "width": "LGFIFO+1" },
+        { "name": "synced_rd_gray", "width": "LGFIFO+1" },
+        { "name": "full_raw", "width": 1 },
+        { "name": "empty_raw", "width": 1 },
+        { "name": "wr_ptr_gray_synced", "width": "LGFIFO+1" },
+        { "name": "rd_ptr_gray_synced", "width": "LGFIFO+1" },
+        { "name": "wr_ptr_bin_synced", "width": "LGFIFO+1" },
+        { "name": "rd_ptr_bin_synced", "width": "LGFIFO+1" },
+        { "name": "wr_ptr_gray_next", "width": "LGFIFO+1" },
+        { "name": "rd_ptr_gray_next", "width": "LGFIFO+1" },
+        { "name": "wr_edge", "width": 1 },
+        { "name": "rd_edge", "width": 1 },
+        { "name": "wr_gray_reg", "width": "LGFIFO+1" },
+        { "name": "rd_gray_reg", "width": "LGFIFO+1" },
+        { "name": "rd_data_reg", "width": "WIDTH" },
+        { "name": "rd_valid_reg", "width": 1 }
+      ],
+      "behavior": [
+        "On i_wclk, if i_wr_reset_n is low, reset wr_gray to 0.",
+        "On i_wclk, if i_wr is high and not full_raw, increment wr_gray.",
+        "On i_rclk, if i_rd_reset_n is low, reset rd_gray to 0.",
+        "On i_rclk, if i_rd is high and not empty_raw, increment rd_gray.",
+        "Convert wr_gray to wr_bin using gray_to_bin_wr.",
+        "Convert rd_gray to rd_bin using gray_to_bin_rd.",
+        "Synchronize wr_gray to read domain using sync_wr_gray.",
+        "Synchronize rd_gray to write domain using sync_rd_gray.",
+        "Calculate full_raw as (synced_wr_gray == (synced_rd_gray ^ (1 << LGFIFO))) and (synced_wr_gray != synced_rd_gray).",
+        "Calculate empty_raw as (synced_wr_gray == synced_rd_gray).",
+        "Assign o_wr_full as full_raw.",
+        "Assign o_rd_empty as empty_raw.",
+        "On i_rclk, if i_rd_reset_n is low, reset rd_data_reg and rd_valid_reg.",
+        "On i_rclk, if i_rd is high and not empty_raw, update rd_data_reg with rd_data from dual_port_ram_inst.",
+        "On i_rclk, if OPT_REGISTER_READS is high, register rd_data_reg to o_rd_data.",
+        "On i_rclk, if i_rd_reset_n is low, reset rd_ptr_gray_synced.",
+        "On i_wclk, if i_wr_reset_n is low, reset wr_ptr_gray_synced.",
+        "On i_rclk, if i_rd_reset_n is low, reset rd_ptr_bin_synced.",
+        "On i_wclk, if i_wr_reset_n is low, reset wr_ptr_bin_synced.",
+        "On i_rclk, if i_rd is high and not empty_raw, update rd_ptr_gray_synced.",
+        "On i_wclk, if i_wr is high and not full_raw, update wr_ptr_gray_synced.",
+        "Convert wr_ptr_gray_synced to wr_ptr_bin_synced.",
+        "Convert rd_ptr_gray_synced to rd_ptr_bin_synced.",
+        "On i_wclk, if i_wr_reset_n is low, reset wr_gray_reg.",
+        "On i_rclk, if i_rd_reset_n is low, reset rd_gray_reg.",
+        "On i_wclk, if i_wr is high and not full_raw, update wr_gray_reg.",
+        "On i_rclk, if i_rd is high and not empty_raw, update rd_gray_reg.",
+        "On i_wclk, if i_wr is high and not full_raw, write i_wr_data to dual_port_ram_inst at wr_ptr_bin_synced.",
+        "On i_rclk, if i_rd is high and not empty_raw, read from dual_port_ram_inst at rd_ptr_bin_synced."
+      ]
+    },
+    {
+      "Top_module_name": "gray_counter",
+      "function": "Gray code counter",
+      "parameters": [],
+      "ports": [
+        { "name": "clk", "direction": "input", "width": 1, "clock_domain": "any" },
+        { "name": "reset_n", "direction": "input", "width": 1, "clock_domain": "any" },
+        { "name": "enable", "direction": "input", "width": 1, "clock_domain": "any" },
+        { "name": "gray", "direction": "output", "width": "LGFIFO+1", "clock_domain": "any" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        { "name": "count", "width": "LGFIFO+1" },
+        { "name": "count_next", "width": "LGFIFO+1" }
+      ],
+      "behavior": [
+        "On clk, if reset_n is low, reset count to 0.",
+        "On clk, if enable is high, update count to count_next.",
+        "Calculate count_next as count ^ (count >> 1) + enable.",
+        "Assign gray as count."
+      ]
+    },
+    {
+      "Top_module_name": "gray_to_bin",
+      "function": "Convert gray code to binary",
+      "parameters": [],
+      "ports": [
+        { "name": "gray", "direction": "input", "width": "LGFIFO+1", "clock_domain": "any" },
+        { "name": "bin", "direction": "output", "width": "LGFIFO+1", "clock_domain": "any" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [],
+      "behavior": [
+        "Calculate bin as gray ^ (gray >> 1) ^ (gray >> 2) ^ ... ^ (gray >> (LGFIFO)).",
+        "Assign bin as calculated value."
+      ]
+    },
+    {
+      "Top_module_name": "dual_port_ram",
+      "function": "Dual port RAM for FIFO storage",
+      "parameters": [],
+      "ports": [
+        { "name": "clk", "direction": "input", "width": 1, "clock_domain": "read" },
+        { "name": "wr_addr", "direction": "input", "width": "LGFIFO+1", "clock_domain": "write" },
+        { "name": "wr_data", "direction": "input", "width": "WIDTH", "clock_domain": "write" },
+        { "name": "wr_en", "direction": "input", "width": 1, "clock_domain": "write" },
+        { "name": "rd_addr", "direction": "input", "width": "LGFIFO+1", "clock_domain": "read" },
+        { "name": "rd_data", "direction": "output", "width": "WIDTH", "clock_domain": "read" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        { "name": "memory", "width": "WIDTH", "depth": "2**(LGFIFO+1)" }
+      ],
+      "behavior": [
+        "On clk, if wr_en is high, write wr_data to memory at wr_addr.",
+        "Read from memory at rd_addr and assign to rd_data."
+      ]
+    },
+    {
+      "Top_module_name": "sync_register",
+      "function": "Synchronize signal across clock domains",
+      "parameters": [],
+      "ports": [
+        { "name": "clk", "direction": "input", "width": 1, "clock_domain": "destination" },
+        { "name": "reset_n", "direction": "input", "width": 1, "clock_domain": "destination" },
+        { "name": "d", "direction": "input", "width": "LGFIFO+1", "clock_domain": "source" },
+        { "name": "q", "direction": "output", "width": "LGFIFO+1", "clock_domain": "destination" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        { "name": "q_reg1", "width": "LGFIFO+1" },
+        { "name": "q_reg2", "width": "LGFIFO+1" }
+      ],
+      "behavior": [
+        "On clk, if reset_n is low, reset q_reg1 and q_reg2 to 0.",
+        "On clk, update q_reg1 with d.",
+        "On clk, update q_reg2 with q_reg1.",
+        "Assign q as q_reg2."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	wire [LGFIFO:0] wr_gray, rd_gray;
+	wire [LGFIFO:0] wr_bin, rd_bin;
+	wire [LGFIFO:0] synced_wr_gray, synced_rd_gray;
+	wire full_raw, empty_raw;
+	wire [LGFIFO:0] wr_ptr_gray_synced, rd_ptr_gray_synced;
+	wire [LGFIFO:0] wr_ptr_bin_synced, rd_ptr_bin_synced;
+	wire wr_edge, rd_edge;
+	reg [LGFIFO:0] wr_gray_reg, rd_gray_reg;
+	reg [WIDTH-1:0] rd_data_reg;
+	reg rd_valid_reg;
+
+	gray_counter gray_counter_wr (
+		.clk(i_wclk),
+		.reset_n(i_wr_reset_n),
+		.enable(i_wr),
+		.gray(wr_gray)
+	);
+
+	gray_counter gray_counter_rd (
+		.clk(i_rclk),
+		.reset_n(i_rd_reset_n),
+		.enable(i_rd),
+		.gray(rd_gray)
+	);
+
+	gray_to_bin gray_to_bin_wr (
+		.gray(wr_gray),
+		.bin(wr_bin)
+	);
+
+	gray_to_bin gray_to_bin_rd (
+		.gray(rd_gray),
+		.bin(rd_bin)
+	);
+
+	sync_register sync_wr_gray (
+		.clk(i_rclk),
+		.reset_n(i_rd_reset_n),
+		.d(wr_gray),
+		.q(synced_wr_gray)
+	);
+
+	sync_register sync_rd_gray (
+		.clk(i_wclk),
+		.reset_n(i_wr_reset_n),
+		.d(rd_gray),
+		.q(synced_rd_gray)
+	);
+
+	dual_port_ram dual_port_ram_inst (
+		.clk(i_rclk),
+		.wr_addr(wr_bin),
+		.wr_data(i_wr_data),
+		.wr_en(i_wr & ~full_raw),
+		.rd_addr(rd_bin),
+		.rd_data(o_rd_data)
+	);
+
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_gray_reg <= 0;
+			wr_ptr_gray_synced <= 0;
+			wr_ptr_bin_synced <= 0;
+			o_wr_full <= 0;
+		end else begin
+			if (i_wr & ~full_raw) begin
+				wr_gray_reg <= wr_gray;
+			end
+			wr_ptr_gray_synced <= synced_wr_gray;
+			wr_ptr_bin_synced <= wr_bin;
+			o_wr_full <= full_raw;
+		end
+	end
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_gray_reg <= 0;
+			rd_data_reg <= 0;
+			rd_valid_reg <= 0;
+			rd_ptr_gray_synced <= 0;
+			rd_ptr_bin_synced <= 0;
+			o_rd_empty <= 1;
+		end else begin
+			if (i_rd & ~empty_raw) begin
+				rd_gray_reg <= rd_gray;
+				rd_data_reg <= dual_port_ram_inst.rd_data;
+				rd_valid_reg <= 1;
+			end
+			rd_ptr_gray_synced <= synced_rd_gray;
+			rd_ptr_bin_synced <= rd_bin;
+			o_rd_empty <= empty_raw;
+		end
+	end
+
+	assign full_raw = (synced_wr_gray == (synced_rd_gray ^ (1 << LGFIFO))) && (synced_wr_gray != synced_rd_gray);
+	assign empty_raw = (synced_wr_gray == synced_rd_gray);
+
+endmodule
+
+module gray_counter (
+		input	wire	clk, reset_n, enable,
+		output	wire	[LGFIFO:0] gray
+	);
+	parameter LGFIFO = 3;
+
+	reg [LGFIFO:0] count, count_next;
+
+	always @(posedge clk or negedge reset_n) begin
+		if (!reset_n) begin
+			count <= 0;
+		end else if (enable) begin
+			count <= count_next;
+		end
+	end
+
+	assign count_next = count ^ (count >> 1) + enable;
+	assign gray = count;
+endmodule
+
+module gray_to_bin (
+		input	wire	[LGFIFO:0] gray,
+		output	wire	[LGFIFO:0] bin
+	);
+	parameter LGFIFO = 3;
+
+	wire [LGFIFO:0] gray_shifted1, gray_shifted2, gray_shifted3, gray_shifted4;
+
+	assign gray_shifted1 = gray >> 1;
+	assign gray_shifted2 = gray >> 2;
+	assign gray_shifted3 = gray >> 3;
+	assign gray_shifted4 = gray >> 4;
+
+	assign bin = gray ^ gray_shifted1 ^ gray_shifted2 ^ gray_shifted3 ^ gray_shifted4;
+endmodule
+
+module dual_port_ram #(
+		parameter LGFIFO = 3,
+		parameter WIDTH  = 16
+	) (
+		input	wire	clk,
+		input	wire	[LGFIFO:0] wr_addr,
+		input	wire	[WIDTH-1:0] wr_data,
+		input	wire	wr_en,
+		input	wire	[LGFIFO:0] rd_addr,
+		output	reg	[WIDTH-1:0] rd_data
+	);
+
+	reg [WIDTH-1:0] memory [0:(2**(LGFIFO+1))-1];
+
+	always @(posedge clk) begin
+		if (wr_en) begin
+			memory[wr_addr] <= wr_data;
+		end
+		rd_data <= memory[rd_addr];
+	end
+
+endmodule
+
+module sync_register #(
+		parameter LGFIFO = 3
+	) (
+		input	wire	clk, reset_n,
+		input	wire	[LGFIFO:0] d,
+		output	reg	[LGFIFO:0] q
+	);
+
+	reg [LGFIFO:0] q_reg1, q_reg2;
+
+	always @(posedge clk or negedge reset_n) begin
+		if (!reset_n) begin
+			q_reg1 <= 0;
+			q_reg2 <= 0;
+			q <= 0;
+		end else begin
+			q_reg1 <= d;
+			q_reg2 <= q_reg1;
+			q <= q_reg2;
+		end
+	end
+
+endmodule
+```

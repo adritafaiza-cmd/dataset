@@ -1,0 +1,299 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "spi_master",
+      "function": "An SPI master with a parallel-side word interface. Sends accepted parallel words over SPI and returns received words when complete.",
+      "parameters": [
+        { "name": "N", "value": "8" },
+        { "name": "SPI_2X_CLK_DIV", "value": "2" }
+      ],
+      "ports": [
+        { "name": "sclk_i", "direction": "input", "width": 1, "clock_domain": "sclk" },
+        { "name": "pclk_i", "direction": "input", "width": 1, "clock_domain": "pclk" },
+        { "name": "rst_i", "direction": "input", "width": 1, "clock_domain": "pclk" },
+        { "name": "spi_ssel_o", "direction": "output", "width": 1, "clock_domain": "sclk" },
+        { "name": "spi_sck_o", "direction": "output", "width": 1, "clock_domain": "sclk" },
+        { "name": "spi_mosi_o", "direction": "output", "width": 1, "clock_domain": "sclk" },
+        { "name": "spi_miso_i", "direction": "input", "width": 1, "clock_domain": "sclk" },
+        { "name": "di_req_o", "direction": "output", "width": 1, "clock_domain": "pclk" },
+        { "name": "di_i", "direction": "input", "width": "N", "clock_domain": "pclk" },
+        { "name": "wren_i", "direction": "input", "width": 1, "clock_domain": "pclk" },
+        { "name": "wr_ack_o", "direction": "output", "width": 1, "clock_domain": "pclk" },
+        { "name": "do_valid_o", "direction": "output", "width": 1, "clock_domain": "pclk" },
+        { "name": "do_o", "direction": "output", "width": "N", "clock_domain": "pclk" }
+      ],
+      "instances": [
+        {
+          "module": "cd_sync",
+          "name": "sync_wren",
+          "function": "Synchronizes the write enable signal from pclk domain to sclk domain",
+          "connections": [
+            { "local": "pclk_i", "remote": "clk_i" },
+            { "local": "rst_i", "remote": "rst_i" },
+            { "local": "wren_i", "remote": "data_i" },
+            { "local": "wren_synced", "remote": "data_o" }
+          ]
+        },
+        {
+          "module": "cd_sync",
+          "name": "sync_miso",
+          "function": "Synchronizes the MISO signal from sclk domain to pclk domain",
+          "connections": [
+            { "local": "sclk_i", "remote": "clk_i" },
+            { "local": "rst_i", "remote": "rst_i" },
+            { "local": "spi_miso_i", "remote": "data_i" },
+            { "local": "miso_synced", "remote": "data_o" }
+          ]
+        }
+      ],
+      "connections": [
+        { "local": "spi_ssel_o", "remote": "ssel" },
+        { "local": "spi_sck_o", "remote": "sck" },
+        { "local": "spi_mosi_o", "remote": "mosi" }
+      ],
+      "internal_signals": [
+        { "name": "ssel", "width": 1 },
+        { "name": "sck", "width": 1 },
+        { "name": "mosi", "width": 1 },
+        { "name": "miso_synced", "width": 1 },
+        { "name": "wren_synced", "width": 1 },
+        { "name": "shift_reg", "width": "N" },
+        { "name": "bit_count", "width": 4 },
+        { "name": "state", "width": 3 },
+        { "name": "next_state", "width": 3 },
+        { "name": "do_reg", "width": "N" }
+      ],
+      "behavior": [
+        "Reset the SPI interface and internal signals on active-high reset in pclk domain.",
+        "Synchronize the write enable signal from pclk to sclk domain.",
+        "Synchronize the MISO signal from sclk to pclk domain.",
+        "Keep the serial interface idle after reset.",
+        "On acceptance of a new word, pulse wr_ack_o and set di_req_o to indicate readiness for the next word.",
+        "Transmit the parallel word over SPI in MSB-first order using the sclk_i clock.",
+        "Receive the SPI word in MSB-first order and store it in an internal register.",
+        "Pulse do_valid_o and output the received word on do_o once per completed word.",
+        "Maintain state transitions for SPI communication: idle, transmitting, receiving.",
+        "Allow extra turnaround latency between transactions."
+      ]
+    },
+    {
+      "Top_module_name": "cd_sync",
+      "function": "A simple synchronizer for crossing clock domains",
+      "parameters": [],
+      "ports": [
+        { "name": "clk_i", "direction": "input", "width": 1, "clock_domain": "destination_clk" },
+        { "name": "rst_i", "direction": "input", "width": 1, "clock_domain": "destination_clk" },
+        { "name": "data_i", "direction": "input", "width": 1, "clock_domain": "source_clk" },
+        { "name": "data_o", "direction": "output", "width": 1, "clock_domain": "destination_clk" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        { "name": "sync_reg1", "width": 1 },
+        { "name": "sync_reg2", "width": 1 }
+      ],
+      "behavior": [
+        "Synchronize the input data from the source clock domain to the destination clock domain using a two-stage synchronizer."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // Internal signals
+    reg                wren_synced;
+    reg                miso_synced;
+    reg [N-1:0]        shift_reg;
+    reg [3:0]          bit_count;
+    reg [2:0]          state;
+    reg [2:0]          next_state;
+    reg [N-1:0]        do_reg;
+
+    // States
+    localparam IDLE         = 3'b000;
+    localparam TRANSMITTING = 3'b001;
+    localparam RECEIVING    = 3'b010;
+    localparam TURNAROUND   = 3'b011;
+
+    // SPI clock divider
+    reg [1:0] sclk_div_cnt;
+    reg       sclk;
+
+    // SPI clock generation
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sclk_div_cnt <= 2'b00;
+            sclk         <= 1'b0;
+        end else begin
+            if (sclk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                sclk_div_cnt <= 2'b00;
+                sclk         <= ~sclk;
+            end else begin
+                sclk_div_cnt <= sclk_div_cnt + 1;
+            end
+        end
+    end
+
+    // State machine
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i)
+            state <= IDLE;
+        else
+            state <= next_state;
+    end
+
+    always @(*) begin
+        next_state = state;
+        case (state)
+            IDLE: begin
+                if (wren_synced) begin
+                    next_state = TRANSMITTING;
+                end
+            end
+            TRANSMITTING: begin
+                if (bit_count == N - 1)
+                    next_state = RECEIVING;
+            end
+            RECEIVING: begin
+                if (bit_count == N - 1)
+                    next_state = TURNAROUND;
+            end
+            TURNAROUND: begin
+                next_state = IDLE;
+            end
+            default: next_state = IDLE;
+        endcase
+    end
+
+    // Shift register and bit count
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            bit_count <= 4'b0000;
+            shift_reg <= {N{1'b0}};
+        end else begin
+            case (state)
+                TRANSMITTING: begin
+                    if (sclk) begin
+                        bit_count <= bit_count + 1;
+                        shift_reg <= {shift_reg[N-2:0], 1'b0};
+                    end
+                end
+                RECEIVING: begin
+                    if (sclk) begin
+                        bit_count <= bit_count + 1;
+                        shift_reg <= {miso_synced, shift_reg[N-1:1]};
+                    end
+                end
+                TURNAROUND: begin
+                    bit_count <= 4'b0000;
+                end
+            endcase
+        end
+    end
+
+    // SPI signals
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_ssel_o <= 1'b1;
+            spi_sck_o  <= 1'b0;
+            spi_mosi_o <= 1'b0;
+        end else begin
+            case (state)
+                IDLE: begin
+                    spi_ssel_o <= 1'b1;
+                    spi_sck_o  <= 1'b0;
+                    spi_mosi_o <= 1'b0;
+                end
+                TRANSMITTING, RECEIVING: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o  <= sclk;
+                    if (state == TRANSMITTING)
+                        spi_mosi_o <= shift_reg[N-1];
+                end
+                TURNAROUND: begin
+                    spi_ssel_o <= 1'b1;
+                    spi_sck_o  <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Parallel interface signals
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_o   <= 1'b1;
+            wr_ack_o   <= 1'b0;
+            do_valid_o <= 1'b0;
+            do_o       <= {N{1'b0}};
+        end else begin
+            di_req_o   <= (state == IDLE) ? 1'b1 : 1'b0;
+            wr_ack_o   <= (state == TRANSMITTING && bit_count == 0) ? 1'b1 : 1'b0;
+            do_valid_o <= (state == TURNAROUND) ? 1'b1 : 1'b0;
+            do_o       <= (state == TURNAROUND) ? shift_reg : do_o;
+        end
+    end
+
+    // Clock domain crossing synchronizers
+    cd_sync sync_wren (
+        .clk_i  (sclk_i),
+        .rst_i  (rst_i),
+        .data_i (wren_i),
+        .data_o (wren_synced)
+    );
+
+    cd_sync sync_miso (
+        .clk_i  (pclk_i),
+        .rst_i  (rst_i),
+        .data_i (spi_miso_i),
+        .data_o (miso_synced)
+    );
+
+endmodule
+
+module cd_sync (
+    input  clk_i,
+    input  rst_i,
+    input  data_i,
+    output reg data_o
+);
+
+    reg sync_reg1;
+    reg sync_reg2;
+
+    always @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sync_reg1 <= 1'b0;
+            sync_reg2 <= 1'b0;
+        end else begin
+            sync_reg1 <= data_i;
+            sync_reg2 <= sync_reg1;
+        end
+    end
+
+    assign data_o = sync_reg2;
+
+endmodule
+```

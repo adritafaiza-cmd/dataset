@@ -1,0 +1,245 @@
+module wbxclk #(
+	parameter AW=32,
+	parameter DW=32,
+	parameter LGFIFO = 5
+) (
+	input	wire			i_wb_clk, i_reset,
+	input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+	input	wire	[(AW-1):0]	i_wb_addr,
+	input	wire	[(DW-1):0]	i_wb_data,
+	input	wire	[(DW/8-1):0]	i_wb_sel,
+	output	wire			o_wb_stall,
+	output	reg			o_wb_ack,
+	output	reg	[(DW-1):0]	o_wb_data,
+	output	reg			o_wb_err,
+	input	wire			i_xclk_clk,
+	output	reg			o_xclk_cyc,
+	output	reg			o_xclk_stb,
+	output	reg			o_xclk_we,
+	output	reg	[(AW-1):0]	o_xclk_addr,
+	output	reg	[(DW-1):0]	o_xclk_data,
+	output	reg	[(DW/8-1):0]	o_xclk_sel,
+	input	wire			i_xclk_stall,
+	input	wire			i_xclk_ack,
+	input	wire	[(DW-1):0]	i_xclk_data,
+	input	wire			i_xclk_err
+);
+
+	localparam FIFO_DEPTH = 1 << LGFIFO;
+	localparam FIFO_PTR_W = LGFIFO;
+	localparam FIFO_FULL_THRESHOLD = FIFO_DEPTH - 1;
+
+	// ------------------------------------------------------------------
+	// Source domain (i_wb_clk)
+	// ------------------------------------------------------------------
+
+	reg [FIFO_PTR_W-1:0] wr_ptr;
+	reg [FIFO_PTR_W-1:0] rd_ptr_sync; // synchronized read pointer from dest domain
+
+	// FIFO storage
+	reg [DW-1:0] fifo_data [0:FIFO_DEPTH-1];
+	reg [AW-1:0] fifo_addr [0:FIFO_DEPTH-1];
+	reg [DW/8-1:0] fifo_sel [0:FIFO_DEPTH-1];
+	reg fifo_we [0:FIFO_DEPTH-1];
+
+	// Write enable to FIFO
+	wire wb_valid = i_wb_cyc & i_wb_stb;
+	wire fifo_full = (wr_ptr - rd_ptr_sync) >= FIFO_FULL_THRESHOLD;
+	wire wb_accept = wb_valid & ~fifo_full;
+
+	assign o_wb_stall = fifo_full;
+
+	// Write to FIFO
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			wr_ptr <= {FIFO_PTR_W{1'b0}};
+		end else if (wb_accept) begin
+			fifo_data[wr_ptr] <= i_wb_data;
+			fifo_addr[wr_ptr] <= i_wb_addr;
+			fifo_sel[wr_ptr] <= i_wb_sel;
+			fifo_we[wr_ptr] <= i_wb_we;
+			wr_ptr <= wr_ptr + 1'b1;
+		end
+	end
+
+	// Synchronize read pointer from destination domain
+	reg [FIFO_PTR_W-1:0] rd_ptr_sync_r1, rd_ptr_sync_r2;
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rd_ptr_sync_r1 <= {FIFO_PTR_W{1'b0}};
+			rd_ptr_sync_r2 <= {FIFO_PTR_W{1'b0}};
+		end else begin
+			rd_ptr_sync_r1 <= rd_ptr;
+			rd_ptr_sync_r2 <= rd_ptr_sync_r1;
+		end
+	end
+	assign rd_ptr_sync = rd_ptr_sync_r2;
+
+	// Response FIFO (for ack/err/data from destination)
+	reg [FIFO_PTR_W-1:0] resp_wr_ptr;
+	reg [FIFO_PTR_W-1:0] resp_rd_ptr_sync;
+
+	reg [DW-1:0] resp_data [0:FIFO_DEPTH-1];
+	reg resp_err [0:FIFO_DEPTH-1];
+
+	// Write response from destination domain (synchronized)
+	reg [DW-1:0] resp_data_sync_r1, resp_data_sync_r2;
+	reg resp_err_sync_r1, resp_err_sync_r2;
+	reg resp_valid_sync_r1, resp_valid_sync_r2;
+
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			resp_data_sync_r1 <= {DW{1'b0}};
+			resp_data_sync_r2 <= {DW{1'b0}};
+			resp_err_sync_r1 <= 1'b0;
+			resp_err_sync_r2 <= 1'b0;
+			resp_valid_sync_r1 <= 1'b0;
+			resp_valid_sync_r2 <= 1'b0;
+		end else begin
+			resp_data_sync_r1 <= resp_data_sync_r2;
+			resp_data_sync_r2 <= resp_data_sync_r1;
+			resp_err_sync_r1 <= resp_err_sync_r2;
+			resp_err_sync_r2 <= resp_err_sync_r1;
+			resp_valid_sync_r1 <= resp_valid_sync_r2;
+			resp_valid_sync_r2 <= resp_valid_sync_r1;
+		end
+	end
+
+	// Response FIFO write (from synchronized signals)
+	wire resp_write = resp_valid_sync_r2;
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			resp_wr_ptr <= {FIFO_PTR_W{1'b0}};
+		end else if (resp_write) begin
+			resp_data[resp_wr_ptr] <= resp_data_sync_r2;
+			resp_err[resp_wr_ptr] <= resp_err_sync_r2;
+			resp_wr_ptr <= resp_wr_ptr + 1'b1;
+		end
+	end
+
+	// Response FIFO read
+	wire resp_empty = (resp_rd_ptr_sync == resp_wr_ptr);
+	wire resp_read = ~resp_empty;
+
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			o_wb_ack <= 1'b0;
+			o_wb_data <= {DW{1'b0}};
+			o_wb_err <= 1'b0;
+		end else if (resp_read) begin
+			o_wb_ack <= 1'b1;
+			o_wb_data <= resp_data[resp_rd_ptr_sync];
+			o_wb_err <= resp_err[resp_rd_ptr_sync];
+		end else begin
+			o_wb_ack <= 1'b0;
+		end
+	end
+
+	// Synchronize response read pointer to destination domain
+	reg [FIFO_PTR_W-1:0] resp_rd_ptr_sync_r1, resp_rd_ptr_sync_r2;
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			resp_rd_ptr_sync_r1 <= {FIFO_PTR_W{1'b0}};
+			resp_rd_ptr_sync_r2 <= {FIFO_PTR_W{1'b0}};
+		end else begin
+			resp_rd_ptr_sync_r1 <= resp_rd_ptr_sync;
+			resp_rd_ptr_sync_r2 <= resp_rd_ptr_sync_r1;
+		end
+	end
+
+	// ------------------------------------------------------------------
+	// Destination domain (i_xclk_clk)
+	// ------------------------------------------------------------------
+
+	reg [FIFO_PTR_W-1:0] rd_ptr;
+	reg [FIFO_PTR_W-1:0] wr_ptr_sync; // synchronized write pointer from source domain
+
+	// Synchronize write pointer from source domain
+	reg [FIFO_PTR_W-1:0] wr_ptr_sync_r1, wr_ptr_sync_r2;
+	always @(posedge i_xclk_clk) begin
+		wr_ptr_sync_r1 <= wr_ptr;
+		wr_ptr_sync_r2 <= wr_ptr_sync_r1;
+	end
+	assign wr_ptr_sync = wr_ptr_sync_r2;
+
+	// Synchronize response read pointer from source domain
+	reg [FIFO_PTR_W-1:0] resp_rd_ptr_sync_r1, resp_rd_ptr_sync_r2;
+	always @(posedge i_xclk_clk) begin
+		resp_rd_ptr_sync_r1 <= resp_rd_ptr_sync_r2;
+		resp_rd_ptr_sync_r2 <= resp_rd_ptr_sync_r1;
+	end
+	assign resp_rd_ptr_sync = resp_rd_ptr_sync_r2;
+
+	// FIFO read
+	wire fifo_empty = (rd_ptr == wr_ptr_sync);
+	wire dest_stall = i_xclk_stall;
+	wire dest_ready = ~dest_stall;
+	wire dest_read = ~fifo_empty & dest_ready;
+
+	// Two-stage pipeline for payload
+	reg [DW-1:0] pipe_data_r1, pipe_data_r2;
+	reg [AW-1:0] pipe_addr_r1, pipe_addr_r2;
+	reg [DW/8-1:0] pipe_sel_r1, pipe_sel_r2;
+	reg pipe_we_r1, pipe_we_r2;
+	reg pipe_valid_r1, pipe_valid_r2;
+
+	always @(posedge i_xclk_clk) begin
+		pipe_data_r1 <= fifo_data[rd_ptr];
+		pipe_addr_r1 <= fifo_addr[rd_ptr];
+		pipe_sel_r1 <= fifo_sel[rd_ptr];
+		pipe_we_r1 <= fifo_we[rd_ptr];
+		pipe_valid_r1 <= dest_read;
+
+		pipe_data_r2 <= pipe_data_r1;
+		pipe_addr_r2 <= pipe_addr_r1;
+		pipe_sel_r2 <= pipe_sel_r1;
+		pipe_we_r2 <= pipe_we_r1;
+		pipe_valid_r2 <= pipe_valid_r1;
+	end
+
+	// Drive destination bus
+	always @(posedge i_xclk_clk) begin
+		if (pipe_valid_r2) begin
+			o_xclk_cyc <= 1'b1;
+			o_xclk_stb <= 1'b1;
+			o_xclk_we <= pipe_we_r2;
+			o_xclk_addr <= pipe_addr_r2;
+			o_xclk_data <= pipe_data_r2;
+			o_xclk_sel <= pipe_sel_r2;
+		end else begin
+			o_xclk_cyc <= 1'b0;
+			o_xclk_stb <= 1'b0;
+		end
+	end
+
+	// Advance read pointer when destination accepts
+	wire dest_accept = pipe_valid_r2 & i_xclk_ack;
+	always @(posedge i_xclk_clk) begin
+		if (dest_accept) begin
+			rd_ptr <= rd_ptr + 1'b1;
+		end
+	end
+
+	// Response generation
+	reg resp_valid_r1, resp_valid_r2;
+	reg [DW-1:0] resp_data_r1, resp_data_r2;
+	reg resp_err_r1, resp_err_r2;
+
+	always @(posedge i_xclk_clk) begin
+		resp_valid_r1 <= dest_accept;
+		resp_data_r1 <= i_xclk_data;
+		resp_err_r1 <= i_xclk_err;
+
+		resp_valid_r2 <= resp_valid_r1;
+		resp_data_r2 <= resp_data_r1;
+		resp_err_r2 <= resp_err_r1;
+	end
+
+	// Drive response signals to source domain (synchronized there)
+	always @(posedge i_xclk_clk) begin
+		resp_valid_sync_r1 <= resp_valid_r2;
+		resp_data_sync_r1 <= resp_data_r2;
+		resp_err_sync_r1 <= resp_err_r2;
+	end
+
+endmodule

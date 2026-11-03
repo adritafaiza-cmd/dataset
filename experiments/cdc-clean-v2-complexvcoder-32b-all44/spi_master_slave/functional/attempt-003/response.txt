@@ -1,0 +1,144 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "spi_master_slave",
+            "function": "SPI Master with a parallel-side word interface",
+            "parameters": [
+                { "name": "N", "value": 8 },
+                { "name": "SPI_2X_CLK_DIV", "value": 2 }
+            ],
+            "ports": [
+                { "name": "sclk_i", "direction": "input", "width": 1, "clock_domain": "sclk" },
+                { "name": "pclk_i", "direction": "input", "width": 1, "clock_domain": "pclk" },
+                { "name": "rst_i", "direction": "input", "width": 1, "clock_domain": "pclk" },
+                { "name": "spi_miso_i", "direction": "input", "width": 1, "clock_domain": "sclk" },
+                { "name": "di_i", "direction": "input", "width": "N", "clock_domain": "pclk" },
+                { "name": "wren_i", "direction": "input", "width": 1, "clock_domain": "pclk" },
+                { "name": "spi_ssel_o", "direction": "output", "width": 1, "clock_domain": "sclk" },
+                { "name": "spi_sck_o", "direction": "output", "width": 1, "clock_domain": "sclk" },
+                { "name": "spi_mosi_o", "direction": "output", "width": 1, "clock_domain": "sclk" },
+                { "name": "di_req_o", "direction": "output", "width": 1, "clock_domain": "pclk" },
+                { "name": "wr_ack_o", "direction": "output", "width": 1, "clock_domain": "pclk" },
+                { "name": "do_valid_o", "direction": "output", "width": 1, "clock_domain": "pclk" },
+                { "name": "do_o", "direction": "output", "width": "N", "clock_domain": "pclk" }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                { "name": "spi_ssel", "width": 1, "clock_domain": "sclk" },
+                { "name": "spi_sck", "width": 1, "clock_domain": "sclk" },
+                { "name": "spi_mosi", "width": 1, "clock_domain": "sclk" },
+                { "name": "di_req", "width": 1, "clock_domain": "pclk" },
+                { "name": "wr_ack", "width": 1, "clock_domain": "pclk" },
+                { "name": "do_valid", "width": 1, "clock_domain": "pclk" },
+                { "name": "do", "width": "N", "clock_domain": "pclk" },
+                { "name": "shift_reg", "width": "N", "clock_domain": "sclk" },
+                { "name": "bit_cnt", "width": "N", "clock_domain": "sclk" },
+                { "name": "miso_reg", "width": "N", "clock_domain": "sclk" },
+                { "name": "sclk_cnt", "width": 1, "clock_domain": "sclk" }
+            ],
+            "behavior": [
+                "After reset, selects are inactive and outputs are idle.",
+                "Accept N-bit words on di_i when wren_i is high; wr_ack_o acknowledges the write.",
+                "Shift the word out on spi_mosi_o with spi_sck_o and spi_ssel_o.",
+                "Capture spi_miso_i and present it on do_o with do_valid_o.",
+                "di_req_o requests the next word.",
+                "di_req_o indicates that the previous request/response handshake has returned to idle and a new word can be accepted.",
+                "wr_ack_o pulses on acceptance; do_valid_o pulses once per completed word.",
+                "Extra turnaround latency is permitted. Do not duplicate serial transactions."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    reg [N-1:0] shift_reg;
+    reg [N-1:0] miso_reg;
+    reg [N-1:0] bit_cnt;
+    reg         sclk_cnt;
+    reg         di_req;
+    reg         wr_ack;
+    reg         do_valid;
+
+    // SCLK domain logic
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_ssel_o <= 0;
+            spi_sck_o  <= 0;
+            spi_mosi_o <= 0;
+            shift_reg  <= 0;
+            miso_reg   <= 0;
+            bit_cnt    <= 0;
+            sclk_cnt   <= 0;
+        end else begin
+            // SCK generation
+            sclk_cnt <= ~sclk_cnt;
+            spi_sck_o <= sclk_cnt;
+
+            if (sclk_cnt == 0) begin
+                if (bit_cnt < N) begin
+                    // Shift out MOSI and shift in MISO
+                    spi_mosi_o <= shift_reg[N-1];
+                    miso_reg <= {miso_reg[N-2:0], spi_miso_i};
+                    shift_reg <= {shift_reg[N-2:0], 1'b0};
+                    bit_cnt <= bit_cnt + 1;
+                end else begin
+                    // End of transaction
+                    spi_ssel_o <= 0;
+                    bit_cnt <= 0;
+                end
+            end else begin
+                if (bit_cnt == 0) begin
+                    // Start of transaction
+                    spi_ssel_o <= 1;
+                    shift_reg <= di_i;
+                end
+            end
+        end
+    end
+
+    // PCLK domain logic
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_o   <= 0;
+            wr_ack_o   <= 0;
+            do_valid_o <= 0;
+            do_o       <= 0;
+        end else begin
+            // Request next word
+            di_req_o <= ~spi_ssel_o;
+
+            // Write acknowledge
+            wr_ack_o <= (wren_i && !wr_ack_o) ? 1 : 0;
+
+            // Data valid and output
+            do_valid_o <= (bit_cnt == N && sclk_cnt == 0) ? 1 : 0;
+            do_o <= (bit_cnt == N && sclk_cnt == 0) ? miso_reg : do_o;
+        end
+    end
+
+endmodule
+```

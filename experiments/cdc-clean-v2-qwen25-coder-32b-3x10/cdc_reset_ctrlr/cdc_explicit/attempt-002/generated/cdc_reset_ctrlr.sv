@@ -1,0 +1,212 @@
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  a_clk_i,
+    input  a_rst_ni,
+    input  a_clear_i,
+    output a_clear_o,
+    input  a_clear_ack_i,
+    output a_isolate_o,
+    input  a_isolate_ack_i,
+    input  b_clk_i,
+    input  b_rst_ni,
+    input  b_clear_i,
+    output b_clear_o,
+    input  b_clear_ack_i,
+    output b_isolate_o,
+    input  b_isolate_ack_i
+);
+
+    // Internal signals
+    reg [SYNC_STAGES-1:0] a_clear_sync;
+    reg [SYNC_STAGES-1:0] b_clear_sync;
+    reg [SYNC_STAGES-1:0] a_isolate_sync;
+    reg [SYNC_STAGES-1:0] b_isolate_sync;
+
+    reg a_isolate_req;
+    reg a_clear_req;
+    reg a_isolate_done;
+    reg a_clear_done;
+    reg a_release_req;
+    reg a_release_done;
+
+    reg b_isolate_req;
+    reg b_clear_req;
+    reg b_isolate_done;
+    reg b_clear_done;
+    reg b_release_req;
+    reg b_release_done;
+
+    // Synchronize clear and isolate requests from B domain to A domain
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            a_clear_sync <= {SYNC_STAGES{1'b0}};
+            a_isolate_sync <= {SYNC_STAGES{1'b0}};
+        end else begin
+            a_clear_sync <= {a_clear_sync[SYNC_STAGES-2:0], b_clear_i};
+            a_isolate_sync <= {a_isolate_sync[SYNC_STAGES-2:0], b_isolate_ack_i};
+        end
+    end
+
+    // Synchronize clear and isolate requests from A domain to B domain
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            b_clear_sync <= {SYNC_STAGES{1'b0}};
+            b_isolate_sync <= {SYNC_STAGES{1'b0}};
+        end else begin
+            b_clear_sync <= {b_clear_sync[SYNC_STAGES-2:0], a_clear_i};
+            b_isolate_sync <= {b_isolate_sync[SYNC_STAGES-2:0], a_isolate_ack_i};
+        end
+    end
+
+    // A domain state machine
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            a_isolate_req <= 1'b0;
+            a_clear_req <= 1'b0;
+            a_isolate_done <= 1'b0;
+            a_clear_done <= 1'b0;
+            a_release_req <= 1'b0;
+            a_release_done <= 1'b0;
+        end else begin
+            case ({a_isolate_req, a_clear_req, a_isolate_done, a_clear_done, a_release_req, a_release_done})
+                6'b000000: begin // IDLE
+                    if (a_clear_i || a_clear_sync[SYNC_STAGES-1]) begin
+                        a_isolate_req <= 1'b1;
+                    end
+                end
+                6'b100000: begin // ISOLATE_REQUESTED
+                    a_isolate_o <= 1'b1;
+                    if (a_isolate_ack_i) begin
+                        a_isolate_req <= 1'b0;
+                        a_isolate_done <= 1'b1;
+                    end
+                end
+                6'b010000: begin // CLEAR_REQUESTED
+                    a_clear_o <= 1'b1;
+                    if (a_clear_ack_i) begin
+                        a_clear_req <= 1'b0;
+                        a_clear_done <= 1'b1;
+                    end
+                end
+                6'b001000: begin // ISOLATE_DONE
+                    if (a_clear_sync[SYNC_STAGES-1]) begin
+                        a_clear_req <= 1'b1;
+                    end
+                end
+                6'b000100: begin // CLEAR_DONE
+                    if (b_isolate_sync[SYNC_STAGES-1]) begin
+                        a_release_req <= 1'b1;
+                    end
+                end
+                6'b000010: begin // RELEASE_REQUESTED
+                    a_clear_o <= 1'b0;
+                    if (b_release_sync[SYNC_STAGES-1]) begin
+                        a_release_req <= 1'b0;
+                        a_release_done <= 1'b1;
+                    end
+                end
+                6'b000001: begin // RELEASE_DONE
+                    a_isolate_o <= 1'b0;
+                    a_isolate_done <= 1'b0;
+                    a_clear_done <= 1'b0;
+                    a_release_done <= 1'b0;
+                end
+                default: begin
+                    a_isolate_req <= 1'b0;
+                    a_clear_req <= 1'b0;
+                    a_isolate_done <= 1'b0;
+                    a_clear_done <= 1'b0;
+                    a_release_req <= 1'b0;
+                    a_release_done <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // B domain state machine
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            b_isolate_req <= 1'b0;
+            b_clear_req <= 1'b0;
+            b_isolate_done <= 1'b0;
+            b_clear_done <= 1'b0;
+            b_release_req <= 1'b0;
+            b_release_done <= 1'b0;
+        end else begin
+            case ({b_isolate_req, b_clear_req, b_isolate_done, b_clear_done, b_release_req, b_release_done})
+                6'b000000: begin // IDLE
+                    if (b_clear_i || b_clear_sync[SYNC_STAGES-1]) begin
+                        b_isolate_req <= 1'b1;
+                    end
+                end
+                6'b100000: begin // ISOLATE_REQUESTED
+                    b_isolate_o <= 1'b1;
+                    if (b_isolate_ack_i) begin
+                        b_isolate_req <= 1'b0;
+                        b_isolate_done <= 1'b1;
+                    end
+                end
+                6'b010000: begin // CLEAR_REQUESTED
+                    b_clear_o <= 1'b1;
+                    if (b_clear_ack_i) begin
+                        b_clear_req <= 1'b0;
+                        b_clear_done <= 1'b1;
+                    end
+                end
+                6'b001000: begin // ISOLATE_DONE
+                    if (b_clear_sync[SYNC_STAGES-1]) begin
+                        b_clear_req <= 1'b1;
+                    end
+                end
+                6'b000100: begin // CLEAR_DONE
+                    if (a_isolate_sync[SYNC_STAGES-1]) begin
+                        b_release_req <= 1'b1;
+                    end
+                end
+                6'b000010: begin // RELEASE_REQUESTED
+                    b_clear_o <= 1'b0;
+                    if (a_release_sync[SYNC_STAGES-1]) begin
+                        b_release_req <= 1'b0;
+                        b_release_done <= 1'b1;
+                    end
+                end
+                6'b000001: begin // RELEASE_DONE
+                    b_isolate_o <= 1'b0;
+                    b_isolate_done <= 1'b0;
+                    b_clear_done <= 1'b0;
+                    b_release_done <= 1'b0;
+                end
+                default: begin
+                    b_isolate_req <= 1'b0;
+                    b_clear_req <= 1'b0;
+                    b_isolate_done <= 1'b0;
+                    b_clear_done <= 1'b0;
+                    b_release_req <= 1'b0;
+                    b_release_done <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Synchronize release requests from A domain to B domain
+    reg [SYNC_STAGES-1:0] a_release_sync;
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            a_release_sync <= {SYNC_STAGES{1'b0}};
+        end else begin
+            a_release_sync <= {a_release_sync[SYNC_STAGES-2:0], a_release_req};
+        end
+    end
+
+    // Synchronize release requests from B domain to A domain
+    reg [SYNC_STAGES-1:0] b_release_sync;
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            b_release_sync <= {SYNC_STAGES{1'b0}};
+        end else begin
+            b_release_sync <= {b_release_sync[SYNC_STAGES-2:0], b_release_req};
+        end
+    end
+
+endmodule

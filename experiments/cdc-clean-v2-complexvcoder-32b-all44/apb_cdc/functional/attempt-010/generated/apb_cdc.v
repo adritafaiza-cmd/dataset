@@ -1,0 +1,223 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    // Internal signals for command FIFO
+    wire [ADDR_WIDTH + DATA_WIDTH + DATA_WIDTH/8 + 3 + 1 + 1 - 1:0] cmd_fifo_wr_data;
+    wire cmd_fifo_wr_en;
+    wire cmd_fifo_full;
+    wire cmd_fifo_rd_en;
+    wire [ADDR_WIDTH + DATA_WIDTH + DATA_WIDTH/8 + 3 + 1 + 1 - 1:0] cmd_fifo_rd_data;
+    wire cmd_fifo_empty;
+
+    // Internal signals for response FIFO
+    wire [DATA_WIDTH + 1 - 1:0] rsp_fifo_wr_data;
+    wire rsp_fifo_wr_en;
+    wire rsp_fifo_full;
+    wire rsp_fifo_rd_en;
+    wire [DATA_WIDTH + 1 - 1:0] rsp_fifo_rd_data;
+    wire rsp_fifo_empty;
+
+    // Command FIFO instantiation
+    async_fifo #(
+        .DATA_WIDTH(ADDR_WIDTH + DATA_WIDTH + DATA_WIDTH/8 + 3 + 1 + 1),
+        .LOG_DEPTH(LOG_DEPTH)
+    ) cmd_fifo_inst (
+        .wr_clk(src_pclk_i),
+        .wr_rst_n(src_preset_ni),
+        .wr_data(cmd_fifo_wr_data),
+        .wr_en(cmd_fifo_wr_en),
+        .full(cmd_fifo_full),
+        .rd_clk(dst_pclk_i),
+        .rd_rst_n(dst_preset_ni),
+        .rd_en(cmd_fifo_rd_en),
+        .rd_data(cmd_fifo_rd_data),
+        .empty(cmd_fifo_empty)
+    );
+
+    // Response FIFO instantiation
+    async_fifo #(
+        .DATA_WIDTH(DATA_WIDTH + 1),
+        .LOG_DEPTH(LOG_DEPTH)
+    ) rsp_fifo_inst (
+        .wr_clk(dst_pclk_i),
+        .wr_rst_n(dst_preset_ni),
+        .wr_data(rsp_fifo_wr_data),
+        .wr_en(rsp_fifo_wr_en),
+        .full(rsp_fifo_full),
+        .rd_clk(src_pclk_i),
+        .rd_rst_n(src_preset_ni),
+        .rd_en(rsp_fifo_rd_en),
+        .rd_data(rsp_fifo_rd_data),
+        .empty(rsp_fifo_empty)
+    );
+
+    // Command FIFO write data assignment
+    assign cmd_fifo_wr_data = {src_pwrite_i, src_paddr_i, src_pwdata_i, src_pstrb_i, src_pprot_i, src_psel_i, src_penable_i};
+
+    // Command FIFO write enable
+    assign cmd_fifo_wr_en = src_psel_i & src_penable_i & ~src_pready_o;
+
+    // Command FIFO read enable
+    assign cmd_fifo_rd_en = ~cmd_fifo_empty;
+
+    // Response FIFO write data assignment
+    assign rsp_fifo_wr_data = {dst_prdata_i, dst_pslverr_i};
+
+    // Response FIFO write enable
+    assign rsp_fifo_wr_en = dst_pready_i;
+
+    // Response FIFO read enable
+    assign rsp_fifo_rd_en = ~rsp_fifo_empty;
+
+    // Source ready output
+    assign src_pready_o = ~cmd_fifo_empty & ~cmd_fifo_full;
+
+    // Source read data output
+    assign src_prdata_o = rsp_fifo_rd_data[DATA_WIDTH-1:0];
+
+    // Source slave error output
+    assign src_pslverr_o = rsp_fifo_rd_data[DATA_WIDTH];
+
+    // Destination select output
+    assign dst_psel_o = cmd_fifo_rd_data[ADDR_WIDTH + DATA_WIDTH + DATA_WIDTH/8 + 3 + 1 + 1 - 1];
+
+    // Destination enable output
+    assign dst_penable_o = cmd_fifo_rd_data[ADDR_WIDTH + DATA_WIDTH + DATA_WIDTH/8 + 3 + 1];
+
+    // Destination write output
+    assign dst_pwrite_o = cmd_fifo_rd_data[ADDR_WIDTH + DATA_WIDTH + DATA_WIDTH/8 + 3 + 1 + 1 - 1];
+
+    // Destination address output
+    assign dst_paddr_o = cmd_fifo_rd_data[ADDR_WIDTH + DATA_WIDTH + DATA_WIDTH/8 + 3 - 1 : DATA_WIDTH + DATA_WIDTH/8 + 3];
+
+    // Destination write data output
+    assign dst_pwdata_o = cmd_fifo_rd_data[ADDR_WIDTH + DATA_WIDTH/8 + 3 - 1 : DATA_WIDTH/8 + 3];
+
+    // Destination write strobes output
+    assign dst_pstrb_o = cmd_fifo_rd_data[DATA_WIDTH/8 + 3 - 1 : 3];
+
+    // Destination protection bits output
+    assign dst_pprot_o = cmd_fifo_rd_data[2:0];
+
+endmodule
+
+// Asynchronous FIFO module
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter LOG_DEPTH = 1
+)(
+    input wr_clk,
+    input wr_rst_n,
+    input [DATA_WIDTH-1:0] wr_data,
+    input wr_en,
+    output reg full,
+    input rd_clk,
+    input rd_rst_n,
+    input rd_en,
+    output reg [DATA_WIDTH-1:0] rd_data,
+    output reg empty
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam ADDR_WIDTH = LOG_DEPTH;
+
+    reg [DATA_WIDTH-1:0] mem [0:DEPTH-1];
+    reg [ADDR_WIDTH:0] wr_ptr, rd_ptr;
+    reg [ADDR_WIDTH:0] wr_ptr_gray, rd_ptr_gray;
+    reg [ADDR_WIDTH:0] wr_ptr_gray_sync, rd_ptr_gray_sync;
+
+    // Write pointer logic
+    always @(posedge wr_clk or negedge wr_rst_n) begin
+        if (!wr_rst_n) begin
+            wr_ptr <= 0;
+            wr_ptr_gray <= 0;
+        end else if (wr_en && !full) begin
+            wr_ptr <= wr_ptr + 1;
+            wr_ptr_gray <= (wr_ptr + 1) ^ ((wr_ptr + 1) >> 1);
+        end
+    end
+
+    // Gray code synchronization
+    always @(posedge rd_clk or negedge rd_rst_n) begin
+        if (!rd_rst_n) begin
+            wr_ptr_gray_sync <= 0;
+        end else begin
+            wr_ptr_gray_sync <= wr_ptr_gray;
+        end
+    end
+
+    // Read pointer logic
+    always @(posedge rd_clk or negedge rd_rst_n) begin
+        if (!rd_rst_n) begin
+            rd_ptr <= 0;
+            rd_ptr_gray <= 0;
+        end else if (rd_en && !empty) begin
+            rd_ptr <= rd_ptr + 1;
+            rd_ptr_gray <= (rd_ptr + 1) ^ ((rd_ptr + 1) >> 1);
+        end
+    end
+
+    // Gray code synchronization
+    always @(posedge wr_clk or negedge wr_rst_n) begin
+        if (!wr_rst_n) begin
+            rd_ptr_gray_sync <= 0;
+        end else begin
+            rd_ptr_gray_sync <= rd_ptr_gray;
+        end
+    end
+
+    // Memory write
+    always @(posedge wr_clk) begin
+        if (wr_en && !full) begin
+            mem[wr_ptr[ADDR_WIDTH-1:0]] <= wr_data;
+        end
+    end
+
+    // Memory read
+    always @(posedge rd_clk) begin
+        if (rd_en && !empty) begin
+            rd_data <= mem[rd_ptr[ADDR_WIDTH-1:0]];
+        end
+    end
+
+    // Full flag
+    always @(*) begin
+        full = (wr_ptr_gray[ADDR_WIDTH] != rd_ptr_gray_sync[ADDR_WIDTH]) &&
+               (wr_ptr_gray[ADDR_WIDTH-1:0] == rd_ptr_gray_sync[ADDR_WIDTH-1:0]);
+    end
+
+    // Empty flag
+    always @(*) begin
+        empty = (wr_ptr_gray_sync[ADDR_WIDTH] == rd_ptr_gray[ADDR_WIDTH]) &&
+                (wr_ptr_gray_sync[ADDR_WIDTH-1:0] == rd_ptr_gray[ADDR_WIDTH-1:0]);
+    end
+
+endmodule

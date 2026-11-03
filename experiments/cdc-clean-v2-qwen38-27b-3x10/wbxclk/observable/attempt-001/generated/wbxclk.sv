@@ -1,0 +1,127 @@
+module wbxclk #(
+	parameter	AW=32,
+			DW=32,
+			LGFIFO = 5
+) (
+	input	wire			i_wb_clk, i_reset,
+	input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+	input	wire	[(AW-1):0]	i_wb_addr,
+	input	wire	[(DW-1):0]	i_wb_data,
+	input	wire	[(DW/8-1):0]	i_wb_sel,
+	output	wire			o_wb_stall,
+	output	reg			o_wb_ack,
+	output	reg	[(DW/8-1):0]	o_wb_data,
+	output	reg			o_wb_err,
+	input	wire			i_xclk_clk,
+	output	reg			o_xclk_cyc,
+	output	reg			o_xclk_stb,
+	output	reg			o_xclk_we,
+	output	reg	[(AW-1):0]	o_xclk_addr,
+	output	reg	[(DW-1):0]	o_xclk_data,
+	output	reg	[(DW/8-1):0]	o_xclk_sel,
+	input	wire			i_xclk_stall,
+	input	wire			i_xclk_ack,
+	input	wire	[(DW-1):0]	i_xclk_data,
+	input	wire			i_xclk_err
+);
+
+	localparam FIFO_DEPTH = 1 << LGFIFO;
+	localparam FIFO_W = AW + DW + DW/8 + 1; // addr + data + sel + we
+	localparam ACK_FIFO_W = DW + 1; // data + err
+
+	// Request FIFO (wb -> xclk)
+	reg [FIFO_W-1:0] req_fifo [0:FIFO_DEPTH-1];
+	reg [LGFIFO:0] req_wr_ptr, req_rd_ptr;
+	wire req_full = (req_wr_ptr[LGFIFO] != req_rd_ptr[LGFIFO]) &&
+	                 (req_wr_ptr[LGFIFO-1:0] == req_rd_ptr[LGFIFO-1:0]);
+	wire req_empty = (req_wr_ptr == req_rd_ptr);
+
+	// Ack FIFO (xclk -> wb)
+	reg [ACK_FIFO_W-1:0] ack_fifo [0:FIFO_DEPTH-1];
+	reg [LGFIFO:0] ack_wr_ptr, ack_rd_ptr;
+	wire ack_full = (ack_wr_ptr[LGFIFO] != ack_rd_ptr[LGFIFO]) &&
+	                 (ack_wr_ptr[LGFIFO-1:0] == ack_rd_ptr[LGFIFO-1:0]);
+	wire ack_empty = (ack_wr_ptr == ack_rd_ptr);
+
+	// WB side: accept request when not full
+	wire wb_accept = i_wb_cyc && !req_full;
+
+	// WB side: write to request FIFO
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_wr_ptr <= 0;
+		end else if (wb_accept) begin
+			req_fifo[req_wr_ptr[LGFIFO-1:0]] <= {i_wb_we, i_wb_addr, i_wb_data, i_wb_sel};
+			req_wr_ptr <= req_wr_ptr + 1;
+		end
+	end
+
+	// WB side: read from ack FIFO
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			o_wb_ack <= 0;
+			o_wb_data <= 0;
+			o_wb_err <= 0;
+			ack_rd_ptr <= 0;
+		end else if (!ack_empty) begin
+			{ack_fifo[ack_rd_ptr[LGFIFO-1:0]][ACK_FIFO_W-1],
+			 ack_fifo[ack_rd_ptr[LGFIFO-1:0]][ACK_FIFO_W-2:0]} <=
+			{ack_fifo[ack_rd_ptr[LGFIFO-1:0]][ACK_FIFO_W-1],
+			 ack_fifo[ack_rd_ptr[LGFIFO-1:0]][ACK_FIFO_W-2:0]};
+			o_wb_ack <= 1;
+			o_wb_data <= ack_fifo[ack_rd_ptr[LGFIFO-1:0]][ACK_FIFO_W-2:0];
+			o_wb_err <= ack_fifo[ack_rd_ptr[LGFIFO-1:0]][ACK_FIFO_W-1];
+			ack_rd_ptr <= ack_rd_ptr + 1;
+		end else begin
+			o_wb_ack <= 0;
+		end
+	end
+
+	assign o_wb_stall = req_full;
+
+	// XCLK side: read from request FIFO
+	reg [FIFO_W-1:0] req_out;
+	reg req_valid;
+
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			req_rd_ptr <= 0;
+			req_valid <= 0;
+			o_xclk_cyc <= 0;
+			o_xclk_stb <= 0;
+			o_xclk_we <= 0;
+			o_xclk_addr <= 0;
+			o_xclk_data <= 0;
+			o_xclk_sel <= 0;
+		end else begin
+			if (req_valid) begin
+				if (i_xclk_ack) begin
+					req_valid <= 0;
+					o_xclk_cyc <= 0;
+					o_xclk_stb <= 0;
+				end
+			end else if (!req_empty && !i_xclk_stall) begin
+				req_out <= req_fifo[req_rd_ptr[LGFIFO-1:0]];
+				req_rd_ptr <= req_rd_ptr + 1;
+				req_valid <= 1;
+				o_xclk_cyc <= 1;
+				o_xclk_stb <= 1;
+				o_xclk_we <= req_fifo[req_rd_ptr[LGFIFO-1:0]][FIFO_W-1];
+				o_xclk_addr <= req_fifo[req_rd_ptr[LGFIFO-1:0]][FIFO_W-2:FIFO_W-1-DW];
+				o_xclk_data <= req_fifo[req_rd_ptr[LGFIFO-1:0]][FIFO_W-2-DW:FIFO_W-1-DW-DW/8];
+				o_xclk_sel <= req_fifo[req_rd_ptr[LGFIFO-1:0]][FIFO_W-2-DW-DW/8:0];
+			end
+		end
+	end
+
+	// XCLK side: write to ack FIFO
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			ack_wr_ptr <= 0;
+		end else if (i_xclk_ack && !ack_full) begin
+			ack_fifo[ack_wr_ptr[LGFIFO-1:0]] <= {i_xclk_err, i_xclk_data};
+			ack_wr_ptr <= ack_wr_ptr + 1;
+		end
+	end
+
+endmodule

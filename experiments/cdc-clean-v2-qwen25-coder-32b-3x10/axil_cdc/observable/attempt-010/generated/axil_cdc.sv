@@ -1,0 +1,316 @@
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // Slave to Master signals
+    reg [ADDR_WIDTH-1:0] s2m_awaddr;
+    reg [2:0] s2m_awprot;
+    reg s2m_awvalid;
+    reg [DATA_WIDTH-1:0] s2m_wdata;
+    reg [STRB_WIDTH-1:0] s2m_wstrb;
+    reg s2m_wvalid;
+    reg [1:0] m2s_bresp;
+    reg m2s_bvalid;
+    reg [ADDR_WIDTH-1:0] s2m_araddr;
+    reg [2:0] s2m_arprot;
+    reg s2m_arvalid;
+    reg [DATA_WIDTH-1:0] m2s_rdata;
+    reg [1:0] m2s_rresp;
+    reg m2s_rvalid;
+
+    // Master to Slave signals
+    reg [ADDR_WIDTH-1:0] m2s_awaddr;
+    reg [2:0] m2s_awprot;
+    reg m2s_awvalid;
+    reg [DATA_WIDTH-1:0] m2s_wdata;
+    reg [STRB_WIDTH-1:0] m2s_wstrb;
+    reg m2s_wvalid;
+    reg [1:0] s2m_bresp;
+    reg s2m_bvalid;
+    reg [ADDR_WIDTH-1:0] m2s_araddr;
+    reg [2:0] m2s_arprot;
+    reg m2s_arvalid;
+    reg [DATA_WIDTH-1:0] s2m_rdata;
+    reg [1:0] s2m_rresp;
+    reg s2m_rvalid;
+
+    // Cross-domain synchronization
+    reg [1:0] s_awvalid_sync;
+    reg [1:0] m_awready_sync;
+    reg [1:0] s_wvalid_sync;
+    reg [1:0] m_wready_sync;
+    reg [1:0] m_bvalid_sync;
+    reg [1:0] s_bready_sync;
+    reg [1:0] s_arvalid_sync;
+    reg [1:0] m_arready_sync;
+    reg [1:0] m_rvalid_sync;
+    reg [1:0] s_rready_sync;
+
+    // Slave to Master synchronization
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            s_awvalid_sync <= 2'b00;
+            s_wvalid_sync <= 2'b00;
+            s_arvalid_sync <= 2'b00;
+        end else begin
+            s_awvalid_sync <= {s_awvalid_sync[0], s_axil_awvalid};
+            s_wvalid_sync <= {s_wvalid_sync[0], s_axil_wvalid};
+            s_arvalid_sync <= {s_arvalid_sync[0], s_axil_arvalid};
+        end
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            m_awready_sync <= 2'b00;
+            m_wready_sync <= 2'b00;
+            m_bvalid_sync <= 2'b00;
+            m_arready_sync <= 2'b00;
+            m_rvalid_sync <= 2'b00;
+        end else begin
+            m_awready_sync <= {m_awready_sync[0], m_axil_awready};
+            m_wready_sync <= {m_wready_sync[0], m_axil_wready};
+            m_bvalid_sync <= {m_bvalid_sync[0], m_axil_bvalid};
+            m_arready_sync <= {m_arready_sync[0], m_axil_arready};
+            m_rvalid_sync <= {m_rvalid_sync[0], m_axil_rvalid};
+        end
+    end
+
+    // Master to Slave synchronization
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            m_awvalid_sync <= 2'b00;
+            m_wvalid_sync <= 2'b00;
+            m_arvalid_sync <= 2'b00;
+        end else begin
+            m_awvalid_sync <= {m_awvalid_sync[0], m2s_awvalid};
+            m_wvalid_sync <= {m_wvalid_sync[0], m2s_wvalid};
+            m_arvalid_sync <= {m_arvalid_sync[0], m2s_arvalid};
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            s_awready_sync <= 2'b00;
+            s_wready_sync <= 2'b00;
+            s_bvalid_sync <= 2'b00;
+            s_arready_sync <= 2'b00;
+            s_rvalid_sync <= 2'b00;
+        end else begin
+            s_awready_sync <= {s_awready_sync[0], s_axil_awready};
+            s_wready_sync <= {s_wready_sync[0], s_axil_wready};
+            s_bvalid_sync <= {s_bvalid_sync[0], s_axil_bvalid};
+            s_arready_sync <= {s_arready_sync[0], s_axil_arready};
+            s_rvalid_sync <= {s_rvalid_sync[0], s_axil_rvalid};
+        end
+    end
+
+    // Slave to Master data transfer
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            s2m_awaddr <= 0;
+            s2m_awprot <= 0;
+            s2m_wdata <= 0;
+            s2m_wstrb <= 0;
+            s2m_araddr <= 0;
+            s2m_arprot <= 0;
+        end else begin
+            if (m_axil_awready && s_axil_awvalid) begin
+                s2m_awaddr <= s_axil_awaddr;
+                s2m_awprot <= s_axil_awprot;
+            end
+            if (m_axil_wready && s_axil_wvalid) begin
+                s2m_wdata <= s_axil_wdata;
+                s2m_wstrb <= s_axil_wstrb;
+            end
+            if (m_axil_arready && s_axil_arvalid) begin
+                s2m_araddr <= s_axil_araddr;
+                s2m_arprot <= s_axil_arprot;
+            end
+        end
+    end
+
+    // Master to Slave data transfer
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            m2s_awaddr <= 0;
+            m2s_awprot <= 0;
+            m2s_wdata <= 0;
+            m2s_wstrb <= 0;
+            m2s_araddr <= 0;
+            m2s_arprot <= 0;
+        end else begin
+            if (s_axil_awready && m2s_awvalid) begin
+                m2s_awaddr <= m_axil_awaddr;
+                m2s_awprot <= m_axil_awprot;
+            end
+            if (s_axil_wready && m2s_wvalid) begin
+                m2s_wdata <= m_axil_wdata;
+                m2s_wstrb <= m_axil_wstrb;
+            end
+            if (s_axil_arready && m2s_arvalid) begin
+                m2s_araddr <= m_axil_araddr;
+                m2s_arprot <= m_axil_arprot;
+            end
+        end
+    end
+
+    // Slave to Master control signals
+    assign s_axil_awready = m_awready_sync[1];
+    assign s_axil_wready = m_wready_sync[1];
+    assign s_axil_bresp = m2s_bresp;
+    assign s_axil_bvalid = m2s_bvalid;
+    assign s_axil_arready = m_arready_sync[1];
+    assign s_axil_rdata = m2s_rdata;
+    assign s_axil_rresp = m2s_rresp;
+    assign s_axil_rvalid = m2s_rvalid;
+
+    // Master to Slave control signals
+    assign m_axil_awaddr = s2m_awaddr;
+    assign m_axil_awprot = s2m_awprot;
+    assign m_axil_awvalid = s_awvalid_sync[1];
+    assign m_axil_wdata = s2m_wdata;
+    assign m_axil_wstrb = s2m_wstrb;
+    assign m_axil_wvalid = s_wvalid_sync[1];
+    assign m_axil_bready = s_bready_sync[1];
+    assign m_axil_araddr = s2m_araddr;
+    assign m_axil_arprot = s2m_arprot;
+    assign m_axil_arvalid = s_arvalid_sync[1];
+    assign m_axil_rready = s_rready_sync[1];
+
+    // Slave to Master back-channel control signals
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m2s_bresp <= 0;
+            m2s_bvalid <= 0;
+            m2s_rdata <= 0;
+            m2s_rresp <= 0;
+            m2s_rvalid <= 0;
+        end else begin
+            if (m_axil_bvalid && s_bready_sync[1]) begin
+                m2s_bresp <= m_axil_bresp;
+                m2s_bvalid <= 1;
+            end else begin
+                m2s_bvalid <= 0;
+            end
+            if (m_axil_rvalid && s_rready_sync[1]) begin
+                m2s_rdata <= m_axil_rdata;
+                m2s_rresp <= m_axil_rresp;
+                m2s_rvalid <= 1;
+            end else begin
+                m2s_rvalid <= 0;
+            end
+        end
+    end
+
+    // Master to Slave back-channel control signals
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s2m_bresp <= 0;
+            s2m_bvalid <= 0;
+            s2m_rdata <= 0;
+            s2m_rresp <= 0;
+            s2m_rvalid <= 0;
+        end else begin
+            if (s_axil_bvalid && m_bready_sync[1]) begin
+                s2m_bresp <= s_axil_bresp;
+                s2m_bvalid <= 1;
+            end else begin
+                s2m_bvalid <= 0;
+            end
+            if (s_axil_rvalid && m_rready_sync[1]) begin
+                s2m_rdata <= s_axil_rdata;
+                s2m_rresp <= s_axil_rresp;
+                s2m_rvalid <= 1;
+            end else begin
+                s2m_rvalid <= 0;
+            end
+        end
+    end
+
+    // Back-channel ready signals
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_bready_sync <= 2'b00;
+        end else begin
+            s_bready_sync <= {s_bready_sync[0], s_axil_bready};
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_bready_sync <= 2'b00;
+        end else begin
+            m_bready_sync <= {m_bready_sync[0], m_axil_bready};
+        end
+    end
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_rready_sync <= 2'b00;
+        end else begin
+            s_rready_sync <= {s_rready_sync[0], s_axil_rready};
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rready_sync <= 2'b00;
+        end else begin
+            m_rready_sync <= {m_rready_sync[0], m_axil_rready};
+        end
+    end
+
+endmodule

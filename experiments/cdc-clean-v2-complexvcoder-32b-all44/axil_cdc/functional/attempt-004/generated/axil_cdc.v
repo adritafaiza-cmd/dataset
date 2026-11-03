@@ -1,0 +1,252 @@
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // Internal signals
+    reg [ADDR_WIDTH+2:0] s_aw_reg;
+    reg s_aw_valid_reg;
+    reg [DATA_WIDTH+STRB_WIDTH-1:0] s_w_reg;
+    reg s_w_valid_reg;
+    reg [ADDR_WIDTH+2:0] s_ar_reg;
+    reg s_ar_valid_reg;
+
+    reg [ADDR_WIDTH+2:0] m_aw_reg;
+    reg m_aw_valid_reg;
+    reg [DATA_WIDTH+STRB_WIDTH-1:0] m_w_reg;
+    reg m_w_valid_reg;
+    reg [ADDR_WIDTH+2:0] m_ar_reg;
+    reg m_ar_valid_reg;
+
+    reg m_aw_ready_sync;
+    reg m_w_ready_sync;
+    reg m_ar_ready_sync;
+    reg m_bvalid_sync;
+    reg [1:0] m_bresp_sync;
+    reg m_rvalid_sync;
+    reg [DATA_WIDTH-1:0] m_rdata_sync;
+    reg [1:0] m_rresp_sync;
+
+    // AXIL write address channel CDC
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_aw_valid_reg <= 0;
+            s_aw_reg <= 0;
+        end else begin
+            if (s_axil_awvalid && !s_aw_valid_reg && s_axil_awready) begin
+                s_aw_valid_reg <= 1;
+                s_aw_reg <= {s_axil_awaddr, s_axil_awprot};
+            end else if (m_aw_valid_reg && m_axil_awready) begin
+                s_aw_valid_reg <= 0;
+            end
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_aw_valid_reg <= 0;
+            m_aw_reg <= 0;
+            m_aw_ready_sync <= 0;
+        end else begin
+            if (!m_aw_valid_reg && s_aw_valid_reg) begin
+                m_aw_valid_reg <= 1;
+                m_aw_reg <= s_aw_reg;
+            end else if (m_axil_awready) begin
+                m_aw_valid_reg <= 0;
+            end
+            m_aw_ready_sync <= s_axil_awready;
+        end
+    end
+
+    assign s_axil_awready = !s_aw_valid_reg && m_aw_ready_sync;
+
+    // AXIL write data channel CDC
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_w_valid_reg <= 0;
+            s_w_reg <= 0;
+        end else begin
+            if (s_axil_wvalid && !s_w_valid_reg && s_axil_wready) begin
+                s_w_valid_reg <= 1;
+                s_w_reg <= {s_axil_wdata, s_axil_wstrb};
+            end else if (m_w_valid_reg && m_axil_wready) begin
+                s_w_valid_reg <= 0;
+            end
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_w_valid_reg <= 0;
+            m_w_reg <= 0;
+            m_w_ready_sync <= 0;
+        end else begin
+            if (!m_w_valid_reg && s_w_valid_reg) begin
+                m_w_valid_reg <= 1;
+                m_w_reg <= s_w_reg;
+            end else if (m_axil_wready) begin
+                m_w_valid_reg <= 0;
+            end
+            m_w_ready_sync <= s_axil_wready;
+        end
+    end
+
+    assign s_axil_wready = !s_w_valid_reg && m_w_ready_sync;
+
+    // AXIL write response channel CDC
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_axil_bresp <= 0;
+            s_axil_bvalid <= 0;
+        end else begin
+            s_axil_bresp <= m_bresp_sync;
+            s_axil_bvalid <= m_bvalid_sync;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_bvalid_sync <= 0;
+            m_bresp_sync <= 0;
+        end else begin
+            if (m_axil_bvalid && !s_axil_bready) begin
+                m_bvalid_sync <= 1;
+                m_bresp_sync <= m_axil_bresp;
+            end else if (s_axil_bready) begin
+                m_bvalid_sync <= 0;
+            end
+        end
+    end
+
+    assign m_axil_bready = !m_bvalid_sync;
+
+    // AXIL read address channel CDC
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_ar_valid_reg <= 0;
+            s_ar_reg <= 0;
+        end else begin
+            if (s_axil_arvalid && !s_ar_valid_reg && s_axil_arready) begin
+                s_ar_valid_reg <= 1;
+                s_ar_reg <= {s_axil_araddr, s_axil_arprot};
+            end else if (m_ar_valid_reg && m_axil_arready) begin
+                s_ar_valid_reg <= 0;
+            end
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_ar_valid_reg <= 0;
+            m_ar_reg <= 0;
+            m_ar_ready_sync <= 0;
+        end else begin
+            if (!m_ar_valid_reg && s_ar_valid_reg) begin
+                m_ar_valid_reg <= 1;
+                m_ar_reg <= s_ar_reg;
+            end else if (m_axil_arready) begin
+                m_ar_valid_reg <= 0;
+            end
+            m_ar_ready_sync <= s_axil_arready;
+        end
+    end
+
+    assign s_axil_arready = !s_ar_valid_reg && m_ar_ready_sync;
+
+    // AXIL read data channel CDC
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_axil_rdata <= 0;
+            s_axil_rresp <= 0;
+            s_axil_rvalid <= 0;
+        end else begin
+            s_axil_rdata <= m_rdata_sync;
+            s_axil_rresp <= m_rresp_sync;
+            s_axil_rvalid <= m_rvalid_sync;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rvalid_sync <= 0;
+            m_rdata_sync <= 0;
+            m_rresp_sync <= 0;
+        end else begin
+            if (m_axil_rvalid && !s_axil_rready) begin
+                m_rvalid_sync <= 1;
+                m_rdata_sync <= m_axil_rdata;
+                m_rresp_sync <= m_axil_rresp;
+            end else if (s_axil_rready) begin
+                m_rvalid_sync <= 0;
+            end
+        end
+    end
+
+    assign m_axil_rready = !m_rvalid_sync;
+
+    // Master outputs
+    assign m_axil_awaddr = m_aw_reg[ADDR_WIDTH+2:3];
+    assign m_axil_awprot = m_aw_reg[2:0];
+    assign m_axil_awvalid = m_aw_valid_reg;
+
+    assign m_axil_wdata = m_w_reg[DATA_WIDTH+STRB_WIDTH-1:STRB_WIDTH];
+    assign m_axil_wstrb = m_w_reg[STRB_WIDTH-1:0];
+    assign m_axil_wvalid = m_w_valid_reg;
+
+    assign m_axil_araddr = m_ar_reg[ADDR_WIDTH+2:3];
+    assign m_axil_arprot = m_ar_reg[2:0];
+    assign m_axil_arvalid = m_ar_valid_reg;
+
+endmodule

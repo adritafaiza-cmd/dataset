@@ -1,0 +1,242 @@
+```verilog
+module axis_async_fifo_adapter #
+(
+    parameter DEPTH = 4096,
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                     s_clk,
+    input  wire                     s_rst,
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    input  wire                     m_clk,
+    input  wire                     m_rst,
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser,
+    input  wire                     s_pause_req,
+    output wire                     s_pause_ack,
+    input  wire                     m_pause_req,
+    output wire                     m_pause_ack,
+    output wire [$clog2(DEPTH):0]   s_status_depth,
+    output wire [$clog2(DEPTH):0]   s_status_depth_commit,
+    output wire                     s_status_overflow,
+    output wire                     s_status_bad_frame,
+    output wire                     s_status_good_frame,
+    output wire [$clog2(DEPTH):0]   m_status_depth,
+    output wire [$clog2(DEPTH):0]   m_status_depth_commit,
+    output wire                     m_status_overflow,
+    output wire                     m_status_bad_frame,
+    output wire                     m_status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam PTR_WIDTH = ADDR_WIDTH + 1;
+
+    // Internal data width for storage
+    localparam DATA_W = S_DATA_WIDTH;
+    localparam KEEP_W = S_KEEP_WIDTH;
+    localparam USER_W = USER_ENABLE ? USER_WIDTH : 1;
+    localparam ID_W = ID_ENABLE ? ID_WIDTH : 1;
+    localparam DEST_W = DEST_ENABLE ? DEST_WIDTH : 1;
+
+    // Total bits per entry
+    localparam ENTRY_W = DATA_W + KEEP_W + USER_W + ID_W + DEST_W + 1; // +1 for tlast
+
+    // RAM
+    reg [ENTRY_W-1:0] ram [0:DEPTH-1];
+
+    // Write pointer (s_clk domain)
+    reg [PTR_WIDTH-1:0] wr_ptr;
+    reg [ADDR_WIDTH-1:0] wr_addr;
+
+    // Read pointer (m_clk domain)
+    reg [PTR_WIDTH-1:1] rd_ptr;
+    reg [ADDR_WIDTH-1:0] rd_addr;
+
+    // Gray code pointers for CDC
+    function [PTR_WIDTH-1:0] bin2gray;
+        input [PTR_WIDTH-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    function [PTR_WIDTH-1:0] gray2bin;
+        input [PTR_WIDTH-1:0] gray;
+        reg [PTR_WIDTH-1:0] bin;
+        integer i;
+        begin
+            bin[PTR_WIDTH-1] = gray[PTR_WIDTH-1];
+            for (i = PTR_WIDTH-2; i >= 0; i = i - 1)
+                bin[i] = gray[i] ^ bin[i+1];
+            gray2bin = bin;
+        end
+    endfunction
+
+    // Gray code write pointer
+    wire [PTR_WIDTH-1:0] wr_ptr_gray = bin2gray({wr_ptr, wr_addr});
+    // Actually, let's use a single pointer with enough bits
+    // Let's redefine: use a single counter for write and read
+
+    // Redefine pointers as single counters
+    reg [PTR_WIDTH-1:0] wr_ptr_reg;
+    reg [PTR_WIDTH-1:0] rd_ptr_reg;
+
+    wire [PTR_WIDTH-1:0] wr_ptr_gray = bin2gray(wr_ptr_reg);
+    wire [PTR_WIDTH-1:0] rd_ptr_gray = bin2gray(rd_ptr_reg);
+
+    // Synchronizers
+    reg [PTR_WIDTH-1:0] wr_ptr_gray_s1, wr_ptr_gray_s2;
+    reg [PTR_WIDTH-1:0] rd_ptr_gray_s1, rd_ptr_gray_s2;
+
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            wr_ptr_gray_s1 <= {PTR_WIDTH{1'b0}};
+            wr_ptr_gray_s2 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            wr_ptr_gray_s1 <= wr_ptr_gray;
+            wr_ptr_gray_s2 <= wr_ptr_gray_s1;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            rd_ptr_gray_s1 <= {PTR_WIDTH{1'b0}};
+            rd_ptr_gray_s2 <= {PTR_WIDTH{1'b0}};
+        end else begin
+            rd_ptr_gray_s1 <= rd_ptr_gray;
+            rd_ptr_gray_s2 <= rd_ptr_gray_s1;
+        end
+    end
+
+    // Convert synchronized gray to binary
+    wire [PTR_WIDTH-1:0] wr_ptr_sync = gray2bin(wr_ptr_gray_s2);
+    wire [PTR_WIDTH-1:0] rd_ptr_sync = gray2bin(rd_ptr_gray_s2);
+
+    // Depth calculation
+    wire [PTR_WIDTH:0] depth = wr_ptr_sync - rd_ptr_sync;
+    wire [PTR_WIDTH-1:0] depth_low = depth[PTR_WIDTH-1:0];
+    wire full = (depth == DEPTH);
+    wire empty = (depth == 0);
+
+    // Write address
+    wire [ADDR_WIDTH-1:0] wr_addr_calc = wr_ptr_reg[ADDR_WIDTH-1:0];
+    wire [ADDR_WIDTH-1:0] rd_addr_calc = rd_ptr_reg[ADDR_WIDTH-1:0];
+
+    // Write enable
+    wire s_write_en = s_axis_tvalid & s_axis_tready & ~full;
+
+    // Read enable
+    wire m_read_en = m_axis_tvalid & m_axis_tready & ~empty;
+
+    // Update write pointer
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            wr_ptr_reg <= {PTR_WIDTH{1'b0}};
+        else if (s_write_en)
+            wr_ptr_reg <= wr_ptr_reg + 1'b1;
+    end
+
+    // Update read pointer
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            rd_ptr_reg <= {PTR_WIDTH{1'b0}};
+        else if (m_read_en)
+            rd_ptr_reg <= rd_ptr_reg + 1'b1;
+    end
+
+    // RAM write
+    always @(posedge s_clk) begin
+        if (s_write_en) begin
+            ram[wr_addr_calc] <= {s_axis_tlast, s_axis_tuser, s_axis_tid, s_axis_tdest, s_axis_tkeep, s_axis_tdata};
+        end
+    end
+
+    // RAM read
+    reg [ENTRY_W-1:0] rd_data;
+    always @(posedge m_clk) begin
+        rd_data <= ram[rd_addr_calc];
+    end
+
+    // Output signals
+    assign m_axis_tdata = rd_data[DATA_W-1:0];
+    assign m_axis_tkeep = rd_data[DATA_W + KEEP_W-1:DATA_W];
+    assign m_axis_tlast = rd_data[ENTRY_W-1];
+    assign m_axis_tuser = rd_data[ENTRY_W-2:ENTRY_W-1-USER_W];
+    assign m_axis_tid = rd_data[ENTRY_W-1-USER_W:ENTRY_W-1-USER_W-ID_W];
+    assign m_axis_tdest = rd_data[ENTRY_W-1-USER_W-ID_W:ENTRY_W-1-USER_W-ID_W-DEST_W];
+
+    // Valid and ready
+    assign m_axis_tvalid = ~empty;
+    assign s_axis_tready = ~full;
+
+    // Pause logic
+    reg s_pause_ack_reg, m_pause_ack_reg;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            s_pause_ack_reg <= 1'b0;
+        else if (PAUSE_ENABLE)
+            s_pause_ack_reg <= s_pause_req;
+        else
+            s_pause_ack_reg <= 1'b0;
+    end
+    assign s_pause_ack = s_pause_ack_reg;
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            m_pause_ack_reg <= 1'b0;
+        else if (PAUSE_ENABLE)
+            m_pause_ack_reg <= m_pause_req;
+        else
+            m_pause_ack_reg <= 1'b0;
+    end
+    assign m_pause_ack = m_pause_ack_reg;
+
+    // Status
+    assign s_status_depth = depth_low;
+    assign s_status_depth_commit = depth_low;
+    assign s_status_overflow = full;
+    assign s_status_bad_frame = 1'b0;
+    assign s_status_good_frame = 1'b0;
+    assign m_status_depth = depth_low;
+    assign m_status_depth_commit = depth_low;
+    assign m_status_overflow = full;
+    assign m_status_bad_frame = 1'b0;
+    assign m_status_good_frame = 1'b0;
+
+endmodule
+```<|im_end|>

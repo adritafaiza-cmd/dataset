@@ -1,0 +1,192 @@
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	// Internal parameters
+	localparam DEPTH = 1 << LGFIFO;
+	localparam ADDR_W = LGFIFO;
+	localparam CNT_W = LGFIFO + 1;
+	localparam GRAY_W = LGFIFO + 1;
+
+	// Write side
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+	reg [ADDR_W-1:0] wr_ptr;
+	reg [ADDR_W-1:0] wr_ptr_gray;
+	reg [CNT_W-1:0] wr_count;
+
+	// Read side
+	reg [ADDR_W-1:0] rd_ptr;
+	reg [ADDR_W-1:0] rd_ptr_gray;
+	reg [CNT_W-1:0] rd_count;
+
+	// Synchronizers
+	reg [GRAY_W-1:0] wr_gray_sync [0:NFF-1];
+	reg [GRAY_W-1:0] rd_gray_sync [0:NFF-1];
+
+	// Write side logic
+	wire wr_en = i_wr & ~o_wr_full;
+	wire wr_edge = WRITE_ON_POSEDGE ? i_wclk : ~i_wclk;
+
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_ptr <= {ADDR_W{1'b0}};
+			wr_ptr_gray <= {GRAY_W{1'b0}};
+			wr_count <= {CNT_W{1'b0}};
+		end else if (wr_en) begin
+			mem[wr_ptr] <= i_wr_data;
+			wr_ptr <= wr_ptr + 1'b1;
+			wr_ptr_gray <= wr_ptr + 1'b1;
+			wr_count <= wr_count + 1'b1;
+		end
+	end
+
+	// Gray code conversion for write pointer
+	always @(*) begin
+		wr_ptr_gray = wr_ptr ^ (wr_ptr >> 1);
+	end
+
+	// Read side logic
+	wire rd_en = i_rd & ~o_rd_empty;
+	wire rd_edge = i_rclk;
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_ptr <= {ADDR_W{1'b0}};
+			rd_ptr_gray <= {GRAY_W{1'b0}};
+			rd_count <= {CNT_W{1'b0}};
+		end else if (rd_en) begin
+			rd_ptr <= rd_ptr + 1'b1;
+			rd_ptr_gray <= rd_ptr + 1'b1;
+			rd_count <= rd_count + 1'b1;
+		end
+	end
+
+	// Gray code conversion for read pointer
+	always @(*) begin
+		rd_ptr_gray = rd_ptr ^ (rd_ptr >> 1);
+	end
+
+	// Synchronize write gray pointer to read clock
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			wr_gray_sync[0] <= {GRAY_W{1'b0}};
+			wr_gray_sync[1] <= {GRAY_W{1'b0}};
+			if (NFF > 2) begin
+				wr_gray_sync[2] <= {GRAY_W{1'b0}};
+			end
+		end else begin
+			wr_gray_sync[0] <= wr_ptr_gray;
+			wr_gray_sync[1] <= wr_gray_sync[0];
+			if (NFF > 2) begin
+				wr_gray_sync[2] <= wr_gray_sync[1];
+			end
+		end
+	end
+
+	// Synchronize read gray pointer to write clock
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			rd_gray_sync[0] <= {GRAY_W{1'b0}};
+			rd_gray_sync[1] <= {GRAY_W{1'b0}};
+			if (NFF > 2) begin
+				rd_gray_sync[2] <= {GRAY_W{1'b0}};
+			end
+		end else begin
+			rd_gray_sync[0] <= rd_ptr_gray;
+			rd_gray_sync[1] <= rd_gray_sync[0];
+			if (NFF > 2) begin
+				rd_gray_sync[2] <= rd_gray_sync[1];
+			end
+		end
+	end
+
+	// Convert synchronized gray codes back to binary
+	function [ADDR_W-1:0] gray_to_bin;
+		input [GRAY_W-1:0] gray;
+		reg [GRAY_W-1:0] binary;
+		begin
+			binary[GRAY_W-1] = gray[GRAY_W-1];
+			for (i = GRAY_W-2; i >= 0; i = i - 1)
+				binary[i] = binary[i+1] ^ gray[i];
+			gray_to_bin = binary[ADDR_W-1:0];
+		end
+	endfunction
+
+	reg [ADDR_W-1:0] wr_ptr_bin_rd;
+	reg [ADDR_W-1:0] rd_ptr_bin_wr;
+
+	always @(*) begin
+		wr_ptr_bin_rd = gray_to_bin(wr_gray_sync[NFF-1]);
+		rd_ptr_bin_wr = gray_to_bin(rd_gray_sync[NFF-1]);
+	end
+
+	// Full and empty flags
+	// Full: write pointer has lapped read pointer by DEPTH
+	// In gray code, full when MSB differs and rest are same
+	wire full_flag = (wr_ptr_bin_rd == rd_ptr_bin_wr) && 
+	                 (wr_ptr_bin_rd[ADDR_W-1] != rd_ptr_bin_wr[ADDR_W-1]);
+	
+	// Actually, let's use a simpler approach with counters
+	// Full when wr_count - rd_count == DEPTH
+	// Empty when wr_count - rd_count == 0
+
+	// Use the synchronized pointers to compute full/empty
+	// Full: (wr_ptr_bin_rd - rd_ptr_bin_wr) == DEPTH
+	// Empty: wr_ptr_bin_rd == rd_ptr_bin_wr
+
+	wire [CNT_W-1:0] wr_rd_diff = wr_ptr_bin_rd - rd_ptr_bin_wr;
+	wire full_raw = (wr_rd_diff == DEPTH);
+	wire empty_raw = (wr_ptr_bin_rd == rd_ptr_bin_wr);
+
+	// Register the flags
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			o_wr_full <= 1'b0;
+		else
+			o_wr_full <= full_raw;
+	end
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_empty <= 1'b1;
+		else
+			o_rd_empty <= empty_raw;
+	end
+
+	// Read data
+	reg [WIDTH-1:0] rd_data_reg;
+	reg [ADDR_W-1:0] rd_addr;
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_data_reg <= {WIDTH{1'b0}};
+			rd_addr <= {ADDR_W{1'b0}};
+		end else begin
+			rd_addr <= rd_ptr;
+			if (rd_en)
+				rd_data_reg <= mem[rd_ptr];
+		end
+	end
+
+	// Output data
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_data <= {WIDTH{1'b0}};
+		else if (OPT_REGISTER_READS)
+			o_rd_data <= rd_data_reg;
+		else
+			o_rd_data <= mem[rd_addr];
+	end
+
+endmodule

@@ -1,0 +1,127 @@
+```verilog
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    reg [N-1:0] shift_reg;
+    reg [N-1:0] data_in;
+    reg [N-1:0] data_out;
+    reg [3:0]   bit_cnt;
+    reg         sclk_div_cnt;
+    reg         sclk_edge;
+    reg         transfer_active;
+    reg         data_loaded;
+
+    // SCLK Divider
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sclk_div_cnt <= 0;
+        end else begin
+            if (sclk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                sclk_div_cnt <= 0;
+            end else begin
+                sclk_div_cnt <= sclk_div_cnt + 1;
+            end
+        end
+    end
+
+    // SCLK Edge Detection
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sclk_edge <= 0;
+        end else begin
+            if (sclk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                sclk_edge <= ~sclk_edge;
+            end
+        end
+    end
+
+    // Parallel Data Interface
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            di_req_o <= 1;
+            wr_ack_o <= 0;
+            data_loaded <= 0;
+        end else begin
+            if (di_req_o && wren_i) begin
+                data_in <= di_i;
+                di_req_o <= 0;
+                wr_ack_o <= 1;
+                data_loaded <= 1;
+            end else begin
+                wr_ack_o <= 0;
+            end
+        end
+    end
+
+    // SPI Transfer Control
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            spi_ssel_o <= 0;
+            spi_sck_o <= 0;
+            bit_cnt <= 0;
+            transfer_active <= 0;
+            do_valid_o <= 0;
+        end else begin
+            if (sclk_div_cnt == SPI_2X_CLK_DIV - 1) begin
+                if (data_loaded && !transfer_active) begin
+                    spi_ssel_o <= 1;
+                    shift_reg <= data_in;
+                    bit_cnt <= N - 1;
+                    transfer_active <= 1;
+                    spi_sck_o <= sclk_edge;
+                end else if (transfer_active) begin
+                    if (bit_cnt > 0) begin
+                        bit_cnt <= bit_cnt - 1;
+                        spi_sck_o <= sclk_edge;
+                    end else begin
+                        spi_ssel_o <= 0;
+                        transfer_active <= 0;
+                        do_valid_o <= 1;
+                        data_loaded <= 0;
+                        di_req_o <= 1;
+                    end
+                end else begin
+                    spi_sck_o <= sclk_edge;
+                end
+            end
+        end
+    end
+
+    // Data Shifting and MISO Capture
+    always @(posedge sclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            shift_reg <= 0;
+            data_out <= 0;
+        end else begin
+            if (sclk_div_cnt == SPI_2X_CLK_DIV - 1 && transfer_active) begin
+                if (sclk_edge) begin
+                    shift_reg <= {shift_reg[N-2:0], spi_miso_i};
+                    spi_mosi_o <= shift_reg[N-1];
+                end
+            end else if (do_valid_o) begin
+                data_out <= shift_reg;
+                do_valid_o <= 0;
+            end
+        end
+    end
+
+    assign do_o = data_out;
+
+endmodule
+```<|im_end|>

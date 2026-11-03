@@ -1,0 +1,103 @@
+module cdc_fifo_2phase #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH;
+    localparam FULL_PTR_W = LOG_DEPTH + 1;
+
+    // Source domain: write pointer and FIFO memory
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg [PTR_W-1:0] wptr;
+    reg [PTR_W-1:0] rptr_src_sync; // synchronized read pointer from dst domain
+
+    wire src_wr_en = src_valid_i & src_ready_o;
+    wire [FULL_PTR_W-1:0] wptr_full = {wptr[PTR_W-1], wptr};
+    wire [FULL_PTR_W-1:0] rptr_full_src = {rptr_src_sync[PTR_W-1], rptr_src_sync};
+    wire src_full = (wptr_full == rptr_full_src) && (wptr[PTR_W-1] != rptr_src_sync[PTR_W-1]);
+    wire src_empty = (wptr_full == rptr_full_src);
+
+    assign src_ready_o = !src_full;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            wptr <= {PTR_W{1'b0}};
+        end else if (src_wr_en) begin
+            mem[wptr] <= src_data_i;
+            wptr <= wptr + 1'b1;
+        end
+    end
+
+    // Destination domain: read pointer and output register
+    reg [PTR_W-1:0] rptr;
+    reg [PTR_W-1:0] wptr_dst_sync; // synchronized write pointer from src domain
+    reg [WIDTH-1:0] dst_data_reg;
+    reg dst_valid_reg;
+
+    wire [FULL_PTR_W-1:0] rptr_full = {rptr[PTR_W-1], rptr};
+    wire [FULL_PTR_W-1:0] wptr_full_dst = {wptr_dst_sync[PTR_W-1], wptr_dst_sync};
+    wire dst_empty = (rptr_full == wptr_full_dst);
+    wire dst_rd_en = dst_valid_reg & dst_ready_i;
+
+    assign dst_data_o = dst_data_reg;
+    assign dst_valid_o = dst_valid_reg;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            rptr <= {PTR_W{1'b0}};
+            dst_data_reg <= {WIDTH{1'b0}};
+            dst_valid_reg <= 1'b0;
+        end else begin
+            if (dst_rd_en) begin
+                dst_valid_reg <= 1'b0;
+                rptr <= rptr + 1'b1;
+            end else if (!dst_valid_reg && !dst_empty) begin
+                dst_data_reg <= mem[rptr];
+                dst_valid_reg <= 1'b1;
+            end
+        end
+    end
+
+    // Synchronize write pointer from src to dst domain
+    reg [PTR_W-1:0] wptr_sync1;
+    reg [PTR_W-1:0] wptr_sync2;
+    assign wptr_dst_sync = wptr_sync2;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            wptr_sync1 <= {PTR_W{1'b0}};
+            wptr_sync2 <= {PTR_W{1'b0}};
+        end else begin
+            wptr_sync1 <= wptr;
+            wptr_sync2 <= wptr_sync1;
+        end
+    end
+
+    // Synchronize read pointer from dst to src domain
+    reg [PTR_W-1:0] rptr_sync1;
+    reg [PTR_W-1:0] rptr_sync2;
+    assign rptr_src_sync = rptr_sync2;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            rptr_sync1 <= {PTR_W{1'b0}};
+            rptr_sync2 <= {PTR_W{1'b0}};
+        end else begin
+            rptr_sync1 <= rptr;
+            rptr_sync2 <= rptr_sync1;
+        end
+    end
+
+endmodule

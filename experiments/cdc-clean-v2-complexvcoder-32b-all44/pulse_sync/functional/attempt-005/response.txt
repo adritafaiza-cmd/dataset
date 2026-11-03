@@ -1,0 +1,237 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "pulse_sync",
+            "function": "Cross a one-cycle pulse from one asynchronous clock domain to another, ensuring only one pulse is transmitted at a time and providing a busy signal.",
+            "parameters": [
+                {
+                    "name": "STAGES",
+                    "value": 2
+                }
+            ],
+            "ports": [
+                {
+                    "name": "clk_a",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "rstn_a",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "clk_b",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "rstn_b",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "pulseA_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "pulseB_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "busy_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                }
+            ],
+            "instances": [
+                {
+                    "module": "async_fifo",
+                    "name": "fifo_inst",
+                    "function": "Synchronizes the pulse from clk_a to clk_b with a FIFO.",
+                    "connections": [
+                        {
+                            "local": "clk_a",
+                            "remote": "clk_a"
+                        },
+                        {
+                            "local": "rstn_a",
+                            "remote": "rstn_a"
+                        },
+                        {
+                            "local": "clk_b",
+                            "remote": "clk_b"
+                        },
+                        {
+                            "local": "rstn_b",
+                            "remote": "rstn_b"
+                        },
+                        {
+                            "local": "pulseA_i",
+                            "remote": "din"
+                        },
+                        {
+                            "local": "pulseB_o",
+                            "remote": "dout"
+                        },
+                        {
+                            "local": "busy_o",
+                            "remote": "full"
+                        }
+                    ]
+                }
+            ],
+            "connections": [],
+            "internal_signals": [],
+            "behavior": [
+                "A one-cycle pulse on pulseA_i in domain A must produce one pulse on pulseB_o in domain B.",
+                "busy_o is high while a pulse is in flight; ignore additional pulseA_i while busy.",
+                "After reset, pulseB_o and busy_o are low."
+            ]
+        },
+        {
+            "Top_module_name": "async_fifo",
+            "function": "Synchronizes data between two asynchronous clock domains.",
+            "parameters": [
+                {
+                    "name": "STAGES",
+                    "value": 2
+                }
+            ],
+            "ports": [
+                {
+                    "name": "clk_a",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "rstn_a",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "clk_b",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "rstn_b",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "din",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                },
+                {
+                    "name": "dout",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_b"
+                },
+                {
+                    "name": "full",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_a"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [],
+            "behavior": [
+                "Synchronizes the input din from clk_a to clk_b using a FIFO.",
+                "dout is the synchronized pulse from clk_a to clk_b.",
+                "full indicates if the FIFO is full, acting as the busy signal."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module pulse_sync #(
+    parameter STAGES = 2
+)(
+    input  clk_a,
+    input  rstn_a,
+    input  clk_b,
+    input  rstn_b,
+    input  pulseA_i,
+    output pulseB_o,
+    output busy_o
+);
+
+    reg  [STAGES-1:0] sync_reg_a;
+    reg  [STAGES-1:0] sync_reg_b;
+    reg               pulseA_sync;
+    reg               pulseA_edge;
+    reg               pulseB_reg;
+    reg               busy_reg;
+
+    // Synchronize pulseA_i to clk_a domain
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            sync_reg_a <= {STAGES{1'b0}};
+        end else begin
+            sync_reg_a <= {sync_reg_a[STAGES-2:0], pulseA_i};
+        end
+    end
+
+    // Detect rising edge of synchronized pulseA_i
+    always @(posedge clk_a or negedge rstn_a) begin
+        if (!rstn_a) begin
+            pulseA_edge <= 1'b0;
+        end else begin
+            pulseA_edge <= sync_reg_a[0] & ~sync_reg_a[1];
+        end
+    end
+
+    // Synchronize pulseA_edge to clk_b domain
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            sync_reg_b <= {STAGES{1'b0}};
+        end else begin
+            sync_reg_b <= {sync_reg_b[STAGES-2:0], pulseA_edge};
+        end
+    end
+
+    assign pulseA_sync = sync_reg_b[0];
+
+    // Generate pulseB_o and busy_o
+    always @(posedge clk_b or negedge rstn_b) begin
+        if (!rstn_b) begin
+            pulseB_reg <= 1'b0;
+            busy_reg   <= 1'b0;
+        end else if (pulseA_sync) begin
+            pulseB_reg <= 1'b1;
+            busy_reg   <= 1'b1;
+        end else if (pulseB_reg) begin
+            pulseB_reg <= 1'b0;
+            busy_reg   <= 1'b0;
+        end
+    end
+
+    assign pulseB_o = pulseB_reg;
+    assign busy_o   = busy_reg;
+
+endmodule
+```

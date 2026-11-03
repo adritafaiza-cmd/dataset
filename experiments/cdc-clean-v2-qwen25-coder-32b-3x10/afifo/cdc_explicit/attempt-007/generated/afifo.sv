@@ -1,0 +1,150 @@
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	localparam DEPTH = 1 << LGFIFO;
+	localparam ADDR_WIDTH = LGFIFO;
+
+	reg [ADDR_WIDTH-1:0] wr_ptr, wr_ptr_gray, wr_ptr_gray_sync;
+	reg [ADDR_WIDTH-1:0] rd_ptr, rd_ptr_gray, rd_ptr_gray_sync;
+	reg [WIDTH-1:0] mem [0:DEPTH-1];
+
+	// Write side logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_ptr <= 0;
+			wr_ptr_gray <= 0;
+			o_wr_full <= 0;
+		end else begin
+			if (i_wr && !o_wr_full) begin
+				if (WRITE_ON_POSEDGE) begin
+					mem[wr_ptr] <= i_wr_data;
+					wr_ptr <= wr_ptr + 1;
+					wr_ptr_gray <= wr_ptr ^ (wr_ptr >> 1);
+				end
+			end
+			if (!WRITE_ON_POSEDGE) begin
+				mem[wr_ptr] <= i_wr_data;
+				wr_ptr <= wr_ptr + 1;
+				wr_ptr_gray <= wr_ptr ^ (wr_ptr >> 1);
+			end
+		end
+	end
+
+	// Gray code synchronization for wr_ptr_gray to read domain
+	generate
+		genvar i;
+		for (i = 0; i < NFF; i = i + 1) begin : sync_wr_ptr_gray
+			reg [ADDR_WIDTH-1:0] sync_stage;
+			if (i == 0) begin
+				always @(posedge i_rclk or negedge i_rd_reset_n) begin
+					if (!i_rd_reset_n)
+						sync_stage <= 0;
+					else
+						sync_stage <= wr_ptr_gray;
+				end
+			end else begin
+				always @(posedge i_rclk or negedge i_rd_reset_n) begin
+					if (!i_rd_reset_n)
+						sync_stage <= 0;
+					else
+						sync_stage <= sync_wr_ptr_gray[i-1].sync_stage;
+				end
+			end
+			if (i == NFF-1)
+				assign wr_ptr_gray_sync = sync_stage;
+		end
+	endgenerate
+
+	// Read side logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_ptr <= 0;
+			rd_ptr_gray <= 0;
+			o_rd_empty <= 1;
+		end else begin
+			if (i_rd && !o_rd_empty) begin
+				rd_ptr <= rd_ptr + 1;
+				rd_ptr_gray <= rd_ptr ^ (rd_ptr >> 1);
+			end
+		end
+	end
+
+	// Gray code synchronization for rd_ptr_gray to write domain
+	generate
+		genvar j;
+		for (j = 0; j < NFF; j = j + 1) begin : sync_rd_ptr_gray
+			reg [ADDR_WIDTH-1:0] sync_stage;
+			if (j == 0) begin
+				always @(posedge i_wclk or negedge i_wr_reset_n) begin
+					if (!i_wr_reset_n)
+						sync_stage <= 0;
+					else
+						sync_stage <= rd_ptr_gray;
+				end
+			end else begin
+				always @(posedge i_wclk or negedge i_wr_reset_n) begin
+					if (!i_wr_reset_n)
+						sync_stage <= 0;
+					else
+						sync_stage <= sync_rd_ptr_gray[j-1].sync_stage;
+				end
+			end
+			if (j == NFF-1)
+				assign rd_ptr_gray_sync = sync_stage;
+		end
+	endgenerate
+
+	// Full and empty flags
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			o_wr_full <= 0;
+		else begin
+			if (wr_ptr_gray_sync == (rd_ptr_gray + 1) ^ ((rd_ptr_gray + 1) >> 1))
+				o_wr_full <= 1;
+			else
+				o_wr_full <= 0;
+		end
+	end
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_empty <= 1;
+		else begin
+			if (wr_ptr_gray_sync == rd_ptr_gray)
+				o_rd_empty <= 1;
+			else
+				o_rd_empty <= 0;
+		end
+	end
+
+	// Read data output
+	reg [WIDTH-1:0] rd_data_sync;
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			rd_data_sync <= 0;
+		else
+			rd_data_sync <= mem[rd_ptr];
+	end
+
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_data <= 0;
+		else if (OPT_REGISTER_READS)
+			o_rd_data <= rd_data_sync;
+		else
+			o_rd_data <= mem[rd_ptr];
+	end
+
+endmodule

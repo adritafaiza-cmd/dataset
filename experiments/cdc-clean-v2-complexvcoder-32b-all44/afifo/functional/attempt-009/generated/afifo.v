@@ -1,0 +1,173 @@
+module afifo #(
+        parameter	LGFIFO = 3,
+        parameter	WIDTH  = 16,
+        parameter	NFF    = 2,
+        parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+        parameter [0:0]	OPT_REGISTER_READS = 1'b1
+    ) (
+        input	wire			i_wclk, i_wr_reset_n, i_wr,
+        input	wire	[WIDTH-1:0]	i_wr_data,
+        output	reg			o_wr_full,
+        input	wire			i_rclk, i_rd_reset_n, i_rd,
+        output	reg	[WIDTH-1:0]	o_rd_data,
+        output	reg			o_rd_empty
+    );
+
+    wire [LGFIFO:0] gray_wr_ptr, gray_rd_ptr, sync_gray_wr_ptr, sync_gray_rd_ptr;
+    wire [LGFIFO:0] wr_ptr, rd_ptr;
+    wire wr_full_flag, rd_empty_flag;
+    reg [WIDTH-1:0] reg_o_rd_data;
+
+    async_fifo_logic #(
+        .LGFIFO(LGFIFO),
+        .WIDTH(WIDTH),
+        .NFF(NFF),
+        .WRITE_ON_POSEDGE(WRITE_ON_POSEDGE),
+        .OPT_REGISTER_READS(OPT_REGISTER_READS)
+    ) async_fifo_logic_inst (
+        .i_wclk(i_wclk),
+        .i_wr_reset_n(i_wr_reset_n),
+        .i_wr(i_wr),
+        .i_wr_data(i_wr_data),
+        .o_wr_full(o_wr_full),
+        .i_rclk(i_rclk),
+        .i_rd_reset_n(i_rd_reset_n),
+        .i_rd(i_rd),
+        .o_rd_data(reg_o_rd_data),
+        .o_rd_empty(o_rd_empty),
+        .wr_ptr(wr_ptr),
+        .rd_ptr(rd_ptr),
+        .gray_wr_ptr(gray_wr_ptr),
+        .gray_rd_ptr(gray_rd_ptr),
+        .sync_gray_wr_ptr(sync_gray_wr_ptr),
+        .sync_gray_rd_ptr(sync_gray_rd_ptr),
+        .wr_full_flag(wr_full_flag),
+        .rd_empty_flag(rd_empty_flag)
+    );
+
+    // Output register for additional output registering if OPT_REGISTER_READS is set
+    always @(posedge i_rclk or negedge i_rd_reset_n) begin
+        if (!i_rd_reset_n) begin
+            o_rd_data <= {WIDTH{1'b0}};
+        end else if (OPT_REGISTER_READS) begin
+            o_rd_data <= reg_o_rd_data;
+        end
+    end
+
+endmodule
+
+module async_fifo_logic #(
+        parameter	LGFIFO = 3,
+        parameter	WIDTH  = 16,
+        parameter	NFF    = 2,
+        parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+        parameter [0:0]	OPT_REGISTER_READS = 1'b1
+    ) (
+        input	wire			i_wclk, i_wr_reset_n, i_wr,
+        input	wire	[WIDTH-1:0]	i_wr_data,
+        output	reg			o_wr_full,
+        input	wire			i_rclk, i_rd_reset_n, i_rd,
+        output	reg	[WIDTH-1:0]	o_rd_data,
+        output	reg			o_rd_empty,
+        output	wire [LGFIFO:0] wr_ptr,
+        output	wire [LGFIFO:0] rd_ptr,
+        output	wire [LGFIFO:0] gray_wr_ptr,
+        output	wire [LGFIFO:0] gray_rd_ptr,
+        output	wire [LGFIFO:0] sync_gray_wr_ptr,
+        output	wire [LGFIFO:0] sync_gray_rd_ptr,
+        output	wire wr_full_flag,
+        output	wire rd_empty_flag
+    );
+
+    reg [LGFIFO:0] wr_ptr_reg, rd_ptr_reg;
+    reg [LGFIFO:0] gray_wr_ptr_reg, gray_rd_ptr_reg;
+    reg [LGFIFO:0] sync_gray_wr_ptr_reg [NFF-1:0];
+    reg [LGFIFO:0] sync_gray_rd_ptr_reg [NFF-1:0];
+    reg [WIDTH-1:0] fifo_mem [0:(2**LGFIFO)-1];
+    reg wr_full_flag_reg, rd_empty_flag_reg;
+
+    // Binary to Gray code conversion
+    function [LGFIFO:0] bin_to_gray;
+        input [LGFIFO:0] bin;
+        bin_to_gray = bin ^ (bin >> 1);
+    endfunction
+
+    // Write pointer and full flag
+    always @(posedge i_wclk or negedge i_wr_reset_n) begin
+        if (!i_wr_reset_n) begin
+            wr_ptr_reg <= {LGFIFO+1{1'b0}};
+            gray_wr_ptr_reg <= {LGFIFO+1{1'b0}};
+            wr_full_flag_reg <= 1'b0;
+        end else if (i_wr && !wr_full_flag_reg) begin
+            if (WRITE_ON_POSEDGE) begin
+                fifo_mem[wr_ptr_reg[LGFIFO-1:0]] <= i_wr_data;
+                wr_ptr_reg <= wr_ptr_reg + 1;
+                gray_wr_ptr_reg <= bin_to_gray(wr_ptr_reg + 1);
+            end
+        end
+    end
+
+    // Read pointer and empty flag
+    always @(posedge i_rclk or negedge i_rd_reset_n) begin
+        if (!i_rd_reset_n) begin
+            rd_ptr_reg <= {LGFIFO+1{1'b0}};
+            gray_rd_ptr_reg <= {LGFIFO+1{1'b0}};
+            rd_empty_flag_reg <= 1'b1;
+        end else if (i_rd && !rd_empty_flag_reg) begin
+            fifo_mem[rd_ptr_reg[LGFIFO-1:0]] <= fifo_mem[rd_ptr_reg[LGFIFO-1:0]];
+            rd_ptr_reg <= rd_ptr_reg + 1;
+            gray_rd_ptr_reg <= bin_to_gray(rd_ptr_reg + 1);
+        end
+    end
+
+    // Synchronizer chain for gray-coded pointers
+    genvar i;
+    generate
+        for (i = 0; i < NFF; i = i + 1) begin : sync_chain
+            always @(posedge i_rclk or negedge i_wr_reset_n) begin
+                if (!i_wr_reset_n) begin
+                    sync_gray_wr_ptr_reg[i] <= {LGFIFO+1{1'b0}};
+                end else if (i == 0) begin
+                    sync_gray_wr_ptr_reg[i] <= gray_wr_ptr_reg;
+                end else begin
+                    sync_gray_wr_ptr_reg[i] <= sync_gray_wr_ptr_reg[i-1];
+                end
+            end
+            always @(posedge i_wclk or negedge i_rd_reset_n) begin
+                if (!i_rd_reset_n) begin
+                    sync_gray_rd_ptr_reg[i] <= {LGFIFO+1{1'b0}};
+                end else if (i == 0) begin
+                    sync_gray_rd_ptr_reg[i] <= gray_rd_ptr_reg;
+                end else begin
+                    sync_gray_rd_ptr_reg[i] <= sync_gray_rd_ptr_reg[i-1];
+                end
+            end
+        end
+    endgenerate
+
+    // Full and empty flags
+    assign sync_gray_wr_ptr = sync_gray_wr_ptr_reg[NFF-1];
+    assign sync_gray_rd_ptr = sync_gray_rd_ptr_reg[NFF-1];
+    assign wr_full_flag = (gray_wr_ptr_reg == bin_to_gray(sync_gray_rd_ptr + 2**LGFIFO));
+    assign rd_empty_flag = (sync_gray_wr_ptr == sync_gray_rd_ptr);
+
+    // Output data
+    always @(posedge i_rclk or negedge i_rd_reset_n) begin
+        if (!i_rd_reset_n) begin
+            o_rd_data <= {WIDTH{1'b0}};
+        end else if (i_rd && !rd_empty_flag) begin
+            o_rd_data <= fifo_mem[rd_ptr_reg[LGFIFO-1:0]];
+        end
+    end
+
+    // Assign output flags
+    assign o_wr_full = wr_full_flag;
+    assign o_rd_empty = rd_empty_flag;
+
+    // Assign output pointers
+    assign wr_ptr = wr_ptr_reg;
+    assign rd_ptr = rd_ptr_reg;
+    assign gray_wr_ptr = gray_wr_ptr_reg;
+    assign gray_rd_ptr = gray_rd_ptr_reg;
+
+endmodule

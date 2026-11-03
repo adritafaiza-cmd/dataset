@@ -1,0 +1,159 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "data_sync",
+            "function": "Multi-bit destination-clock data synchronizer",
+            "parameters": [
+                { "name": "STAGES", "value": 2 },
+                { "name": "DWIDTH", "value": 8 }
+            ],
+            "ports": [
+                { "name": "clk", "direction": "input", "width": 1, "clock_domain": "clk" },
+                { "name": "rstn", "direction": "input", "width": 1, "clock_domain": "clk" },
+                { "name": "din", "direction": "input", "width": "DWIDTH", "clock_domain": "clk" },
+                { "name": "dready_i", "direction": "input", "width": 1, "clock_domain": "clk" },
+                { "name": "dout", "direction": "output", "width": "DWIDTH", "clock_domain": "clk" },
+                { "name": "dready_o", "direction": "output", "width": 1, "clock_domain": "clk" }
+            ],
+            "instances": [
+                {
+                    "module": "sync_stage",
+                    "name": "sync_stage_inst_0",
+                    "function": "Synchronization stage",
+                    "connections": [
+                        { "source": "clk", "sink": "clk" },
+                        { "source": "rstn", "sink": "rstn" },
+                        { "source": "din", "sink": "din" },
+                        { "source": "sync_stage_inst_0.dout", "sink": "sync_stage_inst_1.din" }
+                    ]
+                },
+                {
+                    "module": "sync_stage",
+                    "name": "sync_stage_inst_1",
+                    "function": "Synchronization stage",
+                    "connections": [
+                        { "source": "clk", "sink": "clk" },
+                        { "source": "rstn", "sink": "rstn" },
+                        { "source": "sync_stage_inst_1.dout", "sink": "dout" }
+                    ]
+                }
+            ],
+            "connections": [
+                { "source": "dready_i", "sink": "dready_o" }
+            ],
+            "internal_signals": [],
+            "behavior": [
+                "When dready_i indicates a new source value, present a coherent dout and pulse dready_o in clk.",
+                "Do not tear multi-bit dout.",
+                "After reset, dready_o is low."
+            ]
+        },
+        {
+            "Top_module_name": "sync_stage",
+            "function": "Single synchronization stage",
+            "parameters": [],
+            "ports": [
+                { "name": "clk", "direction": "input", "width": 1, "clock_domain": "clk" },
+                { "name": "rstn", "direction": "input", "width": 1, "clock_domain": "clk" },
+                { "name": "din", "direction": "input", "width": "DWIDTH", "clock_domain": "clk" },
+                { "name": "dout", "direction": "output", "width": "DWIDTH", "clock_domain": "clk" }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                { "name": "reg_din", "width": "DWIDTH" }
+            ],
+            "behavior": [
+                "Synchronize input data from din to dout with one clock cycle delay.",
+                "Reset synchronizer registers when rstn is low."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module data_sync #(
+    parameter STAGES = 2,
+    parameter DWIDTH = 8
+)(
+    input                  clk,
+    input                  rstn,
+    input  [DWIDTH-1:0]    din,
+    input                  dready_i,
+    output reg [DWIDTH-1:0] dout,
+    output reg             dready_o
+);
+
+    // Internal signals for synchronization stages
+    wire [DWIDTH-1:0] sync_stages [STAGES-1:0];
+
+    // Instantiate the first sync stage
+    sync_stage #(.DWIDTH(DWIDTH)) sync_stage_inst_0 (
+        .clk    (clk),
+        .rstn   (rstn),
+        .din    (din),
+        .dout   (sync_stages[0])
+    );
+
+    // Generate the remaining sync stages
+    genvar i;
+    generate
+        for (i = 1; i < STAGES; i = i + 1) begin : gen_sync_stages
+            sync_stage #(.DWIDTH(DWIDTH)) sync_stage_inst_i (
+                .clk    (clk),
+                .rstn   (rstn),
+                .din    (sync_stages[i-1]),
+                .dout   (sync_stages[i])
+            );
+        end
+    endgenerate
+
+    // Assign the final synchronized output
+    assign dout = sync_stages[STAGES-1];
+
+    // Synchronize dready_i to dready_o
+    reg dready_i_sync;
+    reg dready_i_sync2;
+
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            dready_i_sync  <= 1'b0;
+            dready_i_sync2 <= 1'b0;
+            dready_o       <= 1'b0;
+        end else begin
+            dready_i_sync  <= dready_i;
+            dready_i_sync2 <= dready_i_sync;
+            dready_o       <= dready_i_sync2;
+        end
+    end
+
+endmodule
+
+module sync_stage #(
+    parameter DWIDTH = 8
+)(
+    input                  clk,
+    input                  rstn,
+    input  [DWIDTH-1:0]    din,
+    output reg [DWIDTH-1:0] dout
+);
+
+    // Register to hold synchronized data
+    reg [DWIDTH-1:0] reg_din;
+
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            reg_din <= {DWIDTH{1'b0}};
+            dout    <= {DWIDTH{1'b0}};
+        end else begin
+            reg_din <= din;
+            dout    <= reg_din;
+        end
+    end
+
+endmodule
+```

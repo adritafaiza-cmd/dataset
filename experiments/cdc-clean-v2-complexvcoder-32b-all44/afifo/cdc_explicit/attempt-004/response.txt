@@ -1,0 +1,269 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "afifo",
+      "function": "Asynchronous FIFO with 2**LGFIFO entries of WIDTH bits.",
+      "parameters": [
+        { "name": "LGFIFO", "value": "LGFIFO" },
+        { "name": "WIDTH", "value": "WIDTH" },
+        { "name": "NFF", "value": "NFF" },
+        { "name": "WRITE_ON_POSEDGE", "value": "WRITE_ON_POSEDGE" },
+        { "name": "OPT_REGISTER_READS", "value": "OPT_REGISTER_READS" }
+      ],
+      "ports": [
+        { "name": "i_wclk", "direction": "input", "width": 1, "clock_domain": "i_wclk" },
+        { "name": "i_wr_reset_n", "direction": "input", "width": 1, "clock_domain": "i_wclk" },
+        { "name": "i_wr", "direction": "input", "width": 1, "clock_domain": "i_wclk" },
+        { "name": "i_wr_data", "direction": "input", "width": "WIDTH", "clock_domain": "i_wclk" },
+        { "name": "o_wr_full", "direction": "output", "width": 1, "clock_domain": "i_wclk" },
+        { "name": "i_rclk", "direction": "input", "width": 1, "clock_domain": "i_rclk" },
+        { "name": "i_rd_reset_n", "direction": "input", "width": 1, "clock_domain": "i_rclk" },
+        { "name": "i_rd", "direction": "input", "width": 1, "clock_domain": "i_rclk" },
+        { "name": "o_rd_data", "direction": "output", "width": "WIDTH", "clock_domain": "i_rclk" },
+        { "name": "o_rd_empty", "direction": "output", "width": 1, "clock_domain": "i_rclk" }
+      ],
+      "instances": [
+        {
+          "module": "sync_bit",
+          "name": "sync_wr_to_rd",
+          "function": "Synchronizes write pointer to read clock domain.",
+          "connections": [
+            { "port": "i_clk", "signal": "i_rclk" },
+            { "port": "i_reset_n", "signal": "i_rd_reset_n" },
+            { "port": "i_d", "signal": "wr_ptr_gray" },
+            { "port": "o_q", "signal": "wr_ptr_gray_sync" }
+          ]
+        },
+        {
+          "module": "sync_bit",
+          "name": "sync_rd_to_wr",
+          "function": "Synchronizes read pointer to write clock domain.",
+          "connections": [
+            { "port": "i_clk", "signal": "i_wclk" },
+            { "port": "i_reset_n", "signal": "i_wr_reset_n" },
+            { "port": "i_d", "signal": "rd_ptr_gray" },
+            { "port": "o_q", "signal": "rd_ptr_gray_sync" }
+          ]
+        }
+      ],
+      "connections": [
+        { "from": "wr_ptr_gray_sync", "to": "rd_ptr_gray_sync" },
+        { "from": "rd_ptr_gray_sync", "to": "wr_ptr_gray_sync" }
+      ],
+      "internal_signals": [
+        { "name": "wr_ptr_bin", "width": "LGFIFO+1" },
+        { "name": "wr_ptr_gray", "width": "LGFIFO+1" },
+        { "name": "wr_ptr_gray_sync", "width": "LGFIFO+1" },
+        { "name": "rd_ptr_bin", "width": "LGFIFO+1" },
+        { "name": "rd_ptr_gray", "width": "LGFIFO+1" },
+        { "name": "rd_ptr_gray_sync", "width": "LGFIFO+1" },
+        { "name": "mem", "width": "WIDTH", "depth": "2**LGFIFO" },
+        { "name": "wr_gray_plus1", "width": "LGFIFO+1" },
+        { "name": "rd_gray_plus1", "width": "LGFIFO+1" },
+        { "name": "wr_full_raw", "width": 1 },
+        { "name": "rd_empty_raw", "width": 1 },
+        { "name": "wr_data_sync", "width": "WIDTH" },
+        { "name": "wr_ack", "width": 1 },
+        { "name": "rd_ack", "width": 1 },
+        { "name": "rd_data_raw", "width": "WIDTH" },
+        { "name": "rd_data_reg", "width": "WIDTH" }
+      ],
+      "behavior": [
+        "Binary to Gray conversion of write pointer: wr_ptr_gray = wr_ptr_bin ^ (wr_ptr_bin >> 1)",
+        "Binary to Gray conversion of read pointer: rd_ptr_gray = rd_ptr_bin ^ (rd_ptr_bin >> 1)",
+        "Synchronization of write pointer to read domain: wr_ptr_gray_sync",
+        "Synchronization of read pointer to write domain: rd_ptr_gray_sync",
+        "Memory write operation: mem[wr_ptr_bin] = i_wr_data when wr_ack is high",
+        "Memory read operation: rd_data_raw = mem[rd_ptr_bin] when rd_ack is high",
+        "Write acknowledge signal: wr_ack = i_wr & ~o_wr_full & (WRITE_ON_POSEDGE ? posedge(i_wclk) : negedge(i_wclk))",
+        "Read acknowledge signal: rd_ack = i_rd & ~o_rd_empty",
+        "Write pointer increment: wr_ptr_bin = wr_ptr_bin + 1 when wr_ack is high",
+        "Read pointer increment: rd_ptr_bin = rd_ptr_bin + 1 when rd_ack is high",
+        "Write full flag: o_wr_full = (wr_ptr_gray_sync + 1 == rd_ptr_gray) when wr_ack is high",
+        "Read empty flag: o_rd_empty = (wr_ptr_gray == rd_ptr_gray_sync) when rd_ack is high",
+        "Reset behavior: o_wr_full = 0 when i_wr_reset_n is low",
+        "Reset behavior: o_rd_empty = 1 when i_rd_reset_n is low",
+        "Register read data: rd_data_reg = rd_data_raw when rd_ack is high, if OPT_REGISTER_READS is high",
+        "Output read data: o_rd_data = rd_data_reg if OPT_REGISTER_READS is high, else o_rd_data = rd_data_raw"
+      ]
+    },
+    {
+      "Top_module_name": "sync_bit",
+      "function": "Synchronizes a single-bit signal between two asynchronous clock domains.",
+      "parameters": [],
+      "ports": [
+        { "name": "i_clk", "direction": "input", "width": 1, "clock_domain": "i_clk" },
+        { "name": "i_reset_n", "direction": "input", "width": 1, "clock_domain": "i_clk" },
+        { "name": "i_d", "direction": "input", "width": 1, "clock_domain": "i_clk" },
+        { "name": "o_q", "direction": "output", "width": 1, "clock_domain": "i_clk" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        { "name": "sreg", "width": "NFF" }
+      ],
+      "behavior": [
+        "Shift register stages: sreg[i] = (i_reset_n ? sreg[i-1] : 0) when i_clk is rising edge, for i = 1 to NFF-1",
+        "First stage: sreg[0] = (i_reset_n ? i_d : 0) when i_clk is rising edge",
+        "Output stage: o_q = sreg[NFF-1] when i_clk is rising edge"
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	reg [LGFIFO:0] wr_ptr_bin, wr_ptr_bin_next;
+	reg [LGFIFO:0] rd_ptr_bin, rd_ptr_bin_next;
+	reg [LGFIFO:0] wr_ptr_gray, wr_ptr_gray_sync;
+	reg [LGFIFO:0] rd_ptr_gray, rd_ptr_gray_sync;
+	reg [WIDTH-1:0] mem [0:(1<<LGFIFO)-1];
+	reg wr_ack, rd_ack;
+	reg [WIDTH-1:0] rd_data_raw, rd_data_reg;
+
+	// Binary to Gray conversion
+	assign wr_ptr_gray = wr_ptr_bin ^ (wr_ptr_bin >> 1);
+	assign rd_ptr_gray = rd_ptr_bin ^ (rd_ptr_bin >> 1);
+
+	// Write acknowledge signal
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_ack <= 1'b0;
+		end else if (WRITE_ON_POSEDGE) begin
+			wr_ack <= i_wr & ~o_wr_full;
+		end else begin
+			wr_ack <= i_wr & ~o_wr_full;
+		end
+	end
+
+	// Read acknowledge signal
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_ack <= 1'b0;
+		end else begin
+			rd_ack <= i_rd & ~o_rd_empty;
+		end
+	end
+
+	// Write pointer increment
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_ptr_bin <= {LGFIFO+1{1'b0}};
+		end else if (wr_ack) begin
+			wr_ptr_bin <= wr_ptr_bin + 1;
+		end
+	end
+
+	// Read pointer increment
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_ptr_bin <= {LGFIFO+1{1'b0}};
+		end else if (rd_ack) begin
+			rd_ptr_bin <= rd_ptr_bin + 1;
+		end
+	end
+
+	// Memory write operation
+	always @(posedge i_wclk) begin
+		if (wr_ack) begin
+			mem[wr_ptr_bin] <= i_wr_data;
+		end
+	end
+
+	// Memory read operation
+	always @(posedge i_rclk) begin
+		if (rd_ack) begin
+			rd_data_raw <= mem[rd_ptr_bin];
+		end
+	end
+
+	// Register read data if OPT_REGISTER_READS is high
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_data_reg <= {WIDTH{1'b0}};
+		end else if (rd_ack && OPT_REGISTER_READS) begin
+			rd_data_reg <= rd_data_raw;
+		end
+	end
+
+	// Output read data
+	assign o_rd_data = OPT_REGISTER_READS ? rd_data_reg : rd_data_raw;
+
+	// Write full flag
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			o_wr_full <= 1'b0;
+		end else if (wr_ack) begin
+			o_wr_full <= (wr_ptr_gray_sync + 1) == rd_ptr_gray;
+		end
+	end
+
+	// Read empty flag
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			o_rd_empty <= 1'b1;
+		end else if (rd_ack) begin
+			o_rd_empty <= wr_ptr_gray == rd_ptr_gray_sync;
+		end
+	end
+
+	// Synchronize write pointer to read clock domain
+	sync_bit #(.NFF(NFF)) sync_wr_to_rd (
+		.i_clk(i_rclk),
+		.i_reset_n(i_rd_reset_n),
+		.i_d(wr_ptr_gray),
+		.o_q(wr_ptr_gray_sync)
+	);
+
+	// Synchronize read pointer to write clock domain
+	sync_bit #(.NFF(NFF)) sync_rd_to_wr (
+		.i_clk(i_wclk),
+		.i_reset_n(i_wr_reset_n),
+		.i_d(rd_ptr_gray),
+		.o_q(rd_ptr_gray_sync)
+	);
+
+endmodule
+
+module sync_bit #(
+		parameter	NFF = 2
+	) (
+		input	wire	i_clk, i_reset_n, i_d,
+		output	reg	o_q
+	);
+
+	reg [NFF-1:0] sreg;
+
+	always @(posedge i_clk) begin
+		if (!i_reset_n) begin
+			sreg <= {NFF{1'b0}};
+		end else begin
+			sreg[0] <= i_d;
+			for (integer i = 1; i < NFF; i = i + 1) begin
+				sreg[i] <= sreg[i-1];
+			end
+		end
+	end
+
+	assign o_q = sreg[NFF-1];
+
+endmodule
+```

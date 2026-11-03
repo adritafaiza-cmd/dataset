@@ -1,0 +1,165 @@
+```systemverilog
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // ========================================================================
+  // Source-side state
+  // ========================================================================
+  reg src_has_data;
+  reg [WIDTH-1:0] src_data_reg;
+  reg src_clear_pending;
+
+  // ========================================================================
+  // Destination-side state
+  // ========================================================================
+  reg dst_has_data;
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_clear_pending;
+
+  // ========================================================================
+  // CDC synchronizers
+  // ========================================================================
+  // src_has_data -> dst domain
+  reg [SYNC_STAGES-1:0] src_has_data_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_has_data_sync <= {SYNC_STAGES{1'b0}};
+    else
+      src_has_data_sync <= {src_has_data_sync[SYNC_STAGES-2:0], src_has_data};
+  end
+  wire src_has_data_dst = src_has_data_sync[SYNC_STAGES-1];
+
+  // dst_has_data -> src domain
+  reg [SYNC_STAGES-1:0] dst_has_data_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_has_data_sync <= {SYNC_STAGES{1'b0}};
+    else
+      dst_has_data_sync <= {dst_has_data_sync[SYNC_STAGES-2:0], dst_has_data};
+  end
+  wire dst_has_data_src = dst_has_data_sync[SYNC_STAGES-1];
+
+  // dst_clear_pending -> src domain
+  reg [SYNC_STAGES-1:0] dst_clear_pending_sync;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni)
+      dst_clear_pending_sync <= {SYNC_STAGES{1'b0}};
+    else
+      dst_clear_pending_sync <= {dst_clear_pending_sync[SYNC_STAGES-2:0], dst_clear_pending};
+  end
+  wire dst_clear_pending_src = dst_clear_pending_sync[SYNC_STAGES-1];
+
+  // src_clear_pending -> dst domain
+  reg [SYNC_STAGES-1:0] src_clear_pending_sync;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni)
+      src_clear_pending_sync <= {SYNC_STAGES{1'b0}};
+    else
+      src_clear_pending_sync <= {src_clear_pending_sync[SYNC_STAGES-2:0], src_clear_pending};
+  end
+  wire src_clear_pending_dst = src_clear_pending_sync[SYNC_STAGES-1];
+
+  // ========================================================================
+  // Source-side logic
+  // ========================================================================
+  // src_ready: can accept new data if we don't have data and no clear is pending
+  assign src_ready_o = !src_has_data && !src_clear_pending;
+
+  // src_clear_pending output
+  assign src_clear_pending_o = src_clear_pending;
+
+  // Source state machine
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_has_data      <= 1'b0;
+      src_data_reg      <= {WIDTH{1'b0}};
+      src_clear_pending <= 1'b0;
+    end else begin
+      // Handle clear request
+      if (src_clear_i) begin
+        src_clear_pending <= 1'b1;
+        // Drop any outstanding data
+        src_has_data <= 1'b0;
+      end else if (src_clear_pending) begin
+        // Wait for dst to acknowledge the clear
+        if (dst_clear_pending_src) begin
+          // Clear acknowledged, return to idle
+          src_clear_pending <= 1'b0;
+        end
+      end else begin
+        // Normal operation
+        if (src_valid_i && src_ready_o) begin
+          src_has_data <= 1'b1;
+          src_data_reg <= src_data_i;
+        end else if (src_has_data && !dst_has_data_src) begin
+          // Data has been consumed by destination
+          src_has_data <= 1'b0;
+        end
+      end
+    end
+  end
+
+  // ========================================================================
+  // Destination-side logic
+  // ========================================================================
+  // dst_valid: we have data to present
+  assign dst_valid_o = dst_has_data;
+
+  // dst_data output
+  assign dst_data_o = dst_data_reg;
+
+  // dst_clear_pending output
+  assign dst_clear_pending_o = dst_clear_pending;
+
+  // Destination state machine
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_has_data      <= 1'b0;
+      dst_data_reg      <= {WIDTH{1'b0}};
+      dst_clear_pending <= 1'b0;
+    end else begin
+      // Handle clear request
+      if (dst_clear_i) begin
+        dst_clear_pending <= 1'b1;
+        // Drop any outstanding data
+        dst_has_data <= 1'b0;
+      end else if (dst_clear_pending) begin
+        // Wait for src to acknowledge the clear
+        if (src_clear_pending_dst) begin
+          // Clear acknowledged, return to idle
+          dst_clear_pending <= 1'b0;
+        end
+      end else begin
+        // Normal operation
+        if (!dst_has_data && src_has_data_dst) begin
+          // Source has data, accept it
+          dst_has_data <= 1'b1;
+          dst_data_reg <= src_data_reg;
+        end else if (dst_has_data && dst_ready_i) begin
+          // Data consumed by receiver
+          dst_has_data <= 1'b0;
+        end
+      end
+    end
+  end
+
+endmodule
+```<|im_end|>

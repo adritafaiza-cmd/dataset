@@ -1,0 +1,228 @@
+```verilog
+module apbxclk #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		parameter [0:0]	OPT_REGISTERED = 1'b0,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH
+	) (
+		input	wire			S_APB_PCLK, S_PRESETn,
+		input	wire			S_APB_PSEL,
+		input	wire			S_APB_PENABLE,
+		output	reg			S_APB_PREADY,
+		input	wire	[AW-1:0]	S_APB_PADDR,
+		input	wire			S_APB_PWRITE,
+		input	wire	[DW-1:0]	S_APB_PWDATA,
+		input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+		input	wire	[2:0]		S_APB_PPROT,
+		output	wire	[DW-1:0]	S_APB_PRDATA,
+		output	wire			S_APB_PSLVERR,
+		input	wire			M_APB_PCLK,
+		output	reg			M_PRESETn,
+		output	reg			M_APB_PSEL,
+		output	reg			M_APB_PENABLE,
+		input	wire			M_APB_PREADY,
+		output	wire	[AW-1:0]	M_APB_PADDR,
+		output	wire			M_APB_PWRITE,
+		output	wire	[DW-1:0]	M_APB_PWDATA,
+		output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+		output	wire	[2:0]		M_APB_PPROT,
+		input	wire	[DW-1:0]	M_APB_PRDATA,
+		input	wire			M_APB_PSLVERR
+	);
+
+	// Synchronous reset for M domain
+	reg [1:0] m_reset_sync;
+	reg m_resetn;
+
+	always @(posedge M_APB_PCLK or negedge m_resetn) begin
+		if (!m_resetn) begin
+			m_reset_sync <= 2'b00;
+		end else begin
+			m_reset_sync <= {m_reset_sync[0], S_PRESETn};
+		end
+		m_resetn <= m_reset_sync[1];
+	end
+
+	assign M_PRESETn = m_resetn;
+
+	// Handshake signals
+	reg s_req_valid;
+	reg m_req_ready;
+	reg m_resp_valid;
+	reg s_resp_ready;
+
+	// M domain: capture request from S domain
+	reg [AW-1:0] m_addr;
+	reg m_write;
+	reg [DW-1:0] m_wdata;
+	reg [DW/8-1:0] m_wstrb;
+	reg [2:0] m_pprot;
+
+	// M domain: APB state machine
+	reg m_apb_sel;
+	reg m_apb_enable;
+	reg m_apb_done;
+
+	// M domain: capture response
+	reg [DW-1:0] m_rdata;
+	reg m_pslverr;
+
+	// S domain: capture response from M domain
+	reg [DW-1:0] s_rdata;
+	reg s_pslverr;
+
+	// S domain: APB state
+	reg s_apb_busy;
+
+	// M domain: request valid (captured)
+	reg m_req_valid;
+
+	// M domain: response valid (captured)
+	reg m_resp_valid_reg;
+
+	// S domain: response ready
+	reg s_resp_ready_reg;
+
+	// M domain: request ready
+	reg m_req_ready_reg;
+
+	// M domain: APB phase
+	// 0: idle, 1: setup, 2: access
+	reg [1:0] m_apb_state;
+
+	// M domain: capture request fields
+	always @(posedge M_APB_PCLK or negedge m_resetn) begin
+		if (!m_resetn) begin
+			m_req_valid <= 1'b0;
+			m_addr <= {AW{1'b0}};
+			m_write <= 1'b0;
+			m_wdata <= {DW{1'b0}};
+			m_wstrb <= {(DW/8){1'b0}};
+			m_pprot <= 3'b000;
+			m_apb_sel <= 1'b0;
+			m_apb_enable <= 1'b0;
+			m_apb_state <= 2'b00;
+			m_rdata <= {DW{1'b0}};
+			m_pslverr <= 1'b0;
+			m_resp_valid_reg <= 1'b0;
+			m_req_ready_reg <= 1'b0;
+		end else begin
+			// Default: no change
+			// Handle request capture
+			if (s_req_valid && m_req_ready_reg) begin
+				m_req_valid <= 1'b1;
+				m_addr <= S_APB_PADDR;
+				m_write <= S_APB_PWRITE;
+				m_wdata <= S_APB_PWDATA;
+				m_wstrb <= S_APB_PWSTRB;
+				m_pprot <= S_APB_PPROT;
+			end else if (m_apb_state == 2'b11) begin
+				// Transfer complete, clear request valid
+				m_req_valid <= 1'b0;
+			end
+
+			// APB state machine
+			case (m_apb_state)
+				2'b00: begin
+					// Idle
+					m_apb_sel <= 1'b0;
+					m_apb_enable <= 1'b0;
+					if (m_req_valid) begin
+						m_apb_state <= 2'b01;
+						m_apb_sel <= 1'b1;
+						m_apb_enable <= 1'b0;
+					end
+				end
+				2'b01: begin
+					// Setup phase
+					m_apb_sel <= 1'b1;
+					m_apb_enable <= 1'b1;
+					m_apb_state <= 2'b10;
+				end
+				2'b10: begin
+					// Access phase
+					m_apb_sel <= 1'b1;
+					m_apb_enable <= 1'b1;
+					if (M_APB_PREADY) begin
+						m_apb_state <= 2'b11;
+						m_rdata <= M_APB_PRDATA;
+						m_pslverr <= M_APB_PSLVERR;
+						m_resp_valid_reg <= 1'b1;
+					end
+				end
+				2'b11: begin
+					// Done
+					m_apb_sel <= 1'b0;
+					m_apb_enable <= 1'b0;
+					m_apb_state <= 2'b00;
+					if (m_resp_valid_reg && s_resp_ready_reg) begin
+						m_resp_valid_reg <= 1'b0;
+					end
+				end
+				default: m_apb_state <= 2'b00;
+			endcase
+
+			// Request ready: can accept new request when idle and no pending response
+			m_req_ready_reg <= (m_apb_state == 2'b00) && !m_resp_valid_reg;
+		end
+	end
+
+	// M domain outputs
+	assign M_APB_PSEL = m_apb_sel;
+	assign M_APB_PENABLE = m_apb_enable;
+	assign M_APB_PADDR = m_addr;
+	assign M_APB_PWRITE = m_write;
+	assign M_APB_PWDATA = m_wdata;
+	assign M_APB_PWSTRB = m_wstrb;
+	assign M_APB_PPROT = m_pprot;
+
+	// S domain: response capture
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_rdata <= {DW{1'b0}};
+			s_pslverr <= 1'b0;
+			s_apb_busy <= 1'b0;
+			s_resp_ready_reg <= 1'b0;
+			S_APB_PREADY <= 1'b0;
+		end else begin
+			// Capture response from M domain
+			if (m_resp_valid_reg && s_resp_ready_reg) begin
+				s_rdata <= m_rdata;
+				s_pslverr <= m_pslverr;
+				s_apb_busy <= 1'b0;
+				s_resp_ready_reg <= 1'b0;
+			end
+
+			// S domain APB logic
+			if (!s_apb_busy) begin
+				// Idle: can accept new request
+				if (S_APB_PSEL && !S_APB_PENABLE) begin
+					// Setup phase: request is valid
+					s_apb_busy <= 1'b1;
+					s_resp_ready_reg <= 1'b0;
+					S_APB_PREADY <= 1'b0;
+				end
+			end else begin
+				// Busy: waiting for response
+				if (m_resp_valid_reg) begin
+					// Response available, ready to accept
+					s_resp_ready_reg <= 1'b1;
+					S_APB_PREADY <= 1'b1;
+				end
+			end
+		end
+	end
+
+	// S domain outputs
+	assign S_APB_PRDATA = s_rdata;
+	assign S_APB_PSLVERR = s_pslverr;
+
+	// Handshake signals
+	assign s_req_valid = S_APB_PSEL && !S_APB_PENABLE && !s_apb_busy;
+	assign m_req_ready = m_req_ready_reg;
+	assign m_resp_valid = m_resp_valid_reg;
+	assign s_resp_ready = s_resp_ready_reg;
+
+endmodule
+```<|im_end|>

@@ -1,0 +1,260 @@
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire src_req;
+  wire src_ack;
+  wire dst_req;
+  wire dst_ack;
+
+  // Source domain: request generation
+  reg src_req_reg;
+  reg src_ack_reg;
+  reg src_clear_pending_reg;
+  reg src_isolated_reg;
+
+  // Destination domain: acknowledge generation
+  reg dst_ack_reg;
+  reg dst_req_reg;
+  reg dst_clear_pending_reg;
+  reg dst_isolated_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+  reg dst_valid_reg;
+
+  // Synchronizers
+  // src_req -> dst domain
+  wire [SYNC_STAGES-1:0] src_req_sync;
+  // src_ack -> dst domain
+  wire [SYNC_STAGES-1:0] src_ack_sync;
+  // dst_req -> src domain
+  wire [SYNC_STAGES-1:0] dst_req_sync;
+  // dst_ack -> src domain
+  wire [SYNC_STAGES-1:0] dst_ack_sync;
+
+  // Synchronizer for src_req to dst domain
+  genvar i;
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_src_req_sync
+      if (i == 0) begin
+        always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+          if (!dst_rst_ni)
+            src_req_sync[0] <= 1'b0;
+          else
+            src_req_sync[0] <= src_req;
+        end
+      end else begin
+        always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+          if (!dst_rst_ni)
+            src_req_sync[i] <= 1'b0;
+          else
+            src_req_sync[i] <= src_req_sync[i-1];
+        end
+      end
+    end
+  endgenerate
+
+  // Synchronizer for src_ack to dst domain
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_src_ack_sync
+      if (i == 0) begin
+        always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+          if (!dst_rst_ni)
+            src_ack_sync[0] <= 1'b0;
+          else
+            src_ack_sync[0] <= src_ack;
+        end
+      end else begin
+        always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+          if (!dst_rst_ni)
+            src_ack_sync[i] <= 1'b0;
+          else
+            src_ack_sync[i] <= src_ack_sync[i-1];
+        end
+      end
+    end
+  endgenerate
+
+  // Synchronizer for dst_req to src domain
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_dst_req_sync
+      if (i == 0) begin
+        always @(posedge src_clk_i or negedge src_rst_ni) begin
+          if (!src_rst_ni)
+            dst_req_sync[0] <= 1'b0;
+          else
+            dst_req_sync[0] <= dst_req;
+        end
+      end else begin
+        always @(posedge src_clk_i or negedge src_rst_ni) begin
+          if (!src_rst_ni)
+            dst_req_sync[i] <= 1'b0;
+          else
+            dst_req_sync[i] <= dst_req_sync[i-1];
+        end
+      end
+    end
+  endgenerate
+
+  // Synchronizer for dst_ack to src domain
+  generate
+    for (i = 0; i < SYNC_STAGES; i = i + 1) begin : gen_dst_ack_sync
+      if (i == 0) begin
+        always @(posedge src_clk_i or negedge src_rst_ni) begin
+          if (!src_rst_ni)
+            dst_ack_sync[0] <= 1'b0;
+          else
+            dst_ack_sync[0] <= dst_ack;
+        end
+      end else begin
+        always @(posedge src_clk_i or negedge src_rst_ni) begin
+          if (!src_rst_ni)
+            dst_ack_sync[i] <= 1'b0;
+          else
+            dst_ack_sync[i] <= dst_ack_sync[i-1];
+        end
+      end
+    end
+  endgenerate
+
+  // Synchronized signals
+  wire src_req_synced = src_req_sync[SYNC_STAGES-1];
+  wire src_ack_synced = src_ack_sync[SYNC_STAGES-1];
+  wire dst_req_synced = dst_req_sync[SYNC_STAGES-1];
+  wire dst_ack_synced = dst_ack_sync[SYNC_STAGES-1];
+
+  // Source domain logic
+  // src_req is the request signal sent to destination
+  // src_ack is the acknowledge signal received from destination (synchronized)
+  assign src_req = src_req_reg;
+  assign src_ack = dst_ack_synced;
+
+  // Source state machine
+  // States: IDLE, WAIT_ACK, CLEARING
+  // In IDLE: if valid and not isolated, set req
+  // In WAIT_ACK: wait for ack, then go to IDLE
+  // Clear: isolate, drop data, return to idle
+
+  // Source ready: can accept new data when in IDLE and not isolated
+  assign src_ready_o = !src_isolated_reg && !src_req_reg;
+
+  // Source clear pending: high when clear is in progress
+  assign src_clear_pending_o = src_clear_pending_reg;
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_req_reg <= 1'b0;
+      src_clear_pending_reg <= 1'b0;
+      src_isolated_reg <= 1'b0;
+    end else begin
+      // Handle clear
+      if (src_clear_i) begin
+        // Start clear: isolate and set pending
+        src_isolated_reg <= 1'b1;
+        src_clear_pending_reg <= 1'b1;
+        // Drop any in-flight request
+        src_req_reg <= 1'b0;
+      end else if (src_clear_pending_reg) begin
+        // Clear in progress: wait for dst to acknowledge the clear
+        // The clear is complete when dst_ack_synced goes low (dst has processed the clear)
+        // Actually, we need to wait for the destination to finish its clear
+        // The clear protocol: src sets req=0, dst sees req=0 and clears its state
+        // We consider clear done when dst_ack_synced is 0 and we've been isolated for a while
+        // Simpler: clear is done when dst_ack_synced == 0 (dst has no pending ack)
+        if (!dst_ack_synced) begin
+          src_clear_pending_reg <= 1'b0;
+          src_isolated_reg <= 1'b0;
+        end
+      end else begin
+        // Normal operation
+        if (!src_req_reg) begin
+          // In idle, can send new request
+          if (src_valid_i && !src_isolated_reg) begin
+            src_req_reg <= 1'b1;
+          end
+        end else begin
+          // Waiting for ack
+          if (dst_ack_synced) begin
+            src_req_reg <= 1'b0;
+          end
+        end
+      end
+    end
+  end
+
+  // Destination domain logic
+  // dst_ack is the acknowledge signal sent to source
+  // dst_req is the request signal received from source (synchronized)
+  assign dst_ack = dst_ack_reg;
+  assign dst_req = src_req_synced;
+
+  // Destination valid: high when we have data to present
+  assign dst_valid_o = dst_valid_reg;
+  assign dst_data_o = dst_data_reg;
+
+  // Destination clear pending: high when clear is in progress
+  assign dst_clear_pending_o = dst_clear_pending_reg;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_ack_reg <= 1'b0;
+      dst_req_reg <= 1'b0;
+      dst_clear_pending_reg <= 1'b0;
+      dst_isolated_reg <= 1'b0;
+      dst_data_reg <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+    end else begin
+      // Handle clear
+      if (dst_clear_i) begin
+        // Start clear: isolate and set pending
+        dst_isolated_reg <= 1'b1;
+        dst_clear_pending_reg <= 1'b1;
+        // Drop any in-flight data
+        dst_valid_reg <= 1'b0;
+        dst_ack_reg <= 1'b0;
+      end else if (dst_clear_pending_reg) begin
+        // Clear in progress: wait for src to acknowledge the clear
+        // The clear is complete when src_req_synced goes low (src has processed the clear)
+        if (!src_req_synced) begin
+          dst_clear_pending_reg <= 1'b0;
+          dst_isolated_reg <= 1'b0;
+        end
+      end else begin
+        // Normal operation
+        if (!dst_ack_reg) begin
+          // In idle, can accept new request
+          if (src_req_synced && !dst_isolated_reg) begin
+            // Capture data and set ack
+            dst_ack_reg <= 1'b1;
+            dst_valid_reg <= 1'b1;
+            dst_data_reg <= src_data_i;
+          end
+        end else begin
+          // Waiting for ready to deassert ack
+          if (dst_ready_i) begin
+            dst_ack_reg <= 1'b0;
+            dst_valid_reg <= 1'b0;
+          end
+        end
+      end
+    end
+  end
+
+endmodule

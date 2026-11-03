@@ -1,0 +1,135 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "arbiter",
+            "function": "Multi-port request arbiter",
+            "parameters": [
+                { "name": "PORTS", "value": "4" },
+                { "name": "ARB_TYPE_ROUND_ROBIN", "value": "0" },
+                { "name": "ARB_BLOCK", "value": "0" },
+                { "name": "ARB_BLOCK_ACK", "value": "1" },
+                { "name": "ARB_LSB_HIGH_PRIORITY", "value": "0" }
+            ],
+            "ports": [
+                { "name": "clk", "direction": "input", "width": 1, "clock_domain": "clk" },
+                { "name": "rst", "direction": "input", "width": 1, "clock_domain": "clk" },
+                { "name": "request", "direction": "input", "width": "PORTS", "clock_domain": "clk" },
+                { "name": "acknowledge", "direction": "input", "width": "PORTS", "clock_domain": "clk" },
+                { "name": "grant", "direction": "output", "width": "PORTS", "clock_domain": "clk" },
+                { "name": "grant_valid", "direction": "output", "width": 1, "clock_domain": "clk" },
+                { "name": "grant_encoded", "direction": "output", "width": "$clog2(PORTS)", "clock_domain": "clk" }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                { "name": "next_grant", "width": "PORTS" },
+                { "name": "current_grant", "width": "PORTS" },
+                { "name": "active_request", "width": "PORTS" },
+                { "name": "request_priority", "width": "PORTS" },
+                { "name": "valid_grant", "width": 1 },
+                { "name": "encoded_grant", "width": "$clog2(PORTS)" }
+            ],
+            "behavior": [
+                "Reset logic: On rising edge of clk, if rst is high, current_grant is set to 0 and valid_grant is set to 0.",
+                "Request processing: On rising edge of clk, active_request is set to request & ~acknowledge if ARB_BLOCK is set and ARB_BLOCK_ACK is set, otherwise active_request is set to request.",
+                "Priority selection: If ARB_TYPE_ROUND_ROBIN is set, next_grant is determined by rotating the priority of active_request starting from the position after the current_grant. If ARB_LSB_HIGH_PRIORITY is set, the LSB wins ties.",
+                "Grant selection: If ARB_TYPE_ROUND_ROBIN is not set, next_grant is determined by the highest priority active_request. If ARB_LSB_HIGH_PRIORITY is set, the LSB wins ties.",
+                "Grant update: On rising edge of clk, if rst is low, current_grant is updated to next_grant if valid_grant is high.",
+                "Grant valid: valid_grant is high if there is at least one active_request.",
+                "Grant encoding: encoded_grant is the one-hot encoded index of the current_grant.",
+                "Output assignment: grant is assigned the value of current_grant, grant_valid is assigned the value of valid_grant, and grant_encoded is assigned the value of encoded_grant."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    reg [PORTS-1:0] next_grant;
+    reg [PORTS-1:0] current_grant;
+    reg [PORTS-1:0] active_request;
+    reg [PORTS-1:0] request_priority;
+    reg             valid_grant;
+    reg [$clog2(PORTS)-1:0] encoded_grant;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            current_grant <= 0;
+            valid_grant <= 0;
+        end else begin
+            if (valid_grant) begin
+                if (ARB_BLOCK) begin
+                    if (ARB_BLOCK_ACK ? acknowledge & current_grant : ~request & current_grant) begin
+                        current_grant <= next_grant;
+                        valid_grant <= |next_grant;
+                    end
+                end else begin
+                    current_grant <= next_grant;
+                    valid_grant <= |next_grant;
+                end
+            end else begin
+                current_grant <= next_grant;
+                valid_grant <= |next_grant;
+            end
+        end
+    end
+
+    always @(*) begin
+        if (ARB_BLOCK && ARB_BLOCK_ACK) begin
+            active_request = request & ~acknowledge;
+        end else begin
+            active_request = request;
+        end
+    end
+
+    always @(*) begin
+        request_priority = active_request;
+        if (ARB_TYPE_ROUND_ROBIN) begin
+            if (valid_grant) begin
+                request_priority = {current_grant[PORTS-2:0], current_grant[PORTS-1]};
+            end
+        end
+        if (ARB_LSB_HIGH_PRIORITY) begin
+            next_grant = (1 << (PORTS - 1 - $lsb(request_priority)));
+        end else begin
+            next_grant = (1 << (PORTS - 1 - $highest(request_priority)));
+        end
+    end
+
+    always @(*) begin
+        if (valid_grant) begin
+            encoded_grant = $clog2(current_grant);
+        end else begin
+            encoded_grant = 0;
+        end
+    end
+
+    assign grant = current_grant;
+    assign grant_valid = valid_grant;
+    assign grant_encoded = encoded_grant;
+
+endmodule
+```
+
+This Verilog module implements the specified multi-port request arbiter with the given parameters and behavior. The module handles round-robin and fixed priority arbitration, with options for blocking grants based on acknowledge signals and resolving ties based on the least significant bit (LSB).

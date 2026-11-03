@@ -1,0 +1,268 @@
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam AWIDTH = ASIZE + 1;
+  localparam AFULL_THRESH = DEPTH - 2;
+  localparam AEMPTY_THRESH = 1;
+
+  // Shared storage
+  reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+  // A-side pointers (in A clock domain)
+  reg [AWIDTH-1:0] a_wr_ptr;
+  reg [AWIDTH-1:0] a_rd_ptr;
+
+  // B-side pointers (in B clock domain)
+  reg [AWIDTH-1:0] b_wr_ptr;
+  reg [AWIDTH-1:0] b_rd_ptr;
+
+  // Synchronized pointers
+  reg [AWIDTH-1:0] a_wr_ptr_sync1, a_wr_ptr_sync2;
+  reg [AWIDTH-1:0] a_rd_ptr_sync1, a_rd_ptr_sync2;
+  reg [AWIDTH-1:0] b_wr_ptr_sync1, b_wr_ptr_sync2;
+  reg [AWIDTH-1:0] b_rd_ptr_sync1, b_rd_ptr_sync2;
+
+  // Direction synchronization
+  reg a_dir_sync1, a_dir_sync2;
+  reg b_dir_sync1, b_dir_sync2;
+
+  // Write enable signals
+  wire a_write_en;
+  wire b_write_en;
+  wire a_read_en;
+  wire b_read_en;
+
+  // A writes to FIFO when a_dir == 0, B writes when b_dir == 1
+  // A reads from FIFO when a_dir == 1, B reads when b_dir == 0
+  assign a_write_en = a_winc & ~a_dir;
+  assign a_read_en  = a_rinc &  a_dir;
+  assign b_write_en = b_winc &  b_dir;
+  assign b_read_en  = b_rinc & ~b_dir;
+
+  // Full/Empty calculations
+  // A side: FIFO is full for A when A is writing and B is reading
+  //         FIFO is empty for A when A is reading and B is writing
+  // We need to track the effective occupancy from each side's perspective.
+
+  // For A:
+  //   a_full: A cannot write. This happens when the FIFO is full from A's write perspective.
+  //   a_empty: A cannot read. This happens when the FIFO is empty from A's read perspective.
+  //
+  // The FIFO has two "views":
+  //   - When A writes and B reads: occupancy = a_wr_ptr - b_rd_ptr (mod DEPTH)
+  //   - When B writes and A reads: occupancy = b_wr_ptr - a_rd_ptr (mod DEPTH)
+  //
+  // But since direction can change, we need to be careful.
+  //
+  // Actually, let's think of it differently. The FIFO is a single buffer.
+  // At any time, either A is the writer and B is the reader, or B is the writer and A is the reader.
+  // The direction signals determine who is writing and who is reading.
+  //
+  // Let's define:
+  //   a_is_writer = ~a_dir
+  //   b_is_writer =  b_dir
+  //
+  // If a_is_writer and b_is_writer, that's a conflict - but the spec says "as selected on each side"
+  // implying they should be complementary. Let's assume a_dir and b_dir are complementary
+  // (i.e., a_dir == ~b_dir) for normal operation. But we should handle it gracefully.
+  //
+  // For simplicity and correctness, let's assume the directions are complementary:
+  //   a_dir = 0 means A writes, B reads (b_dir should be 1)
+  //   a_dir = 1 means A reads, B writes (b_dir should be 0)
+  //
+  // Full/Empty from A's perspective:
+  //   If A is writing (a_dir=0): a_full when FIFO is full, a_empty is irrelevant (but we still compute it)
+  //   If A is reading (a_dir=1): a_empty when FIFO is empty, a_full is irrelevant
+  //
+  // Let's compute occupancy based on the current direction.
+
+  // Synchronize direction signals
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_dir_sync1 <= 1'b0;
+      a_dir_sync2 <= 1'b0;
+    end else begin
+      a_dir_sync1 <= a_dir;
+      a_dir_sync2 <= a_dir_sync1;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_dir_sync1 <= 1'b0;
+      b_dir_sync2 <= 1'b0;
+    end else begin
+      b_dir_sync1 <= b_dir;
+      b_dir_sync2 <= b_dir_sync1;
+    end
+  end
+
+  // A is writing when a_dir_sync2 == 0
+  wire a_is_writer = ~a_dir_sync2;
+  wire b_is_writer =  b_dir_sync2;
+
+  // Compute occupancy
+  // When A is writer: occupancy = (a_wr_ptr - b_rd_ptr) mod DEPTH
+  // When B is writer: occupancy = (b_wr_ptr - a_rd_ptr) mod DEPTH
+
+  wire [AWIDTH-1:0] occ_a_wr; // occupancy when A is writer
+  wire [AWIDTH-1:0] occ_b_wr; // occupancy when B is writer
+
+  assign occ_a_wr = a_wr_ptr - b_rd_ptr_sync2;
+  assign occ_b_wr = b_wr_ptr_sync2 - a_rd_ptr;
+
+  // Full/Empty for A
+  // a_full: A is writing and FIFO is full
+  // a_empty: A is reading and FIFO is empty
+  wire a_full_raw;
+  wire a_empty_raw;
+
+  assign a_full_raw  = (occ_a_wr >= DEPTH[AWIDTH-1:0]);
+  assign a_empty_raw = (occ_b_wr == 0);
+
+  // But we need to consider the direction. If A is writing, a_full matters.
+  // If A is reading, a_empty matters.
+  // For the flags, let's compute them based on the actual direction.
+
+  // Actually, let's just compute full and empty based on the current mode.
+  // a_full should be high when A cannot write (i.e., A is writer and FIFO is full)
+  // a_empty should be high when A cannot read (i.e., A is reader and FIFO is empty)
+
+  assign a_full  = a_is_writer & a_full_raw;
+  assign a_empty = ~a_is_writer & a_empty_raw;
+
+  // Almost full/empty
+  assign a_afull  = a_is_writer & (occ_a_wr >= AFULL_THRESH[AWIDTH-1:0]);
+  assign a_aempty = ~a_is_writer & (occ_b_wr <= AEMPTY_THRESH[AWIDTH-1:0]);
+
+  // Full/Empty for B
+  // b_full: B is writing and FIFO is full
+  // b_empty: B is reading and FIFO is empty
+  wire b_full_raw;
+  wire b_empty_raw;
+
+  assign b_full_raw  = (occ_b_wr >= DEPTH[AWIDTH-1:0]);
+  assign b_empty_raw = (occ_a_wr == 0);
+
+  assign b_full  = b_is_writer & b_full_raw;
+  assign b_empty = ~b_is_writer & b_empty_raw;
+
+  assign b_afull  = b_is_writer & (occ_b_wr >= AFULL_THRESH[AWIDTH-1:0]);
+  assign b_aempty = ~b_is_writer & (occ_a_wr <= AEMPTY_THRESH[AWIDTH-1:0]);
+
+  // Synchronize pointers
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_wr_ptr_sync1 <= {AWIDTH{1'b0}};
+      a_wr_ptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      a_wr_ptr_sync1 <= a_wr_ptr;
+      a_wr_ptr_sync2 <= a_wr_ptr_sync1;
+    end
+  end
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_rd_ptr_sync1 <= {AWIDTH{1'b0}};
+      a_rd_ptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      a_rd_ptr_sync1 <= a_rd_ptr;
+      a_rd_ptr_sync2 <= a_rd_ptr_sync1;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_wr_ptr_sync1 <= {AWIDTH{1'b0}};
+      b_wr_ptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      b_wr_ptr_sync1 <= b_wr_ptr;
+      b_wr_ptr_sync2 <= b_wr_ptr_sync1;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_rd_ptr_sync1 <= {AWIDTH{1'b0}};
+      b_rd_ptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      b_rd_ptr_sync1 <= b_rd_ptr;
+      b_rd_ptr_sync2 <= b_rd_ptr_sync1;
+    end
+  end
+
+  // Write to memory
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_wr_ptr <= {AWIDTH{1'b0}};
+    end else if (a_write_en && !a_full) begin
+      mem[a_wr_ptr[ASIZE-1:0]] <= a_wdata;
+      a_wr_ptr <= a_wr_ptr + 1'b1;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_wr_ptr <= {AWIDTH{1'b0}};
+    end else if (b_write_en && !b_full) begin
+      mem[b_wr_ptr[ASIZE-1:0]] <= b_wdata;
+      b_wr_ptr <= b_wr_ptr + 1'b1;
+    end
+  end
+
+  // Read from memory
+  reg [DSIZE-1:0] a_rdata_reg;
+  reg [DSIZE-1:0] b_rdata_reg;
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a_rd_ptr <= {AWIDTH{1'b0}};
+      a_rdata_reg <= {DSIZE{1'b0}};
+    end else if (a_read_en && !a_empty) begin
+      a_rdata_reg <= mem[a_rd_ptr[ASIZE-1:0]];
+      a_rd_ptr <= a_rd_ptr + 1'b1;
+    end
+  end
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b_rd_ptr <= {AWIDTH{1'b0}};
+      b_rdata_reg <= {DSIZE{1'b0}};
+    end else if (b_read_en && !b_empty) begin
+      b_rdata_reg <= mem[b_rd_ptr[ASIZE-1:0]];
+      b_rd_ptr <= b_rd_ptr + 1'b1;
+    end
+  end
+
+  assign a_rdata = a_rdata_reg;
+  assign b_rdata = b_rdata_reg;
+
+endmodule

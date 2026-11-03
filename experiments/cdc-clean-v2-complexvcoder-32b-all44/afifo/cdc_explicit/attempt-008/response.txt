@@ -1,0 +1,310 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "afifo",
+      "function": "Asynchronous FIFO with 2**LGFIFO entries of WIDTH bits",
+      "parameters": [
+        { "name": "LGFIFO", "value": "LGFIFO" },
+        { "name": "WIDTH", "value": "WIDTH" },
+        { "name": "NFF", "value": "NFF" },
+        { "name": "WRITE_ON_POSEDGE", "value": "WRITE_ON_POSEDGE" },
+        { "name": "OPT_REGISTER_READS", "value": "OPT_REGISTER_READS" }
+      ],
+      "ports": [
+        { "name": "i_wclk", "direction": "input", "width": 1, "clock_domain": "i_wclk" },
+        { "name": "i_wr_reset_n", "direction": "input", "width": 1, "clock_domain": "i_wclk" },
+        { "name": "i_wr", "direction": "input", "width": 1, "clock_domain": "i_wclk" },
+        { "name": "i_wr_data", "direction": "input", "width": "WIDTH", "clock_domain": "i_wclk" },
+        { "name": "o_wr_full", "direction": "output", "width": 1, "clock_domain": "i_wclk" },
+        { "name": "i_rclk", "direction": "input", "width": 1, "clock_domain": "i_rclk" },
+        { "name": "i_rd_reset_n", "direction": "input", "width": 1, "clock_domain": "i_rclk" },
+        { "name": "i_rd", "direction": "input", "width": 1, "clock_domain": "i_rclk" },
+        { "name": "o_rd_data", "direction": "output", "width": "WIDTH", "clock_domain": "i_rclk" },
+        { "name": "o_rd_empty", "direction": "output", "width": 1, "clock_domain": "i_rclk" }
+      ],
+      "instances": [
+        { "module": "sync_bit", "name": "wr_sync_rptr", "function": "Synchronize read pointer to write clock domain", "connections": [ "i_rclk", "i_wr_reset_n", "rptr_gray_sync", "rptr_gray_sync_wclk" ] },
+        { "module": "sync_bit", "name": "rd_sync_wptr", "function": "Synchronize write pointer to read clock domain", "connections": [ "i_wclk", "i_rd_reset_n", "wptr_gray_sync", "wptr_gray_sync_rclk" ] },
+        { "module": "sync_payload", "name": "payload_sync", "function": "Synchronize payload to read clock domain", "connections": [ "i_wclk", "i_rclk", "i_wr_reset_n", "i_rd_reset_n", "wptr_gray_sync_wclk", "rptr_gray_sync_rclk", "i_wr_data", "payload_sync_rclk" ] }
+      ],
+      "connections": [
+        { "source": "wr_sync_rptr.o_sync", "destination": "rptr_gray_sync_wclk" },
+        { "source": "rd_sync_wptr.o_sync", "destination": "wptr_gray_sync_rclk" },
+        { "source": "payload_sync.o_sync_data", "destination": "payload_sync_rclk" }
+      ],
+      "internal_signals": [
+        { "name": "wptr", "width": "LGFIFO+1" },
+        { "name": "wptr_gray", "width": "LGFIFO+1" },
+        { "name": "rptr", "width": "LGFIFO+1" },
+        { "name": "rptr_gray", "width": "LGFIFO+1" },
+        { "name": "rptr_gray_sync", "width": "LGFIFO+1" },
+        { "name": "wptr_gray_sync", "width": "LGFIFO+1" },
+        { "name": "wptr_gray_sync_wclk", "width": "LGFIFO+1" },
+        { "name": "rptr_gray_sync_rclk", "width": "LGFIFO+1" },
+        { "name": "payload_sync_rclk", "width": "WIDTH" },
+        { "name": "mem", "width": "WIDTH", "size": "2**LGFIFO" },
+        { "name": "wr_full_gray", "width": 1 },
+        { "name": "rd_empty_gray", "width": 1 }
+      ],
+      "behavior": [
+        "Storage accepts 2**LGFIFO writes before any read. o_wr_full is high only when that storage is occupied.",
+        "A write is accepted when i_wr is high and o_wr_full is low, on the edge selected by WRITE_ON_POSEDGE.",
+        "A read is accepted when i_rd is high and o_rd_empty is low.",
+        "A write while full does not change stored data. A read while empty does not change o_rd_data and does not drop a later word.",
+        "Accepted data returns exactly once, in write order.",
+        "While write reset is asserted, o_wr_full is low. While read reset is asserted, o_rd_empty is high.",
+        "o_rd_empty can be high while words remain stored. The read side presents one stored word at a time. After a read, empty may return high until the next stored word becomes visible.",
+        "OPT_REGISTER_READS selects additional output registering; the payload must always have destination-clock synchronization.",
+        "NFF is the synchronizer depth. Use at least 2 stages.",
+        "Do not emit FORMAL-only ports.",
+        "Use acknowledged single-bit control between i_wclk and i_rclk, with at least NFF stages and sufficient payload settling. Synchronize the held payload separately; do not independently synchronize a changing data bus.",
+        "Hold each memory word stable from the time it is offered until the read side takes it.",
+        "Do not form full or empty by comparing a multi-bit pointer that was synchronized bit by bit.",
+        "Reset release must be safe in each clock domain.",
+        "Payloads pass through two destination-clock stages before they are advertised as valid. Preserve source ownership of each queued word until its accepted destination transfer; synchronization stages alone do not establish multi-bit coherence. Availability may lag and bubbles may span multiple destination clocks. There is no one-beat-per-clock guarantee. Register the offered word in the write domain before launching its request. NFF sets the minimum control synchronization depth; additional request-settling stages are permitted. OPT_REGISTER_READS selects an additional destination holding register or the synchronized destination payload, never an asynchronous memory bypass."
+      ]
+    },
+    {
+      "Top_module_name": "sync_bit",
+      "function": "Synchronize a single-bit signal across clock domains",
+      "parameters": [],
+      "ports": [
+        { "name": "i_clk", "direction": "input", "width": 1, "clock_domain": "i_clk" },
+        { "name": "i_reset_n", "direction": "input", "width": 1, "clock_domain": "i_clk" },
+        { "name": "i_async", "direction": "input", "width": 1, "clock_domain": "i_clk" },
+        { "name": "o_sync", "direction": "output", "width": 1, "clock_domain": "i_clk" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        { "name": "sync_reg", "width": 1 }
+      ],
+      "behavior": [
+        "Synchronize a single-bit signal across clock domains using a multi-stage register."
+      ]
+    },
+    {
+      "Top_module_name": "sync_payload",
+      "function": "Synchronize a payload across clock domains",
+      "parameters": [],
+      "ports": [
+        { "name": "i_wclk", "direction": "input", "width": 1, "clock_domain": "i_wclk" },
+        { "name": "i_rclk", "direction": "input", "width": 1, "clock_domain": "i_rclk" },
+        { "name": "i_wr_reset_n", "direction": "input", "width": 1, "clock_domain": "i_wclk" },
+        { "name": "i_rd_reset_n", "direction": "input", "width": 1, "clock_domain": "i_rclk" },
+        { "name": "i_wptr_gray_sync", "direction": "input", "width": "LGFIFO+1", "clock_domain": "i_wclk" },
+        { "name": "i_rptr_gray_sync", "direction": "input", "width": "LGFIFO+1", "clock_domain": "i_rclk" },
+        { "name": "i_wr_data", "direction": "input", "width": "WIDTH", "clock_domain": "i_wclk" },
+        { "name": "o_sync_data", "direction": "output", "width": "WIDTH", "clock_domain": "i_rclk" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        { "name": "mem", "width": "WIDTH", "size": "2**LGFIFO" },
+        { "name": "payload_reg", "width": "WIDTH" }
+      ],
+      "behavior": [
+        "Synchronize a payload across clock domains using a memory buffer and a multi-stage synchronization process."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	// Internal signals
+	reg [LGFIFO:0] wptr, wptr_gray, wptr_gray_sync, wptr_gray_sync_wclk;
+	reg [LGFIFO:0] rptr, rptr_gray, rptr_gray_sync, rptr_gray_sync_rclk;
+	reg [WIDTH-1:0] mem [0:(1<<LGFIFO)-1];
+	reg [WIDTH-1:0] payload_sync_rclk;
+	reg wr_full_gray, rd_empty_gray;
+
+	// Gray code conversion functions
+	function [LGFIFO:0] bin2gray;
+		input [LGFIFO:0] bin;
+		bin2gray = bin ^ (bin >> 1);
+	endfunction
+
+	function [LGFIFO:0] gray2bin;
+		input [LGFIFO:0] gray;
+		integer i;
+		reg [LGFIFO:0] bin;
+		bin = gray;
+		for (i = LGFIFO-1; i >= 0; i = i - 1)
+			bin[i] = bin[i+1] ^ gray[i];
+		gray2bin = bin;
+	endfunction
+
+	// Write side logic
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wptr <= 0;
+			o_wr_full <= 0;
+		end else begin
+			if (i_wr && !o_wr_full) begin
+				if (WRITE_ON_POSEDGE)
+					mem[wptr[LGFIFO-1:0]] <= i_wr_data;
+				wptr <= wptr + 1;
+			end
+			wptr_gray <= bin2gray(wptr);
+			o_wr_full <= (wptr_gray == {~wptr_gray_sync_wclk[LGFIFO], wptr_gray_sync_wclk[LGFIFO-1:0]});
+		end
+	end
+
+	// Read side logic
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rptr <= 0;
+			o_rd_empty <= 1;
+		end else begin
+			if (i_rd && !o_rd_empty) begin
+				rptr <= rptr + 1;
+			end
+			rptr_gray <= bin2gray(rptr);
+			o_rd_empty <= (rptr_gray == {~rptr_gray_sync_rclk[LGFIFO], rptr_gray_sync_rclk[LGFIFO-1:0]});
+		end
+	end
+
+	// Pointer synchronization
+	sync_bit #(.NFF(NFF)) wr_sync_rptr (
+		.i_clk(i_wclk),
+		.i_reset_n(i_wr_reset_n),
+		.i_async(rptr_gray),
+		.o_sync(rptr_gray_sync_wclk)
+	);
+
+	sync_bit #(.NFF(NFF)) rd_sync_wptr (
+		.i_clk(i_rclk),
+		.i_reset_n(i_rd_reset_n),
+		.i_async(wptr_gray),
+		.o_sync(wptr_gray_sync_rclk)
+	);
+
+	// Payload synchronization
+	sync_payload #(.LGFIFO(LGFIFO), .WIDTH(WIDTH), .NFF(NFF)) payload_sync (
+		.i_wclk(i_wclk),
+		.i_rclk(i_rclk),
+		.i_wr_reset_n(i_wr_reset_n),
+		.i_rd_reset_n(i_rd_reset_n),
+		.i_wptr_gray_sync(wptr_gray_sync_wclk),
+		.i_rptr_gray_sync(rptr_gray_sync_rclk),
+		.i_wr_data(i_wr_data),
+		.o_sync_data(payload_sync_rclk)
+	);
+
+	// Output data selection
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			o_rd_data <= 0;
+		end else begin
+			if (!OPT_REGISTER_READS) begin
+				o_rd_data <= payload_sync_rclk;
+			end else begin
+				if (i_rd && !o_rd_empty) begin
+					o_rd_data <= payload_sync_rclk;
+				end
+			end
+		end
+	end
+
+endmodule
+
+module sync_bit #(
+		parameter	NFF = 2
+	) (
+		input	wire	i_clk,
+		input	wire	i_reset_n,
+		input	wire	i_async,
+		output	reg	o_sync
+	);
+
+	reg [NFF-1:0] sync_reg;
+
+	always @(posedge i_clk or negedge i_reset_n) begin
+		if (!i_reset_n)
+			sync_reg <= 0;
+		else
+			sync_reg <= {sync_reg[NFF-2:0], i_async};
+	end
+
+	assign o_sync = sync_reg[NFF-1];
+
+endmodule
+
+module sync_payload #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2
+	) (
+		input	wire			i_wclk,
+		input	wire			i_rclk,
+		input	wire			i_wr_reset_n,
+		input	wire			i_rd_reset_n,
+		input	wire	[LGFIFO:0]	i_wptr_gray_sync,
+		input	wire	[LGFIFO:0]	i_rptr_gray_sync,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg	[WIDTH-1:0]	o_sync_data
+	);
+
+	reg [WIDTH-1:0] mem [0:(1<<LGFIFO)-1];
+	reg [LGFIFO-1:0] wptr_sync, rptr_sync;
+	reg [WIDTH-1:0] payload_reg;
+
+	// Write side
+	always @(posedge i_wclk or negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wptr_sync <= 0;
+		end else begin
+			wptr_sync <= i_wptr_gray_sync[LGFIFO-1:0];
+		end
+	end
+
+	// Read side
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rptr_sync <= 0;
+		end else begin
+			rptr_sync <= i_rptr_gray_sync[LGFIFO-1:0];
+		end
+	end
+
+	// Memory write
+	always @(posedge i_wclk) begin
+		if (i_wr_reset_n)
+			mem[wptr_sync] <= i_wr_data;
+	end
+
+	// Memory read
+	always @(posedge i_rclk) begin
+		if (i_rd_reset_n)
+			payload_reg <= mem[rptr_sync];
+	end
+
+	// Output data with additional register stage if needed
+	always @(posedge i_rclk or negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_sync_data <= 0;
+		else
+			o_sync_data <= payload_reg;
+	end
+
+endmodule
+```

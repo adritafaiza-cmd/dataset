@@ -1,0 +1,326 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "cdc_2phase_clearable",
+      "function": "Implements a clearable two-phase valid/ready channel between asynchronous clocks.",
+      "parameters": [
+        { "name": "WIDTH", "value": "1" },
+        { "name": "SYNC_STAGES", "value": "3" },
+        { "name": "CLEAR_ON_ASYNC_RESET", "value": "1" }
+      ],
+      "ports": [
+        { "name": "src_rst_ni", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_clk_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_clear_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_clear_pending_o", "direction": "output", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_data_i", "direction": "input", "width": "WIDTH", "clock_domain": "src_clk_i" },
+        { "name": "src_valid_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_ready_o", "direction": "output", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "dst_rst_ni", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_clk_i", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_clear_i", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_clear_pending_o", "direction": "output", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_data_o", "direction": "output", "width": "WIDTH", "clock_domain": "dst_clk_i" },
+        { "name": "dst_valid_o", "direction": "output", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_ready_i", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" }
+      ],
+      "instances": [
+        { "module": "sync_fifo", "name": "src_to_dst_fifo", "function": "Synchronizes data and handshake signals from source to destination clock domain.", "connections": [] },
+        { "module": "sync_fifo", "name": "dst_to_src_fifo", "function": "Synchronizes clear request and response signals from destination to source clock domain.", "connections": [] },
+        { "module": "sync_register", "name": "src_clear_sync", "function": "Synchronizes clear request from source to destination clock domain.", "connections": [] },
+        { "module": "sync_register", "name": "dst_clear_sync", "function": "Synchronizes clear request from destination to source clock domain.", "connections": [] }
+      ],
+      "connections": [
+        { "source": "src_valid_i", "destination": "src_to_dst_fifo.src_valid_i" },
+        { "source": "src_data_i", "destination": "src_to_dst_fifo.src_data_i" },
+        { "source": "src_to_dst_fifo.dst_valid_o", "destination": "dst_valid_o" },
+        { "source": "src_to_dst_fifo.dst_data_o", "destination": "dst_data_o" },
+        { "source": "dst_ready_i", "destination": "src_to_dst_fifo.dst_ready_i" },
+        { "source": "src_clear_i", "destination": "src_clear_sync.src_data_i" },
+        { "source": "src_clear_sync.dst_data_o", "destination": "dst_clear_i" },
+        { "source": "dst_clear_i", "destination": "dst_clear_sync.src_data_i" },
+        { "source": "dst_clear_sync.dst_data_o", "destination": "src_clear_i" },
+        { "source": "src_rst_ni", "destination": "src_to_dst_fifo.src_rst_ni" },
+        { "source": "dst_rst_ni", "destination": "src_to_dst_fifo.dst_rst_ni" },
+        { "source": "src_rst_ni", "destination": "src_clear_sync.src_rst_ni" },
+        { "source": "dst_rst_ni", "destination": "src_clear_sync.dst_rst_ni" },
+        { "source": "src_rst_ni", "destination": "dst_clear_sync.src_rst_ni" },
+        { "source": "dst_rst_ni", "destination": "dst_clear_sync.dst_rst_ni" },
+        { "source": "src_to_dst_fifo.src_ready_o", "destination": "src_ready_o" },
+        { "source": "src_clear_sync.dst_data_o", "destination": "src_clear_pending_o" },
+        { "source": "dst_clear_sync.dst_data_o", "destination": "dst_clear_pending_o" }
+      ],
+      "internal_signals": [],
+      "behavior": [
+        "Every accepted source beat must appear exactly once at the destination, in order.",
+        "The channel may hold one outstanding item.",
+        "src_clear_i and dst_clear_i request a coordinated flush: isolate the channel, drop in-flight data, then return both sides to idle.",
+        "src_clear_pending_o / dst_clear_pending_o stay high until that side has finished the clear.",
+        "Reset and clear must not create a destination beat.",
+        "Isolate gates both ends before clear. Clear drops the one outstanding beat by returning the two-phase request and acknowledge to zero. The destination payload is still captured on the request edge, with no extra valid gap between beats. Each clear step reaches the other clock one handshake later.",
+        "Hold each transaction payload stable under the request/acknowledge protocol. Synchronize the held payload through at least two destination-clock stages and delay its control indication sufficiently for the payload to settle before capture or acceptance. Preserve ordered, exactly-once transfers and stable outputs under backpressure."
+      ]
+    },
+    {
+      "Top_module_name": "sync_fifo",
+      "function": "Synchronizes data and handshake signals between two asynchronous clock domains.",
+      "parameters": [
+        { "name": "WIDTH", "value": "1" },
+        { "name": "SYNC_STAGES", "value": "3" }
+      ],
+      "ports": [
+        { "name": "src_rst_ni", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_clk_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_data_i", "direction": "input", "width": "WIDTH", "clock_domain": "src_clk_i" },
+        { "name": "src_valid_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_ready_o", "direction": "output", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "dst_rst_ni", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_clk_i", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_data_o", "direction": "output", "width": "WIDTH", "clock_domain": "dst_clk_i" },
+        { "name": "dst_valid_o", "direction": "output", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_ready_i", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [],
+      "behavior": [
+        "Synchronizes data and handshake signals between two asynchronous clock domains using a FIFO with a specified number of synchronization stages.",
+        "Ensure no metastability issues arise during clock-domain crossing."
+      ]
+    },
+    {
+      "Top_module_name": "sync_register",
+      "function": "Synchronizes a single-bit signal between two asynchronous clock domains.",
+      "parameters": [
+        { "name": "SYNC_STAGES", "value": "3" }
+      ],
+      "ports": [
+        { "name": "src_rst_ni", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_clk_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_data_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "dst_rst_ni", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_clk_i", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_data_o", "direction": "output", "width": "1", "clock_domain": "dst_clk_i" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [],
+      "behavior": [
+        "Synchronizes a single-bit signal between two asynchronous clock domains using a chain of flip-flops to mitigate metastability.",
+        "Ensure that the signal is stable before being used in the destination clock domain."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Instantiate sync_fifo for data and handshake signals
+  sync_fifo #(
+    .WIDTH(WIDTH),
+    .SYNC_STAGES(SYNC_STAGES)
+  ) src_to_dst_fifo (
+    .src_rst_ni(src_rst_ni),
+    .src_clk_i(src_clk_i),
+    .src_data_i(src_data_i),
+    .src_valid_i(src_valid_i),
+    .src_ready_o(src_ready_o),
+    .dst_rst_ni(dst_rst_ni),
+    .dst_clk_i(dst_clk_i),
+    .dst_data_o(dst_data_o),
+    .dst_valid_o(dst_valid_o),
+    .dst_ready_i(dst_ready_i)
+  );
+
+  // Instantiate sync_register for clear requests from source to destination
+  sync_register #(
+    .SYNC_STAGES(SYNC_STAGES)
+  ) src_clear_sync (
+    .src_rst_ni(src_rst_ni),
+    .src_clk_i(src_clk_i),
+    .src_data_i(src_clear_i),
+    .dst_rst_ni(dst_rst_ni),
+    .dst_clk_i(dst_clk_i),
+    .dst_data_o(src_to_dst_fifo.src_clear_i)
+  );
+
+  // Instantiate sync_register for clear requests from destination to source
+  sync_register #(
+    .SYNC_STAGES(SYNC_STAGES)
+  ) dst_clear_sync (
+    .src_rst_ni(dst_rst_ni),
+    .src_clk_i(dst_clk_i),
+    .src_data_i(dst_clear_i),
+    .dst_rst_ni(src_rst_ni),
+    .dst_clk_i(src_clk_i),
+    .dst_data_o(src_to_dst_fifo.dst_clear_i)
+  );
+
+  // Instantiate sync_register for clear pending status from source to destination
+  sync_register #(
+    .SYNC_STAGES(SYNC_STAGES)
+  ) src_clear_pending_sync (
+    .src_rst_ni(src_rst_ni),
+    .src_clk_i(src_clk_i),
+    .src_data_i(src_to_dst_fifo.src_clear_pending_o),
+    .dst_rst_ni(dst_rst_ni),
+    .dst_clk_i(dst_clk_i),
+    .dst_data_o(dst_clear_pending_o)
+  );
+
+  // Instantiate sync_register for clear pending status from destination to source
+  sync_register #(
+    .SYNC_STAGES(SYNC_STAGES)
+  ) dst_clear_pending_sync (
+    .src_rst_ni(dst_rst_ni),
+    .src_clk_i(dst_clk_i),
+    .src_data_i(src_to_dst_fifo.dst_clear_pending_o),
+    .dst_rst_ni(src_rst_ni),
+    .dst_clk_i(src_clk_i),
+    .dst_data_o(src_clear_pending_o)
+  );
+
+endmodule
+
+module sync_fifo #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  reg [WIDTH-1:0] data_ff;
+  reg valid_ff;
+  reg clear_src, clear_dst;
+
+  // Synchronize clear signals
+  sync_register #(
+    .SYNC_STAGES(SYNC_STAGES)
+  ) clear_src_sync (
+    .src_rst_ni(src_rst_ni),
+    .src_clk_i(src_clk_i),
+    .src_data_i(src_clear_i),
+    .dst_rst_ni(src_rst_ni),
+    .dst_clk_i(src_clk_i),
+    .dst_data_o(clear_src)
+  );
+
+  sync_register #(
+    .SYNC_STAGES(SYNC_STAGES)
+  ) clear_dst_sync (
+    .src_rst_ni(dst_rst_ni),
+    .src_clk_i(dst_clk_i),
+    .src_data_i(dst_clear_i),
+    .dst_rst_ni(dst_rst_ni),
+    .dst_clk_i(dst_clk_i),
+    .dst_data_o(clear_dst)
+  );
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      data_ff <= '0;
+      valid_ff <= 0;
+      src_ready_o <= 0;
+    end else begin
+      if (clear_src) begin
+        valid_ff <= 0;
+        src_ready_o <= 1;
+      end else if (src_valid_i && src_ready_o) begin
+        data_ff <= src_data_i;
+        valid_ff <= 1;
+        src_ready_o <= 0;
+      end else if (dst_ready_i && valid_ff) begin
+        src_ready_o <= 1;
+      end
+    end
+  end
+
+  // Destination domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_o <= '0;
+      dst_valid_o <= 0;
+    end else begin
+      if (clear_dst) begin
+        dst_valid_o <= 0;
+      end else if (src_ready_o && src_valid_i) begin
+        dst_data_o <= data_ff;
+        dst_valid_o <= valid_ff;
+      end else if (dst_ready_i) begin
+        dst_valid_o <= 0;
+      end
+    end
+  end
+
+endmodule
+
+module sync_register #(
+  parameter SYNC_STAGES = 3
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_data_i,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output dst_data_o
+);
+
+  reg [SYNC_STAGES-1:0] sync_ff;
+
+  // Source to destination synchronization
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      sync_ff <= '0;
+    end else begin
+      sync_ff[0] <= src_data_i;
+      for (int i = 1; i < SYNC_STAGES; i = i + 1) begin
+        sync_ff[i] <= sync_ff[i-1];
+      end
+    end
+  end
+
+  // Destination domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_o <= 0;
+    end else begin
+      dst_data_o <= sync_ff[SYNC_STAGES-1];
+    end
+  end
+
+endmodule
+```

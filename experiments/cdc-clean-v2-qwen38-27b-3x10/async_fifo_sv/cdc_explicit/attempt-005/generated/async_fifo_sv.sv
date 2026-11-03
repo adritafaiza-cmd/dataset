@@ -1,0 +1,113 @@
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    localparam DEPTH = 1 << ADDR_WIDTH;
+    localparam PTR_WIDTH = ADDR_WIDTH + 1;
+
+    // Write domain
+    reg [PTR_WIDTH-1:0] wptr;
+    reg [PTR_WIDTH-1:0] rptr_sync;
+    reg [DATA_WIDTH-1:0] mem [0:DEPTH-1];
+
+    // Read domain
+    reg [PTR_WIDTH-1:0] rptr;
+    reg [PTR_WIDTH-1:0] wptr_sync;
+
+    // Synchronizer registers for write pointer (to read domain)
+    reg [PTR_WIDTH-1:0] wptr_sync_reg [0:SYNC_STAGES-1];
+
+    // Synchronizer registers for read pointer (to write domain)
+    reg [PTR_WIDTH-1:0] rptr_sync_reg [0:SYNC_STAGES-1];
+
+    // Write domain logic
+    wire wfull_internal;
+    wire winc_valid;
+
+    assign wfull_internal = (wptr[ADDR_WIDTH] != rptr_sync[ADDR_WIDTH]) &&
+                            (wptr[ADDR_WIDTH-1:0] == rptr_sync[ADDR_WIDTH-1:0]);
+    assign wfull = wfull_internal;
+    assign waddr = wptr;
+
+    assign winc_valid = winc & ~wfull_internal;
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {PTR_WIDTH{1'b0}};
+        end else if (winc_valid) begin
+            wptr <= wptr + 1'b1;
+            mem[wptr[ADDR_WIDTH-1:0]] <= wdata;
+        end
+    end
+
+    // Synchronize wptr to read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_sync_reg[0] <= {PTR_WIDTH{1'b0}};
+            for (int i = 1; i < SYNC_STAGES; i = i + 1) begin
+                wptr_sync_reg[i] <= {PTR_WIDTH{1'b0}};
+            end
+        end else begin
+            wptr_sync_reg[0] <= wptr;
+            for (int i = 1; i < SYNC_STAGES; i = i + 1) begin
+                wptr_sync_reg[i] <= wptr_sync_reg[i-1];
+            end
+        end
+    end
+
+    assign wptr_sync = wptr_sync_reg[SYNC_STAGES-1];
+
+    // Read domain logic
+    wire rempty_internal;
+    wire rinc_valid;
+
+    assign rempty_internal = (rptr == wptr_sync);
+    assign rempty = rempty_internal;
+    assign raddr = rptr;
+
+    assign rinc_valid = rinc & ~rempty_internal;
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= {PTR_WIDTH{1'b0}};
+        end else if (rinc_valid) begin
+            rptr <= rptr + 1'b1;
+        end
+    end
+
+    // Synchronize rptr to write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_sync_reg[0] <= {PTR_WIDTH{1'b0}};
+            for (int i = 1; i < SYNC_STAGES; i = i + 1) begin
+                rptr_sync_reg[i] <= {PTR_WIDTH{1'b0}};
+            end
+        end else begin
+            rptr_sync_reg[0] <= rptr;
+            for (int i = 1; i < SYNC_STAGES; i = i + 1) begin
+                rptr_sync_reg[i] <= rptr_sync_reg[i-1];
+            end
+        end
+    end
+
+    assign rptr_sync = rptr_sync_reg[SYNC_STAGES-1];
+
+    // Read data output
+    assign rdata = mem[rptr[ADDR_WIDTH-1:0]];
+
+endmodule

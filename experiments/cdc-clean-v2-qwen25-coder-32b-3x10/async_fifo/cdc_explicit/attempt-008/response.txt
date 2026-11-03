@@ -1,0 +1,110 @@
+```verilog
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWATERMARK = DEPTH - 2;
+    localparam EWATERMARK = 1;
+
+    reg [DSIZE-1:0] mem [DEPTH-1:0];
+
+    reg [ASIZE:0] wptr_gray, wptr_gray_nxt, wptr_bin;
+    reg [ASIZE:0] rptr_gray, rptr_gray_nxt, rptr_bin;
+
+    // Write domain logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr_gray <= 0;
+        end else if (winc && !wfull) begin
+            wptr_gray <= wptr_gray_nxt;
+        end
+    end
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            mem[0] <= 0;
+        end else if (winc && !wfull) begin
+            mem[wptr_bin[ASIZE-1:0]] <= wdata;
+        end
+    end
+
+    assign wptr_gray_nxt = wptr_gray + 1;
+    assign wptr_bin = wptr_gray ^ (wptr_gray >> 1);
+
+    // Read domain logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr_gray <= 0;
+        end else if (rinc && !rempty) begin
+            rptr_gray <= rptr_gray_nxt;
+        end
+    end
+
+    assign rptr_gray_nxt = rptr_gray + 1;
+    assign rptr_bin = rptr_gray ^ (rptr_gray >> 1);
+
+    // Gray to binary conversion for read pointer in write domain
+    reg [ASIZE:0] rptr_bin_wdom;
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_bin_wdom <= 0;
+        end else begin
+            rptr_bin_wdom <= rptr_gray ^ (rptr_gray >> 1);
+        end
+    end
+
+    // Gray to binary conversion for write pointer in read domain
+    reg [ASIZE:0] wptr_bin_rdom;
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_bin_rdom <= 0;
+        end else begin
+            wptr_bin_rdom <= wptr_gray ^ (wptr_gray >> 1);
+        end
+    end
+
+    // FIFO full and almost full logic
+    wire [ASIZE:0] wptr_bin_plus1;
+    assign wptr_bin_plus1 = wptr_bin_wdom + 1;
+    assign wfull = (wptr_bin_plus1[ASIZE:0] == rptr_bin_wdom[ASIZE:0]);
+    assign awfull = (wptr_bin_plus1[ASIZE:0] == (rptr_bin_wdom[ASIZE:0] + AWATERMARK));
+
+    // FIFO empty and almost empty logic
+    wire [ASIZE:0] rptr_bin_plus1;
+    assign rptr_bin_plus1 = rptr_bin_rdom + 1;
+    assign rempty = (wptr_bin_rdom[ASIZE:0] == rptr_bin_rdom[ASIZE:0]);
+    assign arempty = (wptr_bin_rdom[ASIZE:0] == (rptr_bin_rdom[ASIZE:0] + EWATERMARK));
+
+    // Read data output
+    reg [DSIZE-1:0] rdata_reg;
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rdata_reg <= 0;
+        end else if (rinc && !rempty) begin
+            rdata_reg <= mem[rptr_bin_rdom[ASIZE-1:0]];
+        end else if (FALLTHROUGH && !rempty) begin
+            rdata_reg <= mem[rptr_bin_rdom[ASIZE-1:0]];
+        end
+    end
+
+    assign rdata = rdata_reg;
+
+endmodule
+```<|im_end|>

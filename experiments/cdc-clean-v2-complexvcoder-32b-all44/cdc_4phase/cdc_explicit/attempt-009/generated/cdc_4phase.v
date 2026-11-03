@@ -1,0 +1,129 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  logic src_valid_synced;
+  logic [WIDTH-1:0] src_data_synced;
+  logic src_valid_ff;
+  logic src_valid_ff2;
+  logic dst_ready_ff;
+
+  // Synchronize src_valid_i to dst_clk_i
+  sync_ff sync_src_valid (
+    .async_in (src_valid_i),
+    .clk      (dst_clk_i),
+    .rst_n    (dst_rst_ni),
+    .sync_out (src_valid_synced)
+  );
+
+  // Synchronize src_data_i to dst_clk_i
+  sync_ff_wide sync_src_data (
+    .async_in (src_data_i),
+    .clk      (dst_clk_i),
+    .rst_n    (dst_rst_ni),
+    .sync_out (src_data_synced)
+  );
+
+  // Register synchronization signals for src_valid_i
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_valid_ff  <= 1'b0;
+      src_valid_ff2 <= 1'b0;
+    end else begin
+      src_valid_ff  <= src_valid_synced;
+      src_valid_ff2 <= src_valid_ff;
+    end
+  end
+
+  // Register synchronization signals for dst_ready_i
+  always_ff @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      dst_ready_ff <= 1'b0;
+    end else begin
+      dst_ready_ff <= dst_ready_i;
+    end
+  end
+
+  // Source ready output
+  assign src_ready_o = dst_ready_ff || !src_valid_ff2;
+
+  // Destination valid output
+  assign dst_valid_o = src_valid_ff2;
+
+  // Destination data output
+  always_ff @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      if (SEND_RESET_MSG) begin
+        dst_data_o <= RESET_MSG;
+      end else begin
+        dst_data_o <= {WIDTH{1'b0}};
+      end
+    end else if (src_valid_synced) begin
+      dst_data_o <= src_data_synced;
+    end
+  end
+
+endmodule
+
+// Synchronizer for 1-bit signals
+module sync_ff (
+  input  async_in,
+  input  clk,
+  input  rst_n,
+  output sync_out
+);
+  logic ff1;
+  logic ff2;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      ff1 <= 1'b0;
+      ff2 <= 1'b0;
+    end else begin
+      ff1 <= async_in;
+      ff2 <= ff1;
+    end
+  end
+
+  assign sync_out = ff2;
+endmodule
+
+// Synchronizer for WIDTH-bit signals
+module sync_ff_wide #(
+  parameter WIDTH = 1
+)(
+  input  [WIDTH-1:0] async_in,
+  input  clk,
+  input  rst_n,
+  output [WIDTH-1:0] sync_out
+);
+  logic [WIDTH-1:0] ff1;
+  logic [WIDTH-1:0] ff2;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      ff1 <= {WIDTH{1'b0}};
+      ff2 <= {WIDTH{1'b0}};
+    end else begin
+      ff1 <= async_in;
+      ff2 <= ff1;
+    end
+  end
+
+  assign sync_out = ff2;
+endmodule

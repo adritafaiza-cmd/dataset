@@ -1,0 +1,216 @@
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWIDTH = ASIZE;
+
+    reg [DSIZE-1:0] mem [0:DEPTH-1];
+
+    // A side pointers
+    reg [AWIDTH:0] a_wr_ptr, a_wr_ptr_next;
+    reg [AWIDTH:0] a_rd_ptr, a_rd_ptr_next;
+    reg [AWIDTH:0] a_wr_ptr_gray, a_wr_ptr_gray_next;
+    reg [AWIDTH:0] a_rd_ptr_gray, a_rd_ptr_gray_next;
+
+    // B side pointers
+    reg [AWIDTH:0] b_wr_ptr, b_wr_ptr_next;
+    reg [AWIDTH:0] b_rd_ptr, b_rd_ptr_next;
+    reg [AWIDTH:0] b_wr_ptr_gray, b_wr_ptr_gray_next;
+    reg [AWIDTH:0] b_rd_ptr_gray, b_rd_ptr_gray_next;
+
+    // Gray code conversion
+    function [AWIDTH:0] bin2gray;
+        input [AWIDTH:0] bin;
+        bin2gray = bin ^ (bin >> 1);
+    endfunction
+
+    // Binary conversion
+    function [AWIDTH:0] gray2bin;
+        input [AWIDTH:0] gray;
+        integer i;
+        reg [AWIDTH:0] bin;
+        bin = gray;
+        for (i = AWIDTH; i > 0; i = i - 1) begin
+            bin[i-1] = bin[i] ^ bin[i-1];
+        end
+        gray2bin = bin;
+    endfunction
+
+    // A side write pointer update
+    always @(posedge a_clk or negedge a_rst_n) begin
+        if (!a_rst_n) begin
+            a_wr_ptr <= 0;
+            a_wr_ptr_gray <= 0;
+        end else begin
+            a_wr_ptr <= a_wr_ptr_next;
+            a_wr_ptr_gray <= a_wr_ptr_gray_next;
+        end
+    end
+
+    // A side read pointer update
+    always @(posedge a_clk or negedge a_rst_n) begin
+        if (!a_rst_n) begin
+            a_rd_ptr <= 0;
+            a_rd_ptr_gray <= 0;
+        end else begin
+            a_rd_ptr <= a_rd_ptr_next;
+            a_rd_ptr_gray <= a_rd_ptr_gray_next;
+        end
+    end
+
+    // B side write pointer update
+    always @(posedge b_clk or negedge b_rst_n) begin
+        if (!b_rst_n) begin
+            b_wr_ptr <= 0;
+            b_wr_ptr_gray <= 0;
+        end else begin
+            b_wr_ptr <= b_wr_ptr_next;
+            b_wr_ptr_gray <= b_wr_ptr_gray_next;
+        end
+    end
+
+    // B side read pointer update
+    always @(posedge b_clk or negedge b_rst_n) begin
+        if (!b_rst_n) begin
+            b_rd_ptr <= 0;
+            b_rd_ptr_gray <= 0;
+        end else begin
+            b_rd_ptr <= b_rd_ptr_next;
+            b_rd_ptr_gray <= b_rd_ptr_gray_next;
+        end
+    end
+
+    // A side write pointer logic
+    always @(*) begin
+        a_wr_ptr_next = a_wr_ptr;
+        if (a_winc && !a_full) begin
+            a_wr_ptr_next = a_wr_ptr + 1;
+        end
+        a_wr_ptr_gray_next = bin2gray(a_wr_ptr_next);
+    end
+
+    // A side read pointer logic
+    always @(*) begin
+        a_rd_ptr_next = a_rd_ptr;
+        if (a_rinc && !a_empty) begin
+            a_rd_ptr_next = a_rd_ptr + 1;
+        end
+        a_rd_ptr_gray_next = bin2gray(a_rd_ptr_next);
+    end
+
+    // B side write pointer logic
+    always @(*) begin
+        b_wr_ptr_next = b_wr_ptr;
+        if (b_winc && !b_full) begin
+            b_wr_ptr_next = b_wr_ptr + 1;
+        end
+        b_wr_ptr_gray_next = bin2gray(b_wr_ptr_next);
+    end
+
+    // B side read pointer logic
+    always @(*) begin
+        b_rd_ptr_next = b_rd_ptr;
+        if (b_rinc && !b_empty) begin
+            b_rd_ptr_next = b_rd_ptr + 1;
+        end
+        b_rd_ptr_gray_next = bin2gray(b_rd_ptr_next);
+    end
+
+    // A side memory write
+    always @(posedge a_clk) begin
+        if (a_winc && !a_full) begin
+            mem[a_wr_ptr[AWIDTH-1:0]] <= a_wdata;
+        end
+    end
+
+    // B side memory write
+    always @(posedge b_clk) begin
+        if (b_winc && !b_full) begin
+            mem[b_wr_ptr[AWIDTH-1:0]] <= b_wdata;
+        end
+    end
+
+    // A side read data
+    reg [DSIZE-1:0] a_rdata_reg;
+    always @(posedge a_clk or negedge a_rst_n) begin
+        if (!a_rst_n) begin
+            a_rdata_reg <= 0;
+        end else if (a_rinc && !a_empty) begin
+            a_rdata_reg <= mem[a_rd_ptr[AWIDTH-1:0]];
+        end
+    end
+
+    // B side read data
+    reg [DSIZE-1:0] b_rdata_reg;
+    always @(posedge b_clk or negedge b_rst_n) begin
+        if (!b_rst_n) begin
+            b_rdata_reg <= 0;
+        end else if (b_rinc && !b_empty) begin
+            b_rdata_reg <= mem[b_rd_ptr[AWIDTH-1:0]];
+        end
+    end
+
+    // A side full and empty flags
+    reg [AWIDTH:0] b_rd_ptr_gray_sync_a;
+    always @(posedge a_clk or negedge a_rst_n) begin
+        if (!a_rst_n) begin
+            b_rd_ptr_gray_sync_a <= 0;
+        end else begin
+            b_rd_ptr_gray_sync_a <= b_rd_ptr_gray;
+        end
+    end
+
+    wire [AWIDTH:0] b_rd_ptr_sync_a = gray2bin(b_rd_ptr_gray_sync_a);
+    assign a_full = (a_wr_ptr + 1) == b_rd_ptr_sync_a;
+    assign a_afull = (a_wr_ptr + 2) == b_rd_ptr_sync_a;
+    assign a_empty = a_wr_ptr == b_rd_ptr_sync_a;
+    assign a_aempty = a_wr_ptr == (b_rd_ptr_sync_a + 1);
+
+    // B side full and empty flags
+    reg [AWIDTH:0] a_rd_ptr_gray_sync_b;
+    always @(posedge b_clk or negedge b_rst_n) begin
+        if (!b_rst_n) begin
+            a_rd_ptr_gray_sync_b <= 0;
+        end else begin
+            a_rd_ptr_gray_sync_b <= a_rd_ptr_gray;
+        end
+    end
+
+    wire [AWIDTH:0] a_rd_ptr_sync_b = gray2bin(a_rd_ptr_gray_sync_b);
+    assign b_full = (b_wr_ptr + 1) == a_rd_ptr_sync_b;
+    assign b_afull = (b_wr_ptr + 2) == a_rd_ptr_sync_b;
+    assign b_empty = b_wr_ptr == a_rd_ptr_sync_b;
+    assign b_aempty = b_wr_ptr == (a_rd_ptr_sync_b + 1);
+
+    // Output assignments
+    assign a_rdata = a_rdata_reg;
+    assign b_rdata = b_rdata_reg;
+
+endmodule

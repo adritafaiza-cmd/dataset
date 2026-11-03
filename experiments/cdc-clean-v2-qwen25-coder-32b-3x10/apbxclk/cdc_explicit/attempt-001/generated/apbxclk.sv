@@ -1,0 +1,224 @@
+module apbxclk #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		parameter [0:0]	OPT_REGISTERED = 1'b0,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH
+	) (
+		input	wire			S_APB_PCLK, S_PRESETn,
+		input	wire			S_APB_PSEL,
+		input	wire			S_APB_PENABLE,
+		output	reg			S_APB_PREADY,
+		input	wire	[AW-1:0]	S_APB_PADDR,
+		input	wire			S_APB_PWRITE,
+		input	wire	[DW-1:0]	S_APB_PWDATA,
+		input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+		input	wire	[2:0]		S_APB_PPROT,
+		output	wire	[DW-1:0]	S_APB_PRDATA,
+		output	wire			S_APB_PSLVERR,
+		input	wire			M_APB_PCLK,
+		output	reg			M_PRESETn,
+		output	reg			M_APB_PSEL,
+		output	reg			M_APB_PENABLE,
+		input	wire			M_APB_PREADY,
+		output	wire	[AW-1:0]	M_APB_PADDR,
+		output	wire			M_APB_PWRITE,
+		output	wire	[DW-1:0]	M_APB_PWDATA,
+		output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+		output	wire	[2:0]		M_APB_PPROT,
+		input	wire	[DW-1:0]	M_APB_PRDATA,
+		input	wire			M_APB_PSLVERR
+	);
+
+	// Internal signals
+	reg [AW-1:0]	s_apb_paddr_reg;
+	reg			s_apb_pwrite_reg;
+	reg [DW-1:0]	s_apb_pwdata_reg;
+	reg [DW/8-1:0]	s_apb_pwstrb_reg;
+	reg [2:0]		s_apb_pprot_reg;
+	reg [DW-1:0]	m_apb_prdata_reg;
+	reg			m_apb_pslverr_reg;
+	reg			req_valid;
+	reg			req_ready;
+	reg			resp_valid;
+	reg			resp_ready;
+
+	// Synchronizers for reset
+	reg [1:0]	s_reset_sync;
+	reg [1:0]	m_reset_sync;
+
+	// Synchronizers for request fields
+	reg [AW-1:0]	s_apb_paddr_sync;
+	reg			s_apb_pwrite_sync;
+	reg [DW-1:0]	s_apb_pwdata_sync;
+	reg [DW/8-1:0]	s_apb_pwstrb_sync;
+	reg [2:0]		s_apb_pprot_sync;
+
+	// Synchronizers for response fields
+	reg [DW-1:0]	m_apb_prdata_sync;
+	reg			m_apb_pslverr_sync;
+
+	// Reset synchronizers
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_reset_sync <= 2'b00;
+		end else begin
+			s_reset_sync <= {s_reset_sync[0], 1'b1};
+		end
+	end
+
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_reset_sync <= 2'b00;
+		end else begin
+			m_reset_sync <= {m_reset_sync[0], 1'b1};
+		end
+	end
+
+	assign M_PRESETn = m_reset_sync[1];
+
+	// Request synchronizers
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			s_apb_paddr_sync <= {AW{1'b0}};
+			s_apb_pwrite_sync <= 1'b0;
+			s_apb_pwdata_sync <= {DW{1'b0}};
+			s_apb_pwstrb_sync <= {DW/8{1'b0}};
+			s_apb_pprot_sync <= 3'b000;
+		end else begin
+			s_apb_paddr_sync <= S_APB_PADDR;
+			s_apb_pwrite_sync <= S_APB_PWRITE;
+			s_apb_pwdata_sync <= S_APB_PWDATA;
+			s_apb_pwstrb_sync <= S_APB_PWSTRB;
+			s_apb_pprot_sync <= S_APB_PPROT;
+		end
+	end
+
+	// Response synchronizers
+	always @(posedge S_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_apb_prdata_sync <= {DW{1'b0}};
+			m_apb_pslverr_sync <= 1'b0;
+		end else begin
+			m_apb_prdata_sync <= M_APB_PRDATA;
+			m_apb_pslverr_sync <= M_APB_PSLVERR;
+		end
+	end
+
+	// Request valid and ready signals
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			req_valid <= 1'b0;
+		end else begin
+			if (S_APB_PSEL && S_APB_PENABLE && !req_valid) begin
+				req_valid <= 1'b1;
+			end else if (req_ready) begin
+				req_valid <= 1'b0;
+			end
+		end
+	end
+
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			req_ready <= 1'b0;
+		end else begin
+			req_ready <= M_APB_PREADY;
+		end
+	end
+
+	// Response valid and ready signals
+	always @(posedge S_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			resp_valid <= 1'b0;
+		end else begin
+			if (req_valid && req_ready && !resp_valid) begin
+				resp_valid <= 1'b1;
+			end else if (resp_ready) begin
+				resp_valid <= 1'b0;
+			end
+		end
+	end
+
+	always @(posedge S_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			resp_ready <= 1'b0;
+		end else begin
+			resp_ready <= M_APB_PREADY;
+		end
+	end
+
+	// Register crossing payload and response fields if OPT_REGISTERED is set
+	generate
+		if (OPT_REGISTERED) begin : gen_registered
+			always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+				if (!M_PRESETn) begin
+					s_apb_paddr_reg <= {AW{1'b0}};
+					s_apb_pwrite_reg <= 1'b0;
+					s_apb_pwdata_reg <= {DW{1'b0}};
+					s_apb_pwstrb_reg <= {DW/8{1'b0}};
+					s_apb_pprot_reg <= 3'b000;
+				end else if (req_valid && req_ready) begin
+					s_apb_paddr_reg <= s_apb_paddr_sync;
+					s_apb_pwrite_reg <= s_apb_pwrite_sync;
+					s_apb_pwdata_reg <= s_apb_pwdata_sync;
+					s_apb_pwstrb_reg <= s_apb_pwstrb_sync;
+					s_apb_pprot_reg <= s_apb_pprot_sync;
+				end
+			end
+
+			always @(posedge S_APB_PCLK or negedge M_PRESETn) begin
+				if (!M_PRESETn) begin
+					m_apb_prdata_reg <= {DW{1'b0}};
+					m_apb_pslverr_reg <= 1'b0;
+				end else if (resp_valid && resp_ready) begin
+					m_apb_prdata_reg <= m_apb_prdata_sync;
+					m_apb_pslverr_reg <= m_apb_pslverr_sync;
+				end
+			end
+		end else begin : gen_combinational
+			assign s_apb_paddr_reg = s_apb_paddr_sync;
+			assign s_apb_pwrite_reg = s_apb_pwrite_sync;
+			assign s_apb_pwdata_reg = s_apb_pwdata_sync;
+			assign s_apb_pwstrb_reg = s_apb_pwstrb_sync;
+			assign s_apb_pprot_reg = s_apb_pprot_sync;
+
+			assign m_apb_prdata_reg = m_apb_prdata_sync;
+			assign m_apb_pslverr_reg = m_apb_pslverr_sync;
+		end
+	endgenerate
+
+	// Source APB interface
+	always @(posedge S_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			S_APB_PREADY <= 1'b0;
+			S_APB_PRDATA <= {DW{1'b0}};
+			S_APB_PSLVERR <= 1'b0;
+		end else begin
+			S_APB_PREADY <= resp_valid && resp_ready;
+			S_APB_PRDATA <= m_apb_prdata_reg;
+			S_APB_PSLVERR <= m_apb_pslverr_reg;
+		end
+	end
+
+	// Destination APB interface
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			M_APB_PADDR <= {AW{1'b0}};
+			M_APB_PWRITE <= 1'b0;
+			M_APB_PWDATA <= {DW{1'b0}};
+			M_APB_PWSTRB <= {DW/8{1'b0}};
+			M_APB_PPROT <= 3'b000;
+		end else begin
+			M_APB_PSEL <= req_valid;
+			M_APB_PENABLE <= req_valid && req_ready;
+			M_APB_PADDR <= s_apb_paddr_reg;
+			M_APB_PWRITE <= s_apb_pwrite_reg;
+			M_APB_PWDATA <= s_apb_pwdata_reg;
+			M_APB_PWSTRB <= s_apb_pwstrb_reg;
+			M_APB_PPROT <= s_apb_pprot_reg;
+		end
+	end
+
+endmodule

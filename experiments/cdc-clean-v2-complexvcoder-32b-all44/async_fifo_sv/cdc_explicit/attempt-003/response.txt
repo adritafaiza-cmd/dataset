@@ -1,0 +1,335 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "async_fifo_sv",
+      "function": "Asynchronous FIFO with 2**ADDR_WIDTH entries of DATA_WIDTH bits",
+      "parameters": [
+        { "name": "DATA_WIDTH", "value": "8" },
+        { "name": "ADDR_WIDTH", "value": "4" },
+        { "name": "SYNC_STAGES", "value": "2" }
+      ],
+      "ports": [
+        { "name": "wclk", "direction": "input", "width": 1, "clock_domain": "wclk" },
+        { "name": "wrst_n", "direction": "input", "width": 1, "clock_domain": "wclk" },
+        { "name": "winc", "direction": "input", "width": 1, "clock_domain": "wclk" },
+        { "name": "wdata", "direction": "input", "width": "DATA_WIDTH", "clock_domain": "wclk" },
+        { "name": "wfull", "direction": "output", "width": 1, "clock_domain": "wclk" },
+        { "name": "waddr", "direction": "output", "width": "ADDR_WIDTH+1", "clock_domain": "wclk" },
+        { "name": "rclk", "direction": "input", "width": 1, "clock_domain": "rclk" },
+        { "name": "rrst_n", "direction": "input", "width": 1, "clock_domain": "rclk" },
+        { "name": "rinc", "direction": "input", "width": 1, "clock_domain": "rclk" },
+        { "name": "rdata", "direction": "output", "width": "DATA_WIDTH", "clock_domain": "rclk" },
+        { "name": "rempty", "direction": "output", "width": 1, "clock_domain": "rclk" },
+        { "name": "raddr", "direction": "output", "width": "ADDR_WIDTH+1", "clock_domain": "rclk" }
+      ],
+      "instances": [
+        {
+          "module": "sync_flop",
+          "name": "wptr_gray_sync",
+          "function": "Synchronize write pointer to read domain",
+          "connections": [
+            { "name": "clk", "target": "rclk" },
+            { "name": "rst_n", "target": "rrst_n" },
+            { "name": "din", "target": "wptr_gray" },
+            { "name": "dout", "target": "wptr_gray_synced" },
+            { "name": "sync_stages", "target": "SYNC_STAGES" }
+          ]
+        },
+        {
+          "module": "sync_flop",
+          "name": "rptr_gray_sync",
+          "function": "Synchronize read pointer to write domain",
+          "connections": [
+            { "name": "clk", "target": "wclk" },
+            { "name": "rst_n", "target": "wrst_n" },
+            { "name": "din", "target": "rptr_gray" },
+            { "name": "dout", "target": "rptr_gray_synced" },
+            { "name": "sync_stages", "target": "SYNC_STAGES" }
+          ]
+        },
+        {
+          "module": "fifo_mem",
+          "name": "fifo_memory",
+          "function": "Store FIFO data",
+          "connections": [
+            { "name": "wclk", "target": "wclk" },
+            { "name": "wrst_n", "target": "wrst_n" },
+            { "name": "winc", "target": "write_en" },
+            { "name": "waddr", "target": "wptr_bin" },
+            { "name": "wdata", "target": "wdata" },
+            { "name": "rclk", "target": "rclk" },
+            { "name": "rrst_n", "target": "rrst_n" },
+            { "name": "raddr", "target": "rptr_bin" },
+            { "name": "rdata", "target": "rdata" },
+            { "name": "DATA_WIDTH", "target": "DATA_WIDTH" },
+            { "name": "ADDR_WIDTH", "target": "ADDR_WIDTH" }
+          ]
+        }
+      ],
+      "connections": [
+        { "name": "wptr_gray", "target": "wptr_bin ^ (wptr_bin >> 1)" },
+        { "name": "rptr_gray", "target": "rptr_bin ^ (rptr_bin >> 1)" },
+        { "name": "wptr_bin", "target": "wptr_gray_synced ^ (wptr_gray_synced >> 1)" },
+        { "name": "rptr_bin", "target": "rptr_gray_synced ^ (rptr_gray_synced >> 1)" },
+        { "name": "write_en", "target": "winc & ~wfull" },
+        { "name": "read_en", "target": "rinc & ~rempty" },
+        { "name": "wptr_next", "target": "write_en ? (wptr_bin + 1) : wptr_bin" },
+        { "name": "rptr_next", "target": "read_en ? (rptr_bin + 1) : rptr_bin" },
+        { "name": "wfull", "target": "wptr_next[ADDR_WIDTH] != rptr_gray_synced[ADDR_WIDTH] && wptr_next[ADDR_WIDTH-1:0] == rptr_gray_synced[ADDR_WIDTH-1:0]" },
+        { "name": "rempty", "target": "wptr_gray_synced[ADDR_WIDTH] == rptr_bin[ADDR_WIDTH] && wptr_gray_synced[ADDR_WIDTH-1:0] == rptr_bin[ADDR_WIDTH-1:0]" },
+        { "name": "waddr", "target": "wptr_bin" },
+        { "name": "raddr", "target": "rptr_bin" }
+      ],
+      "internal_signals": [
+        { "name": "wptr_bin", "width": "ADDR_WIDTH+1" },
+        { "name": "rptr_bin", "width": "ADDR_WIDTH+1" },
+        { "name": "wptr_gray", "width": "ADDR_WIDTH+1" },
+        { "name": "rptr_gray", "width": "ADDR_WIDTH+1" },
+        { "name": "wptr_gray_synced", "width": "ADDR_WIDTH+1" },
+        { "name": "rptr_gray_synced", "width": "ADDR_WIDTH+1" },
+        { "name": "wptr_next", "width": "ADDR_WIDTH+1" },
+        { "name": "rptr_next", "width": "ADDR_WIDTH+1" },
+        { "name": "write_en", "width": 1 },
+        { "name": "read_en", "width": 1 }
+      ],
+      "behavior": [
+        "A write is accepted when winc is high and wfull is low.",
+        "A read is accepted when rinc is high and rempty is low.",
+        "Data must return exactly once in write order.",
+        "rdata is a read-clock sample of the word being offered. rempty may remain high for multiple read clocks after an accepted read even when another word is already stored.",
+        "After reset, wfull is low and rempty is high.",
+        "waddr and raddr are debug pointer outputs.",
+        "The implementation must be safe for clock-domain and reset-domain crossings and must pass structural CDC/RDC analysis with zero unsafe crossings. Reset release must be safe in each clock domain, and transferred multi-bit data must remain coherent."
+      ]
+    },
+    {
+      "Top_module_name": "sync_flop",
+      "function": "Synchronize a signal across clock domains",
+      "parameters": [
+        { "name": "sync_stages", "value": "2" }
+      ],
+      "ports": [
+        { "name": "clk", "direction": "input", "width": 1, "clock_domain": "target_clk" },
+        { "name": "rst_n", "direction": "input", "width": 1, "clock_domain": "target_clk" },
+        { "name": "din", "direction": "input", "width": "din_width" },
+        { "name": "dout", "direction": "output", "width": "din_width" }
+      ],
+      "instances": [],
+      "connections": [
+        { "name": "sync_flops[0]", "target": "rst_n ? (din_width)'b0 : (sync_flops[0] << 1) | din" },
+        { "name": "sync_flops[i]", "target": "rst_n ? (din_width)'b0 : (sync_flops[i] << 1) | sync_flops[i-1]" }
+      ],
+      "internal_signals": [
+        { "name": "sync_flops", "width": "din_width", "array_size": "sync_stages" }
+      ],
+      "behavior": [
+        "Synchronize din to dout across clock domains using a chain of flip-flops.",
+        "Reset asynchronously with rst_n."
+      ]
+    },
+    {
+      "Top_module_name": "fifo_mem",
+      "function": "Memory array for FIFO storage",
+      "parameters": [
+        { "name": "DATA_WIDTH", "value": "8" },
+        { "name": "ADDR_WIDTH", "value": "4" }
+      ],
+      "ports": [
+        { "name": "wclk", "direction": "input", "width": 1, "clock_domain": "wclk" },
+        { "name": "wrst_n", "direction": "input", "width": 1, "clock_domain": "wclk" },
+        { "name": "winc", "direction": "input", "width": 1, "clock_domain": "wclk" },
+        { "name": "waddr", "direction": "input", "width": "ADDR_WIDTH" },
+        { "name": "wdata", "direction": "input", "width": "DATA_WIDTH" },
+        { "name": "rclk", "direction": "input", "width": 1, "clock_domain": "rclk" },
+        { "name": "rrst_n", "direction": "input", "width": 1, "clock_domain": "rclk" },
+        { "name": "raddr", "direction": "input", "width": "ADDR_WIDTH" },
+        { "name": "rdata", "direction": "output", "width": "DATA_WIDTH" }
+      ],
+      "instances": [],
+      "connections": [
+        { "name": "memory[waddr]", "target": "winc ? wdata : memory[waddr]" },
+        { "name": "rdata", "target": "memory[raddr]" }
+      ],
+      "internal_signals": [
+        { "name": "memory", "width": "DATA_WIDTH", "array_size": "2**ADDR_WIDTH" }
+      ],
+      "behavior": [
+        "Write to memory array on wclk if winc is high.",
+        "Read from memory array on rclk.",
+        "Memory contents are preserved across resets."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module async_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4,
+    parameter SYNC_STAGES = 2
+)(
+    input  wire                    wclk,
+    input  wire                    wrst_n,
+    input  wire                    winc,
+    input  wire [DATA_WIDTH-1:0]   wdata,
+    output wire                    wfull,
+    output wire [ADDR_WIDTH:0]     waddr,
+    input  wire                    rclk,
+    input  wire                    rrst_n,
+    input  wire                    rinc,
+    output wire [DATA_WIDTH-1:0]   rdata,
+    output wire                    rempty,
+    output wire [ADDR_WIDTH:0]     raddr
+);
+
+    // Internal signals
+    reg [ADDR_WIDTH:0] wptr_bin, wptr_gray, wptr_gray_synced, wptr_next;
+    reg [ADDR_WIDTH:0] rptr_bin, rptr_gray, rptr_gray_synced, rptr_next;
+    reg write_en, read_en;
+
+    // Write domain logic
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr_bin <= 0;
+        end else begin
+            if (write_en) begin
+                wptr_bin <= wptr_next;
+            end
+        end
+    end
+
+    // Read domain logic
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr_bin <= 0;
+        end else begin
+            if (read_en) begin
+                rptr_bin <= rptr_next;
+            end
+        end
+    end
+
+    // Binary to Gray conversion
+    assign wptr_gray = wptr_bin ^ (wptr_bin >> 1);
+    assign rptr_gray = rptr_bin ^ (rptr_bin >> 1);
+
+    // Synchronize pointers across clock domains
+    sync_flop #(.din_width(ADDR_WIDTH+1), .sync_stages(SYNC_STAGES)) wptr_gray_sync (
+        .clk(wclk),
+        .rst_n(wrst_n),
+        .din(wptr_gray),
+        .dout(wptr_gray_synced)
+    );
+
+    sync_flop #(.din_width(ADDR_WIDTH+1), .sync_stages(SYNC_STAGES)) rptr_gray_sync (
+        .clk(rclk),
+        .rst_n(rrst_n),
+        .din(rptr_gray),
+        .dout(rptr_gray_synced)
+    );
+
+    // Gray to Binary conversion
+    assign wptr_bin_synced = wptr_gray_synced ^ (wptr_gray_synced >> 1);
+    assign rptr_bin_synced = rptr_gray_synced ^ (rptr_gray_synced >> 1);
+
+    // Next pointers
+    assign wptr_next = write_en ? (wptr_bin + 1) : wptr_bin;
+    assign rptr_next = read_en ? (rptr_bin + 1) : rptr_bin;
+
+    // Full and empty flags
+    assign wfull = (wptr_next[ADDR_WIDTH] != rptr_gray_synced[ADDR_WIDTH]) && (wptr_next[ADDR_WIDTH-1:0] == rptr_gray_synced[ADDR_WIDTH-1:0]);
+    assign rempty = (wptr_gray_synced[ADDR_WIDTH] == rptr_bin[ADDR_WIDTH]) && (wptr_gray_synced[ADDR_WIDTH-1:0] == rptr_bin[ADDR_WIDTH-1:0]);
+
+    // Enable signals
+    assign write_en = winc & ~wfull;
+    assign read_en = rinc & ~rempty;
+
+    // FIFO memory
+    fifo_mem #(.DATA_WIDTH(DATA_WIDTH), .ADDR_WIDTH(ADDR_WIDTH)) fifo_memory (
+        .wclk(wclk),
+        .wrst_n(wrst_n),
+        .winc(write_en),
+        .waddr(wptr_bin[ADDR_WIDTH-1:0]),
+        .wdata(wdata),
+        .rclk(rclk),
+        .rrst_n(rrst_n),
+        .raddr(rptr_bin[ADDR_WIDTH-1:0]),
+        .rdata(rdata)
+    );
+
+    // Debug outputs
+    assign waddr = wptr_bin;
+    assign raddr = rptr_bin;
+
+endmodule
+
+module sync_flop #(
+    parameter din_width = 8,
+    parameter sync_stages = 2
+)(
+    input  wire clk,
+    input  wire rst_n,
+    input  wire [din_width-1:0] din,
+    output reg [din_width-1:0] dout
+);
+
+    reg [din_width-1:0] sync_flops [sync_stages-1:0];
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (int i = 0; i < sync_stages; i = i + 1) begin
+                sync_flops[i] <= 0;
+            end
+        end else begin
+            sync_flops[0] <= din;
+            for (int i = 1; i < sync_stages; i = i + 1) begin
+                sync_flops[i] <= sync_flops[i-1];
+            end
+        end
+    end
+
+    assign dout = sync_flops[sync_stages-1];
+
+endmodule
+
+module fifo_mem #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 4
+)(
+    input  wire wclk,
+    input  wire wrst_n,
+    input  wire winc,
+    input  wire [ADDR_WIDTH-1:0] waddr,
+    input  wire [DATA_WIDTH-1:0] wdata,
+    input  wire rclk,
+    input  wire rrst_n,
+    input  wire [ADDR_WIDTH-1:0] raddr,
+    output reg [DATA_WIDTH-1:0] rdata
+);
+
+    reg [DATA_WIDTH-1:0] memory [0:(2**ADDR_WIDTH)-1];
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            for (int i = 0; i < (2**ADDR_WIDTH); i = i + 1) begin
+                memory[i] <= 0;
+            end
+        end else if (winc) begin
+            memory[waddr] <= wdata;
+        end
+    end
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rdata <= 0;
+        end else begin
+            rdata <= memory[raddr];
+        end
+    end
+
+endmodule
+```

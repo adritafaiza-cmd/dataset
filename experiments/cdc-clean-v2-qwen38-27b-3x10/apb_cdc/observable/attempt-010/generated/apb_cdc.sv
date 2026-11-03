@@ -1,0 +1,249 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam AW = LOG_DEPTH;
+
+    // Request FIFO (src -> dst)
+    reg [ADDR_WIDTH-1:0] req_addr [0:DEPTH-1];
+    reg [DATA_WIDTH-1:0] req_wdata [0:DEPTH-1];
+    reg [DATA_WIDTH/8-1:0] req_strb [0:DEPTH-1];
+    reg [2:0] req_prot [0:DEPTH-1];
+    reg req_write [0:DEPTH-1];
+
+    reg [AW:0] req_wr_ptr;
+    reg [AW:0] req_rd_ptr;
+
+    wire req_full = (req_wr_ptr[AW] != req_rd_ptr[AW]) && (req_wr_ptr[AW-1:0] == req_rd_ptr[AW-1:0]);
+    wire req_empty = (req_wr_ptr == req_rd_ptr);
+
+    // Response FIFO (dst -> src)
+    reg [DATA_WIDTH-1:0] rsp_data [0:DEPTH-1];
+    reg rsp_err [0:DEPTH-1];
+
+    reg [AW:0] rsp_wr_ptr;
+    reg [AW:0] rsp_rd_ptr;
+
+    wire rsp_full = (rsp_wr_ptr[AW] != rsp_rd_ptr[AW]) && (rsp_wr_ptr[AW-1:0] == rsp_rd_ptr[AW-1:0]);
+    wire rsp_empty = (rsp_wr_ptr == rsp_rd_ptr);
+
+    // Gray code pointers for CDC
+    wire [AW:0] req_wr_ptr_gray = req_wr_ptr ^ {1'b0, req_wr_ptr[AW-1:0]};
+    wire [AW:0] req_rd_ptr_gray = req_rd_ptr ^ {1'b0, req_rd_ptr[AW-1:0]};
+    wire [AW:0] rsp_wr_ptr_gray = rsp_wr_ptr ^ {1'b0, rsp_wr_ptr[AW-1:0]};
+    wire [AW:0] rsp_rd_ptr_gray = rsp_rd_ptr ^ {1'b0, rsp_rd_ptr[AW-1:0]};
+
+    // Synchronizers: src clock domain
+    reg [AW:0] req_rd_ptr_gray_sync1;
+    reg [AW:0] req_rd_ptr_gray_sync2;
+    reg [AW:0] req_rd_ptr_gray_sync3;
+
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            req_rd_ptr_gray_sync1 <= {1'b0, {AW{1'b0}}};
+            req_rd_ptr_gray_sync2 <= {1'b0, {AW{1'b0}}};
+            req_rd_ptr_gray_sync3 <= {1'b0, {AW{1'b0}}};
+        end else begin
+            req_rd_ptr_gray_sync1 <= req_rd_ptr_gray;
+            req_rd_ptr_gray_sync2 <= req_rd_ptr_gray_sync1;
+            req_rd_ptr_gray_sync3 <= req_rd_ptr_gray_sync2;
+        end
+    end
+
+    // Convert gray to binary
+    function [AW:0] gray2bin;
+        input [AW:0] gray;
+        reg [AW:0] bin;
+        integer i;
+        begin
+            bin[AW] = gray[AW];
+            for (i = AW-1; i >= 0; i = i - 1)
+                bin[i] = bin[i+1] ^ gray[i];
+            gray2bin = bin;
+        end
+    endfunction
+
+    wire [AW:0] req_rd_ptr_sync = gray2bin(req_rd_ptr_gray_sync3);
+    wire req_not_full = (req_wr_ptr[AW] != req_rd_ptr_sync[AW]) || (req_wr_ptr[AW-1:0] != req_rd_ptr_sync[AW-1:0]);
+
+    // Synchronizers: dst clock domain
+    reg [AW:0] req_wr_ptr_gray_sync1;
+    reg [AW:0] req_wr_ptr_gray_sync2;
+    reg [AW:0] req_wr_ptr_gray_sync3;
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            req_wr_ptr_gray_sync1 <= {1'b0, {AW{1'b0}}};
+            req_wr_ptr_gray_sync2 <= {1'b0, {AW{1'b0}}};
+            req_wr_ptr_gray_sync3 <= {1'b0, {AW{1'b0}}};
+        end else begin
+            req_wr_ptr_gray_sync1 <= req_wr_ptr_gray;
+            req_wr_ptr_gray_sync2 <= req_wr_ptr_gray_sync1;
+            req_wr_ptr_gray_sync3 <= req_wr_ptr_gray_sync2;
+        end
+    end
+
+    wire [AW:0] req_wr_ptr_sync = gray2bin(req_wr_ptr_gray_sync3);
+    wire req_not_empty = (req_wr_ptr_sync != req_rd_ptr);
+
+    // Synchronizers: dst clock domain for rsp_rd_ptr
+    reg [AW:0] rsp_rd_ptr_gray_sync1;
+    reg [AW:0] rsp_rd_ptr_gray_sync2;
+    reg [AW:0] rsp_rd_ptr_gray_sync3;
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            rsp_rd_ptr_gray_sync1 <= {1'b0, {AW{1'b0}}};
+            rsp_rd_ptr_gray_sync2 <= {1'b0, {AW{1'b0}}};
+            rsp_rd_ptr_gray_sync3 <= {1'b0, {AW{1'b0}}};
+        end else begin
+            rsp_rd_ptr_gray_sync1 <= rsp_rd_ptr_gray;
+            rsp_rd_ptr_gray_sync2 <= rsp_rd_ptr_gray_sync1;
+            rsp_rd_ptr_gray_sync3 <= rsp_rd_ptr_gray_sync2;
+        end
+    end
+
+    wire [AW:0] rsp_rd_ptr_sync = gray2bin(rsp_rd_ptr_gray_sync3);
+    wire rsp_not_full = (rsp_wr_ptr[AW] != rsp_rd_ptr_sync[AW]) || (rsp_wr_ptr[AW-1:0] != rsp_rd_ptr_sync[AW-1:0]);
+
+    // Synchronizers: src clock domain for rsp_wr_ptr
+    reg [AW:0] rsp_wr_ptr_gray_sync1;
+    reg [AW:0] rsp_wr_ptr_gray_sync2;
+    reg [AW:0] rsp_wr_ptr_gray_sync3;
+
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            rsp_wr_ptr_gray_sync1 <= {1'b0, {AW{1'b0}}};
+            rsp_wr_ptr_gray_sync2 <= {1'b0, {AW{1'b0}}};
+            rsp_wr_ptr_gray_sync3 <= {1'b0, {AW{1'b0}}};
+        end else begin
+            rsp_wr_ptr_gray_sync1 <= rsp_wr_ptr_gray;
+            rsp_wr_ptr_gray_sync2 <= rsp_wr_ptr_gray_sync1;
+            rsp_wr_ptr_gray_sync3 <= rsp_wr_ptr_gray_sync2;
+        end
+    end
+
+    wire [AW:0] rsp_wr_ptr_sync = gray2bin(rsp_wr_ptr_gray_sync3);
+    wire rsp_not_empty = (rsp_wr_ptr_sync != rsp_rd_ptr);
+
+    // Source side: APB slave interface
+    // We accept a request when PSEL && !PENABLE (setup phase) and FIFO is not full
+    wire src_setup = src_psel_i && !src_penable_i;
+    wire src_accept = src_setup && req_not_full;
+
+    // Write to request FIFO
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            req_wr_ptr <= {1'b0, {AW{1'b0}}};
+        end else if (src_accept) begin
+            req_addr[req_wr_ptr[AW-1:0]] <= src_paddr_i;
+            req_wdata[req_wr_ptr[AW-1:0]] <= src_pwdata_i;
+            req_strb[req_wr_ptr[AW-1:0]] <= src_pstrb_i;
+            req_prot[req_wr_ptr[AW-1:0]] <= src_pprot_i;
+            req_write[req_wr_ptr[AW-1:0]] <= src_pwrite_i;
+            req_wr_ptr <= req_wr_ptr + 1'b1;
+        end
+    end
+
+    // Source side: read from response FIFO
+    wire src_rsp_valid = rsp_not_empty;
+
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            rsp_rd_ptr <= {1'b0, {AW{1'b0}}};
+            src_prdata_o <= {DATA_WIDTH{1'b0}};
+            src_pslverr_o <= 1'b0;
+        end else if (src_rsp_valid) begin
+            src_prdata_o <= rsp_data[rsp_rd_ptr[AW-1:0]];
+            src_pslverr_o <= rsp_err[rsp_rd_ptr[AW-1:0]];
+            rsp_rd_ptr <= rsp_rd_ptr + 1'b1;
+        end
+    end
+
+    // Source side: pready
+    // Pready is high when the response is available (or when no request is pending)
+    // In APB, pready is asserted in the access phase. We assert pready when we have a response ready.
+    // But we need to be careful: pready should be high when the slave can complete the transfer.
+    // Since we're bridging, we complete the source transfer when the destination has completed.
+    // So src_pready_o should be high when src_rsp_valid is true.
+    assign src_pready_o = src_rsp_valid;
+
+    // Destination side: APB master interface
+    // We issue a request when the request FIFO is not empty and we're not in an active transfer
+    reg dst_active;
+    reg dst_in_access;
+
+    wire dst_can_start = req_not_empty && !dst_active;
+
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_active <= 1'b0;
+            dst_in_access <= 1'b0;
+            dst_psel_o <= 1'b0;
+            dst_penable_o <= 1'b0;
+            dst_pwrite_o <= 1'b0;
+            dst_paddr_o <= {ADDR_WIDTH{1'b0}};
+            dst_pwdata_o <= {DATA_WIDTH{1'b0}};
+            dst_pstrb_o <= {DATA_WIDTH/8{1'b0}};
+            dst_pprot_o <= 3'b0;
+            req_rd_ptr <= {1'b0, {AW{1'b0}}};
+            rsp_wr_ptr <= {1'b0, {AW{1'b0}}};
+        end else begin
+            if (dst_can_start) begin
+                // Start setup phase
+                dst_psel_o <= 1'b1;
+                dst_penable_o <= 1'b0;
+                dst_pwrite_o <= req_write[req_rd_ptr[AW-1:0]];
+                dst_paddr_o <= req_addr[req_rd_ptr[AW-1:0]];
+                dst_pwdata_o <= req_wdata[req_rd_ptr[AW-1:0]];
+                dst_pstrb_o <= req_strb[req_rd_ptr[AW-1:0]];
+                dst_pprot_o <= req_prot[req_rd_ptr[AW-1:0]];
+                dst_active <= 1'b1;
+                dst_in_access <= 1'b0;
+            end else if (dst_active && !dst_in_access) begin
+                // Move to access phase
+                dst_penable_o <= 1'b1;
+                dst_in_access <= 1'b1;
+            end else if (dst_active && dst_in_access && dst_pready_i) begin
+                // Complete access, write response
+                rsp_data[rsp_wr_ptr[AW-1:0]] <= dst_prdata_i;
+                rsp_err[rsp_wr_ptr[AW-1:0]] <= dst_pslverr_i;
+                rsp_wr_ptr <= rsp_wr_ptr + 1'b1;
+                req_rd_ptr <= req_rd_ptr + 1'b1;
+                dst_psel_o <= 1'b0;
+                dst_penable_o <= 1'b0;
+                dst_active <= 1'b0;
+                dst_in_access <= 1'b0;
+            end
+        end
+    end
+
+endmodule

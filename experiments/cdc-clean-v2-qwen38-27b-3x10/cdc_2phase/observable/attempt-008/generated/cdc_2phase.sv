@@ -1,0 +1,109 @@
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source side: capture data when valid and ready
+  // Destination side: present data when valid and ready
+  // Use a 2-phase handshake with a toggle bit for CDC
+
+  // Source side registers
+  reg [WIDTH-1:0] src_data_reg;
+  reg             src_valid_reg;
+  reg             src_toggle;
+  reg             src_toggle_sync;
+
+  // Destination side registers
+  reg [WIDTH-1:0] dst_data_reg;
+  reg             dst_valid_reg;
+  reg             dst_toggle;
+  reg             dst_toggle_sync;
+
+  // Synchronizers for toggle bits
+  // src_toggle goes from src to dst
+  reg [1:0] src_toggle_sync_dst;
+  // dst_toggle goes from dst to src
+  reg [1:0] dst_toggle_sync_src;
+
+  // Source side logic
+  wire src_can_send = src_valid_i && !src_valid_reg;
+  wire src_ready = !src_valid_reg;
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_reg <= {WIDTH{1'b0}};
+      src_valid_reg <= 1'b0;
+      src_toggle <= 1'b0;
+      src_toggle_sync <= 1'b0;
+    end else begin
+      if (src_can_send) begin
+        src_data_reg <= src_data_i;
+        src_valid_reg <= 1'b1;
+        src_toggle <= ~src_toggle;
+      end
+      // Synchronize dst_toggle back to src domain
+      src_toggle_sync <= dst_toggle_sync_src[1];
+    end
+  end
+
+  // Synchronizer for dst_toggle into src domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      dst_toggle_sync_src <= 2'b00;
+    end else begin
+      dst_toggle_sync_src <= {dst_toggle_sync_src[0], dst_toggle};
+    end
+  end
+
+  // Destination side logic
+  wire dst_can_accept = dst_valid_reg && dst_ready_i;
+  wire dst_valid = dst_valid_reg;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_reg <= {WIDTH{1'b0}};
+      dst_valid_reg <= 1'b0;
+      dst_toggle <= 1'b0;
+      dst_toggle_sync <= 1'b0;
+    end else begin
+      // Synchronize src_toggle into dst domain
+      dst_toggle_sync <= src_toggle_sync_dst[1];
+
+      // Check if new data arrived from source
+      if (src_toggle_sync_dst[1] != dst_toggle_sync) begin
+        // New data available
+        dst_data_reg <= src_data_reg;
+        dst_valid_reg <= 1'b1;
+        dst_toggle <= ~dst_toggle;
+      end else if (dst_can_accept) begin
+        // Data accepted, clear valid
+        dst_valid_reg <= 1'b0;
+      end
+    end
+  end
+
+  // Synchronizer for src_toggle into dst domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_toggle_sync_dst <= 2'b00;
+    end else begin
+      src_toggle_sync_dst <= {src_toggle_sync_dst[0], src_toggle};
+    end
+  end
+
+  // Outputs
+  assign src_ready_o = src_ready;
+  assign dst_data_o = dst_data_reg;
+  assign dst_valid_o = dst_valid;
+
+endmodule

@@ -1,0 +1,186 @@
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "cdc_fifo_gray",
+            "function": "Asynchronous FIFO with Gray-code pointers for CDC",
+            "parameters": [
+                {"name": "WIDTH", "value": 8},
+                {"name": "LOG_DEPTH", "value": 3},
+                {"name": "SYNC_STAGES", "value": 2}
+            ],
+            "ports": [
+                {"name": "src_rst_ni", "direction": "input", "width": 1, "clock_domain": "src_clk_i"},
+                {"name": "src_clk_i", "direction": "input", "width": 1, "clock_domain": "src_clk_i"},
+                {"name": "src_data_i", "direction": "input", "width": "WIDTH", "clock_domain": "src_clk_i"},
+                {"name": "src_valid_i", "direction": "input", "width": 1, "clock_domain": "src_clk_i"},
+                {"name": "src_ready_o", "direction": "output", "width": 1, "clock_domain": "src_clk_i"},
+                {"name": "dst_rst_ni", "direction": "input", "width": 1, "clock_domain": "dst_clk_i"},
+                {"name": "dst_clk_i", "direction": "input", "width": 1, "clock_domain": "dst_clk_i"},
+                {"name": "dst_data_o", "direction": "output", "width": "WIDTH", "clock_domain": "dst_clk_i"},
+                {"name": "dst_valid_o", "direction": "output", "width": 1, "clock_domain": "dst_clk_i"},
+                {"name": "dst_ready_i", "direction": "input", "width": 1, "clock_domain": "dst_clk_i"}
+            ],
+            "instances": [
+                {
+                    "module": "gray_counter",
+                    "name": "src_gray_counter",
+                    "function": "Gray-code counter for source",
+                    "connections": [
+                        {"name": "clk", "signal": "src_clk_i"},
+                        {"name": "rst_n", "signal": "src_rst_ni"},
+                        {"name": "load", "signal": "src_wr_en"},
+                        {"name": "inc", "signal": "1'b1"},
+                        {"name": "gray_out", "signal": "src_gray_ptr"}
+                    ]
+                },
+                {
+                    "module": "gray_counter",
+                    "name": "dst_gray_counter",
+                    "function": "Gray-code counter for destination",
+                    "connections": [
+                        {"name": "clk", "signal": "dst_clk_i"},
+                        {"name": "rst_n", "signal": "dst_rst_ni"},
+                        {"name": "load", "signal": "dst_rd_en"},
+                        {"name": "inc", "signal": "1'b1"},
+                        {"name": "gray_out", "signal": "dst_gray_ptr"}
+                    ]
+                },
+                {
+                    "module": "sync_flop",
+                    "name": "sync_src_gray_ptr",
+                    "function": "Synchronize source gray pointer to destination domain",
+                    "connections": [
+                        {"name": "clk", "signal": "dst_clk_i"},
+                        {"name": "rst_n", "signal": "dst_rst_ni"},
+                        {"name": "d", "signal": "src_gray_ptr"},
+                        {"name": "q", "signal": "src_gray_ptr_synced"}
+                    ]
+                },
+                {
+                    "module": "sync_flop",
+                    "name": "sync_dst_gray_ptr",
+                    "function": "Synchronize destination gray pointer to source domain",
+                    "connections": [
+                        {"name": "clk", "signal": "src_clk_i"},
+                        {"name": "rst_n", "signal": "src_rst_ni"},
+                        {"name": "d", "signal": "dst_gray_ptr"},
+                        {"name": "q", "signal": "dst_gray_ptr_synced"}
+                    ]
+                },
+                {
+                    "module": "dual_port_ram",
+                    "name": "fifo_ram",
+                    "function": "Dual-port RAM for FIFO storage",
+                    "connections": [
+                        {"name": "clk_a", "signal": "src_clk_i"},
+                        {"name": "we_a", "signal": "src_wr_en"},
+                        {"name": "addr_a", "signal": "src_gray_ptr[LOG_DEPTH-1:0]"},
+                        {"name": "din_a", "signal": "src_data_i"},
+                        {"name": "clk_b", "signal": "dst_clk_i"},
+                        {"name": "addr_b", "signal": "dst_gray_ptr[LOG_DEPTH-1:0]"},
+                        {"name": "dout_b", "signal": "dst_data_o"}
+                    ]
+                }
+            ],
+            "connections": [
+                {"name": "src_wr_en", "signal": "src_valid_i & src_ready_o"},
+                {"name": "dst_rd_en", "signal": "dst_valid_o & dst_ready_i"},
+                {"name": "src_gray_ptr_next", "signal": "src_gray_ptr + 1"},
+                {"name": "dst_gray_ptr_next", "signal": "dst_gray_ptr + 1"}
+            ],
+            "internal_signals": [
+                {"name": "src_gray_ptr", "width": "LOG_DEPTH+1"},
+                {"name": "src_gray_ptr_synced", "width": "LOG_DEPTH+1"},
+                {"name": "src_gray_ptr_next", "width": "LOG_DEPTH+1"},
+                {"name": "src_wr_en", "width": 1},
+                {"name": "dst_gray_ptr", "width": "LOG_DEPTH+1"},
+                {"name": "dst_gray_ptr_synced", "width": "LOG_DEPTH+1"},
+                {"name": "dst_gray_ptr_next", "width": "LOG_DEPTH+1"},
+                {"name": "dst_rd_en", "width": 1}
+            ],
+            "behavior": [
+                "Accept source beats when src_valid_i and src_ready_o are high.",
+                "Deliver destination beats in order.",
+                "Pointers and data that leave their clock domain must remain coherent.",
+                "SYNC_STAGES is an implementation parameter; choose a safe crossing yourself.",
+                "After reset the FIFO is empty.",
+                "Pointers cross as acknowledged binary snapshots, so ready and valid can lag.",
+                "dst_data_o is one destination-clock sample.",
+                "dst_valid_o may remain low for multiple destination clocks after an accepted beat even when another word is stored."
+            ]
+        },
+        {
+            "Top_module_name": "gray_counter",
+            "function": "Gray-code counter",
+            "parameters": [],
+            "ports": [
+                {"name": "clk", "direction": "input", "width": 1, "clock_domain": "clk"},
+                {"name": "rst_n", "direction": "input", "width": 1, "clock_domain": "clk"},
+                {"name": "load", "direction": "input", "width": 1, "clock_domain": "clk"},
+                {"name": "inc", "direction": "input", "width": 1, "clock_domain": "clk"},
+                {"name": "gray_out", "direction": "output", "width": "LOG_DEPTH+1", "clock_domain": "clk"}
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {"name": "bin_counter", "width": "LOG_DEPTH+1"},
+                {"name": "bin_counter_next", "width": "LOG_DEPTH+1"},
+                {"name": "gray_counter", "width": "LOG_DEPTH+1"}
+            ],
+            "behavior": [
+                "On reset, bin_counter is set to 0.",
+                "On load, bin_counter is incremented if inc is high.",
+                "bin_counter_next is bin_counter + 1 when inc is high.",
+                "gray_counter is the Gray-code encoding of bin_counter.",
+                "gray_out is the Gray-code output."
+            ]
+        },
+        {
+            "Top_module_name": "sync_flop",
+            "function": "Synchronizer flop for CDC",
+            "parameters": [],
+            "ports": [
+                {"name": "clk", "direction": "input", "width": 1, "clock_domain": "clk"},
+                {"name": "rst_n", "direction": "input", "width": 1, "clock_domain": "clk"},
+                {"name": "d", "direction": "input", "width": "LOG_DEPTH+1", "clock_domain": "clk"},
+                {"name": "q", "direction": "output", "width": "LOG_DEPTH+1", "clock_domain": "clk"}
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {"name": "q_reg", "width": "LOG_DEPTH+1"},
+                {"name": "q_reg_next", "width": "LOG_DEPTH+1"}
+            ],
+            "behavior": [
+                "On reset, q_reg is set to 0.",
+                "q_reg_next is d.",
+                "q_reg is updated to q_reg_next on the rising edge of clk."
+            ]
+        },
+        {
+            "Top_module_name": "dual_port_ram",
+            "function": "Dual-port RAM for FIFO storage",
+            "parameters": [],
+            "ports": [
+                {"name": "clk_a", "direction": "input", "width": 1, "clock_domain": "clk_a"},
+                {"name": "we_a", "direction": "input", "width": 1, "clock_domain": "clk_a"},
+                {"name": "addr_a", "direction": "input", "width": "LOG_DEPTH", "clock_domain": "clk_a"},
+                {"name": "din_a", "direction": "input", "width": "WIDTH", "clock_domain": "clk_a"},
+                {"name": "clk_b", "direction": "input", "width": 1, "clock_domain": "clk_b"},
+                {"name": "addr_b", "direction": "input", "width": "LOG_DEPTH", "clock_domain": "clk_b"},
+                {"name": "dout_b", "direction": "output", "width": "WIDTH", "clock_domain": "clk_b"}
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {"name": "ram", "width": "WIDTH", "size": "2**LOG_DEPTH"}
+            ],
+            "behavior": [
+                "On rising edge of clk_a, if we_a is high, ram[addr_a] is set to din_a.",
+                "On rising edge of clk_b, dout_b is set to ram[addr_b]."
+            ]
+        }
+    ]
+}
+```

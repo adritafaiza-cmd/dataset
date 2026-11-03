@@ -1,0 +1,166 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "apb_regs",
+      "function": "An APB-mapped register file with specified parameters and behavior.",
+      "parameters": [
+        { "name": "NoApbRegs", "value": "32'd0" },
+        { "name": "ApbAddrWidth", "value": "32'd0" },
+        { "name": "AddrOffset", "value": "32'd4" },
+        { "name": "ApbDataWidth", "value": "32'd0" },
+        { "name": "RegDataWidth", "value": "32'd0" },
+        { "name": "ReadOnly", "value": "32'h0" },
+        { "name": "req_t", "value": "logic" },
+        { "name": "resp_t", "value": "logic" },
+        { "name": "apb_addr_t", "value": "logic[ApbAddrWidth-1:0]" },
+        { "name": "reg_data_t", "value": "logic[RegDataWidth-1:0]" }
+      ],
+      "ports": [
+        { "name": "pclk_i", "direction": "input", "width": 1, "clock_domain": "pclk_i" },
+        { "name": "preset_ni", "direction": "input", "width": 1, "clock_domain": "pclk_i" },
+        { "name": "req_i", "direction": "input", "width": "req_t", "clock_domain": "pclk_i" },
+        { "name": "base_addr_i", "direction": "input", "width": "ApbAddrWidth", "clock_domain": "pclk_i" },
+        { "name": "reg_init_i", "direction": "input", "width": "reg_data_t[NoApbRegs-1:0]", "clock_domain": "pclk_i" },
+        { "name": "resp_o", "direction": "output", "width": "resp_t", "clock_domain": "pclk_i" },
+        { "name": "reg_q_o", "direction": "output", "width": "reg_data_t[NoApbRegs-1:0]", "clock_domain": "pclk_i" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        { "name": "registers", "width": "reg_data_t[NoApbRegs-1:0]" },
+        { "name": "decoded_addr", "width": "NoApbRegs" },
+        { "name": "write_enable", "width": "NoApbRegs" },
+        { "name": "read_data", "width": "reg_data_t" },
+        { "name": "write_data", "width": "reg_data_t" },
+        { "name": "write_strobe", "width": "ApbDataWidth/8" },
+        { "name": "write_commit", "width": 1 }
+      ],
+      "behavior": [
+        "Map NoApbRegs registers of RegDataWidth, spaced AddrOffset bytes apart, starting at base_addr_i.",
+        "req_i / resp_o use the APB request and response types supplied by the testbench.",
+        "Drive reg_q_o with current register values; read-only entries expose reg_init_i.",
+        "Read-only registers selected by ReadOnly must ignore writes.",
+        "Writable registers reset to zero; read-only registers expose reg_init_i.",
+        "Writes commit only in the APB access phase (psel and penable).",
+        "Byte strobes update only the selected bytes of a writable register; unstrobed bytes and idle-cycle state are preserved.",
+        "Writes outside the register width do not change stored data.",
+        "Each AddrOffset-byte decoded address range maps to its register.",
+        "Reset cancels pending writes, clears writable registers to zero, and leaves read-only registers exposing reg_init_i."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd32,
+  parameter int unsigned        ApbAddrWidth = 32'd32,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd32,
+  parameter int unsigned        RegDataWidth = 32'd32,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type                apb_addr_t   = logic[ApbAddrWidth-1:0],
+  parameter type                reg_data_t   = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Internal signals
+  reg_data_t [NoApbRegs-1:0] registers;
+  logic [NoApbRegs-1:0]      decoded_addr;
+  logic [NoApbRegs-1:0]      write_enable;
+  reg_data_t                 read_data;
+  reg_data_t                 write_data;
+  logic [ApbDataWidth/8-1:0] write_strobe;
+  logic                      write_commit;
+
+  // Decode the address
+  always_comb begin
+    decoded_addr = '0;
+    for (int i = 0; i < NoApbRegs; i++) begin
+      if (req_i.paddr[ApbAddrWidth-1:$clog2(AddrOffset)] == base_addr_i[ApbAddrWidth-1:$clog2(AddrOffset)] + i) begin
+        decoded_addr[i] = 1'b1;
+      end
+    end
+  end
+
+  // Determine write enable for each register
+  always_comb begin
+    write_enable = '0;
+    for (int i = 0; i < NoApbRegs; i++) begin
+      if (decoded_addr[i] && req_i.pwrite && !ReadOnly[i]) begin
+        write_enable[i] = 1'b1;
+      end
+    end
+  end
+
+  // Generate write data with byte strobes
+  always_comb begin
+    write_data = '0;
+    for (int i = 0; i < ApbDataWidth/8; i++) begin
+      if (write_strobe[i]) begin
+        write_data[i*8 +: 8] = req_i.pwdata[i*8 +: 8];
+      end
+    end
+  end
+
+  // Write commit signal
+  always_comb begin
+    write_commit = req_i.psel && req_i.penable;
+  end
+
+  // Register file logic
+  always_ff @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        if (!ReadOnly[i]) begin
+          registers[i] <= '0;
+        end else begin
+          registers[i] <= reg_init_i[i];
+        end
+      end
+    end else if (write_commit) begin
+      for (int i = 0; i < NoApbRegs; i++) begin
+        if (write_enable[i]) begin
+          registers[i] <= (registers[i] & ~({ApbDataWidth{write_strobe}})) | write_data;
+        end
+      end
+    end
+  end
+
+  // Read data selection
+  always_comb begin
+    read_data = '0;
+    for (int i = 0; i < NoApbRegs; i++) begin
+      if (decoded_addr[i]) begin
+        read_data = ReadOnly[i] ? reg_init_i[i] : registers[i];
+      end
+    end
+  end
+
+  // APB response
+  always_comb begin
+    resp_o.prdata = read_data;
+    resp_o.pready = 1'b1;
+    resp_o.pslverr = 1'b0;
+  end
+
+  // Register values output
+  always_comb begin
+    reg_q_o = registers;
+  end
+
+endmodule
+```

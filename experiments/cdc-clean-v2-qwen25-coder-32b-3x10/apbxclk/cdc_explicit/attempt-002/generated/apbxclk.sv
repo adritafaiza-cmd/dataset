@@ -1,0 +1,188 @@
+module apbxclk #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		parameter [0:0]	OPT_REGISTERED = 1'b0,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH
+	) (
+		input	wire			S_APB_PCLK, S_PRESETn,
+		input	wire			S_APB_PSEL,
+		input	wire			S_APB_PENABLE,
+		output	reg			S_APB_PREADY,
+		input	wire	[AW-1:0]	S_APB_PADDR,
+		input	wire			S_APB_PWRITE,
+		input	wire	[DW-1:0]	S_APB_PWDATA,
+		input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+		input	wire	[2:0]		S_APB_PPROT,
+		output	wire	[DW-1:0]	S_APB_PRDATA,
+		output	wire			S_APB_PSLVERR,
+		input	wire			M_APB_PCLK,
+		output	reg			M_PRESETn,
+		output	reg			M_APB_PSEL,
+		output	reg			M_APB_PENABLE,
+		input	wire			M_APB_PREADY,
+		output	wire	[AW-1:0]	M_APB_PADDR,
+		output	wire			M_APB_PWRITE,
+		output	wire	[DW-1:0]	M_APB_PWDATA,
+		output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+		output	wire	[2:0]		M_APB_PPROT,
+		input	wire	[DW-1:0]	M_APB_PRDATA,
+		input	wire			M_APB_PSLVERR
+	);
+
+	// Synchronizers for reset
+	reg [1:0] s_reset_sync;
+	reg [1:0] m_reset_sync;
+
+	// Synchronizers for control signals
+	reg [1:0] s_psel_sync;
+	reg [1:0] s_penable_sync;
+
+	// Registered payload and response fields
+	reg [AW-1:0] s_paddr_reg;
+	reg s_pwrite_reg;
+	reg [DW-1:0] s_pwdata_reg;
+	reg [DW/8-1:0] s_pwstrb_reg;
+	reg [2:0] s_pprot_reg;
+
+	// Registered response fields
+	reg [DW-1:0] m_prdata_reg;
+	reg m_pslverr_reg;
+
+	// Control signals
+	reg s_req_valid;
+	reg m_req_valid;
+	reg m_req_ready;
+	reg s_resp_valid;
+	reg s_resp_ready;
+
+	// Synchronizers for reset
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_reset_sync <= 2'b00;
+		end else begin
+			s_reset_sync <= {s_reset_sync[0], 1'b1};
+		end
+	end
+
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_reset_sync <= 2'b00;
+		end else begin
+			m_reset_sync <= {m_reset_sync[0], 1'b1};
+		end
+	end
+
+	// Active-low reset outputs
+	assign M_PRESETn = m_reset_sync[1];
+
+	// Synchronizers for control signals
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_psel_sync <= 2'b00;
+			s_penable_sync <= 2'b00;
+		end else begin
+			s_psel_sync <= {s_psel_sync[0], S_APB_PSEL};
+			s_penable_sync <= {s_penable_sync[0], S_APB_PENABLE};
+		end
+	end
+
+	// Control signal detection
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_req_valid <= 1'b0;
+		end else begin
+			if (s_psel_sync[1] && s_penable_sync[1]) begin
+				s_req_valid <= 1'b1;
+			end else if (M_APB_PREADY) begin
+				s_req_valid <= 1'b0;
+			end
+		end
+	end
+
+	// Register payload fields
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_paddr_reg <= {AW{1'b0}};
+			s_pwrite_reg <= 1'b0;
+			s_pwdata_reg <= {DW{1'b0}};
+			s_pwstrb_reg <= {DW/8{1'b0}};
+			s_pprot_reg <= 3'b000;
+		end else if (s_req_valid && !m_req_valid) begin
+			s_paddr_reg <= S_APB_PADDR;
+			s_pwrite_reg <= S_APB_PWRITE;
+			s_pwdata_reg <= S_APB_PWDATA;
+			s_pwstrb_reg <= S_APB_PWSTRB;
+			s_pprot_reg <= S_APB_PPROT;
+		end
+	end
+
+	// Control signal for master request
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_req_valid <= 1'b0;
+		end else begin
+			if (s_req_valid && !m_req_valid) begin
+				m_req_valid <= 1'b1;
+			end else if (M_APB_PREADY) begin
+				m_req_valid <= 1'b0;
+			end
+		end
+	end
+
+	// Control signal for master ready
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_req_ready <= 1'b0;
+		end else begin
+			m_req_ready <= s_req_valid && !m_req_valid;
+		end
+	end
+
+	// Control signal for slave response
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_resp_valid <= 1'b0;
+		end else begin
+			if (M_APB_PREADY) begin
+				s_resp_valid <= 1'b1;
+			end else if (S_APB_PREADY) begin
+				s_resp_valid <= 1'b0;
+			end
+		end
+	end
+
+	// Control signal for slave ready
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_resp_ready <= 1'b0;
+		end else begin
+			s_resp_ready <= M_APB_PREADY;
+		end
+	end
+
+	// Register response fields
+	always @(posedge M_APB_PCLK or negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_prdata_reg <= {DW{1'b0}};
+			m_pslverr_reg <= 1'b0;
+		end else if (M_APB_PREADY) begin
+			m_prdata_reg <= M_APB_PRDATA;
+			m_pslverr_reg <= M_APB_PSLVERR;
+		end
+	end
+
+	// Output assignments
+	assign S_APB_PREADY = s_resp_valid;
+	assign S_APB_PRDATA = m_prdata_reg;
+	assign S_APB_PSLVERR = m_pslverr_reg;
+
+	assign M_APB_PSEL = m_req_valid;
+	assign M_APB_PENABLE = m_req_valid;
+	assign M_APB_PADDR = s_paddr_reg;
+	assign M_APB_PWRITE = s_pwrite_reg;
+	assign M_APB_PWDATA = s_pwdata_reg;
+	assign M_APB_PWSTRB = s_pwstrb_reg;
+	assign M_APB_PPROT = s_pprot_reg;
+
+endmodule

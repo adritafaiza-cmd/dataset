@@ -1,0 +1,208 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals for the four-phase handshake
+  // req: source -> destination (request)
+  // ack: destination -> source (acknowledge)
+  //
+  // Four-phase protocol:
+  //   Idle: req=0, ack=0
+  //   Transfer: req=1, ack=0 (data valid on dst side)
+  //   Ack: req=1, ack=1 (dst has accepted, src can deassert req)
+  //   Return: req=0, ack=1 (dst deasserts ack, back to idle)
+  //
+  // We use a 2-bit Gray-coded or binary counter for the handshake state.
+  // Actually, for a 4-phase handshake, we can use two separate 1-bit signals
+  // (req and ack) that are each synchronized across the clock domain.
+  //
+  // The key insight: req and ack are each single-bit signals that cross
+  // clock domains. We synchronize each with a 2-flop synchronizer.
+  //
+  // Source side:
+  //   - Drives req (1-bit)
+  //   - Receives synchronized ack (ack_sync)
+  //   - src_ready_o = ~req | ack_sync  (can accept new data when not in transfer, or when ack received)
+  //     Actually, in 4-phase: src can send when req=0. After sending, req=1.
+  //     src_ready should be high when we can accept a new transfer.
+  //     We can accept a new transfer when req=0 (idle) OR when we've received ack and are returning.
+  //     Let's think more carefully.
+  //
+  // State machine on source side (based on local req and synchronized ack):
+  //   S_IDLE: req=0, ack_sync=0. src_ready=1. If src_valid, set req=1.
+  //   S_REQ:  req=1, ack_sync=0. src_ready=0. Wait for ack_sync=1.
+  //   S_ACK:  req=1, ack_sync=1. src_ready=0. Deassert req (req=0).
+  //   S_RET:  req=0, ack_sync=1. src_ready=0. Wait for ack_sync=0.
+  //
+  // But wait, in 4-phase, the source deasserts req after seeing ack, and the
+  // destination deasserts ack after seeing req deasserted. So:
+  //
+  // Source FSM:
+  //   IDLE: req=0, ack_sync=0. ready=1. On valid: req<=1.
+  //   WAIT_ACK: req=1, ack_sync=0. ready=0. On ack_sync=1: req<=0.
+  //   WAIT_ACK_RET: req=0, ack_sync=1. ready=0. On ack_sync=0: back to IDLE.
+  //
+  // Destination FSM:
+  //   IDLE: req_sync=0, ack=0. valid=0.
+  //   WAIT_DATA: req_sync=1, ack=0. valid=1. On ready: ack<=1.
+  //   WAIT_REQ_RET: req_sync=1, ack=1. valid=0. On req_sync=0: ack<=0.
+  //
+  // Wait, let me reconsider. The standard 4-phase handshake:
+  //
+  // Source:
+  //   1. Start: req=0, ack=0
+  //   2. Source asserts req (req=1), data is stable
+  //   3. Destination sees req=1, presents data, waits for ready
+  //   4. When ready, destination asserts ack (ack=1)
+  //   5. Source sees ack=1, deasserts req (req=0)
+  //   6. Destination sees req=0, deasserts ack (ack=0)
+  //   7. Back to start
+  //
+  // So the source FSM:
+  //   IDLE: req=0, ack_sync=0. src_ready=1.
+  //   On src_valid: req<=1, go to WAIT_ACK.
+  //   WAIT_ACK: req=1, ack_sync=0. src_ready=0.
+  //   On ack_sync=1: req<=0, go to WAIT_ACK_RET.
+  //   WAIT_ACK_RET: req=0, ack_sync=1. src_ready=0.
+  //   On ack_sync=0: go to IDLE.
+  //
+  // Destination FSM:
+  //   IDLE: req_sync=0, ack=0. dst_valid=0.
+  //   On req_sync=1: go to WAIT_READY.
+  //   WAIT_READY: req_sync=1, ack=0. dst_valid=1.
+  //   On dst_ready: ack<=1, go to WAIT_REQ_RET.
+  //   WAIT_REQ_RET: req_sync=1, ack=1. dst_valid=0.
+  //   On req_sync=0: ack<=0, go to IDLE.
+  //
+  // This looks correct. Let me implement it.
+
+  // Synchronizers
+  // req crosses from src to dst
+  wire req_raw;
+  wire [1:0] req_sync;
+  wire req_synced;
+
+  // ack crosses from dst to src
+  wire ack_raw;
+  wire [1:0] ack_sync;
+  wire ack_synced;
+
+  // Source side state
+  localparam SRC_IDLE = 2'd0;
+  localparam SRC_WAIT_ACK = 2'd1;
+  localparam SRC_WAIT_ACK_RET = 2'd2;
+
+  reg [1:0] src_state;
+  reg req_reg;
+
+  // Destination side state
+  localparam DST_IDLE = 2'd0;
+  localparam DST_WAIT_READY = 2'd1;
+  localparam DST_WAIT_REQ_RET = 2'd2;
+
+  reg [1:0] dst_state;
+  reg ack_reg;
+  reg [WIDTH-1:0] dst_data_reg;
+
+  // Source clock domain
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_state <= SRC_IDLE;
+      req_reg <= 1'b0;
+    end else begin
+      case (src_state)
+        SRC_IDLE: begin
+          if (src_valid_i) begin
+            req_reg <= 1'b1;
+            src_state <= SRC_WAIT_ACK;
+          end
+        end
+        SRC_WAIT_ACK: begin
+          if (ack_synced) begin
+            req_reg <= 1'b0;
+            src_state <= SRC_WAIT_ACK_RET;
+          end
+        end
+        SRC_WAIT_ACK_RET: begin
+          if (!ack_synced) begin
+            src_state <= SRC_IDLE;
+          end
+        end
+        default: src_state <= SRC_IDLE;
+      endcase
+    end
+  end
+
+  assign req_raw = req_reg;
+  assign src_ready_o = (src_state == SRC_IDLE);
+
+  // Synchronize req from src to dst
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      req_sync <= 2'b00;
+    end else begin
+      req_sync <= {req_sync[0], req_raw};
+    end
+  end
+  assign req_synced = req_sync[1];
+
+  // Destination clock domain
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_state <= DST_IDLE;
+      ack_reg <= 1'b0;
+      dst_data_reg <= SEND_RESET_MSG ? RESET_MSG : {WIDTH{1'b0}};
+    end else begin
+      case (dst_state)
+        DST_IDLE: begin
+          if (req_synced) begin
+            dst_data_reg <= req_synced ? src_data_i : {WIDTH{1'b0}};
+            dst_state <= DST_WAIT_READY;
+          end
+        end
+        DST_WAIT_READY: begin
+          if (dst_ready_i) begin
+            ack_reg <= 1'b1;
+            dst_state <= DST_WAIT_REQ_RET;
+          end
+        end
+        DST_WAIT_REQ_RET: begin
+          if (!req_synced) begin
+            ack_reg <= 1'b0;
+            dst_state <= DST_IDLE;
+          end
+        end
+        default: dst_state <= DST_IDLE;
+      endcase
+    end
+  end
+
+  assign ack_raw = ack_reg;
+  assign dst_valid_o = (dst_state == DST_WAIT_READY);
+  assign dst_data_o = dst_data_reg;
+
+  // Synchronize ack from dst to src
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      ack_sync <= 2'b00;
+    end else begin
+      ack_sync <= {ack_sync[0], ack_raw};
+    end
+  end
+  assign ack_synced = ack_sync[1];
+
+endmodule

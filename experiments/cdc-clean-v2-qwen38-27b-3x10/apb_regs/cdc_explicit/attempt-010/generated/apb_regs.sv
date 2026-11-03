@@ -1,0 +1,140 @@
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Extract APB signals from the request type
+  wire psel;
+  wire penable;
+  wire pwrite;
+  wire [ApbAddrWidth-1:0] paddr;
+  wire [ApbDataWidth-1:0] pwdata;
+  wire [ApbDataWidth/8-1:0] pstrb;
+
+  assign psel    = req_i.psel;
+  assign penable = req_i.penable;
+  assign pwrite  = req_i.pwrite;
+  assign paddr   = req_i.paddr;
+  assign pwdata  = req_i.pwdata;
+  assign pstrb   = req_i.pstrb;
+
+  // Response
+  assign resp_o.pready = 1'b1;
+  assign resp_o.pslverr = 1'b0;
+  assign resp_o.prdata  = 8'h0; // Not used for writes; reads handled via reg_q_o
+
+  // Address decoding
+  // Each register is spaced AddrOffset bytes apart
+  // The offset from base address determines which register
+  wire [ApbAddrWidth-1:0] addr_offset = paddr - base_addr_i;
+
+  // Calculate register index
+  // AddrOffset is in bytes, so we need to shift right by log2(AddrOffset)
+  // But AddrOffset may not be a power of 2, so we use division
+  // For simplicity and correctness, we'll use a comparator approach
+
+  // Determine which register is being accessed
+  // reg_index = addr_offset / AddrOffset
+  // We need to check if the address falls within the valid range for each register
+
+  // Generate a one-hot select for each register
+  wire [NoApbRegs-1:0] reg_sel;
+  genvar i;
+  generate
+    for (i = 0; i < NoApbRegs; i = i + 1) begin : gen_sel
+      // The address range for register i is:
+      // base_addr_i + i*AddrOffset to base_addr_i + (i+1)*AddrOffset - 1
+      // So addr_offset should be in [i*AddrOffset, (i+1)*AddrOffset - 1]
+      wire [ApbAddrWidth-1:0] reg_start = base_addr_i + (i * AddrOffset);
+      wire [ApbAddrWidth-1:0] reg_end   = base_addr_i + ((i + 1) * AddrOffset) - 1;
+      assign reg_sel[i] = (paddr >= reg_start) && (paddr <= reg_end);
+    end
+  endgenerate
+
+  // Write enable: APB access phase
+  wire apb_write = psel & penable & pwrite;
+
+  // Register storage
+  reg_data_t [NoApbRegs-1:0] reg_r;
+
+  // Byte strobe width
+  localparam int unsigned NumBytes = RegDataWidth / 8;
+
+  // Write data with byte strobes applied
+  // For each register, apply the byte strobes to the write data
+  // The write data is ApbDataWidth bits wide, but the register is RegDataWidth bits wide
+  // We need to mask the write data to only the bytes that are strobed and within the register width
+
+  // Generate write data for each register with byte strobes
+  wire [RegDataWidth-1:0] wdata_masked [NoApbRegs-1:0];
+  generate
+    for (i = 0; i < NoApbRegs; i = i + 1) begin : gen_wdata
+      // Apply byte strobes
+      // For each byte in the register, if the corresponding strobe is set, use the write data
+      // The write data is ApbDataWidth bits, the register is RegDataWidth bits
+      // We assume the write data is aligned to the register width
+      // Byte j of the register corresponds to byte j of the write data (if j < NumBytes)
+      // The strobe for byte j is pstrb[j] (if j < ApbDataWidth/8)
+      wire [RegDataWidth-1:0] wdata_full;
+      assign wdata_full = pwdata[RegDataWidth-1:0]; // Take the lower RegDataWidth bits
+
+      // Apply byte strobes
+      // For each byte position, if strobed, use wdata_full, else keep old value
+      // We'll build the masked write data
+      wire [RegDataWidth-1:0] masked;
+      genvar b;
+      generate
+        for (b = 0; b < NumBytes; b = b + 1) begin : gen_byte
+          wire strobe = (b < (ApbDataWidth/8)) ? pstrb[b] : 1'b0;
+          assign masked[b*8 +: 8] = strobe ? wdata_full[b*8 +: 8] : reg_r[i][b*8 +: 8];
+        end
+      endgenerate
+      assign wdata_masked[i] = masked;
+    end
+  endgenerate
+
+  // Register update logic
+  always @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int unsigned j = 0; j < NoApbRegs; j = j + 1) begin
+        if (ReadOnly[j])
+          reg_r[j] <= reg_init_i[j];
+        else
+          reg_r[j] <= '0;
+      end
+    end else begin
+      for (int unsigned j = 0; j < NoApbRegs; j = j + 1) begin
+        if (!ReadOnly[j] && apb_write && reg_sel[j]) begin
+          reg_r[j] <= wdata_masked[j];
+        end
+      end
+    end
+  end
+
+  // Output: read-only registers expose reg_init_i, writable registers expose reg_r
+  generate
+    for (i = 0; i < NoApbRegs; i = i + 1) begin : gen_out
+      if (ReadOnly[i])
+        assign reg_q_o[i] = reg_init_i[i];
+      else
+        assign reg_q_o[i] = reg_r[i];
+    end
+  endgenerate
+
+endmodule

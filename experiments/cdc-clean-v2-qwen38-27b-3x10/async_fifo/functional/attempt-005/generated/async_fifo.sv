@@ -1,0 +1,130 @@
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+        output wire             wfull,
+        output wire             awfull,
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWIDTH = ASIZE + 1;
+    localparam FULL_THRESHOLD = DEPTH - 1;
+    localparam EMPTY_THRESHOLD = 1;
+
+    // Write domain
+    reg [AWIDTH-1:0] wptr;
+    reg [ASIZE-1:0] waddr;
+    reg [DSIZE-1:0] mem [0:DEPTH-1];
+    reg [AWIDTH-1:0] wptr_rclk;
+    reg [AWIDTH-1:0] wptr_rclk_1;
+    reg [AWIDTH-1:0] wptr_rclk_2;
+
+    // Read domain
+    reg [AWIDTH-1:0] rptr;
+    reg [ASIZE-1:0] raddr;
+    reg [AWIDTH-1:0] rptr_wclk;
+    reg [AWIDTH-1:0] rptr_wclk_1;
+    reg [AWIDTH-1:0] rptr_wclk_2;
+
+    // Write domain signals
+    wire winc_valid = winc & ~wfull;
+    wire wfull_internal = (wptr[ASIZE-1:0] == rptr_wclk[ASIZE-1:0]) &&
+                          (wptr[ASIZE] != rptr_wclk[ASIZE]);
+    wire awfull_internal = (wptr[ASIZE-1:0] == rptr_wclk[ASIZE-1:0]) &&
+                           (wptr[ASIZE] == rptr_wclk[ASIZE]) &&
+                           (wptr[ASIZE-1:0] == FULL_THRESHOLD[ASIZE-1:0]);
+
+    // Read domain signals
+    wire rinc_valid = rinc & ~rempty;
+    wire rempty_internal = (rptr == wptr_rclk);
+    wire arempty_internal = (rptr[ASIZE-1:0] == wptr_rclk[ASIZE-1:0]) &&
+                            (rptr[ASIZE] == wptr_rclk[ASIZE]) &&
+                            (rptr[ASIZE-1:0] == EMPTY_THRESHOLD[ASIZE-1:0]);
+
+    // Outputs
+    assign wfull = wfull_internal;
+    assign awfull = awfull_internal;
+    assign rempty = rempty_internal;
+    assign arempty = arempty_internal;
+
+    // Read data output
+    reg [DSIZE-1:0] rdata_reg;
+    assign rdata = rdata_reg;
+
+    // Write pointer update
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr <= {AWIDTH{1'b0}};
+            waddr <= {ASIZE{1'b0}};
+        end else if (winc_valid) begin
+            wptr <= wptr + 1'b1;
+            waddr <= waddr + 1'b1;
+        end
+    end
+
+    // Memory write
+    always @(posedge wclk) begin
+        if (winc_valid) begin
+            mem[waddr] <= wdata;
+        end
+    end
+
+    // Read pointer update
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr <= {AWIDTH{1'b0}};
+            raddr <= {ASIZE{1'b0}};
+        end else if (rinc_valid) begin
+            rptr <= rptr + 1'b1;
+            raddr <= raddr + 1'b1;
+        end
+    end
+
+    // Read data capture
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rdata_reg <= {DSIZE{1'b0}};
+        end else if (rinc_valid) begin
+            rdata_reg <= mem[raddr];
+        end
+    end
+
+    // Synchronize write pointer to read domain
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            wptr_rclk <= {AWIDTH{1'b0}};
+            wptr_rclk_1 <= {AWIDTH{1'b0}};
+            wptr_rclk_2 <= {AWIDTH{1'b0}};
+        end else begin
+            wptr_rclk <= wptr;
+            wptr_rclk_1 <= wptr_rclk;
+            wptr_rclk_2 <= wptr_rclk_1;
+        end
+    end
+
+    // Synchronize read pointer to write domain
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            rptr_wclk <= {AWIDTH{1'b0}};
+            rptr_wclk_1 <= {AWIDTH{1'b0}};
+            rptr_wclk_2 <= {AWIDTH{1'b0}};
+        end else begin
+            rptr_wclk <= rptr;
+            rptr_wclk_1 <= rptr_wclk;
+            rptr_wclk_2 <= rptr_wclk_1;
+        end
+    end
+
+endmodule

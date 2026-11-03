@@ -1,0 +1,197 @@
+```verilog
+module wbxclk #(
+		parameter	AW=32,
+				DW=32,
+				LGFIFO = 5
+	) (
+		input	wire			i_wb_clk, i_reset,
+		input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+		input	wire	[(AW-1):0]	i_wb_addr,
+		input	wire	[(DW-1):0]	i_wb_data,
+		input	wire	[(DW/8-1):0]	i_wb_sel,
+		output	wire			o_wb_stall,
+		output	reg			o_wb_ack,
+		output	reg	[(DW-1):0]	o_wb_data,
+		output	reg			o_wb_err,
+		input	wire			i_xclk_clk,
+		output	reg			o_xclk_cyc,
+		output	reg			o_xclk_stb,
+		output	reg			o_xclk_we,
+		output	reg	[(AW-1):0]	o_xclk_addr,
+		output	reg	[(DW-1):0]	o_xclk_data,
+		output	reg	[(DW/8-1):0]	o_xclk_sel,
+		input	wire			i_xclk_stall,
+		input	wire			i_xclk_ack,
+		input	wire	[(DW-1):0]	i_xclk_data,
+		input	wire			i_xclk_err
+	);
+
+	localparam FIFO_DEPTH = 1 << LGFIFO;
+	localparam FIFO_PTR_W = LGFIFO;
+	localparam FIFO_FULL_THRESH = FIFO_DEPTH - 1;
+
+	// Reset synchronizers
+	reg [1:0] rst_sync_wb;
+	reg [1:0] rst_sync_xclk;
+
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset)
+			rst_sync_wb <= 2'b00;
+		else
+			rst_sync_wb <= {rst_sync_wb[0], 1'b1};
+	end
+
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset)
+			rst_sync_xclk <= 2'b00;
+		else
+			rst_sync_xclk <= {rst_sync_xclk[0], 1'b1};
+	end
+
+	wire rst_wb = ~rst_sync_wb[1];
+	wire rst_xclk = ~rst_sync_xclk[1];
+
+	// FIFO storage
+	reg [DW-1:0] fifo_data [0:FIFO_DEPTH-1];
+	reg [AW-1:0] fifo_addr [0:FIFO_DEPTH-1];
+	reg [DW/8-1:0] fifo_sel [0:FIFO_DEPTH-1];
+	reg fifo_we [0:FIFO_DEPTH-1];
+
+	// Pointers
+	reg [FIFO_PTR_W:0] wr_ptr;
+	reg [FIFO_PTR_W:0] rd_ptr;
+
+	// Write enable (WB domain)
+	wire wb_write_en = i_wb_cyc & i_wb_stb & ~o_wb_stall & ~rst_wb;
+
+	// Read enable (XCLK domain)
+	wire xclk_read_en = o_xclk_cyc & o_xclk_stb & ~i_xclk_stall & ~rst_xclk;
+
+	// Full/Empty logic
+	wire [FIFO_PTR_W:0] wr_ptr_sync;
+	reg [FIFO_PTR_W:0] wr_ptr_sync_reg;
+
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset)
+			wr_ptr_sync_reg <= {(FIFO_PTR_W+1){1'b0}};
+		else
+			wr_ptr_sync_reg <= wr_ptr;
+	end
+
+	wire [FIFO_PTR_W:0] rd_ptr_sync;
+	reg [FIFO_PTR_W:0] rd_ptr_sync_reg;
+
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset)
+			rd_ptr_sync_reg <= {(FIFO_PTR_W+1){1'b0}};
+		else
+			rd_ptr_sync_reg <= rd_ptr;
+	end
+
+	wire fifo_full = (wr_ptr[FIFO_PTR_W] != rd_ptr_sync_reg[FIFO_PTR_W]) &&
+					 (wr_ptr[FIFO_PTR_W-1:FIFO_PTR_W-1] == rd_ptr_sync_reg[FIFO_PTR_W-1:FIFO_PTR_W-1]) &&
+					 (wr_ptr[FIFO_PTR_W-2:0] == rd_ptr_sync_reg[FIFO_PTR_W-2:0]);
+
+	// Simplified full check: full when high bits differ and lower bits equal
+	wire fifo_full_simple = (wr_ptr[FIFO_PTR_W] != rd_ptr_sync_reg[FIFO_PTR_W]) &&
+							(wr_ptr[FIFO_PTR_W-1:0] == rd_ptr_sync_reg[FIFO_PTR_W-1:0]);
+
+	wire fifo_empty = (wr_ptr_sync_reg == rd_ptr);
+
+	// Stall output
+	assign o_wb_stall = fifo_full_simple | rst_wb;
+
+	// Write to FIFO (WB domain)
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			wr_ptr <= {(FIFO_PTR_W+1){1'b0}};
+		end else if (wb_write_en) begin
+			fifo_data[wr_ptr[FIFO_PTR_W-1:0]] <= i_wb_data;
+			fifo_addr[wr_ptr[FIFO_PTR_W-1:0]] <= i_wb_addr;
+			fifo_sel[wr_ptr[FIFO_PTR_W-1:0]] <= i_wb_sel;
+			fifo_we[wr_ptr[FIFO_PTR_W-1:0]] <= i_wb_we;
+			wr_ptr <= wr_ptr + 1'b1;
+		end
+	end
+
+	// Read from FIFO (XCLK domain)
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			rd_ptr <= {(FIFO_PTR_W+1){1'b0}};
+			o_xclk_cyc <= 1'b0;
+			o_xclk_stb <= 1'b0;
+			o_xclk_we <= 1'b0;
+			o_xclk_addr <= {(AW){1'b0}};
+			o_xclk_data <= {(DW){1'b0}};
+			o_xclk_sel <= {(DW/8){1'b0}};
+		end else begin
+			if (xclk_read_en) begin
+				rd_ptr <= rd_ptr + 1'b1;
+			end
+			if (!fifo_empty) begin
+				o_xclk_cyc <= 1'b1;
+				o_xclk_stb <= 1'b1;
+				o_xclk_we <= fifo_we[rd_ptr[FIFO_PTR_W-1:0]];
+				o_xclk_addr <= fifo_addr[rd_ptr[FIFO_PTR_W-1:0]];
+				o_xclk_data <= fifo_data[rd_ptr[FIFO_PTR_W-1:0]];
+				o_xclk_sel <= fifo_sel[rd_ptr[FIFO_PTR_W-1:0]];
+			end else begin
+				o_xclk_cyc <= 1'b0;
+				o_xclk_stb <= 1'b0;
+			end
+		end
+	end
+
+	// Response FIFO (XCLK to WB)
+	reg [DW-1:0] resp_data [0:FIFO_DEPTH-1];
+	reg resp_err [0:FIFO_DEPTH-1];
+	reg [FIFO_PTR_W:0] resp_wr_ptr;
+	reg [FIFO_PTR_W:0] resp_rd_ptr;
+
+	// Response write (XCLK domain)
+	wire xclk_resp_write_en = i_xclk_ack & ~rst_xclk;
+
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			resp_wr_ptr <= {(FIFO_PTR_W+1){1'b0}};
+		end else if (xclk_resp_write_en) begin
+			resp_data[resp_wr_ptr[FIFO_PTR_W-1:0]] <= i_xclk_data;
+			resp_err[resp_wr_ptr[FIFO_PTR_W-1:0]] <= i_xclk_err;
+			resp_wr_ptr <= resp_wr_ptr + 1'b1;
+		end
+	end
+
+	// Response read (WB domain)
+	wire wb_resp_read_en = o_wb_ack & ~rst_wb;
+
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			resp_rd_ptr <= {(FIFO_PTR_W+1){1'b0}};
+			o_wb_ack <= 1'b0;
+			o_wb_data <= {(DW){1'b0}};
+			o_wb_err <= 1'b0;
+		end else begin
+			if (wb_resp_read_en) begin
+				resp_rd_ptr <= resp_rd_ptr + 1'b1;
+			end
+			if (resp_rd_ptr != resp_wr_ptr_sync_reg) begin
+				o_wb_ack <= 1'b1;
+				o_wb_data <= resp_data[resp_rd_ptr[FIFO_PTR_W-1:0]];
+				o_wb_err <= resp_err[resp_rd_ptr[FIFO_PTR_W-1:0]];
+			end else begin
+				o_wb_ack <= 1'b0;
+			end
+		end
+	end
+
+	// Synchronize resp_wr_ptr to WB domain
+	reg [FIFO_PTR_W:0] resp_wr_ptr_sync_reg;
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset)
+			resp_wr_ptr_sync_reg <= {(FIFO_PTR_W+1){1'b0}};
+		else
+			resp_wr_ptr_sync_reg <= resp_wr_ptr;
+	end
+
+endmodule
+```<|im_end|>

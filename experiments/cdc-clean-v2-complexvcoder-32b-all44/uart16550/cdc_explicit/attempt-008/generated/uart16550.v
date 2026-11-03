@@ -1,0 +1,421 @@
+module uart_top (
+    input wb_clk_i,
+    input wb_rst_i,
+    input [7:0] wb_adr_i,
+    input [31:0] wb_dat_i,
+    output [31:0] wb_dat_o,
+    input wb_we_i,
+    input wb_stb_i,
+    input wb_cyc_i,
+    output wb_ack_o,
+    input [3:0] wb_sel_i,
+    output int_o,
+    output stx_pad_o,
+    input srx_pad_i,
+    output rts_pad_o,
+    input cts_pad_i,
+    output dtr_pad_o,
+    input dsr_pad_i,
+    input ri_pad_i,
+    input dcd_pad_i
+);
+
+    // Internal signals
+    wire [7:0] rx_data;
+    wire rx_valid;
+    wire tx_ready;
+    wire [7:0] tx_data;
+    wire tx_valid;
+    wire [15:0] baud_rate;
+    wire fifo_enabled;
+    wire [3:0] fifo_rx_level;
+    wire [3:0] fifo_tx_level;
+    wire interrupt;
+    wire dtr;
+    wire rts;
+    wire dsr;
+    wire ri;
+    wire dcd;
+
+    // Wishbone slave interface
+    wb_slave wb_slave_inst (
+        .wb_clk_i(wb_clk_i),
+        .wb_rst_i(wb_rst_i),
+        .wb_adr_i(wb_adr_i),
+        .wb_dat_i(wb_dat_i),
+        .wb_dat_o(wb_dat_o),
+        .wb_we_i(wb_we_i),
+        .wb_stb_i(wb_stb_i),
+        .wb_cyc_i(wb_cyc_i),
+        .wb_ack_o(wb_ack_o),
+        .wb_sel_i(wb_sel_i),
+        .rx_data(rx_data),
+        .rx_valid(rx_valid),
+        .tx_ready(tx_ready),
+        .tx_data(tx_data),
+        .tx_valid(tx_valid),
+        .baud_rate(baud_rate),
+        .fifo_enabled(fifo_enabled),
+        .fifo_rx_level(fifo_rx_level),
+        .fifo_tx_level(fifo_tx_level),
+        .interrupt(interrupt),
+        .dtr(dtr),
+        .rts(rts),
+        .dsr(dsr),
+        .ri(ri),
+        .dcd(dcd)
+    );
+
+    // UART core with FIFO and baud rate generator
+    uart_core uart_core_inst (
+        .wb_clk_i(wb_clk_i),
+        .wb_rst_i(wb_rst_i),
+        .rx_data(rx_data),
+        .rx_valid(rx_valid),
+        .tx_ready(tx_ready),
+        .tx_data(tx_data),
+        .tx_valid(tx_valid),
+        .baud_rate(baud_rate),
+        .fifo_enabled(fifo_enabled),
+        .fifo_rx_level(fifo_rx_level),
+        .fifo_tx_level(fifo_tx_level),
+        .interrupt(interrupt),
+        .stx_pad_o(stx_pad_o),
+        .srx_pad_i(srx_pad_i),
+        .cts_pad_i(cts_pad_i)
+    );
+
+    // Modem control and status
+    modem_control modem_control_inst (
+        .wb_clk_i(wb_clk_i),
+        .wb_rst_i(wb_rst_i),
+        .dtr(dtr),
+        .rts(rts),
+        .dtr_pad_o(dtr_pad_o),
+        .rts_pad_o(rts_pad_o),
+        .dsr_pad_i(dsr_pad_i),
+        .ri_pad_i(ri_pad_i),
+        .dcd_pad_i(dcd_pad_i),
+        .cts_pad_i(cts_pad_i),
+        .dsr(dsr),
+        .ri(ri),
+        .dcd(dcd)
+    );
+
+endmodule
+
+// Wishbone slave interface
+module wb_slave (
+    input wb_clk_i,
+    input wb_rst_i,
+    input [7:0] wb_adr_i,
+    input [31:0] wb_dat_i,
+    output [31:0] wb_dat_o,
+    input wb_we_i,
+    input wb_stb_i,
+    input wb_cyc_i,
+    output wb_ack_o,
+    input [3:0] wb_sel_i,
+    output [7:0] rx_data,
+    output rx_valid,
+    output tx_ready,
+    output [7:0] tx_data,
+    output tx_valid,
+    output [15:0] baud_rate,
+    output fifo_enabled,
+    output [3:0] fifo_rx_level,
+    output [3:0] fifo_tx_level,
+    output interrupt,
+    output dtr,
+    output rts,
+    input dsr,
+    input ri,
+    input dcd
+);
+
+    reg [31:0] reg_data [0:31];
+    reg [31:0] wb_dat_o_reg;
+    reg wb_ack_o_reg;
+    reg [7:0] rx_data_reg;
+    reg rx_valid_reg;
+    reg tx_ready_reg;
+    reg [7:0] tx_data_reg;
+    reg tx_valid_reg;
+    reg [15:0] baud_rate_reg;
+    reg fifo_enabled_reg;
+    reg [3:0] fifo_rx_level_reg;
+    reg [3:0] fifo_tx_level_reg;
+    reg interrupt_reg;
+    reg dtr_reg;
+    reg rts_reg;
+
+    assign wb_dat_o = wb_dat_o_reg;
+    assign wb_ack_o = wb_ack_o_reg;
+    assign rx_data = rx_data_reg;
+    assign rx_valid = rx_valid_reg;
+    assign tx_ready = tx_ready_reg;
+    assign tx_data = tx_data_reg;
+    assign tx_valid = tx_valid_reg;
+    assign baud_rate = baud_rate_reg;
+    assign fifo_enabled = fifo_enabled_reg;
+    assign fifo_rx_level = fifo_rx_level_reg;
+    assign fifo_tx_level = fifo_tx_level_reg;
+    assign interrupt = interrupt_reg;
+    assign dtr = dtr_reg;
+    assign rts = rts_reg;
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            wb_dat_o_reg <= 32'b0;
+            wb_ack_o_reg <= 1'b0;
+            rx_data_reg <= 8'b0;
+            rx_valid_reg <= 1'b0;
+            tx_ready_reg <= 1'b0;
+            tx_data_reg <= 8'b0;
+            tx_valid_reg <= 1'b0;
+            baud_rate_reg <= 16'b0;
+            fifo_enabled_reg <= 1'b0;
+            fifo_rx_level_reg <= 4'b0;
+            fifo_tx_level_reg <= 4'b0;
+            interrupt_reg <= 1'b0;
+            dtr_reg <= 1'b0;
+            rts_reg <= 1'b0;
+        end else begin
+            wb_ack_o_reg <= wb_stb_i & wb_cyc_i;
+
+            if (wb_ack_o_reg) begin
+                if (wb_we_i) begin
+                    case (wb_adr_i)
+                        8'h00: reg_data[0] <= wb_dat_i;
+                        8'h01: reg_data[1] <= wb_dat_i;
+                        8'h02: reg_data[2] <= wb_dat_i;
+                        8'h03: reg_data[3] <= wb_dat_i;
+                        8'h04: reg_data[4] <= wb_dat_i;
+                        8'h05: reg_data[5] <= wb_dat_i;
+                        8'h06: reg_data[6] <= wb_dat_i;
+                        8'h07: reg_data[7] <= wb_dat_i;
+                        8'h08: reg_data[8] <= wb_dat_i;
+                        8'h09: reg_data[9] <= wb_dat_i;
+                        8'h0A: reg_data[10] <= wb_dat_i;
+                        8'h0B: reg_data[11] <= wb_dat_i;
+                        8'h0C: reg_data[12] <= wb_dat_i;
+                        8'h0D: reg_data[13] <= wb_dat_i;
+                        8'h0E: reg_data[14] <= wb_dat_i;
+                        8'h0F: reg_data[15] <= wb_dat_i;
+                        8'h10: reg_data[16] <= wb_dat_i;
+                        8'h11: reg_data[17] <= wb_dat_i;
+                        8'h12: reg_data[18] <= wb_dat_i;
+                        8'h13: reg_data[19] <= wb_dat_i;
+                        8'h14: reg_data[20] <= wb_dat_i;
+                        8'h15: reg_data[21] <= wb_dat_i;
+                        8'h16: reg_data[22] <= wb_dat_i;
+                        8'h17: reg_data[23] <= wb_dat_i;
+                        8'h18: reg_data[24] <= wb_dat_i;
+                        8'h19: reg_data[25] <= wb_dat_i;
+                        8'h1A: reg_data[26] <= wb_dat_i;
+                        8'h1B: reg_data[27] <= wb_dat_i;
+                        8'h1C: reg_data[28] <= wb_dat_i;
+                        8'h1D: reg_data[29] <= wb_dat_i;
+                        8'h1E: reg_data[30] <= wb_dat_i;
+                        8'h1F: reg_data[31] <= wb_dat_i;
+                        default: wb_dat_o_reg <= 32'b0;
+                    endcase
+                end else begin
+                    case (wb_adr_i)
+                        8'h00: wb_dat_o_reg <= reg_data[0];
+                        8'h01: wb_dat_o_reg <= reg_data[1];
+                        8'h02: wb_dat_o_reg <= reg_data[2];
+                        8'h03: wb_dat_o_reg <= reg_data[3];
+                        8'h04: wb_dat_o_reg <= reg_data[4];
+                        8'h05: wb_dat_o_reg <= reg_data[5];
+                        8'h06: wb_dat_o_reg <= reg_data[6];
+                        8'h07: wb_dat_o_reg <= reg_data[7];
+                        8'h08: wb_dat_o_reg <= reg_data[8];
+                        8'h09: wb_dat_o_reg <= reg_data[9];
+                        8'h0A: wb_dat_o_reg <= reg_data[10];
+                        8'h0B: wb_dat_o_reg <= reg_data[11];
+                        8'h0C: wb_dat_o_reg <= reg_data[12];
+                        8'h0D: wb_dat_o_reg <= reg_data[13];
+                        8'h0E: wb_dat_o_reg <= reg_data[14];
+                        8'h0F: wb_dat_o_reg <= reg_data[15];
+                        8'h10: wb_dat_o_reg <= reg_data[16];
+                        8'h11: wb_dat_o_reg <= reg_data[17];
+                        8'h12: wb_dat_o_reg <= reg_data[18];
+                        8'h13: wb_dat_o_reg <= reg_data[19];
+                        8'h14: wb_dat_o_reg <= reg_data[20];
+                        8'h15: wb_dat_o_reg <= reg_data[21];
+                        8'h16: wb_dat_o_reg <= reg_data[22];
+                        8'h17: wb_dat_o_reg <= reg_data[23];
+                        8'h18: wb_dat_o_reg <= reg_data[24];
+                        8'h19: wb_dat_o_reg <= reg_data[25];
+                        8'h1A: wb_dat_o_reg <= reg_data[26];
+                        8'h1B: wb_dat_o_reg <= reg_data[27];
+                        8'h1C: wb_dat_o_reg <= reg_data[28];
+                        8'h1D: wb_dat_o_reg <= reg_data[29];
+                        8'h1E: wb_dat_o_reg <= reg_data[30];
+                        8'h1F: wb_dat_o_reg <= reg_data[31];
+                        default: wb_dat_o_reg <= 32'b0;
+                    endcase
+                end
+            end
+        end
+    end
+
+    // Example register assignments for demonstration
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            baud_rate_reg <= 16'd12; // Example baud rate
+            fifo_enabled_reg <= 1'b1;
+            fifo_rx_level_reg <= 4'b0;
+            fifo_tx_level_reg <= 4'b0;
+            interrupt_reg <= 1'b0;
+            dtr_reg <= 1'b0;
+            rts_reg <= 1'b0;
+        end else begin
+            // Update FIFO levels and interrupt based on UART core signals
+            // This is a simplified example; actual implementation would be more complex
+            if (wb_we_i && wb_adr_i == 8'h00) begin
+                baud_rate_reg <= wb_dat_i[15:0];
+            end
+            if (wb_we_i && wb_adr_i == 8'h01) begin
+                fifo_enabled_reg <= wb_dat_i[0];
+            end
+            // Simulated FIFO levels and interrupt
+            fifo_rx_level_reg <= fifo_rx_level_reg + 1'b1;
+            fifo_tx_level_reg <= fifo_tx_level_reg + 1'b1;
+            interrupt_reg <= fifo_rx_level_reg > 4'b5 || fifo_tx_level_reg < 4'b2;
+            dtr_reg <= wb_dat_i[0] & wb_we_i & (wb_adr_i == 8'h02);
+            rts_reg <= wb_dat_i[0] & wb_we_i & (wb_adr_i == 8'h03);
+        end
+    end
+
+endmodule
+
+// UART core with FIFO and baud rate generator
+module uart_core (
+    input wb_clk_i,
+    input wb_rst_i,
+    input [7:0] rx_data,
+    input rx_valid,
+    input tx_ready,
+    output [7:0] tx_data,
+    output tx_valid,
+    input [15:0] baud_rate,
+    input fifo_enabled,
+    input [3:0] fifo_rx_level,
+    input [3:0] fifo_tx_level,
+    output interrupt,
+    output stx_pad_o,
+    input srx_pad_i,
+    input cts_pad_i
+);
+
+    reg [7:0] tx_data_reg;
+    reg tx_valid_reg;
+    reg interrupt_reg;
+
+    assign tx_data = tx_data_reg;
+    assign tx_valid = tx_valid_reg;
+    assign interrupt = interrupt_reg;
+    assign stx_pad_o = tx_valid_reg ? tx_data_reg[0] : 1'b1; // Simplified TX
+
+    reg [15:0] baud_counter;
+    reg [7:0] rx_shift_reg;
+    reg [2:0] rx_bit_counter;
+    reg [7:0] tx_shift_reg;
+    reg [2:0] tx_bit_counter;
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            tx_data_reg <= 8'b0;
+            tx_valid_reg <= 1'b0;
+            interrupt_reg <= 1'b0;
+            baud_counter <= 16'b0;
+            rx_shift_reg <= 8'b0;
+            rx_bit_counter <= 3'b0;
+            tx_shift_reg <= 8'b0;
+            tx_bit_counter <= 3'b0;
+        end else begin
+            // Baud rate generation
+            if (baud_counter == baud_rate - 1) begin
+                baud_counter <= 16'b0;
+                if (rx_valid && rx_bit_counter == 3'b0) begin
+                    rx_shift_reg <= {rx_shift_reg[6:0], srx_pad_i};
+                    rx_bit_counter <= 3'b1;
+                end else if (rx_bit_counter < 3'b100) begin
+                    rx_shift_reg <= {rx_shift_reg[6:0], srx_pad_i};
+                    rx_bit_counter <= rx_bit_counter + 1'b1;
+                end else begin
+                    rx_bit_counter <= 3'b0;
+                end
+
+                if (tx_valid_reg && tx_bit_counter < 3'b100) begin
+                    tx_shift_reg <= {tx_shift_reg[6:0], tx_shift_reg[7]};
+                    tx_bit_counter <= tx_bit_counter + 1'b1;
+                end else if (tx_bit_counter == 3'b100) begin
+                    tx_valid_reg <= 1'b0;
+                    tx_bit_counter <= 3'b0;
+                end
+            end else begin
+                baud_counter <= baud_counter + 1'b1;
+            end
+
+            // Transmit data
+            if (tx_ready && tx_valid_reg == 1'b0 && fifo_tx_level > 4'b0) begin
+                tx_data_reg <= tx_data_reg + 1'b1; // Simplified data fetching
+                tx_valid_reg <= 1'b1;
+            end
+
+            // Interrupt generation
+            interrupt_reg <= fifo_rx_level > 4'b5 || fifo_tx_level < 4'b2;
+        end
+    end
+
+endmodule
+
+// Modem control and status
+module modem_control (
+    input wb_clk_i,
+    input wb_rst_i,
+    input dtr,
+    input rts,
+    output dtr_pad_o,
+    output rts_pad_o,
+    input dsr_pad_i,
+    input ri_pad_i,
+    input dcd_pad_i,
+    input cts_pad_i,
+    output dsr,
+    output ri,
+    output dcd
+);
+
+    reg dtr_pad_o_reg;
+    reg rts_pad_o_reg;
+    reg dsr_reg;
+    reg ri_reg;
+    reg dcd_reg;
+
+    assign dtr_pad_o = dtr_pad_o_reg;
+    assign rts_pad_o = rts_pad_o_reg;
+    assign dsr = dsr_reg;
+    assign ri = ri_reg;
+    assign dcd = dcd_reg;
+
+    always @(posedge wb_clk_i or posedge wb_rst_i) begin
+        if (wb_rst_i) begin
+            dtr_pad_o_reg <= 1'b0;
+            rts_pad_o_reg <= 1'b0;
+            dsr_reg <= 1'b0;
+            ri_reg <= 1'b0;
+            dcd_reg <= 1'b0;
+        end else begin
+            dtr_pad_o_reg <= dtr;
+            rts_pad_o_reg <= rts;
+            dsr_reg <= dsr_pad_i;
+            ri_reg <= ri_pad_i;
+            dcd_reg <= dcd_pad_i;
+        end
+    end
+
+endmodule

@@ -1,0 +1,287 @@
+```verilog
+module apbxclk #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		parameter [0:0]	OPT_REGISTERED = 1'b0,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH
+	) (
+		input	wire			S_APB_PCLK, S_PRESETn,
+		input	wire			S_APB_PSEL,
+		input	wire			S_APB_PENABLE,
+		output	reg			S_APB_PREADY,
+		input	wire	[AW-1:0]	S_APB_PADDR,
+		input	wire			S_APB_PWRITE,
+		input	wire	[DW-1:0]	S_APB_PWDATA,
+		input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+		input	wire	[2:0]		S_APB_PPROT,
+		output	wire	[DW-1:0]	S_APB_PRDATA,
+		output	wire			S_APB_PSLVERR,
+		input	wire			M_APB_PCLK,
+		output	reg			M_PRESETn,
+		output	reg			M_APB_PSEL,
+		output	reg			M_APB_PENABLE,
+		input	wire			M_APB_PREADY,
+		output	wire	[AW-1:0]	M_APB_PADDR,
+		output	wire			M_APB_PWRITE,
+		output	wire	[DW-1:0]	M_APB_PWDATA,
+		output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+		output	wire	[2:0]		M_APB_PPROT,
+		input	wire	[DW-1:0]	M_APB_PRDATA,
+		input	wire			M_APB_PSLVERR
+	);
+
+	// Synchronous reset for M domain
+	reg [3:0] m_reset_sync;
+	reg m_reset_done;
+
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_reset_sync <= 4'b0000;
+			m_reset_done <= 1'b0;
+		end else begin
+			m_reset_sync <= {m_reset_sync[2:0], 1'b1};
+			m_reset_done <= m_reset_sync[3];
+		end
+	end
+
+	assign M_PRESETn = m_reset_done;
+
+	// S domain: detect setup phase completion (PSEL=1, PENABLE=0)
+	// and capture the request. We use a handshake to ensure the request
+	// is captured exactly once per transfer.
+
+	// S domain state
+	reg s_req_valid;       // request captured, waiting for M to accept
+	reg s_transfer_active; // transfer in progress (M side)
+	reg s_ready_pending;   // M side completed, waiting to signal S ready
+
+	// Captured request fields (S domain)
+	reg [AW-1:0] s_addr;
+	reg s_write;
+	reg [DW-1:0] s_wdata;
+	reg [DW/8-1:0] s_wstrb;
+	reg [2:0] s_pprot;
+
+	// M domain: request valid and fields
+	reg m_req_valid;
+	reg [AW-1:0] m_addr;
+	reg m_write;
+	reg [DW-1:0] m_wdata;
+	reg [DW/8-1:0] m_wstrb;
+	reg [2:0] m_pprot;
+
+	// M domain: response capture
+	reg m_resp_valid;
+	reg [DW-1:0] m_rdata;
+	reg m_rslverr;
+
+	// S domain: response
+	reg [DW-1:0] s_rdata;
+	reg s_rslverr;
+
+	// Handshake signals between domains
+	// S -> M: request valid
+	reg s_to_m_req_valid;
+	// M -> S: request accepted (M has captured)
+	reg m_to_s_req_accepted;
+	// M -> S: response valid
+	reg m_to_s_resp_valid;
+	// S -> M: response accepted (S has captured)
+	reg s_to_m_resp_accepted;
+
+	// 2-FF synchronizers for each handshake signal
+	// s_to_m_req_valid: S domain -> M domain
+	reg [1:0] s2m_req_valid_sync;
+	// m_to_s_req_accepted: M domain -> S domain
+	reg [1:0] m2s_req_accepted_sync;
+	// m_to_s_resp_valid: M domain -> S domain
+	reg [1:0] m2s_resp_valid_sync;
+	// s_to_m_resp_accepted: S domain -> M domain
+	reg [1:0] s2m_resp_accepted_sync;
+
+	// S domain: synchronizer outputs
+	wire s2m_req_valid_m = s2m_req_valid_sync[1];
+	wire m2s_req_accepted_s = m2s_req_accepted_sync[1];
+	wire m2s_resp_valid_s = m2s_resp_valid_sync[1];
+	wire s2m_resp_accepted_m = s2m_resp_accepted_sync[1];
+
+	// S domain: synchronizer logic
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s2m_req_valid_sync <= 2'b00;
+			m2s_req_accepted_sync <= 2'b00;
+			m2s_resp_valid_sync <= 2'b00;
+			s2m_resp_accepted_sync <= 2'b00;
+		end else begin
+			s2m_req_valid_sync <= {s2m_req_valid_sync[0], s_to_m_req_valid};
+			m2s_req_accepted_sync <= {m2s_req_accepted_sync[0], m_to_s_req_accepted};
+			m2s_resp_valid_sync <= {m2s_resp_valid_sync[0], m_to_s_resp_valid};
+			s2m_resp_accepted_sync <= {s2m_resp_accepted_sync[0], s_to_m_resp_accepted};
+		end
+	end
+
+	// M domain: synchronizer logic
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s2m_req_valid_sync <= 2'b00;
+			m2s_req_accepted_sync <= 2'b00;
+			m2s_resp_valid_sync <= 2'b00;
+			s2m_resp_accepted_sync <= 2'b00;
+		end else begin
+			s2m_req_valid_sync <= {s2m_req_valid_sync[0], s_to_m_req_valid};
+			m2s_req_accepted_sync <= {m2s_req_accepted_sync[0], m_to_s_req_accepted};
+			m2s_resp_valid_sync <= {m2s_resp_valid_sync[0], m_to_s_resp_valid};
+			s2m_resp_accepted_sync <= {s2m_resp_accepted_sync[0], s_to_m_resp_accepted};
+		end
+	end
+
+	// S domain: request capture and handshake
+	// Detect setup phase: PSEL=1, PENABLE=0
+	wire s_setup_phase = S_APB_PSEL && !S_APB_PENABLE;
+	wire s_access_phase = S_APB_PSEL && S_APB_PENABLE;
+
+	// S domain: state machine for request side
+	// States: IDLE, WAIT_M_ACCEPT, WAIT_M_RESP
+	// We use a simple approach:
+	// - When in setup phase and not already waiting, capture request and assert s_to_m_req_valid
+	// - When m2s_req_accepted_s is high, deassert s_to_m_req_valid
+	// - When m2s_resp_valid_s is high, capture response and assert s_to_m_resp_accepted
+	// - When s2m_resp_accepted_m is high, deassert s_to_m_resp_accepted and signal S_APB_PREADY
+
+	// S domain: request valid generation
+	always @(posedge S_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_to_m_req_valid <= 1'b0;
+			s_to_m_resp_accepted <= 1'b0;
+			s_addr <= {AW{1'b0}};
+			s_write <= 1'b0;
+			s_wdata <= {DW{1'b0}};
+			s_wstrb <= {(DW/8){1'b0}};
+			s_pprot <= 3'b000;
+			s_rdata <= {DW{1'b0}};
+			s_rslverr <= 1'b0;
+			S_APB_PREADY <= 1'b0;
+		end else begin
+			// Default: no ready
+			S_APB_PREADY <= 1'b0;
+
+			// Request valid: assert when in setup phase and not already valid
+			if (s_setup_phase && !s_to_m_req_valid) begin
+				s_to_m_req_valid <= 1'b1;
+				s_addr <= S_APB_PADDR;
+				s_write <= S_APB_PWRITE;
+				s_wdata <= S_APB_PWDATA;
+				s_wstrb <= S_APB_PWSTRB;
+				s_pprot <= S_APB_PPROT;
+			end
+
+			// Deassert request valid when M accepts
+			if (m2s_req_accepted_s) begin
+				s_to_m_req_valid <= 1'b0;
+			end
+
+			// Response: when M signals response valid, capture and acknowledge
+			if (m2s_resp_valid_s) begin
+				s_rdata <= M_APB_PRDATA;
+				s_rslverr <= M_APB_PSLVERR;
+				s_to_m_resp_accepted <= 1'b1;
+				S_APB_PREADY <= 1'b1;
+			end
+
+			// Deassert response accepted when M acknowledges
+			if (s2m_resp_accepted_m) begin
+				s_to_m_resp_accepted <= 1'b0;
+			end
+		end
+	end
+
+	// M domain: request acceptance and APB drive
+	// M domain: state machine
+	// - When s2m_req_valid_m is high and not already valid, capture request and assert m_to_s_req_accepted
+	// - Drive M_APB_PSEL and M_APB_PENABLE for setup and access phases
+	// - When M_APB_PREADY is high during access phase, capture response and assert m_to_s_resp_valid
+	// - Deassert m_to_s_resp_valid when s2m_resp_accepted_m is high
+
+	// M domain: APB phase control
+	reg m_setup_phase;
+	reg m_access_phase;
+
+	always @(posedge M_APB_PCLK or negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_to_s_req_accepted <= 1'b0;
+			m_to_s_resp_valid <= 1'b0;
+			m_addr <= {AW{1'b0}};
+			m_write <= 1'b0;
+			m_wdata <= {DW{1'b0}};
+			m_wstrb <= {(DW/8){1'b0}};
+			m_pprot <= 3'b000;
+			m_setup_phase <= 1'b0;
+			m_access_phase <= 1'b0;
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+		end else begin
+			// Default: no APB activity
+			M_APB_PSEL <= 1'b0;
+			M_APB_PENABLE <= 1'b0;
+			m_setup_phase <= 1'b0;
+			m_access_phase <= 1'b0;
+
+			// Accept request from S domain
+			if (s2m_req_valid_m && !m_to_s_req_accepted) begin
+				m_to_s_req_accepted <= 1'b1;
+				m_addr <= s_addr;
+				m_write <= s_write;
+				m_wdata <= s_wdata;
+				m_wstrb <= s_wstrb;
+				m_pprot <= s_pprot;
+				// Start setup phase
+				M_APB_PSEL <= 1'b1;
+				M_APB_PENABLE <= 1'b0;
+				m_setup_phase <= 1'b1;
+			end
+
+			// Deassert request accepted when S acknowledges
+			if (s2m_resp_accepted_m) begin
+				m_to_s_req_accepted <= 1'b0;
+			end
+
+			// Transition from setup to access phase
+			if (m_setup_phase) begin
+				M_APB_PSEL <= 1'b1;
+				M_APB_PENABLE <= 1'b1;
+				m_setup_phase <= 1'b0;
+				m_access_phase <= 1'b1;
+			end
+
+			// Access phase: wait for M_APB_PREADY
+			if (m_access_phase) begin
+				M_APB_PSEL <= 1'b1;
+				M_APB_PENABLE <= 1'b1;
+				if (M_APB_PREADY) begin
+					// Transfer complete
+					m_access_phase <= 1'b0;
+					m_to_s_resp_valid <= 1'b1;
+				end
+			end
+
+			// Deassert response valid when S acknowledges
+			if (s2m_resp_accepted_m) begin
+				m_to_s_resp_valid <= 1'b0;
+			end
+		end
+	end
+
+	// M domain: output assignments
+	assign M_APB_PADDR = m_addr;
+	assign M_APB_PWRITE = m_write;
+	assign M_APB_PWDATA = m_wdata;
+	assign M_APB_PWSTRB = m_wstrb;
+	assign M_APB_PPROT = m_pprot;
+
+	// S domain: output assignments
+	assign S_APB_PRDATA = s_rdata;
+	assign S_APB_PSLVERR = s_rslverr;
+
+endmodule
+```<|im_end|>

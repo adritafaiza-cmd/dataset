@@ -1,0 +1,218 @@
+module axis_switch #
+(
+    parameter S_COUNT = 4,
+    parameter M_COUNT = 4,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter S_ID_WIDTH = 8,
+    parameter M_ID_WIDTH = S_ID_WIDTH+$clog2(S_COUNT),
+    parameter M_DEST_WIDTH = 1,
+    parameter S_DEST_WIDTH = M_DEST_WIDTH+$clog2(M_COUNT),
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter M_BASE = 0,
+    parameter M_TOP = 0,
+    parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
+    parameter UPDATE_TID = 0,
+    parameter S_REG_TYPE = 0,
+    parameter M_REG_TYPE = 2,
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 1
+)
+(
+    input  wire                             clk,
+    input  wire                             rst,
+    /*
+     * AXI Stream inputs
+     */
+    input  wire [S_COUNT*DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [S_COUNT*KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire [S_COUNT-1:0]               s_axis_tvalid,
+    output wire [S_COUNT-1:0]               s_axis_tready,
+    input  wire [S_COUNT-1:0]               s_axis_tlast,
+    input  wire [S_COUNT*S_ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [S_COUNT*S_DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [S_COUNT*USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI Stream outputs
+     */
+    output wire [M_COUNT*DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [M_COUNT*KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire [M_COUNT-1:0]               m_axis_tvalid,
+    input  wire [M_COUNT-1:0]               m_axis_tready,
+    output wire [M_COUNT-1:0]               m_axis_tlast,
+    output wire [M_COUNT*M_ID_WIDTH-1:0]    m_axis_tid,
+    output wire [M_COUNT*M_DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [M_COUNT*USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    reg  [S_COUNT-1:0]               s_axis_tready_int;
+    reg  [M_COUNT-1:0]               m_axis_tvalid_int;
+    reg  [$clog2(M_COUNT)-1:0]       selected_output;
+    reg  [S_COUNT-1:0]               grant;
+    reg  [S_COUNT-1:0]               request;
+    wire [S_COUNT-1:0]               valid_inputs;
+    wire [M_COUNT-1:0]               ready_outputs;
+
+    genvar i;
+
+    // Internal signals for data routing
+    wire [M_COUNT-1:0][DATA_WIDTH-1:0]  data_route;
+    wire [M_COUNT-1:0][KEEP_WIDTH-1:0]  keep_route;
+    wire [M_COUNT-1:0]                   last_route;
+    wire [M_COUNT-1:0][S_ID_WIDTH-1:0]  id_route;
+    wire [M_COUNT-1:0][S_DEST_WIDTH-1:0] dest_route;
+    wire [M_COUNT-1:0][USER_WIDTH-1:0]  user_route;
+
+    // Generate request signals
+    generate
+        for (i = 0; i < S_COUNT; i = i + 1) begin : gen_request
+            assign request[i] = s_axis_tvalid[i] & s_axis_tready_int[i];
+        end
+    endgenerate
+
+    // Round-robin arbiter
+    round_robin_arbiter #(
+        .COUNT(S_COUNT)
+    ) u_arbiter (
+        .clk(clk),
+        .rst(rst),
+        .request(request),
+        .grant(grant),
+        .selected(selected_output)
+    );
+
+    // Generate valid inputs
+    generate
+        for (i = 0; i < S_COUNT; i = i + 1) begin : gen_valid_inputs
+            assign valid_inputs[i] = s_axis_tvalid[i] & grant[i];
+        end
+    endgenerate
+
+    // Generate ready outputs
+    generate
+        for (i = 0; i < M_COUNT; i = i + 1) begin : gen_ready_outputs
+            assign ready_outputs[i] = m_axis_tready[i] & m_axis_tvalid_int[i];
+        end
+    endgenerate
+
+    // Generate tready signals for inputs
+    generate
+        for (i = 0; i < S_COUNT; i = i + 1) begin : gen_tready
+            assign s_axis_tready[i] = s_axis_tready_int[i];
+        end
+    endgenerate
+
+    // Generate tvalid signals for outputs
+    generate
+        for (i = 0; i < M_COUNT; i = i + 1) begin : gen_tvalid
+            assign m_axis_tvalid[i] = m_axis_tvalid_int[i];
+        end
+    endgenerate
+
+    // Generate data routing
+    generate
+        for (i = 0; i < M_COUNT; i = i + 1) begin : gen_data_route
+            assign data_route[i] = (i == selected_output) ? s_axis_tdata[selected_output*DATA_WIDTH +: DATA_WIDTH] : {DATA_WIDTH{1'b0}};
+        end
+    endgenerate
+
+    // Generate keep routing
+    generate
+        for (i = 0; i < M_COUNT; i = i + 1) begin : gen_keep_route
+            assign keep_route[i] = (i == selected_output) ? s_axis_tkeep[selected_output*KEEP_WIDTH +: KEEP_WIDTH] : {KEEP_WIDTH{1'b0}};
+        end
+    endgenerate
+
+    // Generate last routing
+    generate
+        for (i = 0; i < M_COUNT; i = i + 1) begin : gen_last_route
+            assign last_route[i] = (i == selected_output) ? s_axis_tlast[selected_output] : 1'b0;
+        end
+    endgenerate
+
+    // Generate id routing
+    generate
+        for (i = 0; i < M_COUNT; i = i + 1) begin : gen_id_route
+            assign id_route[i] = (i == selected_output) ? s_axis_tid[selected_output*S_ID_WIDTH +: S_ID_WIDTH] : {S_ID_WIDTH{1'b0}};
+        end
+    endgenerate
+
+    // Generate dest routing
+    generate
+        for (i = 0; i < M_COUNT; i = i + 1) begin : gen_dest_route
+            assign dest_route[i] = (i == selected_output) ? s_axis_tdest[selected_output*S_DEST_WIDTH +: S_DEST_WIDTH] : {S_DEST_WIDTH{1'b0}};
+        end
+    endgenerate
+
+    // Generate user routing
+    generate
+        for (i = 0; i < M_COUNT; i = i + 1) begin : gen_user_route
+            assign user_route[i] = (i == selected_output) ? s_axis_tuser[selected_output*USER_WIDTH +: USER_WIDTH] : {USER_WIDTH{1'b0}};
+        end
+    endgenerate
+
+    // Assign output data
+    assign m_axis_tdata = {<<{data_route}};
+    assign m_axis_tkeep = {<<{keep_route}};
+    assign m_axis_tlast = {<<{last_route}};
+    assign m_axis_tid = {<<{id_route}};
+    assign m_axis_tdest = {<<{dest_route}};
+    assign m_axis_tuser = {<<{user_route}};
+
+    // Ready outputs control
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            m_axis_tvalid_int <= {M_COUNT{1'b0}};
+        end else begin
+            m_axis_tvalid_int <= ready_outputs;
+        end
+    end
+
+    // Ready inputs control
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            s_axis_tready_int <= {S_COUNT{1'b0}};
+        end else begin
+            s_axis_tready_int <= valid_inputs;
+        end
+    end
+
+endmodule
+
+module round_robin_arbiter #(
+    parameter COUNT = 4
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+    input  wire [COUNT-1:0]         request,
+    output reg  [COUNT-1:0]         grant,
+    output reg  [$clog2(COUNT)-1:0] selected
+);
+
+    reg [$clog2(COUNT)-1:0] next_selected;
+    reg [COUNT-1:0]         request_d;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            grant <= {COUNT{1'b0}};
+            selected <= {$clog2(COUNT){1'b0}};
+            request_d <= {COUNT{1'b0}};
+        end else begin
+            request_d <= request;
+            if (|request_d) begin
+                next_selected <= selected + 1;
+                while (!request_d[next_selected])
+                    next_selected <= next_selected + 1;
+                selected <= next_selected;
+                grant <= 1 << selected;
+            end else begin
+                grant <= {COUNT{1'b0}};
+            end
+        end
+    end
+
+endmodule

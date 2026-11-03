@@ -1,0 +1,235 @@
+```verilog
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam AFULL_THRESH  = DEPTH - 2;
+  localparam AEMPTY_THRESH = 2;
+
+  // --- A-to-B direction: A writes, B reads ---
+  // A-side write pointer
+  reg [ASIZE:0] a2b_wr_ptr_a;
+  // B-side read pointer
+  reg [ASIZE:0] a2b_rd_ptr_b;
+
+  // Storage for A-to-B
+  reg [DSIZE-1:0] a2b_mem [0:DEPTH-1];
+
+  // Synchronize A's write pointer to B domain
+  reg [ASIZE:0] a2b_wr_ptr_b_sync1;
+  reg [ASIZE:0] a2b_wr_ptr_b_sync2;
+  reg [ASIZE:0] a2b_wr_ptr_b;
+
+  // Synchronize B's read pointer to A domain
+  reg [ASIZE:0] a2b_rd_ptr_a_sync1;
+  reg [ASIZE:0] a2b_rd_ptr_a_sync2;
+  reg [ASIZE:0] a2b_rd_ptr_a;
+
+  // B-side read data register
+  reg [DSIZE-1:0] a2b_rdata_b;
+
+  // --- B-to-A direction: B writes, A reads ---
+  // B-side write pointer
+  reg [ASIZE:0] b2a_wr_ptr_b;
+  // A-side read pointer
+  reg [ASIZE:0] b2a_rd_ptr_a;
+
+  // Storage for B-to-A
+  reg [DSIZE-1:0] b2a_mem [0:DEPTH-1];
+
+  // Synchronize B's write pointer to A domain
+  reg [ASIZE:0] b2a_wr_ptr_a_sync1;
+  reg [ASIZE:0] b2a_wr_ptr_a_sync2;
+  reg [ASIZE:0] b2a_wr_ptr_a;
+
+  // Synchronize A's read pointer to B domain
+  reg [ASIZE:0] b2a_rd_ptr_b_sync1;
+  reg [ASIZE:0] b2a_rd_ptr_b_sync2;
+  reg [ASIZE:0] b2a_rd_ptr_b;
+
+  // A-side read data register
+  reg [DSIZE-1:0] b2a_rdata_a;
+
+  // --- A domain logic ---
+
+  // A-to-B: A is writer
+  wire a2b_wr_en = a_dir & a_winc & ~a_full;
+  wire a2b_wr_addr = a2b_wr_ptr_a[ASIZE-1:0];
+
+  // B-to-A: A is reader
+  wire b2a_rd_en = ~a_dir & a_rinc & ~a_empty;
+  wire b2a_rd_addr = b2a_rd_ptr_a[ASIZE-1:0];
+
+  // A-to-B write
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a2b_wr_ptr_a <= {1'b0, {ASIZE{1'b0}}};
+    else if (a2b_wr_en)
+      a2b_wr_ptr_a <= a2b_wr_ptr_a + 1'b1;
+  end
+
+  always @(posedge a_clk) begin
+    if (a2b_wr_en)
+      a2b_mem[a2b_wr_addr] <= a_wdata;
+  end
+
+  // B-to-A read
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b2a_rd_ptr_a <= {1'b0, {ASIZE{1'b0}}};
+      b2a_rdata_a  <= {DSIZE{1'b0}};
+    end else if (b2a_rd_en) begin
+      b2a_rd_ptr_a <= b2a_rd_ptr_a + 1'b1;
+      b2a_rdata_a  <= b2a_mem[b2a_rd_addr];
+    end
+  end
+
+  // Synchronize B's read pointer (a2b_rd_ptr_b) to A domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a2b_rd_ptr_a_sync1 <= {1'b0, {ASIZE{1'b0}}};
+      a2b_rd_ptr_a_sync2 <= {1'b0, {ASIZE{1'b0}}};
+      a2b_rd_ptr_a       <= {1'b0, {ASIZE{1'b0}}};
+    end else begin
+      a2b_rd_ptr_a_sync1 <= a2b_rd_ptr_b;
+      a2b_rd_ptr_a_sync2 <= a2b_rd_ptr_a_sync1;
+      a2b_rd_ptr_a       <= a2b_rd_ptr_a_sync2;
+    end
+  end
+
+  // Synchronize A's read pointer (b2a_rd_ptr_a) to B domain
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b2a_rd_ptr_b_sync1 <= {1'b0, {ASIZE{1'b0}}};
+      b2a_rd_ptr_b_sync2 <= {1'b0, {ASIZE{1'b0}}};
+      b2a_rd_ptr_b       <= {1'b0, {ASIZE{1'b0}}};
+    end else begin
+      b2a_rd_ptr_b_sync1 <= b2a_rd_ptr_a;
+      b2a_rd_ptr_b_sync2 <= b2a_rd_ptr_b_sync1;
+      b2a_rd_ptr_b       <= b2a_rd_ptr_b_sync2;
+    end
+  end
+
+  // A-side status flags
+  // a_full: A-to-B FIFO full (A is writer)
+  wire [ASIZE:0] a2b_wr_ptr_a_ext = a2b_wr_ptr_a;
+  wire [ASIZE:0] a2b_rd_ptr_a_ext = a2b_rd_ptr_a;
+  wire a_full = (a2b_wr_ptr_a[ASIZE] != a2b_rd_ptr_a[ASIZE]) &&
+                (a2b_wr_ptr_a[ASIZE-1:0] == a2b_rd_ptr_a[ASIZE-1:0]);
+
+  wire a_afull = (a2b_wr_ptr_a[ASIZE-1:0] - a2b_rd_ptr_a[ASIZE-1:0]) >= AFULL_THRESH;
+
+  // a_empty: B-to-A FIFO empty (A is reader)
+  wire [ASIZE:0] b2a_wr_ptr_a_ext = b2a_wr_ptr_a;
+  wire [ASIZE:0] b2a_rd_ptr_a_ext = b2a_rd_ptr_a;
+  wire a_empty = (b2a_wr_ptr_a == b2a_rd_ptr_a);
+
+  wire a_aempty = (b2a_wr_ptr_a[ASIZE-1:0] - b2a_rd_ptr_a[ASIZE-1:0]) <= AEMPTY_THRESH;
+
+  // A-side read data
+  assign a_rdata = b2a_rdata_a;
+
+  // --- B domain logic ---
+
+  // A-to-B: B is reader
+  wire a2b_rd_en = ~b_dir & b_rinc & ~b_empty;
+  wire a2b_rd_addr = a2b_rd_ptr_b[ASIZE-1:0];
+
+  // B-to-A: B is writer
+  wire b2a_wr_en = b_dir & b_winc & ~b_full;
+  wire b2a_wr_addr = b2a_wr_ptr_b[ASIZE-1:0];
+
+  // A-to-B read
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a2b_rd_ptr_b <= {1'b0, {ASIZE{1'b0}}};
+      a2b_rdata_b  <= {DSIZE{1'b0}};
+    end else if (a2b_rd_en) begin
+      a2b_rd_ptr_b <= a2b_rd_ptr_b + 1'b1;
+      a2b_rdata_b  <= a2b_mem[a2b_rd_addr];
+    end
+  end
+
+  // B-to-A write
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b2a_wr_ptr_b <= {1'b0, {ASIZE{1'b0}}};
+    else if (b2a_wr_en)
+      b2a_wr_ptr_b <= b2a_wr_ptr_b + 1'b1;
+  end
+
+  always @(posedge b_clk) begin
+    if (b2a_wr_en)
+      b2a_mem[b2a_wr_addr] <= b_wdata;
+  end
+
+  // Synchronize A's write pointer (a2b_wr_ptr_a) to B domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a2b_wr_ptr_b_sync1 <= {1'b0, {ASIZE{1'b0}}};
+      a2b_wr_ptr_b_sync2 <= {1'b0, {ASIZE{1'b0}}};
+      a2b_wr_ptr_b       <= {1'b0, {ASIZE{1'b0}}};
+    end else begin
+      a2b_wr_ptr_b_sync1 <= a2b_wr_ptr_a;
+      a2b_wr_ptr_b_sync2 <= a2b_wr_ptr_b_sync1;
+      a2b_wr_ptr_b       <= a2b_wr_ptr_b_sync2;
+    end
+  end
+
+  // Synchronize B's write pointer (b2a_wr_ptr_b) to A domain
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b2a_wr_ptr_a_sync1 <= {1'b0, {ASIZE{1'b0}}};
+      b2a_wr_ptr_a_sync2 <= {1'b0, {ASIZE{1'b0}}};
+      b2a_wr_ptr_a       <= {1'b0, {ASIZE{1'b0}}};
+    end else begin
+      b2a_wr_ptr_a_sync1 <= b2a_wr_ptr_b;
+      b2a_wr_ptr_a_sync2 <= b2a_wr_ptr_a_sync1;
+      b2a_wr_ptr_a       <= b2a_wr_ptr_a_sync2;
+    end
+  end
+
+  // B-side status flags
+  // b_full: B-to-A FIFO full (B is writer)
+  wire b_full = (b2a_wr_ptr_b[ASIZE] != b2a_rd_ptr_b[ASIZE]) &&
+                (b2a_wr_ptr_b[ASIZE-1:0] == b2a_rd_ptr_b[ASIZE-1:0]);
+
+  wire b_afull = (b2a_wr_ptr_b[ASIZE-1:0] - b2a_rd_ptr_b[ASIZE-1:0]) >= AFULL_THRESH;
+
+  // b_empty: A-to-B FIFO empty (B is reader)
+  wire b_empty = (a2b_wr_ptr_b == a2b_rd_ptr_b);
+
+  wire b_aempty = (a2b_wr_ptr_b[ASIZE-1:0] - a2b_rd_ptr_b[ASIZE-1:0]) <= AEMPTY_THRESH;
+
+  // B-side read data
+  assign b_rdata = a2b_rdata_b;
+
+endmodule
+```<|im_end|>

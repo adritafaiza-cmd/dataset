@@ -1,0 +1,157 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "rstgen",
+            "function": "Generates a synchronized active-low reset and an initialization qualifier signal.",
+            "parameters": [],
+            "ports": [
+                {
+                    "name": "clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "test_mode_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "rst_no",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "init_no",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                }
+            ],
+            "instances": [
+                {
+                    "module": "sync_reset",
+                    "name": "sync_reset_inst",
+                    "function": "Synchronizes the reset signal in the target clock domain.",
+                    "connections": [
+                        { "local": "clk_i", "remote": "clk_i" },
+                        { "local": "rst_ni", "remote": "rst_ni" },
+                        { "local": "sync_rst_o", "remote": "sync_rst_o" }
+                    ]
+                }
+            ],
+            "connections": [
+                { "source": "sync_reset_inst.sync_rst_o", "destination": "rst_no" },
+                { "source": "test_mode_i", "destination": "rst_no", "condition": "test_mode_i" },
+                { "source": "sync_reset_inst.sync_rst_o", "destination": "init_no", "condition": "!sync_reset_inst.sync_rst_o" }
+            ],
+            "internal_signals": [
+                { "name": "sync_rst_o", "width": 1 }
+            ],
+            "behavior": [
+                "rst_no is the synchronized active-low reset output.",
+                "init_no is a short initialization qualifier after reset release, active only when rst_no is deasserted.",
+                "test_mode_i bypasses synchronization for scan/test when high, directly driving rst_no."
+            ]
+        },
+        {
+            "Top_module_name": "sync_reset",
+            "function": "Synchronizes the reset signal to the target clock domain.",
+            "parameters": [],
+            "ports": [
+                {
+                    "name": "clk_i",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "rst_ni",
+                    "direction": "input",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                },
+                {
+                    "name": "sync_rst_o",
+                    "direction": "output",
+                    "width": 1,
+                    "clock_domain": "clk_i"
+                }
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                { "name": "rst_sync_reg1", "width": 1 },
+                { "name": "rst_sync_reg2", "width": 1 }
+            ],
+            "behavior": [
+                "rst_sync_reg1 and rst_sync_reg2 form a two-stage synchronizer for the reset signal.",
+                "sync_rst_o is the synchronized reset output, active-low."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module rstgen (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic test_mode_i,
+    output logic rst_no,
+    output logic init_no
+);
+
+    logic sync_rst_o;
+
+    // Instantiate the sync_reset module
+    sync_reset sync_reset_inst (
+        .clk_i  (clk_i),
+        .rst_ni (rst_ni),
+        .sync_rst_o (sync_rst_o)
+    );
+
+    // Assign rst_no based on test_mode_i and sync_rst_o
+    assign rst_no = test_mode_i ? rst_ni : sync_rst_o;
+
+    // Assign init_no to be active only when sync_rst_o is deasserted (reset is released)
+    assign init_no = ~sync_rst_o & sync_rst_o;
+
+endmodule
+
+module sync_reset (
+    input  logic clk_i,
+    input  logic rst_ni,
+    output logic sync_rst_o
+);
+
+    logic rst_sync_reg1;
+    logic rst_sync_reg2;
+
+    // Two-stage synchronizer for the reset signal
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            rst_sync_reg1 <= 1'b1;
+            rst_sync_reg2 <= 1'b1;
+        end else begin
+            rst_sync_reg1 <= 1'b0;
+            rst_sync_reg2 <= rst_sync_reg1;
+        end
+    end
+
+    // Synchronized reset output
+    assign sync_rst_o = rst_sync_reg2;
+
+endmodule
+```

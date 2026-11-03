@@ -1,0 +1,130 @@
+```systemverilog
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  // Extract APB signals from req_t
+  wire psel;
+  wire penable;
+  wire pwrite;
+  wire [ApbDataWidth-1:0] pwdata;
+  wire [ApbDataWidth/8-1:0] pstrb;
+  wire [ApbAddrWidth-1:0] paddr;
+
+  assign psel    = req_i.psel;
+  assign penable = req_i.penable;
+  assign pwrite  = req_i.pwrite;
+  assign pwdata  = req_i.pwdata;
+  assign pstrb   = req_i.pstrb;
+  assign paddr   = req_i.paddr;
+
+  // Response
+  assign resp_o.pready = 1'b1;
+  assign resp_o.pslverr = 1'b0;
+  assign resp_o.prdata  = 8'h0; // Not used for write; for read we could mux but spec says read-only expose reg_init_i via reg_q_o
+
+  // Address decoding
+  // Each register is spaced AddrOffset bytes apart
+  // Compute register index from address offset from base
+  wire [ApbAddrWidth-1:0] addr_offset = paddr - base_addr_i;
+  
+  // Number of address bits needed to select a register
+  // AddrOffset is in bytes, so log2(AddrOffset) bits are for byte offset within register
+  // The register index is the upper bits
+  localparam int unsigned ADDR_OFFSET_BITS = (AddrOffset > 1) ? $clog2(AddrOffset) : 0;
+  
+  // Register index: shift right by ADDR_OFFSET_BITS
+  wire [ApbAddrWidth-1:ADDR_OFFSET_BITS] reg_idx_raw = addr_offset[ApbAddrWidth-1:ADDR_OFFSET_BITS];
+  
+  // Valid register index
+  wire [NoApbRegs-1:0] reg_valid = '0;
+  genvar gi;
+  generate
+    for (gi = 0; gi < NoApbRegs; gi = gi + 1) begin : gen_valid
+      assign reg_valid[gi] = (reg_idx_raw == gi[ApbAddrWidth-ADDR_OFFSET_BITS:0]);
+    end
+  endgenerate
+
+  // Write enable for each register
+  wire [NoApbRegs-1:0] wr_en = '0;
+  generate
+    for (gi = 0; gi < NoApbRegs; gi = gi + 1) begin : gen_wren
+      assign wr_en[gi] = psel & penable & pwrite & reg_valid[gi] & ~ReadOnly[gi];
+    end
+  endgenerate
+
+  // Byte strobe mapping
+  // RegDataWidth may be different from ApbDataWidth
+  // We need to map pstrb bytes to the register's byte lanes
+  // Assume RegDataWidth <= ApbDataWidth, and the register occupies the lower RegDataWidth bits
+  // pstrb has ApbDataWidth/8 bits, each corresponding to a byte in pwdata
+  // For register gi, byte b of the register (0-indexed from LSB) corresponds to pstrb[b] if b < RegDataWidth/8
+
+  // Register storage
+  reg_data_t [NoApbRegs-1:0] reg_q;
+
+  // Write data preparation
+  // For each register, build the write data with byte strobes applied
+  wire [RegDataWidth-1:0] wr_data [NoApbRegs];
+  generate
+    for (gi = 0; gi < NoApbRegs; gi = gi + 1) begin : gen_wrdata
+      // Start with current value
+      assign wr_data[gi] = reg_q[gi];
+      // Apply byte strobes
+      localparam int unsigned REG_BYTES = (RegDataWidth + 7) / 8;
+      for (int bi = 0; bi < REG_BYTES; bi = bi + 1) begin : gen_bytes
+        if (bi < ApbDataWidth/8) begin : gen_byte_valid
+          assign wr_data[gi][bi*8 +: 8] = pstrb[bi] ? pwdata[bi*8 +: 8] : reg_q[gi][bi*8 +: 8];
+        end
+      end
+    end
+  endgenerate
+
+  // Register update
+  always @(posedge pclk_i or negedge preset_ni) begin
+    if (!preset_ni) begin
+      for (int i = 0; i < NoApbRegs; i = i + 1) begin
+        if (ReadOnly[i])
+          reg_q[i] <= reg_init_i[i];
+        else
+          reg_q[i] <= '0;
+      end
+    end else begin
+      for (int i = 0; i < NoApbRegs; i = i + 1) begin
+        if (wr_en[i])
+          reg_q[i] <= wr_data[i];
+        else if (ReadOnly[i])
+          reg_q[i] <= reg_init_i[i];
+      end
+    end
+  end
+
+  // Output
+  generate
+    for (gi = 0; gi < NoApbRegs; gi = gi + 1) begin : gen_out
+      if (ReadOnly[gi])
+        assign reg_q_o[gi] = reg_init_i[gi];
+      else
+        assign reg_q_o[gi] = reg_q[gi];
+    end
+  endgenerate
+
+endmodule
+```<|im_end|>

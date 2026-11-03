@@ -1,0 +1,217 @@
+```verilog
+module cdc_reset_ctrlr #(
+    parameter SYNC_STAGES = 2
+)(
+    input  a_clk_i,
+    input  a_rst_ni,
+    input  a_clear_i,
+    output a_clear_o,
+    input  a_clear_ack_i,
+    output a_isolate_o,
+    input  a_isolate_ack_i,
+    input  b_clk_i,
+    input  b_rst_ni,
+    input  b_clear_i,
+    output b_clear_o,
+    input  b_clear_ack_i,
+    output b_isolate_o,
+    input  b_isolate_ack_i
+);
+
+    // State encoding
+    localparam S_IDLE      = 3'd0;
+    localparam S_ISOLATE   = 3'd1;
+    localparam S_CLEAR     = 3'd2;
+    localparam S_RELEASE   = 3'd3;
+    localparam S_DONE      = 3'd4;
+
+    // A-side state
+    reg [2:0] a_state;
+    // B-side state
+    reg [2:0] b_state;
+
+    // A-side outputs
+    reg a_isolate_reg;
+    reg a_clear_reg;
+
+    // B-side outputs
+    reg b_isolate_reg;
+    reg b_clear_reg;
+
+    // A-side: synchronized B-side state
+    reg [2:0] b_state_sync;
+    // B-side: synchronized A-side state
+    reg [2:0] a_state_sync;
+
+    // Synchronizer for B state into A domain
+    reg [2:0] b_state_sync_r1;
+    reg [2:0] b_state_sync_r2;
+    reg [2:0] b_state_sync_r3;
+
+    // Synchronizer for A state into B domain
+    reg [2:0] a_state_sync_r1;
+    reg [2:0] a_state_sync_r2;
+    reg [2:0] a_state_sync_r3;
+
+    // Synchronize B state to A domain
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            b_state_sync_r1 <= 3'd0;
+            b_state_sync_r2 <= 3'd0;
+            b_state_sync_r3 <= 3'd0;
+        end else begin
+            b_state_sync_r1 <= b_state;
+            b_state_sync_r2 <= b_state_sync_r1;
+            b_state_sync_r3 <= b_state_sync_r2;
+        end
+    end
+
+    assign b_state_sync = b_state_sync_r3;
+
+    // Synchronize A state to B domain
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            a_state_sync_r1 <= 3'd0;
+            a_state_sync_r2 <= 3'd0;
+            a_state_sync_r3 <= 3'd0;
+        end else begin
+            a_state_sync_r1 <= a_state;
+            a_state_sync_r2 <= a_state_sync_r1;
+            a_state_sync_r3 <= a_state_sync_r2;
+        end
+    end
+
+    assign a_state_sync = a_state_sync_r3;
+
+    // A-side state machine
+    always @(posedge a_clk_i or negedge a_rst_ni) begin
+        if (!a_rst_ni) begin
+            a_state       <= S_IDLE;
+            a_isolate_reg <= 1'b0;
+            a_clear_reg   <= 1'b0;
+        end else begin
+            case (a_state)
+                S_IDLE: begin
+                    a_isolate_reg <= 1'b0;
+                    a_clear_reg   <= 1'b0;
+                    if (a_clear_i) begin
+                        a_state <= S_ISOLATE;
+                    end
+                end
+
+                S_ISOLATE: begin
+                    a_isolate_reg <= 1'b1;
+                    a_clear_reg   <= 1'b0;
+                    // Wait for both local and peer isolate acks
+                    if (a_isolate_ack_i && (b_state_sync == S_ISOLATE || b_state_sync == S_CLEAR || b_state_sync == S_RELEASE || b_state_sync == S_DONE)) begin
+                        a_state <= S_CLEAR;
+                    end
+                end
+
+                S_CLEAR: begin
+                    a_isolate_reg <= 1'b1;
+                    a_clear_reg   <= 1'b1;
+                    // Wait for both local and peer clear acks
+                    if (a_clear_ack_i && (b_state_sync == S_CLEAR || b_state_sync == S_RELEASE || b_state_sync == S_DONE)) begin
+                        a_state <= S_RELEASE;
+                    end
+                end
+
+                S_RELEASE: begin
+                    // Drop clear first, then release isolate
+                    a_clear_reg   <= 1'b0;
+                    a_isolate_reg <= 1'b1;
+                    // Wait for peer to also be in release or done
+                    if (b_state_sync == S_RELEASE || b_state_sync == S_DONE) begin
+                        a_state <= S_DONE;
+                    end
+                end
+
+                S_DONE: begin
+                    a_isolate_reg <= 1'b0;
+                    a_clear_reg   <= 1'b0;
+                    // Wait for peer to return to idle
+                    if (b_state_sync == S_IDLE) begin
+                        a_state <= S_IDLE;
+                    end
+                end
+
+                default: begin
+                    a_state       <= S_IDLE;
+                    a_isolate_reg <= 1'b0;
+                    a_clear_reg   <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // B-side state machine
+    always @(posedge b_clk_i or negedge b_rst_ni) begin
+        if (!b_rst_ni) begin
+            b_state       <= S_IDLE;
+            b_isolate_reg <= 1'b0;
+            b_clear_reg   <= 1'b0;
+        end else begin
+            case (b_state)
+                S_IDLE: begin
+                    b_isolate_reg <= 1'b0;
+                    b_clear_reg   <= 1'b0;
+                    if (b_clear_i) begin
+                        b_state <= S_ISOLATE;
+                    end
+                end
+
+                S_ISOLATE: begin
+                    b_isolate_reg <= 1'b1;
+                    b_clear_reg   <= 1'b0;
+                    // Wait for both local and peer isolate acks
+                    if (b_isolate_ack_i && (a_state_sync == S_ISOLATE || a_state_sync == S_CLEAR || a_state_sync == S_RELEASE || a_state_sync == S_DONE)) begin
+                        b_state <= S_CLEAR;
+                    end
+                end
+
+                S_CLEAR: begin
+                    b_isolate_reg <= 1'b1;
+                    b_clear_reg   <= 1'b1;
+                    // Wait for both local and peer clear acks
+                    if (b_clear_ack_i && (a_state_sync == S_CLEAR || a_state_sync == S_RELEASE || a_state_sync == S_DONE)) begin
+                        b_state <= S_RELEASE;
+                    end
+                end
+
+                S_RELEASE: begin
+                    // Drop clear first, then release isolate
+                    b_clear_reg   <= 1'b0;
+                    b_isolate_reg <= 1'b1;
+                    // Wait for peer to also be in release or done
+                    if (a_state_sync == S_RELEASE || a_state_sync == S_DONE) begin
+                        b_state <= S_DONE;
+                    end
+                end
+
+                S_DONE: begin
+                    b_isolate_reg <= 1'b0;
+                    b_clear_reg   <= 1'b0;
+                    // Wait for peer to return to idle
+                    if (a_state_sync == S_IDLE) begin
+                        b_state <= S_IDLE;
+                    end
+                end
+
+                default: begin
+                    b_state       <= S_IDLE;
+                    b_isolate_reg <= 1'b0;
+                    b_clear_reg   <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    // Output assignments
+    assign a_isolate_o = a_isolate_reg;
+    assign a_clear_o   = a_clear_reg;
+    assign b_isolate_o = b_isolate_reg;
+    assign b_clear_o   = b_clear_reg;
+
+endmodule
+```<|im_end|>

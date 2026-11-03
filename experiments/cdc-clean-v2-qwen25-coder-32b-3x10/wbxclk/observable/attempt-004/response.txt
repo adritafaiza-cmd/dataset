@@ -1,0 +1,142 @@
+```verilog
+module wbxclk #(
+		parameter	AW=32,
+				DW=32,
+				LGFIFO = 5
+	) (
+		input	wire			i_wb_clk, i_reset,
+		input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+		input	wire	[(AW-1):0]	i_wb_addr,
+		input	wire	[(DW-1):0]	i_wb_data,
+		input	wire	[(DW/8-1):0]	i_wb_sel,
+		output	wire			o_wb_stall,
+		output	reg			o_wb_ack,
+		output	reg	[(DW-1):0]	o_wb_data,
+		output	reg			o_wb_err,
+		input	wire			i_xclk_clk,
+		output	reg			o_xclk_cyc,
+		output	reg			o_xclk_stb,
+		output	reg			o_xclk_we,
+		output	reg	[(AW-1):0]	o_xclk_addr,
+		output	reg	[(DW-1):0]	o_xclk_data,
+		output	reg	[(DW/8-1):0]	o_xclk_sel,
+		input	wire			i_xclk_stall,
+		input	wire			i_xclk_ack,
+		input	wire	[(DW-1):0]	i_xclk_data,
+		input	wire			i_xclk_err
+	);
+
+	// FIFO for Wishbone to XCLK requests
+	reg [AW-1:0] wb_req_addr_fifo [0:(1<<LGFIFO)-1];
+	reg [DW-1:0] wb_req_data_fifo [0:(1<<LGFIFO)-1];
+	reg [(DW/8-1):0] wb_req_sel_fifo [0:(1<<LGFIFO)-1];
+	reg wb_req_we_fifo [0:(1<<LGFIFO)-1];
+	reg [LGFIFO-1:0] wb_req_wr_ptr, wb_req_rd_ptr;
+	reg wb_req_full, wb_req_empty;
+
+	// FIFO for XCLK to Wishbone responses
+	reg [DW-1:0] xclk_resp_data_fifo [0:(1<<LGFIFO)-1];
+	reg xclk_resp_err_fifo [0:(1<<LGFIFO)-1];
+	reg [LGFIFO-1:0] xclk_resp_wr_ptr, xclk_resp_rd_ptr;
+	reg xclk_resp_full, xclk_resp_empty;
+
+	// FIFO control logic for Wishbone to XCLK requests
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			wb_req_wr_ptr <= 0;
+			wb_req_rd_ptr <= 0;
+			wb_req_full <= 0;
+			wb_req_empty <= 1;
+		end else begin
+			if (i_wb_cyc && i_wb_stb && !wb_req_full) begin
+				wb_req_addr_fifo[wb_req_wr_ptr] <= i_wb_addr;
+				wb_req_data_fifo[wb_req_wr_ptr] <= i_wb_data;
+				wb_req_sel_fifo[wb_req_wr_ptr] <= i_wb_sel;
+				wb_req_we_fifo[wb_req_wr_ptr] <= i_wb_we;
+				wb_req_wr_ptr <= wb_req_wr_ptr + 1;
+				wb_req_empty <= 0;
+				if (wb_req_wr_ptr == wb_req_rd_ptr - 1)
+					wb_req_full <= 1;
+			end
+			if (o_xclk_stb && !i_xclk_stall && !wb_req_empty) begin
+				wb_req_rd_ptr <= wb_req_rd_ptr + 1;
+				wb_req_full <= 0;
+				if (wb_req_wr_ptr == wb_req_rd_ptr)
+					wb_req_empty <= 1;
+			end
+		end
+	end
+
+	// FIFO control logic for XCLK to Wishbone responses
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			xclk_resp_wr_ptr <= 0;
+			xclk_resp_rd_ptr <= 0;
+			xclk_resp_full <= 0;
+			xclk_resp_empty <= 1;
+		end else begin
+			if (i_xclk_ack && !xclk_resp_full) begin
+				xclk_resp_data_fifo[xclk_resp_wr_ptr] <= i_xclk_data;
+				xclk_resp_err_fifo[xclk_resp_wr_ptr] <= i_xclk_err;
+				xclk_resp_wr_ptr <= xclk_resp_wr_ptr + 1;
+				xclk_resp_empty <= 0;
+				if (xclk_resp_wr_ptr == xclk_resp_rd_ptr - 1)
+					xclk_resp_full <= 1;
+			end
+			if (o_wb_ack && !xclk_resp_empty) begin
+				xclk_resp_rd_ptr <= xclk_resp_rd_ptr + 1;
+				xclk_resp_full <= 0;
+				if (xclk_resp_wr_ptr == xclk_resp_rd_ptr)
+					xclk_resp_empty <= 1;
+			end
+		end
+	end
+
+	// Wishbone side logic
+	always @(posedge i_wb_clk or posedge i_reset) begin
+		if (i_reset) begin
+			o_wb_ack <= 0;
+			o_wb_data <= 0;
+			o_wb_err <= 0;
+			o_wb_stall <= 0;
+		end else begin
+			o_wb_ack <= 0;
+			o_wb_err <= 0;
+			if (!xclk_resp_empty) begin
+				o_wb_data <= xclk_resp_data_fifo[xclk_resp_rd_ptr];
+				o_wb_err <= xclk_resp_err_fifo[xclk_resp_rd_ptr];
+				o_wb_ack <= 1;
+			end
+			o_wb_stall <= wb_req_full;
+		end
+	end
+
+	// XCLK side logic
+	always @(posedge i_xclk_clk or posedge i_reset) begin
+		if (i_reset) begin
+			o_xclk_cyc <= 0;
+			o_xclk_stb <= 0;
+			o_xclk_we <= 0;
+			o_xclk_addr <= 0;
+			o_xclk_data <= 0;
+			o_xclk_sel <= 0;
+		end else begin
+			o_xclk_cyc <= 0;
+			o_xclk_stb <= 0;
+			if (!wb_req_empty && !o_xclk_stb) begin
+				o_xclk_cyc <= 1;
+				o_xclk_stb <= 1;
+				o_xclk_we <= wb_req_we_fifo[wb_req_rd_ptr];
+				o_xclk_addr <= wb_req_addr_fifo[wb_req_rd_ptr];
+				o_xclk_data <= wb_req_data_fifo[wb_req_rd_ptr];
+				o_xclk_sel <= wb_req_sel_fifo[wb_req_rd_ptr];
+			end
+			if (i_xclk_ack || i_xclk_err) begin
+				o_xclk_cyc <= 0;
+				o_xclk_stb <= 0;
+			end
+		end
+	end
+
+endmodule
+```<|im_end|>

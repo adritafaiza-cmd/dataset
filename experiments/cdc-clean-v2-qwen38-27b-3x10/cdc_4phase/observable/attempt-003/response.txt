@@ -1,0 +1,413 @@
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals for the four-phase handshake
+  // req: source -> destination (data valid request)
+  // ack: destination -> source (acknowledge)
+  wire req;
+  wire ack;
+
+  // Source side: generate req and accept src_valid when ready
+  // Destination side: generate ack and present dst_valid when req is high
+
+  // Source side logic
+  reg req_r;
+  reg ack_r;
+
+  // Destination side logic
+  reg req_d_r;
+  reg ack_d_r;
+  reg [WIDTH-1:0] data_d_r;
+  reg valid_d_r;
+
+  // Synchronizers for req (src -> dst)
+  reg req_sync1;
+  reg req_sync2;
+
+  // Synchronizers for ack (dst -> src)
+  reg ack_sync1;
+  reg ack_sync2;
+
+  // Source side: req generation
+  // req is asserted when src_valid and src_ready (i.e., not in a pending transfer)
+  // In four-phase: req goes high on transfer, stays high until ack comes back, then req goes low
+  // src_ready is high when req is low (no pending transfer)
+
+  assign src_ready_o = ~req_r;
+
+  // When src_valid and src_ready, assert req and latch data
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      req_r <= 1'b0;
+      ack_r <= 1'b0;
+    end else begin
+      if (src_valid_i && ~req_r) begin
+        req_r <= 1'b1;
+      end else if (req_r && ack_r) begin
+        req_r <= 1'b0;
+        ack_r <= 1'b0;
+      end
+    end
+  end
+
+  // Synchronize req to destination clock
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      req_sync1 <= 1'b0;
+      req_sync2 <= 1'b0;
+    end else begin
+      req_sync1 <= req_r;
+      req_sync2 <= req_sync1;
+    end
+  end
+
+  // Destination side: process req and generate ack
+  // When req_sync2 is high and we haven't already acked, latch data and assert ack
+  // dst_valid is high when req_sync2 is high (data is being presented)
+  // dst_ready is used to control when we can accept the next transfer
+
+  // In four-phase, the destination holds the data valid until the source deasserts req
+  // The destination asserts ack to tell the source it has received the data
+  // The source then deasserts req, and the destination deasserts ack
+
+  // Let's use a state machine on the destination side
+  // States: IDLE, WAIT_ACK (req high, waiting to send ack), WAIT_REQ_LOW (ack sent, waiting for req to go low)
+
+  // Actually, let's think more carefully:
+  // Four-phase handshake:
+  // 1. Source asserts req (data valid)
+  // 2. Destination sees req, latches data, asserts ack
+  // 3. Source sees ack, deasserts req
+  // 4. Destination sees req deasserted, deasserts ack
+  // Back to idle
+
+  // dst_valid should be high when the data is being presented to the downstream
+  // The downstream (dst_ready_i) controls when the data is consumed
+
+  // Let me reconsider: dst_valid_o should indicate that dst_data_o contains valid data
+  // The data should remain stable while dst_valid_o is high and dst_ready_i is low
+
+  // So the destination should:
+  // - When req_sync2 goes high, latch the data
+  // - Assert dst_valid_o
+  // - Assert ack to tell source it's done
+  // - Keep dst_valid_o high until dst_ready_i is high (data consumed)
+  // - When dst_ready_i is high and dst_valid_o is high, deassert dst_valid_o
+  // - When req_sync2 goes low, deassert ack
+
+  // But we need to be careful: the data must be stable while dst_valid_o is high
+  // And we can't start a new transfer until the current one is fully complete
+
+  // Let me use a simpler approach:
+  // - req_sync2 indicates a transfer is in progress
+  // - We latch data when req_sync2 rises
+  // - dst_valid_o = req_sync2 (data is valid while transfer is in progress)
+  // - But we need to handle the case where dst_ready_i is low: we should hold the data
+  // - Actually, in a four-phase handshake, the data is held by the source until ack
+  //   So the data on the wire is stable. We just need to latch it on the destination side.
+
+  // Let me reconsider the protocol:
+  // The source holds req high and data stable until it sees ack
+  // The destination latches data when it sees req, then asserts ack
+  // The source deasserts req when it sees ack
+  // The destination deasserts ack when it sees req deasserted
+
+  // For the output side:
+  // dst_valid_o should be high when there's data to present
+  // dst_data_o should be the latched data
+  // When dst_ready_i is high and dst_valid_o is high, the data is consumed
+
+  // But we need to ensure that we don't lose data if dst_ready_i is low
+  // The four-phase handshake ensures that the source won't send new data until the
+  // previous transfer is complete (req goes low and ack goes low)
+
+  // So the destination can present the data as soon as it latches it, and hold it
+  // until dst_ready_i is high
+
+  // Let me implement this:
+
+  // Destination side state:
+  // - data_d_r: latched data
+  // - valid_d_r: whether we have valid data to present
+  // - ack_d_r: whether we've asserted ack
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      req_d_r <= 1'b0;
+      ack_d_r <= 1'b0;
+      data_d_r <= SEND_RESET_MSG ? RESET_MSG : {WIDTH{1'b0}};
+      valid_d_r <= 1'b0;
+    end else begin
+      // Latch data when req_sync2 rises
+      if (req_sync2 && ~req_d_r) begin
+        data_d_r <= req_sync2 ? data_d_r : data_d_r; // placeholder
+        valid_d_r <= 1'b1;
+      end
+
+      // Consume data when dst_ready_i is high
+      if (valid_d_r && dst_ready_i) begin
+        valid_d_r <= 1'b0;
+      end
+
+      // Assert ack when we have valid data (or when req is high)
+      // Actually, we should assert ack when we see req, to tell the source we've received it
+      if (req_sync2) begin
+        ack_d_r <= 1'b1;
+      end else begin
+        ack_d_r <= 1'b0;
+      end
+
+      req_d_r <= req_sync2;
+    end
+  end
+
+  // Hmm, this is getting complicated. Let me restart with a cleaner approach.
+
+  // Let me use a proper four-phase handshake with explicit state tracking.
+
+  // Source side:
+  // - req_r: request signal (src -> dst)
+  // - ack_r: acknowledge signal (dst -> src), synchronized
+  // - src_ready_o = ~req_r (can accept new data when no transfer in progress)
+  // - When src_valid_i && src_ready_o: assert req_r, latch data
+  // - When req_r && ack_r: deassert req_r and ack_r
+
+  // Destination side:
+  // - req_sync2: synchronized req
+  // - ack_d_r: acknowledge signal (dst -> src)
+  // - data_d_r: latched data
+  // - valid_d_r: output valid
+  // - When req_sync2 rises: latch data, assert valid_d_r, assert ack_d_r
+  // - When valid_d_r && dst_ready_i: deassert valid_d_r
+  // - When req_sync2 falls: deassert ack_d_r
+
+  // The key insight: the data on the source side is held stable while req is high.
+  // So we can latch it on the destination side when req_sync2 is high.
+
+  // But we need to be careful about when to latch. We should latch on the rising edge
+  // of req_sync2 to capture the data.
+
+  // Let me also handle the DECOUPLED parameter. If DECOUPLED is 0, we might want to
+  // combine the handshake with the valid/ready in a different way. But for now,
+  // let's assume DECOUPLED=1 means we use the full four-phase handshake, and
+  // DECOUPLED=0 might mean something else. Let me just implement the four-phase
+  // handshake regardless.
+
+  // Actually, looking at the interface again, the DECOUPLED parameter might control
+  // whether the source and destination are decoupled (i.e., can operate independently)
+  // or coupled (i.e., the source waits for the destination to be ready). For a CDC
+  // handshake, they're always decoupled in some sense. Let me just implement the
+  // standard four-phase handshake.
+
+  // Let me rewrite this cleanly:
+
+  // Source side
+  reg src_req;
+  reg src_ack;
+
+  assign src_ready_o = ~src_req;
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_req <= 1'b0;
+      src_ack <= 1'b0;
+    end else begin
+      if (src_valid_i && ~src_req) begin
+        src_req <= 1'b1;
+      end else if (src_req && src_ack) begin
+        src_req <= 1'b0;
+        src_ack <= 1'b0;
+      end
+    end
+  end
+
+  // Synchronize src_req to dst_clk
+  reg req_s1, req_s2;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      req_s1 <= 1'b0;
+      req_s2 <= 1'b0;
+    end else begin
+      req_s1 <= src_req;
+      req_s2 <= req_s1;
+    end
+  end
+
+  // Destination side
+  reg dst_ack;
+  reg [WIDTH-1:0] dst_data;
+  reg dst_valid;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_ack <= 1'b0;
+      dst_data <= SEND_RESET_MSG ? RESET_MSG : {WIDTH{1'b0}};
+      dst_valid <= 1'b0;
+    end else begin
+      // Latch data and assert valid when req_s2 rises
+      if (req_s2 && ~req_s1) begin
+        dst_data <= src_data_i; // This is wrong - src_data_i is in src_clk domain
+        dst_valid <= 1'b1;
+      end
+
+      // Consume data
+      if (dst_valid && dst_ready_i) begin
+        dst_valid <= 1'b0;
+      end
+
+      // Assert ack when req_s2 is high
+      dst_ack <= req_s2;
+    end
+  end
+
+  // Synchronize dst_ack to src_clk
+  reg ack_s1, ack_s2;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      ack_s1 <= 1'b0;
+      ack_s2 <= 1'b0;
+    end else begin
+      ack_s1 <= dst_ack;
+      ack_s2 <= ack_s1;
+    end
+  end
+
+  assign src_ack = ack_s2;
+  assign dst_data_o = dst_data;
+  assign dst_valid_o = dst_valid;
+
+endmodule
+```
+
+Wait, I have a problem: I'm trying to latch `src_data_i` in the `dst_clk` domain, but `src_data_i` is in the `src_clk` domain. I need to synchronize the data as well, or use a different approach.
+
+In a four-phase handshake, the data is held stable on the source side while `req` is high. So I can synchronize the data bits along with `req`, or I can use a multi-bit synchronizer for the data.
+
+Actually, the standard approach is to synchronize the data bits using a series of flip-flops, similar to how we synchronize `req`. Since the data is stable while `req` is high, we can safely synchronize it.
+
+Let me fix this:
+
+```systemverilog
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source side
+  reg src_req;
+  reg src_ack;
+
+  assign src_ready_o = ~src_req;
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_req <= 1'b0;
+      src_ack <= 1'b0;
+    end else begin
+      if (src_valid_i && ~src_req) begin
+        src_req <= 1'b1;
+      end else if (src_req && src_ack) begin
+        src_req <= 1'b0;
+        src_ack <= 1'b0;
+      end
+    end
+  end
+
+  // Synchronize src_req to dst_clk
+  reg req_s1, req_s2;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      req_s1 <= 1'b0;
+      req_s2 <= 1'b0;
+    end else begin
+      req_s1 <= src_req;
+      req_s2 <= req_s1;
+    end
+  end
+
+  // Synchronize src_data_i to dst_clk (data is stable while src_req is high)
+  reg [WIDTH-1:0] data_s1, data_s2;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      data_s1 <= {WIDTH{1'b0}};
+      data_s2 <= {WIDTH{1'b0}};
+    end else begin
+      data_s1 <= src_data_i;
+      data_s2 <= data_s1;
+    end
+  end
+
+  // Destination side
+  reg dst_ack;
+  reg [WIDTH-1:0] dst_data;
+  reg dst_valid;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_ack <= 1'b0;
+      dst_data <= SEND_RESET_MSG ? RESET_MSG : {WIDTH{1'b0}};
+      dst_valid <= 1'b0;
+    end else begin
+      // Latch data and assert valid when req_s2 rises
+      if (req_s2 && ~req_s1) begin
+        dst_data <= data_s2;
+        dst_valid <= 1'b1;
+      end
+
+      // Consume data
+      if (dst_valid && dst_ready_i) begin
+        dst_valid <= 1'b0;
+      end
+
+      // Assert ack when req_s2 is high
+      dst_ack <= req_s2;
+    end
+  end
+
+  // Synchronize dst_ack to src_clk
+  reg ack_s1, ack_s2;
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      ack_s1 <= 1'b0;
+      ack_s2 <= 1'b0;
+    end else begin
+      ack_s1 <= dst_ack;
+      ack_s2 <= ack_s1;
+    end
+  end
+
+  assign src_ack = ack_s2;
+  assign dst_data_o = dst_data;
+  assign dst_valid_o = dst_valid;
+
+endmodule
+```<|im_end|>

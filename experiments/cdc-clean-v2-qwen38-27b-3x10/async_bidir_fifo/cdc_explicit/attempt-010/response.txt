@@ -1,0 +1,307 @@
+```verilog
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam AFULL_THRESH  = DEPTH - 1;
+  localparam AEMPTY_THRESH = 1;
+
+  // ---------------------------------------------------------------------------
+  // Direction A: A writes to B
+  // ---------------------------------------------------------------------------
+  reg [DSIZE-1:0] a2b_mem [0:DEPTH-1];
+  reg [ASIZE:0]   a2b_wr_ptr_a;
+  reg [ASIZE:0]   a2b_rd_ptr_b;
+
+  // Synchronizer for write pointer (A -> B)
+  reg [ASIZE:0] a2b_wr_ptr_b_sync0;
+  reg [ASIZE:0] a2b_wr_ptr_b_sync1;
+  reg [ASIZE:0] a2b_wr_ptr_b_sync2;
+
+  // Synchronizer for read pointer (B -> A)
+  reg [ASIZE:0] a2b_rd_ptr_a_sync0;
+  reg [ASIZE:0] a2b_rd_ptr_a_sync1;
+  reg [ASIZE:0] a2b_rd_ptr_a_sync2;
+
+  // Data synchronizer for A->B (two destination-clock stages)
+  reg [DSIZE-1:0] a2b_data_b_sync0;
+  reg [DSIZE-1:0] a2b_data_b_sync1;
+  reg             a2b_valid_b_sync0;
+  reg             a2b_valid_b_sync1;
+
+  // ---------------------------------------------------------------------------
+  // Direction B: B writes to A
+  // ---------------------------------------------------------------------------
+  reg [DSIZE-1:0] b2a_mem [0:DEPTH-1];
+  reg [ASIZE:0]   b2a_wr_ptr_b;
+  reg [ASIZE:0]   b2a_rd_ptr_a;
+
+  // Synchronizer for write pointer (B -> A)
+  reg [ASIZE:0] b2a_wr_ptr_a_sync0;
+  reg [ASIZE:0] b2a_wr_ptr_a_sync1;
+  reg [ASIZE:0] b2a_wr_ptr_a_sync2;
+
+  // Synchronizer for read pointer (A -> B)
+  reg [ASIZE:0] b2a_rd_ptr_b_sync0;
+  reg [ASIZE:0] b2a_rd_ptr_b_sync1;
+  reg [ASIZE:0] b2a_rd_ptr_b_sync2;
+
+  // Data synchronizer for B->A (two destination-clock stages)
+  reg [DSIZE-1:0] b2a_data_a_sync0;
+  reg [DSIZE-1:0] b2a_data_a_sync1;
+  reg             b2a_valid_a_sync0;
+  reg             b2a_valid_a_sync1;
+
+  // ---------------------------------------------------------------------------
+  // A-side logic
+  // ---------------------------------------------------------------------------
+  wire a_is_writer = a_dir;
+  wire a_is_reader = ~a_dir;
+
+  // A writes to a2b when a_is_writer and a_winc
+  wire a2b_write = a_is_writer & a_winc;
+  // A reads from b2a when a_is_reader and a_rinc
+  wire b2a_read  = a_is_reader & a_rinc;
+
+  // A2B write pointer update
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      a2b_wr_ptr_a <= {1'b0, {ASIZE{1'b0}}};
+    else if (a2b_write)
+      a2b_wr_ptr_a <= a2b_wr_ptr_a + 1'b1;
+  end
+
+  // A2B memory write
+  always @(posedge a_clk) begin
+    if (a2b_write)
+      a2b_mem[a2b_wr_ptr_a[ASIZE-1:0]] <= a_wdata;
+  end
+
+  // B2A read pointer update
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      b2a_rd_ptr_a <= {1'b0, {ASIZE{1'b0}}};
+    else if (b2a_read)
+      b2a_rd_ptr_a <= b2a_rd_ptr_a + 1'b1;
+  end
+
+  // B2A memory read (for A to read)
+  reg [DSIZE-1:0] b2a_rdata_a_reg;
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n)
+      b2a_rdata_a_reg <= {DSIZE{1'b0}};
+    else if (b2a_read)
+      b2a_rdata_a_reg <= b2a_mem[b2a_rd_ptr_a[ASIZE-1:0]];
+  end
+
+  // A-side read data output
+  assign a_rdata = b2a_rdata_a_reg;
+
+  // A-side full/empty flags
+  // a_full: A is writer, a2b is full
+  // a_empty: A is reader, b2a is empty
+  wire [ASIZE:0] a2b_wr_ptr_a_local = a2b_wr_ptr_a;
+  wire [ASIZE:0] a2b_rd_ptr_a_local = a2b_rd_ptr_a_sync2;
+  wire [ASIZE:0] b2a_wr_ptr_a_local = b2a_wr_ptr_a_sync2;
+  wire [ASIZE:0] b2a_rd_ptr_a_local = b2a_rd_ptr_a;
+
+  wire a2b_full_a  = (a2b_wr_ptr_a_local == a2b_rd_ptr_a_local + DEPTH);
+  wire a2b_empty_a = (a2b_wr_ptr_a_local == a2b_rd_ptr_a_local);
+  wire b2a_full_a  = (b2a_wr_ptr_a_local == b2a_rd_ptr_a_local + DEPTH);
+  wire b2a_empty_a = (b2a_wr_ptr_a_local == b2a_rd_ptr_a_local);
+
+  assign a_full   = a_is_writer ? a2b_full_a  : b2a_full_a;
+  assign a_empty  = a_is_reader ? b2a_empty_a : a2b_empty_a;
+
+  // Almost full/empty
+  wire [ASIZE:0] a2b_count_a = a2b_wr_ptr_a_local - a2b_rd_ptr_a_local;
+  wire [ASIZE:0] b2a_count_a = b2a_wr_ptr_a_local - b2a_rd_ptr_a_local;
+
+  assign a_afull  = a_is_writer ? (a2b_count_a >= AFULL_THRESH) : (b2a_count_a >= AFULL_THRESH);
+  assign a_aempty = a_is_reader ? (b2a_count_a <= AEMPTY_THRESH) : (a2b_count_a <= AEMPTY_THRESH);
+
+  // ---------------------------------------------------------------------------
+  // B-side logic
+  // ---------------------------------------------------------------------------
+  wire b_is_writer = b_dir;
+  wire b_is_reader = ~b_dir;
+
+  // B writes to b2a when b_is_writer and b_winc
+  wire b2a_write = b_is_writer & b_winc;
+  // B reads from a2b when b_is_reader and b_rinc
+  wire a2b_read  = b_is_reader & b_rinc;
+
+  // B2A write pointer update
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      b2a_wr_ptr_b <= {1'b0, {ASIZE{1'b0}}};
+    else if (b2a_write)
+      b2a_wr_ptr_b <= b2a_wr_ptr_b + 1'b1;
+  end
+
+  // B2A memory write
+  always @(posedge b_clk) begin
+    if (b2a_write)
+      b2a_mem[b2a_wr_ptr_b[ASIZE-1:0]] <= b_wdata;
+  end
+
+  // A2B read pointer update
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      a2b_rd_ptr_b <= {1'b0, {ASIZE{1'b0}}};
+    else if (a2b_read)
+      a2b_rd_ptr_b <= a2b_rd_ptr_b + 1'b1;
+  end
+
+  // A2B memory read (for B to read)
+  reg [DSIZE-1:0] a2b_rdata_b_reg;
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n)
+      a2b_rdata_b_reg <= {DSIZE{1'b0}};
+    else if (a2b_read)
+      a2b_rdata_b_reg <= a2b_mem[a2b_rd_ptr_b[ASIZE-1:0]];
+  end
+
+  // B-side read data output
+  assign b_rdata = a2b_rdata_b_reg;
+
+  // B-side full/empty flags
+  wire [ASIZE:0] a2b_wr_ptr_b_local = a2b_wr_ptr_b_sync2;
+  wire [ASIZE:0] a2b_rd_ptr_b_local = a2b_rd_ptr_b;
+  wire [ASIZE:0] b2a_wr_ptr_b_local = b2a_wr_ptr_b;
+  wire [ASIZE:0] b2a_rd_ptr_b_local = b2a_rd_ptr_b_sync2;
+
+  wire a2b_full_b  = (a2b_wr_ptr_b_local == a2b_rd_ptr_b_local + DEPTH);
+  wire a2b_empty_b = (a2b_wr_ptr_b_local == a2b_rd_ptr_b_local);
+  wire b2a_full_b  = (b2a_wr_ptr_b_local == b2a_rd_ptr_b_local + DEPTH);
+  wire b2a_empty_b = (b2a_wr_ptr_b_local == b2a_rd_ptr_b_local);
+
+  assign b_full   = b_is_writer ? b2a_full_b  : a2b_full_b;
+  assign b_empty  = b_is_reader ? a2b_empty_b : b2a_empty_b;
+
+  // Almost full/empty
+  wire [ASIZE:0] a2b_count_b = a2b_wr_ptr_b_local - a2b_rd_ptr_b_local;
+  wire [ASIZE:0] b2a_count_b = b2a_wr_ptr_b_local - b2a_rd_ptr_b_local;
+
+  assign b_afull  = b_is_writer ? (b2a_count_b >= AFULL_THRESH) : (a2b_count_b >= AFULL_THRESH);
+  assign b_aempty = b_is_reader ? (a2b_count_b <= AEMPTY_THRESH) : (b2a_count_b <= AEMPTY_THRESH);
+
+  // ---------------------------------------------------------------------------
+  // CDC: Pointer synchronizers
+  // ---------------------------------------------------------------------------
+
+  // A2B write pointer: A -> B
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a2b_wr_ptr_b_sync0 <= {1'b0, {ASIZE{1'b0}}};
+      a2b_wr_ptr_b_sync1 <= {1'b0, {ASIZE{1'b0}}};
+      a2b_wr_ptr_b_sync2 <= {1'b0, {ASIZE{1'b0}}};
+    end else begin
+      a2b_wr_ptr_b_sync0 <= a2b_wr_ptr_a;
+      a2b_wr_ptr_b_sync1 <= a2b_wr_ptr_b_sync0;
+      a2b_wr_ptr_b_sync2 <= a2b_wr_ptr_b_sync1;
+    end
+  end
+
+  // A2B read pointer: B -> A
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a2b_rd_ptr_a_sync0 <= {1'b0, {ASIZE{1'b0}}};
+      a2b_rd_ptr_a_sync1 <= {1'b0, {ASIZE{1'b0}}};
+      a2b_rd_ptr_a_sync2 <= {1'b0, {ASIZE{1'b0}}};
+    end else begin
+      a2b_rd_ptr_a_sync0 <= a2b_rd_ptr_b;
+      a2b_rd_ptr_a_sync1 <= a2b_rd_ptr_a_sync0;
+      a2b_rd_ptr_a_sync2 <= a2b_rd_ptr_a_sync1;
+    end
+  end
+
+  // B2A write pointer: B -> A
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b2a_wr_ptr_a_sync0 <= {1'b0, {ASIZE{1'b0}}};
+      b2a_wr_ptr_a_sync1 <= {1'b0, {ASIZE{1'b0}}};
+      b2a_wr_ptr_a_sync2 <= {1'b0, {ASIZE{1'b0}}};
+    end else begin
+      b2a_wr_ptr_a_sync0 <= b2a_wr_ptr_b;
+      b2a_wr_ptr_a_sync1 <= b2a_wr_ptr_a_sync0;
+      b2a_wr_ptr_a_sync2 <= b2a_wr_ptr_a_sync1;
+    end
+  end
+
+  // B2A read pointer: A -> B
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b2a_rd_ptr_b_sync0 <= {1'b0, {ASIZE{1'b0}}};
+      b2a_rd_ptr_b_sync1 <= {1'b0, {ASIZE{1'b0}}};
+      b2a_rd_ptr_b_sync2 <= {1'b0, {ASIZE{1'b0}}};
+    end else begin
+      b2a_rd_ptr_b_sync0 <= b2a_rd_ptr_a;
+      b2a_rd_ptr_b_sync1 <= b2a_rd_ptr_b_sync0;
+      b2a_rd_ptr_b_sync2 <= b2a_rd_ptr_b_sync1;
+    end
+  end
+
+  // ---------------------------------------------------------------------------
+  // CDC: Data synchronizers (two destination-clock stages)
+  // ---------------------------------------------------------------------------
+
+  // A2B data: A -> B
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a2b_data_b_sync0 <= {DSIZE{1'b0}};
+      a2b_data_b_sync1 <= {DSIZE{1'b0}};
+      a2b_valid_b_sync0 <= 1'b0;
+      a2b_valid_b_sync1 <= 1'b0;
+    end else begin
+      a2b_data_b_sync0 <= a2b_mem[a2b_wr_ptr_a[ASIZE-1:0]];
+      a2b_data_b_sync1 <= a2b_data_b_sync0;
+      a2b_valid_b_sync0 <= a2b_write;
+      a2b_valid_b_sync1 <= a2b_valid_b_sync0;
+    end
+  end
+
+  // B2A data: B -> A
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b2a_data_a_sync0 <= {DSIZE{1'b0}};
+      b2a_data_a_sync1 <= {DSIZE{1'b0}};
+      b2a_valid_a_sync0 <= 1'b0;
+      b2a_valid_a_sync1 <= 1'b0;
+    end else begin
+      b2a_data_a_sync0 <= b2a_mem[b2a_wr_ptr_b[ASIZE-1:0]];
+      b2a_data_a_sync1 <= b2a_data_a_sync0;
+      b2a_valid_a_sync0 <= b2a_write;
+      b2a_valid_a_sync1 <= b2a_valid_a_sync0;
+    end
+  end
+
+endmodule
+```<|im_end|>

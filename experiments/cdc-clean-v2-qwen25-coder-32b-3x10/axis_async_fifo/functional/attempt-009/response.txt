@@ -1,0 +1,264 @@
+```verilog
+module axis_async_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    /*
+     * AXI input
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   s_pause_req,
+    output wire                   s_pause_ack,
+    input  wire                   m_pause_req,
+    output wire                   m_pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] s_status_depth,
+    output wire [$clog2(DEPTH):0] s_status_depth_commit,
+    output wire                   s_status_overflow,
+    output wire                   s_status_bad_frame,
+    output wire                   s_status_good_frame,
+    output wire [$clog2(DEPTH):0] m_status_depth,
+    output wire [$clog2(DEPTH):0] m_status_depth_commit,
+    output wire                   m_status_overflow,
+    output wire                   m_status_bad_frame,
+    output wire                   m_status_good_frame
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+
+    reg [ADDR_WIDTH:0] wptr_s, rptr_s, wptr_m, rptr_m;
+    reg [ADDR_WIDTH:0] wptr_s_gray, rptr_s_gray, wptr_m_gray, rptr_m_gray;
+    reg [ADDR_WIDTH:0] wptr_s_gray_sync, rptr_s_gray_sync, wptr_m_gray_sync, rptr_m_gray_sync;
+
+    reg [DATA_WIDTH-1:0] mem_data [0:DEPTH-1];
+    reg [KEEP_WIDTH-1:0] mem_keep [0:DEPTH-1];
+    reg [LAST_ENABLE:0]  mem_last [0:DEPTH-1];
+    reg [ID_ENABLE:0]    mem_id [0:DEPTH-1];
+    reg [DEST_ENABLE:0]  mem_dest [0:DEPTH-1];
+    reg [USER_ENABLE:0]  mem_user [0:DEPTH-1];
+
+    reg [ADDR_WIDTH:0] depth_s, depth_m;
+    reg [ADDR_WIDTH:0] depth_commit_s, depth_commit_m;
+    reg overflow_s, overflow_m;
+    reg bad_frame_s, bad_frame_m;
+    reg good_frame_s, good_frame_m;
+
+    reg pause_s, pause_m;
+    reg pause_s_ack, pause_m_ack;
+
+    // Binary to Gray conversion
+    function [ADDR_WIDTH:0] bin_to_gray;
+        input [ADDR_WIDTH:0] bin;
+        bin_to_gray = bin ^ (bin >> 1);
+    endfunction
+
+    // Gray to Binary conversion
+    function [ADDR_WIDTH:0] gray_to_bin;
+        input [ADDR_WIDTH:0] gray;
+        integer i;
+        reg [ADDR_WIDTH:0] bin;
+        bin = gray;
+        for (i = ADDR_WIDTH-1; i >= 0; i = i - 1) begin
+            bin[i] = bin[i] ^ bin[i+1];
+        end
+        gray_to_bin = bin;
+    endfunction
+
+    // Write side logic
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            wptr_s <= 0;
+            wptr_s_gray <= 0;
+            depth_s <= 0;
+            depth_commit_s <= 0;
+            overflow_s <= 0;
+            bad_frame_s <= 0;
+            good_frame_s <= 0;
+            pause_s <= 0;
+            pause_s_ack <= 0;
+        end else begin
+            if (s_axis_tvalid && s_axis_tready) begin
+                mem_data[wptr_s[ADDR_WIDTH-1:0]] <= s_axis_tdata;
+                if (KEEP_ENABLE) mem_keep[wptr_s[ADDR_WIDTH-1:0]] <= s_axis_tkeep;
+                if (LAST_ENABLE) mem_last[wptr_s[ADDR_WIDTH-1:0]] <= s_axis_tlast;
+                if (ID_ENABLE) mem_id[wptr_s[ADDR_WIDTH-1:0]] <= s_axis_tid;
+                if (DEST_ENABLE) mem_dest[wptr_s[ADDR_WIDTH-1:0]] <= s_axis_tdest;
+                if (USER_ENABLE) mem_user[wptr_s[ADDR_WIDTH-1:0]] <= s_axis_tuser;
+
+                if (s_axis_tlast) begin
+                    depth_commit_s <= depth_s;
+                    if (depth_s > DEPTH) begin
+                        overflow_s <= 1;
+                    end else begin
+                        overflow_s <= 0;
+                    end
+                    if (USER_ENABLE && (s_axis_tuser & USER_BAD_FRAME_MASK) == USER_BAD_FRAME_VALUE) begin
+                        bad_frame_s <= 1;
+                    end else begin
+                        good_frame_s <= 1;
+                    end
+                end
+
+                wptr_s <= wptr_s + 1;
+                wptr_s_gray <= bin_to_gray(wptr_s + 1);
+            end
+
+            if (FRAME_FIFO && s_axis_tlast) begin
+                depth_s <= 0;
+            end else begin
+                depth_s <= depth_s + (s_axis_tvalid && s_axis_tready) - (m_axis_tvalid && m_axis_tready);
+            end
+
+            if (PAUSE_ENABLE && s_pause_req) begin
+                pause_s <= 1;
+                pause_s_ack <= 1;
+            end else if (pause_s && m_axis_tready) begin
+                pause_s <= 0;
+            end
+        end
+    end
+
+    // Read side logic
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            rptr_m <= 0;
+            rptr_m_gray <= 0;
+            depth_m <= 0;
+            depth_commit_m <= 0;
+            overflow_m <= 0;
+            bad_frame_m <= 0;
+            good_frame_m <= 0;
+            pause_m <= 0;
+            pause_m_ack <= 0;
+        end else begin
+            if (m_axis_tvalid && m_axis_tready) begin
+                rptr_m <= rptr_m + 1;
+                rptr_m_gray <= bin_to_gray(rptr_m + 1);
+
+                if (m_axis_tlast) begin
+                    depth_commit_m <= depth_m;
+                    if (depth_m > DEPTH) begin
+                        overflow_m <= 1;
+                    end else begin
+                        overflow_m <= 0;
+                    end
+                    if (USER_ENABLE && (m_axis_tuser & USER_BAD_FRAME_MASK) == USER_BAD_FRAME_VALUE) begin
+                        bad_frame_m <= 1;
+                    end else begin
+                        good_frame_m <= 1;
+                    end
+                end
+            end
+
+            if (FRAME_FIFO && m_axis_tlast) begin
+                depth_m <= 0;
+            end else begin
+                depth_m <= depth_m + (s_axis_tvalid && s_axis_tready) - (m_axis_tvalid && m_axis_tready);
+            end
+
+            if (PAUSE_ENABLE && m_pause_req) begin
+                pause_m <= 1;
+                pause_m_ack <= 1;
+            end else if (pause_m && s_axis_tready) begin
+                pause_m <= 0;
+            end
+        end
+    end
+
+    // Gray code synchronization
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            rptr_m_gray_sync <= 0;
+        end else begin
+            rptr_m_gray_sync <= rptr_m_gray;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            wptr_s_gray_sync <= 0;
+        end else begin
+            wptr_s_gray_sync <= wptr_s_gray;
+        end
+    end
+
+    // Status signals
+    assign s_status_depth = depth_s;
+    assign s_status_depth_commit = depth_commit_s;
+    assign s_status_overflow = overflow_s;
+    assign s_status_bad_frame = bad_frame_s;
+    assign s_status_good_frame = good_frame_s;
+
+    assign m_status_depth = depth_m;
+    assign m_status_depth_commit = depth_commit_m;
+    assign m_status_overflow = overflow_m;
+    assign m_status_bad_frame = bad_frame_m;
+    assign m_status_good_frame = good_frame_m;
+
+    // Pause signals
+    assign s_pause_ack = pause_s_ack;
+    assign m_pause_ack = pause_m_ack;
+
+    // Handshake signals
+    assign s_axis_tready = (!pause_s && (depth_s < DEPTH || MARK_WHEN_FULL)) || DROP_WHEN_FULL;
+    assign m_axis_tvalid = (!pause_m && (depth_m > 0));
+
+    // Output signals
+    assign m_axis_tdata = mem_data[rptr_m[ADDR_WIDTH-1:0]];
+    assign m_axis_tkeep = KEEP_ENABLE ? mem_keep[rptr_m[ADDR_WIDTH-1:0]] : {KEEP_WIDTH{1'b1}};
+    assign m_axis_tlast = LAST_ENABLE ? mem_last[rptr_m[ADDR_WIDTH-1:0]] : 1'b0;
+    assign m_axis_tid = ID_ENABLE ? mem_id[rptr_m[ADDR_WIDTH-1:0]] : {ID_WIDTH{1'b0}};
+    assign m_axis_tdest = DEST_ENABLE ? mem_dest[rptr_m[ADDR_WIDTH-1:0]] : {DEST_WIDTH{1'b0}};
+    assign m_axis_tuser = USER_ENABLE ? mem_user[rptr_m[ADDR_WIDTH-1:0]] : {USER_WIDTH{1'b0}};
+
+endmodule
+```<|im_end|>

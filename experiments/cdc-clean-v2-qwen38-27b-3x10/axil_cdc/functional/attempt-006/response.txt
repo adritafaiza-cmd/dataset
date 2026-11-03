@@ -1,0 +1,330 @@
+```verilog
+module axil_cdc #
+(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 32,
+    parameter STRB_WIDTH = (DATA_WIDTH/8)
+)
+(
+    /*
+     * AXI lite slave interface
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
+    input  wire [2:0]             s_axil_awprot,
+    input  wire                   s_axil_awvalid,
+    output wire                   s_axil_awready,
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
+    input  wire                   s_axil_wvalid,
+    output wire                   s_axil_wready,
+    output wire [1:0]             s_axil_bresp,
+    output wire                   s_axil_bvalid,
+    input  wire                   s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
+    input  wire [2:0]             s_axil_arprot,
+    input  wire                   s_axil_arvalid,
+    output wire                   s_axil_arready,
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
+    output wire [1:0]             s_axil_rresp,
+    output wire                   s_axil_rvalid,
+    input  wire                   s_axil_rready,
+    /*
+     * AXI lite master interface
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
+    output wire [2:0]             m_axil_awprot,
+    output wire                   m_axil_awvalid,
+    input  wire                   m_axil_awready,
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
+    output wire                   m_axil_wvalid,
+    input  wire                   m_axil_wready,
+    input  wire [1:0]             m_axil_bresp,
+    input  wire                   m_axil_bvalid,
+    output wire                   m_axil_bready,
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
+    output wire [2:0]             m_axil_arprot,
+    output wire                   m_axil_arvalid,
+    input  wire                   m_axil_arready,
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
+    input  wire [1:0]             m_axil_rresp,
+    input  wire                   m_axil_rvalid,
+    output wire                   m_axil_rready
+);
+
+    // ========================================================================
+    // Write Address Channel (AW) - Slave to Master
+    // ========================================================================
+    reg [ADDR_WIDTH-1:0] aw_addr_reg;
+    reg [2:0]            aw_prot_reg;
+    reg                  aw_valid_reg;
+    reg                  aw_ready_reg;
+
+    // 2-FF synchronizer for aw_valid
+    reg [1:0] aw_valid_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            aw_valid_sync <= 2'b00;
+        else
+            aw_valid_sync <= {aw_valid_sync[0], aw_valid_reg};
+    end
+
+    // 2-FF synchronizer for aw_ready
+    reg [1:0] aw_ready_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            aw_ready_sync <= 2'b00;
+        else
+            aw_ready_sync <= {aw_ready_sync[0], aw_ready_reg};
+    end
+
+    // Master side AW logic
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            aw_valid_reg <= 1'b0;
+            aw_ready_reg <= 1'b0;
+            aw_addr_reg  <= {ADDR_WIDTH{1'b0}};
+            aw_prot_reg  <= 3'b000;
+        end else begin
+            if (aw_valid_sync[1] && m_axil_awready) begin
+                aw_valid_reg <= 1'b0;
+            end else if (!aw_valid_reg) begin
+                // Capture from slave side when slave indicates valid
+                // We need to know when slave has valid AW
+                // Use a separate mechanism: slave sets aw_valid_reg via a pulse
+                // Actually, let's use a different approach:
+                // Slave side captures AW when s_axil_awvalid && s_axil_awready
+                // Then sets a flag that gets synchronized to master
+            end
+        end
+    end
+
+    // Let me redesign this more carefully.
+    // 
+    // Strategy:
+    // 1. Slave side: When s_axil_awvalid && s_axil_awready, capture AW data and set a "pending" flag.
+    //    s_axil_awready is high when no transaction is in flight (i.e., master hasn't accepted yet).
+    // 2. The pending flag is synchronized to master clock domain.
+    // 3. Master side: When pending flag is high, drive m_axil_awvalid. When m_axil_awready, clear pending.
+    // 4. Similarly for W, B, AR, R channels.
+    //
+    // For simplicity and correctness, I'll use a simple handshake with synchronizers.
+
+    // Let me restart with a cleaner design.
+
+    // ========================================================================
+    // AW Channel: Slave -> Master
+    // ========================================================================
+    // Slave side: capture AW when valid && ready
+    // aw_ready is high when we're not in the middle of forwarding an AW transaction
+    
+    reg aw_pending;  // Set when slave captures AW, cleared when master accepts
+    
+    // Slave side AW ready: high when not pending
+    assign s_axil_awready = ~aw_pending;
+    
+    // Capture AW data on slave clock
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            aw_pending  <= 1'b0;
+            aw_addr_reg <= {ADDR_WIDTH{1'b0}};
+            aw_prot_reg <= 3'b000;
+        end else if (s_axil_awvalid && s_axil_awready) begin
+            aw_pending  <= 1'b1;
+            aw_addr_reg <= s_axil_awaddr;
+            aw_prot_reg <= s_axil_awprot;
+        end
+    end
+    
+    // Synchronize aw_pending to master clock
+    reg [1:0] aw_pending_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            aw_pending_sync <= 2'b00;
+        else
+            aw_pending_sync <= {aw_pending_sync[0], aw_pending};
+    end
+    
+    // Master side: drive AW when pending is synchronized
+    assign m_axil_awvalid = aw_pending_sync[1];
+    assign m_axil_awaddr  = aw_addr_reg;
+    assign m_axil_awprot  = aw_prot_reg;
+    
+    // Clear pending when master accepts
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            aw_pending <= 1'b0;
+        else if (aw_pending_sync[1] && m_axil_awready)
+            aw_pending <= 1'b0;
+    end
+
+    // ========================================================================
+    // W Channel: Slave -> Master
+    // ========================================================================
+    reg w_pending;
+    
+    assign s_axil_wready = ~w_pending;
+    
+    reg [DATA_WIDTH-1:0] w_data_reg;
+    reg [STRB_WIDTH-1:0] w_strb_reg;
+    
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            w_pending  <= 1'b0;
+            w_data_reg <= {DATA_WIDTH{1'b0}};
+            w_strb_reg <= {STRB_WIDTH{1'b0}};
+        end else if (s_axil_wvalid && s_axil_wready) begin
+            w_pending  <= 1'b1;
+            w_data_reg <= s_axil_wdata;
+            w_strb_reg <= s_axil_wstrb;
+        end
+    end
+    
+    reg [1:0] w_pending_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            w_pending_sync <= 2'b00;
+        else
+            w_pending_sync <= {w_pending_sync[0], w_pending};
+    end
+    
+    assign m_axil_wvalid = w_pending_sync[1];
+    assign m_axil_wdata  = w_data_reg;
+    assign m_axil_wstrb  = w_strb_reg;
+    
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            w_pending <= 1'b0;
+        else if (w_pending_sync[1] && m_axil_wready)
+            w_pending <= 1'b0;
+    end
+
+    // ========================================================================
+    // B Channel: Master -> Slave
+    // ========================================================================
+    reg b_pending;
+    
+    // Master side: capture B when valid && ready
+    // m_axil_bready is high when we're ready to accept B response
+    assign m_axil_bready = ~b_pending;
+    
+    reg [1:0] b_resp_reg;
+    
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            b_pending  <= 1'b0;
+            b_resp_reg <= 2'b00;
+        end else if (m_axil_bvalid && m_axil_bready) begin
+            b_pending  <= 1'b1;
+            b_resp_reg <= m_axil_bresp;
+        end
+    end
+    
+    // Synchronize b_pending to slave clock
+    reg [1:0] b_pending_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            b_pending_sync <= 2'b00;
+        else
+            b_pending_sync <= {b_pending_sync[0], b_pending};
+    end
+    
+    assign s_axil_bvalid = b_pending_sync[1];
+    assign s_axil_bresp  = b_resp_reg;
+    
+    // Clear pending when slave accepts
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            b_pending <= 1'b0;
+        else if (b_pending_sync[1] && s_axil_bready)
+            b_pending <= 1'b0;
+    end
+
+    // ========================================================================
+    // AR Channel: Slave -> Master
+    // ========================================================================
+    reg ar_pending;
+    
+    assign s_axil_arready = ~ar_pending;
+    
+    reg [ADDR_WIDTH-1:0] ar_addr_reg;
+    reg [2:0]            ar_prot_reg;
+    
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            ar_pending  <= 1'b0;
+            ar_addr_reg <= {ADDR_WIDTH{1'b0}};
+            ar_prot_reg <= 3'b000;
+        end else if (s_axil_arvalid && s_axil_arready) begin
+            ar_pending  <= 1'b1;
+            ar_addr_reg <= s_axil_araddr;
+            ar_prot_reg <= s_axil_arprot;
+        end
+    end
+    
+    reg [1:0] ar_pending_sync;
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            ar_pending_sync <= 2'b00;
+        else
+            ar_pending_sync <= {ar_pending_sync[0], ar_pending};
+    end
+    
+    assign m_axil_arvalid = ar_pending_sync[1];
+    assign m_axil_araddr  = ar_addr_reg;
+    assign m_axil_arprot  = ar_prot_reg;
+    
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst)
+            ar_pending <= 1'b0;
+        else if (ar_pending_sync[1] && m_axil_arready)
+            ar_pending <= 1'b0;
+    end
+
+    // ========================================================================
+    // R Channel: Master -> Slave
+    // ========================================================================
+    reg r_pending;
+    
+    assign m_axil_rready = ~r_pending;
+    
+    reg [DATA_WIDTH-1:0] r_data_reg;
+    reg [1:0]            r_resp_reg;
+    
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            r_pending  <= 1'b0;
+            r_data_reg <= {DATA_WIDTH{1'b0}};
+            r_resp_reg <= 2'b00;
+        end else if (m_axil_rvalid && m_axil_rready) begin
+            r_pending  <= 1'b1;
+            r_data_reg <= m_axil_rdata;
+            r_resp_reg <= m_axil_rresp;
+        end
+    end
+    
+    reg [1:0] r_pending_sync;
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            r_pending_sync <= 2'b00;
+        else
+            r_pending_sync <= {r_pending_sync[0], r_pending};
+    end
+    
+    assign s_axil_rvalid = r_pending_sync[1];
+    assign s_axil_rdata  = r_data_reg;
+    assign s_axil_rresp  = r_resp_reg;
+    
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst)
+            r_pending <= 1'b0;
+        else if (r_pending_sync[1] && s_axil_rready)
+            r_pending <= 1'b0;
+    end
+
+endmodule
+```<|im_end|>

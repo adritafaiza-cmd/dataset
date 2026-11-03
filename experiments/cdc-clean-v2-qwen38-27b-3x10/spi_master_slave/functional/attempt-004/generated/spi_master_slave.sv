@@ -1,0 +1,118 @@
+module spi_master #(
+    parameter N = 8,
+    parameter SPI_2X_CLK_DIV = 2
+)(
+    input              sclk_i,
+    input              pclk_i,
+    input              rst_i,
+    output reg         spi_ssel_o,
+    output reg         spi_sck_o,
+    output             spi_mosi_o,
+    input              spi_miso_i,
+    output reg         di_req_o,
+    input  [N-1:0]     di_i,
+    input              wren_i,
+    output reg         wr_ack_o,
+    output reg         do_valid_o,
+    output reg [N-1:0] do_o
+);
+
+    // State machine states
+    localparam S_IDLE    = 2'd0;
+    localparam S_WAIT_WR = 2'd1;
+    localparam S_SHIFT   = 2'd2;
+    localparam S_DONE    = 2'd3;
+
+    reg [1:0] state;
+    reg [N-1:0] tx_shift;
+    reg [N-1:0] rx_shift;
+    reg [N-1:0] bit_cnt;
+    reg [N-1:0] sck_div_cnt;
+    reg sck_phase;
+
+    // Asynchronous reset for pclk domain
+    always @(posedge pclk_i or posedge rst_i) begin
+        if (rst_i) begin
+            state       <= S_IDLE;
+            spi_ssel_o  <= 1'b0;
+            spi_sck_o   <= 1'b0;
+            di_req_o    <= 1'b0;
+            wr_ack_o    <= 1'b0;
+            do_valid_o  <= 1'b0;
+            do_o        <= {N{1'b0}};
+            tx_shift    <= {N{1'b0}};
+            rx_shift    <= {N{1'b0}};
+            bit_cnt     <= {N{1'b0}};
+            sck_div_cnt <= {N{1'b0}};
+            sck_phase   <= 1'b0;
+        end else begin
+            wr_ack_o   <= 1'b0;
+            do_valid_o <= 1'b0;
+
+            case (state)
+                S_IDLE: begin
+                    spi_ssel_o <= 1'b0;
+                    spi_sck_o  <= 1'b0;
+                    di_req_o   <= 1'b1;
+                    if (wren_i) begin
+                        tx_shift <= di_i;
+                        bit_cnt  <= {N{1'b0}};
+                        sck_div_cnt <= {N{1'b0}};
+                        sck_phase   <= 1'b0;
+                        spi_ssel_o  <= 1'b1;
+                        di_req_o    <= 1'b0;
+                        wr_ack_o    <= 1'b1;
+                        state       <= S_SHIFT;
+                    end
+                end
+
+                S_SHIFT: begin
+                    // Generate SCK based on SPI_2X_CLK_DIV
+                    // SPI_2X_CLK_DIV = 2 means SCK period = 2 * pclk period
+                    // We toggle SCK every SPI_2X_CLK_DIV/2 pclk cycles
+                    // For simplicity, we use a counter that counts to SPI_2X_CLK_DIV/2
+                    // and toggle sck_phase each time.
+                    
+                    if (sck_div_cnt == (N'(SPI_2X_CLK_DIV) / 2 - 1)) begin
+                        sck_div_cnt <= {N{1'b0}};
+                        sck_phase   <= ~sck_phase;
+                        spi_sck_o   <= sck_phase;
+                        
+                        // On rising edge of SCK (sck_phase becomes 1), shift out MSB and capture MISO
+                        // On falling edge of SCK (sck_phase becomes 0), shift in MISO
+                        if (sck_phase) begin
+                            // Rising edge: shift out next bit
+                            tx_shift <= {tx_shift[N-2:0], 1'b0};
+                            spi_mosi_o <= tx_shift[N-1];
+                        end else begin
+                            // Falling edge: capture MISO
+                            rx_shift <= {spi_miso_i, rx_shift[N-1:1]};
+                            bit_cnt  <= bit_cnt + 1'b1;
+                        end
+                    end else begin
+                        sck_div_cnt <= sck_div_cnt + 1'b1;
+                    end
+                    
+                    // Check if all bits have been shifted
+                    if (bit_cnt == N'(N-1) && sck_phase == 1'b0 && sck_div_cnt == (N'(SPI_2X_CLK_DIV) / 2 - 1)) begin
+                        // All bits shifted, deassert SSEL
+                        spi_ssel_o <= 1'b0;
+                        spi_sck_o  <= 1'b0;
+                        do_o       <= rx_shift;
+                        do_valid_o <= 1'b1;
+                        di_req_o   <= 1'b1;
+                        state      <= S_IDLE;
+                    end
+                end
+
+                default: begin
+                    state <= S_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // Drive MOSI from the MSB of the transmit shift register
+    assign spi_mosi_o = tx_shift[N-1];
+
+endmodule

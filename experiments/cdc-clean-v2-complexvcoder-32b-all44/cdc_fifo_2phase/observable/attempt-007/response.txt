@@ -1,0 +1,353 @@
+=== STAGE 1: GIR ===
+```json
+{
+    "modules": [
+        {
+            "Top_module_name": "cdc_fifo_2phase",
+            "function": "Asynchronous FIFO with 2**LOG_DEPTH entries of WIDTH bits, handling clock-domain crossing and ensuring ordered, exactly-once accepted transfers.",
+            "parameters": [
+                {"name": "WIDTH", "value": "8"},
+                {"name": "LOG_DEPTH", "value": "3"}
+            ],
+            "ports": [
+                {"name": "src_rst_ni", "direction": "input", "width": "1", "clock_domain": "src_clk_i"},
+                {"name": "src_clk_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i"},
+                {"name": "src_data_i", "direction": "input", "width": "WIDTH", "clock_domain": "src_clk_i"},
+                {"name": "src_valid_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i"},
+                {"name": "src_ready_o", "direction": "output", "width": "1", "clock_domain": "src_clk_i"},
+                {"name": "dst_rst_ni", "direction": "input", "width": "1", "clock_domain": "dst_clk_i"},
+                {"name": "dst_clk_i", "direction": "input", "width": "1", "clock_domain": "dst_clk_i"},
+                {"name": "dst_data_o", "direction": "output", "width": "WIDTH", "clock_domain": "dst_clk_i"},
+                {"name": "dst_valid_o", "direction": "output", "width": "1", "clock_domain": "dst_clk_i"},
+                {"name": "dst_ready_i", "direction": "input", "width": "1", "clock_domain": "dst_clk_i"}
+            ],
+            "instances": [
+                {
+                    "module": "gray_counter",
+                    "name": "gray_src_counter",
+                    "function": "Generates a gray code counter for the source side.",
+                    "connections": [
+                        {"name": "clk", "port": "src_clk_i"},
+                        {"name": "rst_n", "port": "src_rst_ni"},
+                        {"name": "en", "port": "src_valid_i & src_ready_o"},
+                        {"name": "gray_cnt", "port": "gray_src_cnt"}
+                    ]
+                },
+                {
+                    "module": "gray_counter",
+                    "name": "gray_dst_counter",
+                    "function": "Generates a gray code counter for the destination side.",
+                    "connections": [
+                        {"name": "clk", "port": "dst_clk_i"},
+                        {"name": "rst_n", "port": "dst_rst_ni"},
+                        {"name": "en", "port": "dst_ready_i & dst_valid_o"},
+                        {"name": "gray_cnt", "port": "gray_dst_cnt"}
+                    ]
+                },
+                {
+                    "module": "sync_gray",
+                    "name": "sync_src_gray",
+                    "function": "Synchronizes the source gray counter to the destination clock domain.",
+                    "connections": [
+                        {"name": "clk", "port": "dst_clk_i"},
+                        {"name": "rst_n", "port": "dst_rst_ni"},
+                        {"name": "async_in", "port": "gray_src_cnt"},
+                        {"name": "sync_out", "port": "gray_src_cnt_sync"}
+                    ]
+                },
+                {
+                    "module": "sync_gray",
+                    "name": "sync_dst_gray",
+                    "function": "Synchronizes the destination gray counter to the source clock domain.",
+                    "connections": [
+                        {"name": "clk", "port": "src_clk_i"},
+                        {"name": "rst_n", "port": "src_rst_ni"},
+                        {"name": "async_in", "port": "gray_dst_cnt"},
+                        {"name": "sync_out", "port": "gray_dst_cnt_sync"}
+                    ]
+                },
+                {
+                    "module": "dual_port_ram",
+                    "name": "fifo_ram",
+                    "function": "Dual port RAM for FIFO storage.",
+                    "connections": [
+                        {"name": "clk_a", "port": "src_clk_i"},
+                        {"name": "rst_n_a", "port": "src_rst_ni"},
+                        {"name": "we_a", "port": "src_valid_i & src_ready_o"},
+                        {"name": "addr_a", "port": "gray_src_cnt"},
+                        {"name": "din_a", "port": "src_data_i"},
+                        {"name": "clk_b", "port": "dst_clk_i"},
+                        {"name": "rst_n_b", "port": "dst_rst_ni"},
+                        {"name": "we_b", "port": "0"},
+                        {"name": "addr_b", "port": "gray_dst_cnt"},
+                        {"name": "dout_b", "port": "dst_data_o"}
+                    ]
+                }
+            ],
+            "connections": [
+                {"name": "src_ready_o", "expression": "!(gray_src_cnt_sync == gray_src_cnt + 1)"},
+                {"name": "dst_valid_o", "expression": "!(gray_dst_cnt_sync == gray_dst_cnt)"},
+                {"name": "gray_src_cnt", "expression": "gray_src_counter.gray_cnt"},
+                {"name": "gray_dst_cnt", "expression": "gray_dst_counter.gray_cnt"},
+                {"name": "gray_src_cnt_sync", "expression": "sync_src_gray.sync_out"},
+                {"name": "gray_dst_cnt_sync", "expression": "sync_dst_gray.sync_out"}
+            ],
+            "internal_signals": [
+                {"name": "gray_src_cnt", "width": "LOG_DEPTH + 1"},
+                {"name": "gray_dst_cnt", "width": "LOG_DEPTH + 1"},
+                {"name": "gray_src_cnt_sync", "width": "LOG_DEPTH + 1"},
+                {"name": "gray_dst_cnt_sync", "width": "LOG_DEPTH + 1"}
+            ],
+            "behavior": [
+                "Generates gray code counters for source and destination sides to track FIFO pointers.",
+                "Synchronizes the source gray counter to the destination clock domain and vice versa to handle clock-domain crossing.",
+                "Uses a dual-port RAM to store FIFO data, with the source writing and the destination reading.",
+                "Controls src_ready_o to indicate if the FIFO has room to accept new data.",
+                "Controls dst_valid_o to indicate if there is valid data available for the destination to read.",
+                "Ensures ordered, exactly-once accepted transfers with the stated capacity and stable valid data while stalled.",
+                "Permits additional transfer latency and bubbles spanning multiple receiving-clock edges."
+            ]
+        },
+        {
+            "Top_module_name": "gray_counter",
+            "function": "Generates a gray code counter.",
+            "parameters": [],
+            "ports": [
+                {"name": "clk", "direction": "input", "width": "1", "clock_domain": "clk"},
+                {"name": "rst_n", "direction": "input", "width": "1", "clock_domain": "clk"},
+                {"name": "en", "direction": "input", "width": "1", "clock_domain": "clk"},
+                {"name": "gray_cnt", "direction": "output", "width": "LOG_DEPTH + 1", "clock_domain": "clk"}
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {"name": "bin_cnt", "width": "LOG_DEPTH + 1"},
+                {"name": "bin_cnt_next", "width": "LOG_DEPTH + 1"}
+            ],
+            "behavior": [
+                "Counts in binary and converts the count to gray code.",
+                "Resets to 0 on active-low reset.",
+                "Enables counting on active-high enable."
+            ]
+        },
+        {
+            "Top_module_name": "sync_gray",
+            "function": "Synchronizes a gray code counter from one clock domain to another.",
+            "parameters": [],
+            "ports": [
+                {"name": "clk", "direction": "input", "width": "1", "clock_domain": "clk"},
+                {"name": "rst_n", "direction": "input", "width": "1", "clock_domain": "clk"},
+                {"name": "async_in", "direction": "input", "width": "LOG_DEPTH + 1", "clock_domain": "other_clk"},
+                {"name": "sync_out", "direction": "output", "width": "LOG_DEPTH + 1", "clock_domain": "clk"}
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {"name": "sync_stage1", "width": "LOG_DEPTH + 1"},
+                {"name": "sync_stage2", "width": "LOG_DEPTH + 1"}
+            ],
+            "behavior": [
+                "Synchronizes the asynchronous input gray code counter to the target clock domain using two-stage synchronization.",
+                "Resets to 0 on active-low reset."
+            ]
+        },
+        {
+            "Top_module_name": "dual_port_ram",
+            "function": "Dual-port RAM for FIFO storage.",
+            "parameters": [],
+            "ports": [
+                {"name": "clk_a", "direction": "input", "width": "1", "clock_domain": "clk_a"},
+                {"name": "rst_n_a", "direction": "input", "width": "1", "clock_domain": "clk_a"},
+                {"name": "we_a", "direction": "input", "width": "1", "clock_domain": "clk_a"},
+                {"name": "addr_a", "direction": "input", "width": "LOG_DEPTH + 1", "clock_domain": "clk_a"},
+                {"name": "din_a", "direction": "input", "width": "WIDTH", "clock_domain": "clk_a"},
+                {"name": "clk_b", "direction": "input", "width": "1", "clock_domain": "clk_b"},
+                {"name": "rst_n_b", "direction": "input", "width": "1", "clock_domain": "clk_b"},
+                {"name": "we_b", "direction": "input", "width": "1", "clock_domain": "clk_b"},
+                {"name": "addr_b", "direction": "input", "width": "LOG_DEPTH + 1", "clock_domain": "clk_b"},
+                {"name": "dout_b", "direction": "output", "width": "WIDTH", "clock_domain": "clk_b"}
+            ],
+            "instances": [],
+            "connections": [],
+            "internal_signals": [
+                {"name": "mem", "width": "WIDTH", "depth": "2**(LOG_DEPTH + 1)"}
+            ],
+            "behavior": [
+                "Dual-port RAM with separate read and write ports operating in different clock domains.",
+                "Resets memory to 0 on active-low reset.",
+                "Writes data to memory on active-high write enable.",
+                "Reads data from memory based on the read address."
+            ]
+        }
+    ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module cdc_fifo_2phase #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    // Internal signals
+    wire [LOG_DEPTH:0] gray_src_cnt;
+    wire [LOG_DEPTH:0] gray_dst_cnt;
+    wire [LOG_DEPTH:0] gray_src_cnt_sync;
+    wire [LOG_DEPTH:0] gray_dst_cnt_sync;
+
+    // Instantiate gray counters
+    gray_counter #(.LOG_DEPTH(LOG_DEPTH)) gray_src_counter (
+        .clk(src_clk_i),
+        .rst_n(src_rst_ni),
+        .en(src_valid_i & src_ready_o),
+        .gray_cnt(gray_src_cnt)
+    );
+
+    gray_counter #(.LOG_DEPTH(LOG_DEPTH)) gray_dst_counter (
+        .clk(dst_clk_i),
+        .rst_n(dst_rst_ni),
+        .en(dst_ready_i & dst_valid_o),
+        .gray_cnt(gray_dst_cnt)
+    );
+
+    // Instantiate sync_gray for gray counters
+    sync_gray #(.LOG_DEPTH(LOG_DEPTH)) sync_src_gray (
+        .clk(dst_clk_i),
+        .rst_n(dst_rst_ni),
+        .async_in(gray_src_cnt),
+        .sync_out(gray_src_cnt_sync)
+    );
+
+    sync_gray #(.LOG_DEPTH(LOG_DEPTH)) sync_dst_gray (
+        .clk(src_clk_i),
+        .rst_n(src_rst_ni),
+        .async_in(gray_dst_cnt),
+        .sync_out(gray_dst_cnt_sync)
+    );
+
+    // Instantiate dual-port RAM
+    dual_port_ram #(.WIDTH(WIDTH), .LOG_DEPTH(LOG_DEPTH)) fifo_ram (
+        .clk_a(src_clk_i),
+        .rst_n_a(src_rst_ni),
+        .we_a(src_valid_i & src_ready_o),
+        .addr_a(gray_src_cnt),
+        .din_a(src_data_i),
+        .clk_b(dst_clk_i),
+        .rst_n_b(dst_rst_ni),
+        .we_b(1'b0),
+        .addr_b(gray_dst_cnt),
+        .dout_b(dst_data_o)
+    );
+
+    // Control signals
+    assign src_ready_o = !(gray_src_cnt_sync == (gray_src_cnt + 1'b1));
+    assign dst_valid_o = !(gray_dst_cnt_sync == gray_dst_cnt);
+
+endmodule
+
+// Gray code counter module
+module gray_counter #(
+    parameter LOG_DEPTH = 3
+)(
+    input                  clk,
+    input                  rst_n,
+    input                  en,
+    output [LOG_DEPTH:0] gray_cnt
+);
+
+    reg [LOG_DEPTH:0] bin_cnt;
+    reg [LOG_DEPTH:0] bin_cnt_next;
+
+    // Binary counter
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            bin_cnt <= 0;
+        else if (en)
+            bin_cnt <= bin_cnt_next;
+    end
+
+    // Next state logic
+    always @(*) begin
+        bin_cnt_next = bin_cnt + 1'b1;
+    end
+
+    // Convert binary to gray code
+    assign gray_cnt = (bin_cnt >> 1) ^ bin_cnt;
+
+endmodule
+
+// Gray code synchronizer module
+module sync_gray #(
+    parameter LOG_DEPTH = 3
+)(
+    input                  clk,
+    input                  rst_n,
+    input  [LOG_DEPTH:0] async_in,
+    output [LOG_DEPTH:0] sync_out
+);
+
+    reg [LOG_DEPTH:0] sync_stage1;
+    reg [LOG_DEPTH:0] sync_stage2;
+
+    // Two-stage synchronization
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            sync_stage1 <= 0;
+            sync_stage2 <= 0;
+        end else begin
+            sync_stage1 <= async_in;
+            sync_stage2 <= sync_stage1;
+        end
+    end
+
+    assign sync_out = sync_stage2;
+
+endmodule
+
+// Dual-port RAM module
+module dual_port_ram #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3
+)(
+    input                  clk_a,
+    input                  rst_n_a,
+    input                  we_a,
+    input  [LOG_DEPTH:0] addr_a,
+    input  [WIDTH-1:0]   din_a,
+    input                  clk_b,
+    input                  rst_n_b,
+    input                  we_b,
+    input  [LOG_DEPTH:0] addr_b,
+    output [WIDTH-1:0]   dout_b
+);
+
+    reg [WIDTH-1:0] mem [0:(2**(LOG_DEPTH+1)-1)];
+
+    // Write operation on port A
+    always @(posedge clk_a or negedge rst_n_a) begin
+        if (!rst_n_a && we_a)
+            mem[addr_a] <= din_a;
+    end
+
+    // Read operation on port B
+    always @(posedge clk_b or negedge rst_n_b) begin
+        if (!rst_n_b)
+            dout_b <= 0;
+        else
+            dout_b <= mem[addr_b];
+    end
+
+endmodule
+```

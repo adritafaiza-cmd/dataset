@@ -1,0 +1,243 @@
+=== STAGE 1: GIR ===
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "apbslave",
+      "function": "APB slave implementation that handles read and write operations based on APB protocol.",
+      "parameters": [
+        {
+          "name": "C_APB_ADDR_WIDTH",
+          "value": "12"
+        },
+        {
+          "name": "C_APB_DATA_WIDTH",
+          "value": "32"
+        }
+      ],
+      "ports": [
+        {
+          "name": "PCLK",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PRESETn",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PSEL",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PENABLE",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PADDR",
+          "direction": "input",
+          "width": "C_APB_ADDR_WIDTH",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PWRITE",
+          "direction": "input",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PWDATA",
+          "direction": "input",
+          "width": "C_APB_DATA_WIDTH",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PWSTRB",
+          "direction": "input",
+          "width": "C_APB_DATA_WIDTH/8",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PPROT",
+          "direction": "input",
+          "width": 3,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PREADY",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PRDATA",
+          "direction": "output",
+          "width": "C_APB_DATA_WIDTH",
+          "clock_domain": "PCLK"
+        },
+        {
+          "name": "PSLVERR",
+          "direction": "output",
+          "width": 1,
+          "clock_domain": "PCLK"
+        }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [
+        {
+          "name": "AW",
+          "width": 1,
+          "value": "C_APB_ADDR_WIDTH"
+        },
+        {
+          "name": "DW",
+          "width": 1,
+          "value": "C_APB_DATA_WIDTH"
+        },
+        {
+          "name": "APBLSB",
+          "width": 1,
+          "value": "$clog2(C_APB_DATA_WIDTH)-3"
+        },
+        {
+          "name": "state",
+          "width": 2,
+          "value": "2'b00"
+        },
+        {
+          "name": "next_state",
+          "width": 2,
+          "value": "2'b00"
+        },
+        {
+          "name": "local_PRDATA",
+          "width": "C_APB_DATA_WIDTH",
+          "value": "0"
+        },
+        {
+          "name": "local_PSLVERR",
+          "width": 1,
+          "value": "0"
+        }
+      ],
+      "behavior": [
+        "Reset the slave to an idle state when PRESETn is active-low.",
+        "Accept standard APB setup/access transfers based on PSEL and PENABLE signals.",
+        "Support read operations by driving PRDATA with the data from the addressed location when PWRITE is low.",
+        "Support write operations by writing PWDATA to the addressed location when PWRITE is high, considering PWSTRB.",
+        "Assert PREADY high to indicate completion of the access.",
+        "Keep PSLVERR low for in-range accesses.",
+        "Handle state transitions between idle, setup, and access states based on PSEL and PENABLE."
+      ]
+    }
+  ]
+}
+```
+
+=== STAGE 2: VERILOG ===
+```verilog
+module apbslave #(
+		parameter	C_APB_ADDR_WIDTH = 12,
+		parameter	C_APB_DATA_WIDTH = 32,
+		localparam	AW = C_APB_ADDR_WIDTH,
+		localparam	DW = C_APB_DATA_WIDTH,
+		localparam	APBLSB = $clog2(C_APB_DATA_WIDTH)-3
+	) (
+		input	wire			PCLK, PRESETn,
+		input	wire			PSEL,
+		input	wire			PENABLE,
+		output	reg			PREADY,
+		input	wire	[AW-1:0]	PADDR,
+		input	wire			PWRITE,
+		input	wire	[DW-1:0]	PWDATA,
+		input	wire	[DW/8-1:0]	PWSTRB,
+		input	wire	[2:0]		PPROT,
+		output	reg	[DW-1:0]	PRDATA,
+		output	wire			PSLVERR
+	);
+
+	// Internal signals
+	reg [1:0] state;
+	reg [1:0] next_state;
+	reg [DW-1:0] local_PRDATA;
+	reg local_PSLVERR;
+
+	// States
+	localparam IDLE = 2'b00;
+	localparam SETUP = 2'b01;
+	localparam ACCESS = 2'b10;
+
+	// State machine
+	always @(posedge PCLK or negedge PRESETn) begin
+		if (!PRESETn) begin
+			state <= IDLE;
+			PREADY <= 0;
+			PRDATA <= 0;
+			local_PSLVERR <= 0;
+		end else begin
+			state <= next_state;
+			if (state == ACCESS) begin
+				PREADY <= 1;
+			end else begin
+				PREADY <= 0;
+			end
+			if (state == ACCESS && !PWRITE) begin
+				PRDATA <= local_PRDATA;
+			end
+			local_PSLVERR <= 0; // Keep PSLVERR low for in-range accesses
+		end
+	end
+
+	// Next state logic
+	always @(*) begin
+		next_state = state;
+		case (state)
+			IDLE: begin
+				if (PSEL && PENABLE) begin
+					next_state = ACCESS;
+				end else if (PSEL && !PENABLE) begin
+					next_state = SETUP;
+				end
+			end
+			SETUP: begin
+				if (PSEL && PENABLE) begin
+					next_state = ACCESS;
+				end
+			end
+			ACCESS: begin
+				next_state = IDLE;
+			end
+		endcase
+	end
+
+	// Memory model (simple array for demonstration)
+	reg [DW-1:0] mem [(1<<AW)-1:0];
+
+	// Memory read/write logic
+	always @(posedge PCLK) begin
+		if (state == ACCESS) begin
+			if (PWRITE) begin
+				for (integer i = 0; i < DW/8; i = i + 1) begin
+					if (PWSTRB[i]) begin
+						mem[PADDR][i*8 +: 8] <= PWDATA[i*8 +: 8];
+					end
+				end
+			end else begin
+				local_PRDATA <= mem[PADDR];
+			end
+		end
+	end
+
+	// PSLVERR output
+	assign PSLVERR = local_PSLVERR;
+
+endmodule
+```

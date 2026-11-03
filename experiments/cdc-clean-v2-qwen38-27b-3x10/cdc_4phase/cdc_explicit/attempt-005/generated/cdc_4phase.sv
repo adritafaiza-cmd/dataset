@@ -1,0 +1,213 @@
+module cdc_4phase #(
+  parameter WIDTH = 1,
+  parameter DECOUPLED = 1,
+  parameter SEND_RESET_MSG = 0,
+  parameter [WIDTH-1:0] RESET_MSG = {WIDTH{1'b0}}
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Source domain state
+  reg [WIDTH-1:0] src_payload_reg;
+  reg             src_valid_reg;
+  reg             src_req_reg;
+  reg             src_ack_sync1;
+  reg             src_ack_sync2;
+  reg             src_ack_sync3;
+  reg             src_ack_sync4;
+  reg             src_ack_stable;
+  reg             src_busy;
+
+  // Destination domain state
+  reg [WIDTH-1:0] dst_payload_reg;
+  reg             dst_valid_reg;
+  reg             dst_req_sync1;
+  reg             dst_req_sync2;
+  reg             dst_req_sync3;
+  reg             dst_req_sync4;
+  reg             dst_req_stable;
+  reg             dst_ack_reg;
+  reg             dst_ack_sync1;
+  reg             dst_ack_sync2;
+  reg             dst_ack_sync3;
+  reg             dst_ack_sync4;
+  reg             dst_ack_stable;
+  reg             dst_busy;
+
+  // Source domain: synchronize destination ack back to source
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_ack_sync1 <= 1'b0;
+      src_ack_sync2 <= 1'b0;
+      src_ack_sync3 <= 1'b0;
+      src_ack_sync4 <= 1'b0;
+      src_ack_stable <= 1'b0;
+    end else begin
+      src_ack_sync1 <= dst_ack_reg;
+      src_ack_sync2 <= src_ack_sync1;
+      src_ack_sync3 <= src_ack_sync2;
+      src_ack_sync4 <= src_ack_sync3;
+      src_ack_stable <= src_ack_sync4;
+    end
+  end
+
+  // Source domain: main state machine
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_payload_reg <= {WIDTH{1'b0}};
+      src_valid_reg   <= 1'b0;
+      src_req_reg     <= 1'b0;
+      src_busy        <= 1'b0;
+    end else begin
+      if (src_busy) begin
+        // Wait for ack to return
+        if (src_ack_stable) begin
+          src_req_reg <= 1'b0;
+          src_busy    <= 1'b0;
+          src_valid_reg <= 1'b0;
+        end
+      end else begin
+        // Not busy, can accept new data
+        if (src_valid_i) begin
+          src_payload_reg <= src_data_i;
+          src_valid_reg   <= 1'b1;
+          src_req_reg     <= 1'b1;
+          src_busy        <= 1'b1;
+        end
+      end
+    end
+  end
+
+  // Source ready: can accept when not busy
+  assign src_ready_o = !src_busy;
+
+  // Destination domain: synchronize source request
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req_sync1  <= 1'b0;
+      dst_req_sync2  <= 1'b0;
+      dst_req_sync3  <= 1'b0;
+      dst_req_sync4  <= 1'b0;
+      dst_req_stable <= 1'b0;
+    end else begin
+      dst_req_sync1  <= src_req_reg;
+      dst_req_sync2  <= dst_req_sync1;
+      dst_req_sync3  <= dst_req_sync2;
+      dst_req_sync4  <= dst_req_sync3;
+      dst_req_stable <= dst_req_sync4;
+    end
+  end
+
+  // Destination domain: synchronize payload (multi-bit, use 2-stage sync per bit)
+  // We need to capture the payload when request becomes stable.
+  // Use a handshake: when dst_req_stable rises, capture payload.
+  // But payload is in source domain. We need to synchronize it.
+  // Strategy: when src_req_reg is high, src_payload_reg is stable.
+  // We synchronize the payload bits through 2 FFs each, but we need to know when they're valid.
+  // Better approach: use a "payload valid" flag synchronized along with the request.
+  // Actually, the standard 4-phase handshake with payload:
+  // - Source holds payload stable while req is high.
+  // - Destination synchronizes req, and when req is stable high, it can safely read payload
+  //   if payload has been synchronized. But multi-bit payload needs synchronization.
+  // 
+  // Revised approach per the contract: "Synchronize the held payload through at least two 
+  // destination-clock stages and delay its control indication sufficiently for the payload 
+  // to settle before capture or acceptance."
+  //
+  // So: synchronize each bit of payload through 2 FFs. Then use a delayed version of the 
+  // request signal (delayed by enough cycles for payload to settle) to gate the capture.
+  //
+  // Let's synchronize payload bits:
+  reg [WIDTH-1:0] dst_payload_sync1;
+  reg [WIDTH-1:0] dst_payload_sync2;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_payload_sync1 <= {WIDTH{1'b0}};
+      dst_payload_sync2 <= {WIDTH{1'b0}};
+    end else begin
+      dst_payload_sync1 <= src_payload_reg;
+      dst_payload_sync2 <= dst_payload_sync1;
+    end
+  end
+
+  // Delay the request indication by enough cycles for payload to settle.
+  // dst_req_stable is already 4 stages. Payload sync is 2 stages.
+  // We need to ensure that when we use dst_req_stable to capture, the payload has settled.
+  // Since dst_req_stable is 4 stages and payload sync is 2 stages, and the payload is held
+  // stable while req is high, by the time dst_req_stable is high, the payload sync should
+  // have settled. But to be safe, let's add a few more delay stages to the request.
+  
+  reg [3:0] dst_req_delayed;
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req_delayed <= 4'b0000;
+    end else begin
+      dst_req_delayed <= {dst_req_delayed[2:0], dst_req_stable};
+    end
+  end
+
+  // Use dst_req_delayed[3] as the "safe to capture" signal
+  wire dst_capture_en = dst_req_delayed[3];
+
+  // Destination domain: main state machine
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_payload_reg <= {WIDTH{1'b0}};
+      dst_valid_reg   <= 1'b0;
+      dst_ack_reg     <= 1'b0;
+      dst_busy        <= 1'b0;
+    end else begin
+      if (dst_busy) begin
+        // Wait for dst_ready to accept the data
+        if (dst_ready_i) begin
+          dst_valid_reg <= 1'b0;
+          dst_ack_reg   <= 1'b1;
+          dst_busy      <= 1'b0;
+        end
+      end else begin
+        // Not busy, check if new request arrived
+        if (dst_capture_en) begin
+          dst_payload_reg <= dst_payload_sync2;
+          dst_valid_reg   <= 1'b1;
+          dst_busy        <= 1'b1;
+        end
+      end
+    end
+  end
+
+  // Destination outputs
+  assign dst_data_o  = dst_payload_reg;
+  assign dst_valid_o = dst_valid_reg;
+
+  // Destination domain: synchronize ack back to source
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_ack_sync1  <= 1'b0;
+      dst_ack_sync2  <= 1'b0;
+      dst_ack_sync3  <= 1'b0;
+      dst_ack_sync4  <= 1'b0;
+      dst_ack_stable <= 1'b0;
+    end else begin
+      dst_ack_sync1  <= dst_ack_reg;
+      dst_ack_sync2  <= dst_ack_sync1;
+      dst_ack_sync3  <= dst_ack_sync2;
+      dst_ack_sync4  <= dst_ack_sync3;
+      dst_ack_stable <= dst_ack_sync4;
+    end
+  end
+
+  // Note: dst_ack_stable is not used in this implementation since we use dst_ack_reg directly
+  // for the source-side synchronization. The dst_ack_sync* registers are kept for completeness
+  // but the actual ack signal sent to source is dst_ack_reg.
+
+endmodule

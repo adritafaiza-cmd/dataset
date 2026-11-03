@@ -1,0 +1,509 @@
+module axis_async_fifo_adapter #
+(
+    parameter DEPTH = 4096,
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    /*
+     * AXI input
+     */
+    input  wire                     s_clk,
+    input  wire                     s_rst,
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    /*
+     * AXI output
+     */
+    input  wire                     m_clk,
+    input  wire                     m_rst,
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                     s_pause_req,
+    output wire                     s_pause_ack,
+    input  wire                     m_pause_req,
+    output wire                     m_pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0]   s_status_depth,
+    output wire [$clog2(DEPTH):0]   s_status_depth_commit,
+    output wire                     s_status_overflow,
+    output wire                     s_status_bad_frame,
+    output wire                     s_status_good_frame,
+    output wire [$clog2(DEPTH):0]   m_status_depth,
+    output wire [$clog2(DEPTH):0]   m_status_depth_commit,
+    output wire                     m_status_overflow,
+    output wire                     m_status_bad_frame,
+    output wire                     m_status_good_frame
+);
+
+    // Internal signals
+    reg [S_DATA_WIDTH-1:0]          adapter_s_axis_tdata;
+    reg [S_KEEP_WIDTH-1:0]          adapter_s_axis_tkeep;
+    reg                             adapter_s_axis_tvalid;
+    wire                            adapter_s_axis_tready;
+    reg                             adapter_s_axis_tlast;
+    reg [ID_WIDTH-1:0]              adapter_s_axis_tid;
+    reg [DEST_WIDTH-1:0]            adapter_s_axis_tdest;
+    reg [USER_WIDTH-1:0]            adapter_s_axis_tuser;
+
+    reg [M_DATA_WIDTH-1:0]          fifo_m_axis_tdata;
+    reg [M_KEEP_WIDTH-1:0]          fifo_m_axis_tkeep;
+    reg                             fifo_m_axis_tvalid;
+    wire                            fifo_m_axis_tready;
+    reg                             fifo_m_axis_tlast;
+    reg [ID_WIDTH-1:0]              fifo_m_axis_tid;
+    reg [DEST_WIDTH-1:0]            fifo_m_axis_tdest;
+    reg [USER_WIDTH-1:0]            fifo_m_axis_tuser;
+
+    // Instantiate width_adapter
+    width_adapter #(
+        .S_DATA_WIDTH(S_DATA_WIDTH),
+        .S_KEEP_ENABLE(S_KEEP_ENABLE),
+        .S_KEEP_WIDTH(S_KEEP_WIDTH),
+        .M_DATA_WIDTH(M_DATA_WIDTH),
+        .M_KEEP_ENABLE(M_KEEP_ENABLE),
+        .M_KEEP_WIDTH(M_KEEP_WIDTH),
+        .ID_ENABLE(ID_ENABLE),
+        .ID_WIDTH(ID_WIDTH),
+        .DEST_ENABLE(DEST_ENABLE),
+        .DEST_WIDTH(DEST_WIDTH),
+        .USER_ENABLE(USER_ENABLE),
+        .USER_WIDTH(USER_WIDTH)
+    ) adapter (
+        .s_clk(s_clk),
+        .s_rst(s_rst),
+        .s_axis_tdata(s_axis_tdata),
+        .s_axis_tkeep(s_axis_tkeep),
+        .s_axis_tvalid(s_axis_tvalid),
+        .s_axis_tready(adapter_s_axis_tready),
+        .s_axis_tlast(s_axis_tlast),
+        .s_axis_tid(s_axis_tid),
+        .s_axis_tdest(s_axis_tdest),
+        .s_axis_tuser(s_axis_tuser),
+        .m_axis_tdata(adapter_s_axis_tdata),
+        .m_axis_tkeep(adapter_s_axis_tkeep),
+        .m_axis_tvalid(adapter_s_axis_tvalid),
+        .m_axis_tready(fifo_s_axis_tready),
+        .m_axis_tlast(adapter_s_axis_tlast),
+        .m_axis_tid(adapter_s_axis_tid),
+        .m_axis_tdest(adapter_s_axis_tdest),
+        .m_axis_tuser(adapter_s_axis_tuser)
+    );
+
+    // Instantiate async_fifo
+    async_fifo #(
+        .DEPTH(DEPTH),
+        .DATA_WIDTH(M_DATA_WIDTH),
+        .KEEP_ENABLE(M_KEEP_ENABLE),
+        .KEEP_WIDTH(M_KEEP_WIDTH),
+        .ID_ENABLE(ID_ENABLE),
+        .ID_WIDTH(ID_WIDTH),
+        .DEST_ENABLE(DEST_ENABLE),
+        .DEST_WIDTH(DEST_WIDTH),
+        .USER_ENABLE(USER_ENABLE),
+        .USER_WIDTH(USER_WIDTH),
+        .RAM_PIPELINE(RAM_PIPELINE),
+        .OUTPUT_FIFO_ENABLE(OUTPUT_FIFO_ENABLE),
+        .FRAME_FIFO(FRAME_FIFO),
+        .USER_BAD_FRAME_VALUE(USER_BAD_FRAME_VALUE),
+        .USER_BAD_FRAME_MASK(USER_BAD_FRAME_MASK),
+        .DROP_OVERSIZE_FRAME(DROP_OVERSIZE_FRAME),
+        .DROP_BAD_FRAME(DROP_BAD_FRAME),
+        .DROP_WHEN_FULL(DROP_WHEN_FULL),
+        .MARK_WHEN_FULL(MARK_WHEN_FULL),
+        .PAUSE_ENABLE(PAUSE_ENABLE),
+        .FRAME_PAUSE(FRAME_PAUSE)
+    ) fifo (
+        .s_clk(s_clk),
+        .s_rst(s_rst),
+        .s_axis_tdata(adapter_s_axis_tdata),
+        .s_axis_tkeep(adapter_s_axis_tkeep),
+        .s_axis_tvalid(adapter_s_axis_tvalid),
+        .s_axis_tready(fifo_s_axis_tready),
+        .s_axis_tlast(adapter_s_axis_tlast),
+        .s_axis_tid(adapter_s_axis_tid),
+        .s_axis_tdest(adapter_s_axis_tdest),
+        .s_axis_tuser(adapter_s_axis_tuser),
+        .m_clk(m_clk),
+        .m_rst(m_rst),
+        .m_axis_tdata(fifo_m_axis_tdata),
+        .m_axis_tkeep(fifo_m_axis_tkeep),
+        .m_axis_tvalid(fifo_m_axis_tvalid),
+        .m_axis_tready(fifo_m_axis_tready),
+        .m_axis_tlast(fifo_m_axis_tlast),
+        .m_axis_tid(fifo_m_axis_tid),
+        .m_axis_tdest(fifo_m_axis_tdest),
+        .m_axis_tuser(fifo_m_axis_tuser),
+        .s_pause_req(s_pause_req),
+        .s_pause_ack(s_pause_ack),
+        .m_pause_req(m_pause_req),
+        .m_pause_ack(m_pause_ack),
+        .s_status_depth(s_status_depth),
+        .s_status_depth_commit(s_status_depth_commit),
+        .s_status_overflow(s_status_overflow),
+        .s_status_bad_frame(s_status_bad_frame),
+        .s_status_good_frame(s_status_good_frame),
+        .m_status_depth(m_status_depth),
+        .m_status_depth_commit(m_status_depth_commit),
+        .m_status_overflow(m_status_overflow),
+        .m_status_bad_frame(m_status_bad_frame),
+        .m_status_good_frame(m_status_good_frame)
+    );
+
+    // Assign outputs from FIFO to master interface
+    assign m_axis_tdata = fifo_m_axis_tdata;
+    assign m_axis_tkeep = fifo_m_axis_tkeep;
+    assign m_axis_tvalid = fifo_m_axis_tvalid;
+    assign fifo_m_axis_tready = m_axis_tready;
+    assign m_axis_tlast = fifo_m_axis_tlast;
+    assign m_axis_tid = fifo_m_axis_tid;
+    assign m_axis_tdest = fifo_m_axis_tdest;
+    assign m_axis_tuser = fifo_m_axis_tuser;
+
+    // Assign ready signal from adapter to slave interface
+    assign s_axis_tready = adapter_s_axis_tready;
+
+endmodule
+
+// Width adapter module
+module width_adapter #
+(
+    parameter S_DATA_WIDTH = 8,
+    parameter S_KEEP_ENABLE = (S_DATA_WIDTH>8),
+    parameter S_KEEP_WIDTH = ((S_DATA_WIDTH+7)/8),
+    parameter M_DATA_WIDTH = 8,
+    parameter M_KEEP_ENABLE = (M_DATA_WIDTH>8),
+    parameter M_KEEP_WIDTH = ((M_DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1
+)
+(
+    input  wire                     s_clk,
+    input  wire                     s_rst,
+    input  wire [S_DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [S_KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    output wire [M_DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [M_KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser
+);
+
+    // Internal signals
+    reg [S_DATA_WIDTH-1:0]          s_axis_tdata_reg;
+    reg [S_KEEP_WIDTH-1:0]          s_axis_tkeep_reg;
+    reg                             s_axis_tvalid_reg;
+    reg                             s_axis_tlast_reg;
+    reg [ID_WIDTH-1:0]              s_axis_tid_reg;
+    reg [DEST_WIDTH-1:0]            s_axis_tdest_reg;
+    reg [USER_WIDTH-1:0]            s_axis_tuser_reg;
+
+    reg [M_DATA_WIDTH-1:0]          m_axis_tdata_reg;
+    reg [M_KEEP_WIDTH-1:0]          m_axis_tkeep_reg;
+    reg                             m_axis_tvalid_reg;
+    reg                             m_axis_tlast_reg;
+    reg [ID_WIDTH-1:0]              m_axis_tid_reg;
+    reg [DEST_WIDTH-1:0]            m_axis_tdest_reg;
+    reg [USER_WIDTH-1:0]            m_axis_tuser_reg;
+
+    // FIFO control
+    reg [2:0]                       fifo_wr_ptr;
+    reg [2:0]                       fifo_rd_ptr;
+    reg [S_DATA_WIDTH-1:0]          fifo_data [0:7];
+    reg [S_KEEP_WIDTH-1:0]          fifo_keep [0:7];
+    reg                             fifo_last [0:7];
+    reg [ID_WIDTH-1:0]              fifo_tid [0:7];
+    reg [DEST_WIDTH-1:0]            fifo_tdest [0:7];
+    reg [USER_WIDTH-1:0]            fifo_tuser [0:7];
+    reg                             fifo_full;
+    reg                             fifo_empty;
+
+    // FIFO operations
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            fifo_wr_ptr <= 3'b000;
+            fifo_rd_ptr <= 3'b000;
+            fifo_full <= 1'b0;
+            fifo_empty <= 1'b1;
+        end else begin
+            if (s_axis_tvalid && s_axis_tready) begin
+                fifo_data[fifo_wr_ptr] <= s_axis_tdata;
+                fifo_keep[fifo_wr_ptr] <= s_axis_tkeep;
+                fifo_last[fifo_wr_ptr] <= s_axis_tlast;
+                fifo_tid[fifo_wr_ptr] <= s_axis_tid;
+                fifo_tdest[fifo_wr_ptr] <= s_axis_tdest;
+                fifo_tuser[fifo_wr_ptr] <= s_axis_tuser;
+                fifo_wr_ptr <= fifo_wr_ptr + 1;
+                fifo_empty <= 1'b0;
+                if (fifo_wr_ptr == fifo_rd_ptr - 1)
+                    fifo_full <= 1'b1;
+            end
+            if (m_axis_tvalid && m_axis_tready) begin
+                fifo_rd_ptr <= fifo_rd_ptr + 1;
+                fifo_full <= 1'b0;
+                if (fifo_wr_ptr == fifo_rd_ptr)
+                    fifo_empty <= 1'b1;
+            end
+        end
+    end
+
+    // FIFO read operation
+    always @(*) begin
+        m_axis_tdata_reg = fifo_data[fifo_rd_ptr];
+        m_axis_tkeep_reg = fifo_keep[fifo_rd_ptr];
+        m_axis_tlast_reg = fifo_last[fifo_rd_ptr];
+        m_axis_tid_reg = fifo_tid[fifo_rd_ptr];
+        m_axis_tdest_reg = fifo_tdest[fifo_rd_ptr];
+        m_axis_tuser_reg = fifo_tuser[fifo_rd_ptr];
+    end
+
+    // Width conversion (assuming S_DATA_WIDTH <= M_DATA_WIDTH)
+    assign m_axis_tdata = m_axis_tdata_reg;
+    assign m_axis_tkeep = m_axis_tkeep_reg;
+    assign m_axis_tlast = m_axis_tlast_reg;
+    assign m_axis_tid = m_axis_tid_reg;
+    assign m_axis_tdest = m_axis_tdest_reg;
+    assign m_axis_tuser = m_axis_tuser_reg;
+
+    // Control signals
+    assign s_axis_tready = ~fifo_full;
+    assign m_axis_tvalid = ~fifo_empty;
+
+endmodule
+
+// Asynchronous FIFO module
+module async_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    input  wire                     s_clk,
+    input  wire                     s_rst,
+    input  wire [DATA_WIDTH-1:0]    s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]    s_axis_tkeep,
+    input  wire                     s_axis_tvalid,
+    output wire                     s_axis_tready,
+    input  wire                     s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]      s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]    s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]    s_axis_tuser,
+    input  wire                     m_clk,
+    input  wire                     m_rst,
+    output wire [DATA_WIDTH-1:0]    m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]    m_axis_tkeep,
+    output wire                     m_axis_tvalid,
+    input  wire                     m_axis_tready,
+    output wire                     m_axis_tlast,
+    output wire [ID_WIDTH-1:0]      m_axis_tid,
+    output wire [DEST_WIDTH-1:0]    m_axis_tdest,
+    output wire [USER_WIDTH-1:0]    m_axis_tuser,
+    input  wire                     s_pause_req,
+    output wire                     s_pause_ack,
+    input  wire                     m_pause_req,
+    output wire                     m_pause_ack,
+    output wire [$clog2(DEPTH):0]   s_status_depth,
+    output wire [$clog2(DEPTH):0]   s_status_depth_commit,
+    output wire                     s_status_overflow,
+    output wire                     s_status_bad_frame,
+    output wire                     s_status_good_frame,
+    output wire [$clog2(DEPTH):0]   m_status_depth,
+    output wire [$clog2(DEPTH):0]   m_status_depth_commit,
+    output wire                     m_status_overflow,
+    output wire                     m_status_bad_frame,
+    output wire                     m_status_good_frame
+);
+
+    // Internal signals
+    reg [$clog2(DEPTH):0]           s_wr_ptr;
+    reg [$clog2(DEPTH):0]           s_wr_ptr_gray;
+    reg [$clog2(DEPTH):0]           s_wr_ptr_gray_sync;
+    reg [$clog2(DEPTH):0]           m_rd_ptr;
+    reg [$clog2(DEPTH):0]           m_rd_ptr_gray;
+    reg [$clog2(DEPTH):0]           m_rd_ptr_gray_sync;
+    reg [DATA_WIDTH-1:0]            fifo_data [0:DEPTH-1];
+    reg [KEEP_WIDTH-1:0]            fifo_keep [0:DEPTH-1];
+    reg                             fifo_last [0:DEPTH-1];
+    reg [ID_WIDTH-1:0]              fifo_tid [0:DEPTH-1];
+    reg [DEST_WIDTH-1:0]            fifo_tdest [0:DEPTH-1];
+    reg [USER_WIDTH-1:0]            fifo_tuser [0:DEPTH-1];
+    reg                             fifo_full;
+    reg                             fifo_empty;
+    reg [$clog2(DEPTH):0]           s_depth;
+    reg [$clog2(DEPTH):0]           s_depth_commit;
+    reg                             s_overflow;
+    reg                             s_bad_frame;
+    reg                             s_good_frame;
+
+    // Binary to Gray conversion
+    function [$clog2(DEPTH):0] bin2gray;
+        input [$clog2(DEPTH):0] bin;
+        bin2gray = (bin >> 1) ^ bin;
+    endfunction
+
+    // Gray to Binary conversion
+    function [$clog2(DEPTH):0] gray2bin;
+        input [$clog2(DEPTH):0] gray;
+        integer i;
+        reg [$clog2(DEPTH):0] bin;
+        bin = gray;
+        for (i = 1; i <= $clog2(DEPTH); i = i << 1)
+            bin = bin ^ (bin >> i);
+        gray2bin = bin;
+    endfunction
+
+    // Write pointer logic
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_wr_ptr <= 0;
+            s_wr_ptr_gray <= 0;
+        end else begin
+            if (s_axis_tvalid && s_axis_tready) begin
+                fifo_data[s_wr_ptr] <= s_axis_tdata;
+                fifo_keep[s_wr_ptr] <= s_axis_tkeep;
+                fifo_last[s_wr_ptr] <= s_axis_tlast;
+                fifo_tid[s_wr_ptr] <= s_axis_tid;
+                fifo_tdest[s_wr_ptr] <= s_axis_tdest;
+                fifo_tuser[s_wr_ptr] <= s_axis_tuser;
+                s_wr_ptr <= s_wr_ptr + 1;
+                s_wr_ptr_gray <= bin2gray(s_wr_ptr + 1);
+            end
+        end
+    end
+
+    // Read pointer logic
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rd_ptr <= 0;
+            m_rd_ptr_gray <= 0;
+        end else begin
+            if (m_axis_tvalid && m_axis_tready) begin
+                m_rd_ptr <= m_rd_ptr + 1;
+                m_rd_ptr_gray <= bin2gray(m_rd_ptr + 1);
+            end
+        end
+    end
+
+    // Gray synchronization
+    always @(posedge s_clk or posedge s_rst) begin
+        if (s_rst) begin
+            s_wr_ptr_gray_sync <= 0;
+        end else begin
+            s_wr_ptr_gray_sync <= m_rd_ptr_gray;
+        end
+    end
+
+    always @(posedge m_clk or posedge m_rst) begin
+        if (m_rst) begin
+            m_rd_ptr_gray_sync <= 0;
+        end else begin
+            m_rd_ptr_gray_sync <= s_wr_ptr_gray;
+        end
+    end
+
+    // FIFO status
+    assign s_depth = gray2bin(s_wr_ptr_gray) - gray2bin(m_rd_ptr_gray_sync);
+    assign s_depth_commit = gray2bin(s_wr_ptr_gray_sync) - gray2bin(m_rd_ptr_gray);
+    assign fifo_full = (s_depth == DEPTH);
+    assign fifo_empty = (s_depth == 0);
+    assign s_status_depth = s_depth;
+    assign s_status_depth_commit = s_depth_commit;
+    assign s_status_overflow = fifo_full;
+    assign s_status_bad_frame = 0;
+    assign s_status_good_frame = 0;
+
+    assign m_depth = gray2bin(s_wr_ptr_gray_sync) - gray2bin(m_rd_ptr_gray);
+    assign m_depth_commit = gray2bin(s_wr_ptr_gray) - gray2bin(m_rd_ptr_gray_sync);
+    assign m_status_depth = m_depth;
+    assign m_status_depth_commit = m_depth_commit;
+    assign m_status_overflow = 0;
+    assign m_status_bad_frame = 0;
+    assign m_status_good_frame = 0;
+
+    // Control signals
+    assign s_axis_tready = ~fifo_full;
+    assign m_axis_tvalid = ~fifo_empty;
+
+    // Data output
+    assign m_axis_tdata = fifo_data[m_rd_ptr];
+    assign m_axis_tkeep = fifo_keep[m_rd_ptr];
+    assign m_axis_tlast = fifo_last[m_rd_ptr];
+    assign m_axis_tid = fifo_tid[m_rd_ptr];
+    assign m_axis_tdest = fifo_tdest[m_rd_ptr];
+    assign m_axis_tuser = fifo_tuser[m_rd_ptr];
+
+    // Pause signals
+    assign s_pause_ack = 0;
+    assign m_pause_ack = 0;
+
+endmodule

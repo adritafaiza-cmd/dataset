@@ -1,0 +1,811 @@
+module axixclk #(
+    parameter integer C_S_AXI_ID_WIDTH   = 2,
+    parameter integer C_S_AXI_DATA_WIDTH = 32,
+    parameter integer C_S_AXI_ADDR_WIDTH = 6,
+    parameter [0:0] OPT_WRITE_ONLY      = 1'b0,
+    parameter [0:0] OPT_READ_ONLY       = 1'b0,
+    parameter       XCLOCK_FFS          = 2,
+    parameter       LGFIFO              = 5
+) (
+    input  wire                               S_AXI_ACLK,
+    input  wire                               S_AXI_ARESETN,
+    input  wire [C_S_AXI_ID_WIDTH-1 : 0]    S_AXI_AWID,
+    input  wire [C_S_AXI_ADDR_WIDTH-1 : 0]  S_AXI_AWADDR,
+    input  wire [7 : 0]                       S_AXI_AWLEN,
+    input  wire [2 : 0]                       S_AXI_AWSIZE,
+    input  wire [1 : 0]                       S_AXI_AWBURST,
+    input  wire                               S_AXI_AWLOCK,
+    input  wire [3 : 0]                       S_AXI_AWCACHE,
+    input  wire [2 : 0]                       S_AXI_AWPROT,
+    input  wire [3 : 0]                       S_AXI_AWQOS,
+    input  wire                               S_AXI_AWVALID,
+    output wire                               S_AXI_AWREADY,
+    input  wire [C_S_AXI_DATA_WIDTH-1 : 0]  S_AXI_WDATA,
+    input  wire [(C_S_AXI_DATA_WIDTH/8)-1 : 0] S_AXI_WSTRB,
+    input  wire                               S_AXI_WLAST,
+    input  wire                               S_AXI_WVALID,
+    output wire                               S_AXI_WREADY,
+    output wire [C_S_AXI_ID_WIDTH-1 : 0]    S_AXI_BID,
+    output wire [1 : 0]                       S_AXI_BRESP,
+    output wire                               S_AXI_BVALID,
+    input  wire                               S_AXI_BREADY,
+    input  wire [C_S_AXI_ID_WIDTH-1 : 0]    S_AXI_ARID,
+    input  wire [C_S_AXI_ADDR_WIDTH-1 : 0]  S_AXI_ARADDR,
+    input  wire [7 : 0]                       S_AXI_ARLEN,
+    input  wire [2 : 0]                       S_AXI_ARSIZE,
+    input  wire [1 : 0]                       S_AXI_ARBURST,
+    input  wire                               S_AXI_ARLOCK,
+    input  wire [3 : 0]                       S_AXI_ARCACHE,
+    input  wire [2 : 0]                       S_AXI_ARPROT,
+    input  wire [3 : 0]                       S_AXI_ARQOS,
+    input  wire                               S_AXI_ARVALID,
+    output wire                               S_AXI_ARREADY,
+    output wire [C_S_AXI_ID_WIDTH-1 : 0]    S_AXI_RID,
+    output wire [C_S_AXI_DATA_WIDTH-1 : 0]  S_AXI_RDATA,
+    output wire [1 : 0]                       S_AXI_RRESP,
+    output wire                               S_AXI_RLAST,
+    output wire                               S_AXI_RVALID,
+    input  wire                               S_AXI_RREADY,
+    input  wire                               M_AXI_ACLK,
+    output wire                               M_AXI_ARESETN,
+    output wire [C_S_AXI_ID_WIDTH-1 : 0]    M_AXI_AWID,
+    output wire [C_S_AXI_ADDR_WIDTH-1 : 0]  M_AXI_AWADDR,
+    output wire [7 : 0]                       M_AXI_AWLEN,
+    output wire [2 : 0]                       M_AXI_AWSIZE,
+    output wire [1 : 0]                       M_AXI_AWBURST,
+    output wire                               M_AXI_AWLOCK,
+    output wire [3 : 0]                       M_AXI_AWCACHE,
+    output wire [2 : 0]                       M_AXI_AWPROT,
+    output wire [3 : 0]                       M_AXI_AWQOS,
+    output wire                               M_AXI_AWVALID,
+    input  wire                               M_AXI_AWREADY,
+    output wire [C_S_AXI_DATA_WIDTH-1 : 0]  M_AXI_WDATA,
+    output wire [(C_S_AXI_DATA_WIDTH/8)-1 : 0] M_AXI_WSTRB,
+    output wire                               M_AXI_WLAST,
+    output wire                               M_AXI_WVALID,
+    input  wire                               M_AXI_WREADY,
+    input  wire [C_S_AXI_ID_WIDTH-1 : 0]    M_AXI_BID,
+    input  wire [1 : 0]                       M_AXI_BRESP,
+    input  wire                               M_AXI_BVALID,
+    output wire                               M_AXI_BREADY,
+    output wire [C_S_AXI_ID_WIDTH-1 : 0]    M_AXI_ARID,
+    output wire [C_S_AXI_ADDR_WIDTH-1 : 0]  M_AXI_ARADDR,
+    output wire [7 : 0]                       M_AXI_ARLEN,
+    output wire [2 : 0]                       M_AXI_ARSIZE,
+    output wire [1 : 0]                       M_AXI_ARBURST,
+    output wire                               M_AXI_ARLOCK,
+    output wire [3 : 0]                       M_AXI_ARCACHE,
+    output wire [2 : 0]                       M_AXI_ARPROT,
+    output wire [3 : 0]                       M_AXI_ARQOS,
+    output wire                               M_AXI_ARVALID,
+    input  wire                               M_AXI_ARREADY,
+    input  wire [C_S_AXI_ID_WIDTH-1 : 0]    M_AXI_RID,
+    input  wire [C_S_AXI_DATA_WIDTH-1 : 0]  M_AXI_RDATA,
+    input  wire [1 : 0]                       M_AXI_RRESP,
+    input  wire                               M_AXI_RLAST,
+    input  wire                               M_AXI_RVALID,
+    output wire                               M_AXI_RREADY
+);
+
+    // Internal signals for write address channel
+    reg [C_S_AXI_ID_WIDTH-1 : 0]    s_awid_reg;
+    reg [C_S_AXI_ADDR_WIDTH-1 : 0]  s_awaddr_reg;
+    reg [7 : 0]                       s_awlen_reg;
+    reg [2 : 0]                       s_awsize_reg;
+    reg [1 : 0]                       s_awburst_reg;
+    reg                               s_awlock_reg;
+    reg [3 : 0]                       s_awcache_reg;
+    reg [2 : 0]                       s_awprot_reg;
+    reg [3 : 0]                       s_awqos_reg;
+    reg                               s_awvalid_reg;
+    reg                               s_awready_reg;
+
+    // Internal signals for write data channel
+    reg [C_S_AXI_DATA_WIDTH-1 : 0]  s_wdata_reg;
+    reg [(C_S_AXI_DATA_WIDTH/8)-1 : 0] s_wstrb_reg;
+    reg                               s_wlast_reg;
+    reg                               s_wvalid_reg;
+    reg                               s_wready_reg;
+
+    // Internal signals for write response channel
+    reg [C_S_AXI_ID_WIDTH-1 : 0]    s_bid_reg;
+    reg [1 : 0]                       s_bresp_reg;
+    reg                               s_bvalid_reg;
+    reg                               s_bready_reg;
+
+    // Internal signals for read address channel
+    reg [C_S_AXI_ID_WIDTH-1 : 0]    s_arid_reg;
+    reg [C_S_AXI_ADDR_WIDTH-1 : 0]  s_araddr_reg;
+    reg [7 : 0]                       s_arlen_reg;
+    reg [2 : 0]                       s_arsize_reg;
+    reg [1 : 0]                       s_arburst_reg;
+    reg                               s_arlock_reg;
+    reg [3 : 0]                       s_arcache_reg;
+    reg [2 : 0]                       s_arprot_reg;
+    reg [3 : 0]                       s_arqos_reg;
+    reg                               s_arvalid_reg;
+    reg                               s_arready_reg;
+
+    // Internal signals for read data channel
+    reg [C_S_AXI_ID_WIDTH-1 : 0]    s_rid_reg;
+    reg [C_S_AXI_DATA_WIDTH-1 : 0]  s_rdata_reg;
+    reg [1 : 0]                       s_rresp_reg;
+    reg                               s_rlast_reg;
+    reg                               s_rvalid_reg;
+    reg                               s_rready_reg;
+
+    // FIFOs for write address channel
+    wire [C_S_AXI_ID_WIDTH-1 : 0]    m_awid_fifo_out;
+    wire [C_S_AXI_ADDR_WIDTH-1 : 0]  m_awaddr_fifo_out;
+    wire [7 : 0]                       m_awlen_fifo_out;
+    wire [2 : 0]                       m_awsize_fifo_out;
+    wire [1 : 0]                       m_awburst_fifo_out;
+    wire                               m_awlock_fifo_out;
+    wire [3 : 0]                       m_awcache_fifo_out;
+    wire [2 : 0]                       m_awprot_fifo_out;
+    wire [3 : 0]                       m_awqos_fifo_out;
+    wire                               m_awvalid_fifo_out;
+    wire                               m_awready_fifo_in;
+
+    // FIFOs for write data channel
+    wire [C_S_AXI_DATA_WIDTH-1 : 0]  m_wdata_fifo_out;
+    wire [(C_S_AXI_DATA_WIDTH/8)-1 : 0] m_wstrb_fifo_out;
+    wire                               m_wlast_fifo_out;
+    wire                               m_wvalid_fifo_out;
+    wire                               m_wready_fifo_in;
+
+    // FIFOs for write response channel
+    wire [C_S_AXI_ID_WIDTH-1 : 0]    s_bid_fifo_out;
+    wire [1 : 0]                       s_bresp_fifo_out;
+    wire                               s_bvalid_fifo_out;
+    wire                               s_bready_fifo_in;
+
+    // FIFOs for read address channel
+    wire [C_S_AXI_ID_WIDTH-1 : 0]    m_arid_fifo_out;
+    wire [C_S_AXI_ADDR_WIDTH-1 : 0]  m_araddr_fifo_out;
+    wire [7 : 0]                       m_arlen_fifo_out;
+    wire [2 : 0]                       m_arsize_fifo_out;
+    wire [1 : 0]                       m_arburst_fifo_out;
+    wire                               m_arlock_fifo_out;
+    wire [3 : 0]                       m_arcache_fifo_out;
+    wire [2 : 0]                       m_arprot_fifo_out;
+    wire [3 : 0]                       m_arqos_fifo_out;
+    wire                               m_arvalid_fifo_out;
+    wire                               m_arready_fifo_in;
+
+    // FIFOs for read data channel
+    wire [C_S_AXI_ID_WIDTH-1 : 0]    s_rid_fifo_out;
+    wire [C_S_AXI_DATA_WIDTH-1 : 0]  s_rdata_fifo_out;
+    wire [1 : 0]                       s_rresp_fifo_out;
+    wire                               s_rlast_fifo_out;
+    wire                               s_rvalid_fifo_out;
+    wire                               s_rready_fifo_in;
+
+    // Instantiate FIFOs
+    fifo #(
+        .WIDTH(C_S_AXI_ID_WIDTH),
+        .DEPTH(1 << LGFIFO)
+    ) awid_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_AWID),
+        .wr_en(S_AXI_AWVALID & S_AXI_AWREADY),
+        .rd_en(m_awready_fifo_in & m_awvalid_fifo_out),
+        .dout(m_awid_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_awvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(C_S_AXI_ADDR_WIDTH),
+        .DEPTH(1 << LGFIFO)
+    ) awaddr_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_AWADDR),
+        .wr_en(S_AXI_AWVALID & S_AXI_AWREADY),
+        .rd_en(m_awready_fifo_in & m_awvalid_fifo_out),
+        .dout(m_awaddr_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_awvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(8),
+        .DEPTH(1 << LGFIFO)
+    ) awlen_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_AWLEN),
+        .wr_en(S_AXI_AWVALID & S_AXI_AWREADY),
+        .rd_en(m_awready_fifo_in & m_awvalid_fifo_out),
+        .dout(m_awlen_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_awvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(3),
+        .DEPTH(1 << LGFIFO)
+    ) awsize_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_AWSIZE),
+        .wr_en(S_AXI_AWVALID & S_AXI_AWREADY),
+        .rd_en(m_awready_fifo_in & m_awvalid_fifo_out),
+        .dout(m_awsize_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_awvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(2),
+        .DEPTH(1 << LGFIFO)
+    ) awburst_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_AWBURST),
+        .wr_en(S_AXI_AWVALID & S_AXI_AWREADY),
+        .rd_en(m_awready_fifo_in & m_awvalid_fifo_out),
+        .dout(m_awburst_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_awvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(1),
+        .DEPTH(1 << LGFIFO)
+    ) awlock_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_AWLOCK),
+        .wr_en(S_AXI_AWVALID & S_AXI_AWREADY),
+        .rd_en(m_awready_fifo_in & m_awvalid_fifo_out),
+        .dout(m_awlock_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_awvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(4),
+        .DEPTH(1 << LGFIFO)
+    ) awcache_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_AWCACHE),
+        .wr_en(S_AXI_AWVALID & S_AXI_AWREADY),
+        .rd_en(m_awready_fifo_in & m_awvalid_fifo_out),
+        .dout(m_awcache_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_awvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(3),
+        .DEPTH(1 << LGFIFO)
+    ) awprot_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_AWPROT),
+        .wr_en(S_AXI_AWVALID & S_AXI_AWREADY),
+        .rd_en(m_awready_fifo_in & m_awvalid_fifo_out),
+        .dout(m_awprot_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_awvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(4),
+        .DEPTH(1 << LGFIFO)
+    ) awqos_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_AWQOS),
+        .wr_en(S_AXI_AWVALID & S_AXI_AWREADY),
+        .rd_en(m_awready_fifo_in & m_awvalid_fifo_out),
+        .dout(m_awqos_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_awvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(1),
+        .DEPTH(1 << LGFIFO)
+    ) awvalid_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_AWVALID),
+        .wr_en(S_AXI_AWVALID & S_AXI_AWREADY),
+        .rd_en(m_awready_fifo_in & m_awvalid_fifo_out),
+        .dout(m_awvalid_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_awvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(C_S_AXI_DATA_WIDTH),
+        .DEPTH(1 << LGFIFO)
+    ) wdata_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_WDATA),
+        .wr_en(S_AXI_WVALID & S_AXI_WREADY),
+        .rd_en(m_wready_fifo_in & m_wvalid_fifo_out),
+        .dout(m_wdata_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_wvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH((C_S_AXI_DATA_WIDTH/8)),
+        .DEPTH(1 << LGFIFO)
+    ) wstrb_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_WSTRB),
+        .wr_en(S_AXI_WVALID & S_AXI_WREADY),
+        .rd_en(m_wready_fifo_in & m_wvalid_fifo_out),
+        .dout(m_wstrb_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_wvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(1),
+        .DEPTH(1 << LGFIFO)
+    ) wlast_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_WLAST),
+        .wr_en(S_AXI_WVALID & S_AXI_WREADY),
+        .rd_en(m_wready_fifo_in & m_wvalid_fifo_out),
+        .dout(m_wlast_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_wvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(1),
+        .DEPTH(1 << LGFIFO)
+    ) wvalid_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_WVALID),
+        .wr_en(S_AXI_WVALID & S_AXI_WREADY),
+        .rd_en(m_wready_fifo_in & m_wvalid_fifo_out),
+        .dout(m_wvalid_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_wvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(C_S_AXI_ID_WIDTH),
+        .DEPTH(1 << LGFIFO)
+    ) bid_fifo (
+        .clk(M_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(M_AXI_BID),
+        .wr_en(M_AXI_BVALID & M_AXI_BREADY),
+        .rd_en(s_bready_fifo_in & s_bvalid_fifo_out),
+        .dout(s_bid_fifo_out),
+        .full(),
+        .empty(),
+        .valid(s_bvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(2),
+        .DEPTH(1 << LGFIFO)
+    ) bresp_fifo (
+        .clk(M_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(M_AXI_BRESP),
+        .wr_en(M_AXI_BVALID & M_AXI_BREADY),
+        .rd_en(s_bready_fifo_in & s_bvalid_fifo_out),
+        .dout(s_bresp_fifo_out),
+        .full(),
+        .empty(),
+        .valid(s_bvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(1),
+        .DEPTH(1 << LGFIFO)
+    ) bvalid_fifo (
+        .clk(M_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(M_AXI_BVALID),
+        .wr_en(M_AXI_BVALID & M_AXI_BREADY),
+        .rd_en(s_bready_fifo_in & s_bvalid_fifo_out),
+        .dout(s_bvalid_fifo_out),
+        .full(),
+        .empty(),
+        .valid(s_bvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(C_S_AXI_ID_WIDTH),
+        .DEPTH(1 << LGFIFO)
+    ) arid_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_ARID),
+        .wr_en(S_AXI_ARVALID & S_AXI_ARREADY),
+        .rd_en(m_arready_fifo_in & m_arvalid_fifo_out),
+        .dout(m_arid_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_arvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(C_S_AXI_ADDR_WIDTH),
+        .DEPTH(1 << LGFIFO)
+    ) araddr_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_ARADDR),
+        .wr_en(S_AXI_ARVALID & S_AXI_ARREADY),
+        .rd_en(m_arready_fifo_in & m_arvalid_fifo_out),
+        .dout(m_araddr_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_arvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(8),
+        .DEPTH(1 << LGFIFO)
+    ) arlen_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_ARLEN),
+        .wr_en(S_AXI_ARVALID & S_AXI_ARREADY),
+        .rd_en(m_arready_fifo_in & m_arvalid_fifo_out),
+        .dout(m_arlen_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_arvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(3),
+        .DEPTH(1 << LGFIFO)
+    ) arsize_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_ARSIZE),
+        .wr_en(S_AXI_ARVALID & S_AXI_ARREADY),
+        .rd_en(m_arready_fifo_in & m_arvalid_fifo_out),
+        .dout(m_arsize_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_arvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(2),
+        .DEPTH(1 << LGFIFO)
+    ) arburst_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_ARBURST),
+        .wr_en(S_AXI_ARVALID & S_AXI_ARREADY),
+        .rd_en(m_arready_fifo_in & m_arvalid_fifo_out),
+        .dout(m_arburst_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_arvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(1),
+        .DEPTH(1 << LGFIFO)
+    ) arlock_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_ARLOCK),
+        .wr_en(S_AXI_ARVALID & S_AXI_ARREADY),
+        .rd_en(m_arready_fifo_in & m_arvalid_fifo_out),
+        .dout(m_arlock_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_arvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(4),
+        .DEPTH(1 << LGFIFO)
+    ) arcache_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_ARCACHE),
+        .wr_en(S_AXI_ARVALID & S_AXI_ARREADY),
+        .rd_en(m_arready_fifo_in & m_arvalid_fifo_out),
+        .dout(m_arcache_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_arvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(3),
+        .DEPTH(1 << LGFIFO)
+    ) arprot_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_ARPROT),
+        .wr_en(S_AXI_ARVALID & S_AXI_ARREADY),
+        .rd_en(m_arready_fifo_in & m_arvalid_fifo_out),
+        .dout(m_arprot_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_arvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(4),
+        .DEPTH(1 << LGFIFO)
+    ) arqos_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_ARQOS),
+        .wr_en(S_AXI_ARVALID & S_AXI_ARREADY),
+        .rd_en(m_arready_fifo_in & m_arvalid_fifo_out),
+        .dout(m_arqos_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_arvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(1),
+        .DEPTH(1 << LGFIFO)
+    ) arvalid_fifo (
+        .clk(S_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(S_AXI_ARVALID),
+        .wr_en(S_AXI_ARVALID & S_AXI_ARREADY),
+        .rd_en(m_arready_fifo_in & m_arvalid_fifo_out),
+        .dout(m_arvalid_fifo_out),
+        .full(),
+        .empty(),
+        .valid(m_arvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(C_S_AXI_ID_WIDTH),
+        .DEPTH(1 << LGFIFO)
+    ) rid_fifo (
+        .clk(M_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(M_AXI_RID),
+        .wr_en(M_AXI_RVALID & M_AXI_RREADY),
+        .rd_en(s_rready_fifo_in & s_rvalid_fifo_out),
+        .dout(s_rid_fifo_out),
+        .full(),
+        .empty(),
+        .valid(s_rvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(C_S_AXI_DATA_WIDTH),
+        .DEPTH(1 << LGFIFO)
+    ) rdata_fifo (
+        .clk(M_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(M_AXI_RDATA),
+        .wr_en(M_AXI_RVALID & M_AXI_RREADY),
+        .rd_en(s_rready_fifo_in & s_rvalid_fifo_out),
+        .dout(s_rdata_fifo_out),
+        .full(),
+        .empty(),
+        .valid(s_rvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(2),
+        .DEPTH(1 << LGFIFO)
+    ) rresp_fifo (
+        .clk(M_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(M_AXI_RRESP),
+        .wr_en(M_AXI_RVALID & M_AXI_RREADY),
+        .rd_en(s_rready_fifo_in & s_rvalid_fifo_out),
+        .dout(s_rresp_fifo_out),
+        .full(),
+        .empty(),
+        .valid(s_rvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(1),
+        .DEPTH(1 << LGFIFO)
+    ) rlast_fifo (
+        .clk(M_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(M_AXI_RLAST),
+        .wr_en(M_AXI_RVALID & M_AXI_RREADY),
+        .rd_en(s_rready_fifo_in & s_rvalid_fifo_out),
+        .dout(s_rlast_fifo_out),
+        .full(),
+        .empty(),
+        .valid(s_rvalid_fifo_out)
+    );
+
+    fifo #(
+        .WIDTH(1),
+        .DEPTH(1 << LGFIFO)
+    ) rvalid_fifo (
+        .clk(M_AXI_ACLK),
+        .rst(~S_AXI_ARESETN),
+        .din(M_AXI_RVALID),
+        .wr_en(M_AXI_RVALID & M_AXI_RREADY),
+        .rd_en(s_rready_fifo_in & s_rvalid_fifo_out),
+        .dout(s_rvalid_fifo_out),
+        .full(),
+        .empty(),
+        .valid(s_rvalid_fifo_out)
+    );
+
+    // Write address channel handshake
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (~S_AXI_ARESETN) begin
+            s_awready_reg <= 1'b0;
+        end else begin
+            s_awready_reg <= M_AXI_AWREADY;
+        end
+    end
+
+    assign S_AXI_AWREADY = s_awready_reg;
+    assign M_AXI_AWID    = m_awid_fifo_out;
+    assign M_AXI_AWADDR  = m_awaddr_fifo_out;
+    assign M_AXI_AWLEN   = m_awlen_fifo_out;
+    assign M_AXI_AWSIZE  = m_awsize_fifo_out;
+    assign M_AXI_AWBURST = m_awburst_fifo_out;
+    assign M_AXI_AWLOCK  = m_awlock_fifo_out;
+    assign M_AXI_AWCACHE = m_awcache_fifo_out;
+    assign M_AXI_AWPROT  = m_awprot_fifo_out;
+    assign M_AXI_AWQOS   = m_awqos_fifo_out;
+    assign M_AXI_AWVALID = m_awvalid_fifo_out;
+    assign m_awready_fifo_in = M_AXI_AWREADY;
+
+    // Write data channel handshake
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (~S_AXI_ARESETN) begin
+            s_wready_reg <= 1'b0;
+        end else begin
+            s_wready_reg <= M_AXI_WREADY;
+        end
+    end
+
+    assign S_AXI_WREADY = s_wready_reg;
+    assign M_AXI_WDATA  = m_wdata_fifo_out;
+    assign M_AXI_WSTRB  = m_wstrb_fifo_out;
+    assign M_AXI_WLAST  = m_wlast_fifo_out;
+    assign M_AXI_WVALID = m_wvalid_fifo_out;
+    assign m_wready_fifo_in = M_AXI_WREADY;
+
+    // Write response channel handshake
+    always @(posedge M_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (~S_AXI_ARESETN) begin
+            s_bvalid_reg <= 1'b0;
+        end else begin
+            s_bvalid_reg <= s_bvalid_fifo_out;
+        end
+    end
+
+    assign S_AXI_BID    = s_bid_fifo_out;
+    assign S_AXI_BRESP  = s_bresp_fifo_out;
+    assign S_AXI_BVALID = s_bvalid_reg;
+    assign s_bready_fifo_in = S_AXI_BREADY;
+
+    // Read address channel handshake
+    always @(posedge S_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (~S_AXI_ARESETN) begin
+            s_arready_reg <= 1'b0;
+        end else begin
+            s_arready_reg <= M_AXI_ARREADY;
+        end
+    end
+
+    assign S_AXI_ARREADY = s_arready_reg;
+    assign M_AXI_ARID    = m_arid_fifo_out;
+    assign M_AXI_ARADDR  = m_araddr_fifo_out;
+    assign M_AXI_ARLEN   = m_arlen_fifo_out;
+    assign M_AXI_ARSIZE  = m_arsize_fifo_out;
+    assign M_AXI_ARBURST = m_arburst_fifo_out;
+    assign M_AXI_ARLOCK  = m_arlock_fifo_out;
+    assign M_AXI_ARCACHE = m_arcache_fifo_out;
+    assign M_AXI_ARPROT  = m_arprot_fifo_out;
+    assign M_AXI_ARQOS   = m_arqos_fifo_out;
+    assign M_AXI_ARVALID = m_arvalid_fifo_out;
+    assign m_arready_fifo_in = M_AXI_ARREADY;
+
+    // Read data channel handshake
+    always @(posedge M_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (~S_AXI_ARESETN) begin
+            s_rvalid_reg <= 1'b0;
+        end else begin
+            s_rvalid_reg <= s_rvalid_fifo_out;
+        end
+    end
+
+    assign S_AXI_RID    = s_rid_fifo_out;
+    assign S_AXI_RDATA  = s_rdata_fifo_out;
+    assign S_AXI_RRESP  = s_rresp_fifo_out;
+    assign S_AXI_RLAST  = s_rlast_fifo_out;
+    assign S_AXI_RVALID = s_rvalid_reg;
+    assign s_rready_fifo_in = S_AXI_RREADY;
+
+    // Reset for M_AXI_ARESETN
+    always @(posedge M_AXI_ACLK or negedge S_AXI_ARESETN) begin
+        if (~S_AXI_ARESETN) begin
+            M_AXI_ARESETN <= 1'b0;
+        end else begin
+            M_AXI_ARESETN <= 1'b1;
+        end
+    end
+
+endmodule
+
+module fifo #(
+    parameter WIDTH = 8,
+    parameter DEPTH = 16
+) (
+    input  wire clk,
+    input  wire rst,
+    input  wire [WIDTH-1:0] din,
+    input  wire wr_en,
+    input  wire rd_en,
+    output wire [WIDTH-1:0] dout,
+    output wire full,
+    output wire empty,
+    output wire valid
+);
+
+    localparam ADDR_WIDTH = $clog2(DEPTH);
+
+    reg [WIDTH-1:0] mem [DEPTH-1:0];
+    reg [ADDR_WIDTH-1:0] wr_ptr;
+    reg [ADDR_WIDTH-1:0] rd_ptr;
+    reg [ADDR_WIDTH:0] count;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            wr_ptr <= 0;
+            rd_ptr <= 0;
+            count <= 0;
+        end else begin
+            if (wr_en && !full) begin
+                mem[wr_ptr] <= din;
+                wr_ptr <= wr_ptr + 1;
+                count <= count + 1;
+            end
+            if (rd_en && !empty) begin
+                rd_ptr <= rd_ptr + 1;
+                count <= count - 1;
+            end
+        end
+    end
+
+    assign dout = mem[rd_ptr];
+    assign full = (count == DEPTH);
+    assign empty = (count == 0);
+    assign valid = !empty;
+
+endmodule

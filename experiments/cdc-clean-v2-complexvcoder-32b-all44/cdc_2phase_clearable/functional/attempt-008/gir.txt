@@ -1,0 +1,150 @@
+```json
+{
+  "modules": [
+    {
+      "Top_module_name": "cdc_2phase_clearable",
+      "function": "Implement a clearable two-phase valid/ready channel between asynchronous clocks.",
+      "parameters": [
+        { "name": "WIDTH", "value": "1" },
+        { "name": "SYNC_STAGES", "value": "3" },
+        { "name": "CLEAR_ON_ASYNC_RESET", "value": "1" }
+      ],
+      "ports": [
+        { "name": "src_rst_ni", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_clk_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_clear_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_clear_pending_o", "direction": "output", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_data_i", "direction": "input", "width": "WIDTH", "clock_domain": "src_clk_i" },
+        { "name": "src_valid_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_ready_o", "direction": "output", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "dst_rst_ni", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_clk_i", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_clear_i", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_clear_pending_o", "direction": "output", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_data_o", "direction": "output", "width": "WIDTH", "clock_domain": "dst_clk_i" },
+        { "name": "dst_valid_o", "direction": "output", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_ready_i", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" }
+      ],
+      "instances": [
+        { "module": "async_reset_synchronizer", "name": "src_rst_sync", "function": "Synchronize reset from src_clk_i to dst_clk_i", "connections": ["src_rst_ni", "dst_clk_i", "src_rst_sync_o"] },
+        { "module": "async_reset_synchronizer", "name": "dst_rst_sync", "function": "Synchronize reset from dst_clk_i to src_clk_i", "connections": ["dst_rst_ni", "src_clk_i", "dst_rst_sync_o"] },
+        { "module": "sync_fifo", "name": "fifo", "function": "Synchronous FIFO for data transfer", "connections": ["src_clk_i", "src_rst_ni", "src_data_i", "src_valid_i", "src_ready_o", "dst_clk_i", "dst_rst_ni", "dst_data_o", "dst_valid_o", "dst_ready_i"] },
+        { "module": "clear_logic", "name": "src_clear_logic", "function": "Handle clear requests from source", "connections": ["src_clk_i", "src_rst_ni", "src_clear_i", "src_clear_pending_o", "src_clear_req", "src_clear_ack"] },
+        { "module": "clear_logic", "name": "dst_clear_logic", "function": "Handle clear requests from destination", "connections": ["dst_clk_i", "dst_rst_ni", "dst_clear_i", "dst_clear_pending_o", "dst_clear_req", "dst_clear_ack"] },
+        { "module": "clear_handshake", "name": "clear_handshake", "function": "Coordinate clear requests between source and destination", "connections": ["src_clk_i", "src_rst_ni", "src_clear_req", "src_clear_ack", "dst_clk_i", "dst_rst_ni", "dst_clear_req", "dst_clear_ack"] }
+      ],
+      "connections": [
+        { "src": "src_rst_sync_o", "dst": "dst_rst_sync.src_rst_ni" },
+        { "src": "dst_rst_sync_o", "dst": "src_rst_sync.dst_rst_ni" },
+        { "src": "src_clear_logic.src_clear_req", "dst": "clear_handshake.src_clear_req" },
+        { "src": "clear_handshake.src_clear_ack", "dst": "src_clear_logic.src_clear_ack" },
+        { "src": "dst_clear_logic.dst_clear_req", "dst": "clear_handshake.dst_clear_req" },
+        { "src": "clear_handshake.dst_clear_ack", "dst": "dst_clear_logic.dst_clear_ack" }
+      ],
+      "internal_signals": [
+        { "name": "src_rst_sync_o", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_rst_sync_o", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_clear_req", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_clear_ack", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "dst_clear_req", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_clear_ack", "width": "1", "clock_domain": "dst_clk_i" }
+      ],
+      "behavior": [
+        "Every accepted source beat must appear exactly once at the destination, in order.",
+        "The channel may hold one outstanding item.",
+        "src_clear_i and dst_clear_i request a coordinated flush: isolate the channel, drop in-flight data, then return both sides to idle.",
+        "src_clear_pending_o / dst_clear_pending_o stay high until that side has finished the clear.",
+        "Reset and clear must not create a destination beat.",
+        "Isolate gates both ends before clear. Clear drops the one outstanding beat by returning the two-phase request and acknowledge to zero. The destination payload is still captured on the request edge, with no extra valid gap between beats. Each clear step reaches the other clock one handshake later."
+      ]
+    },
+    {
+      "Top_module_name": "async_reset_synchronizer",
+      "function": "Synchronize an active-low reset signal between two asynchronous clocks.",
+      "parameters": [],
+      "ports": [
+        { "name": "async_rst_ni", "direction": "input", "width": "1", "clock_domain": "async_clk_i" },
+        { "name": "sync_clk_i", "direction": "input", "width": "1", "clock_domain": "sync_clk_i" },
+        { "name": "sync_rst_no", "direction": "output", "width": "1", "clock_domain": "sync_clk_i" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [],
+      "behavior": [
+        "Synchronizes the input reset signal from the async_clk_i domain to the sync_clk_i domain using multiple flip-flops to prevent metastability."
+      ]
+    },
+    {
+      "Top_module_name": "sync_fifo",
+      "function": "Synchronous FIFO for data transfer between two clocks.",
+      "parameters": [
+        { "name": "WIDTH", "value": "1" }
+      ],
+      "ports": [
+        { "name": "src_clk_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_rst_ni", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_data_i", "direction": "input", "width": "WIDTH", "clock_domain": "src_clk_i" },
+        { "name": "src_valid_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_ready_o", "direction": "output", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "dst_clk_i", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_rst_ni", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_data_o", "direction": "output", "width": "WIDTH", "clock_domain": "dst_clk_i" },
+        { "name": "dst_valid_o", "direction": "output", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_ready_i", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [],
+      "behavior": [
+        "Implements a synchronous FIFO to transfer data between src_clk_i and dst_clk_i.",
+        "Handles valid/ready handshaking to ensure data is transferred in order.",
+        "Respects the FIFO's capacity and does not create extra valid gaps between beats."
+      ]
+    },
+    {
+      "Top_module_name": "clear_logic",
+      "function": "Handle clear requests and generate clear pending signal.",
+      "parameters": [],
+      "ports": [
+        { "name": "clk_i", "direction": "input", "width": "1", "clock_domain": "clk_i" },
+        { "name": "rst_ni", "direction": "input", "width": "1", "clock_domain": "clk_i" },
+        { "name": "clear_i", "direction": "input", "width": "1", "clock_domain": "clk_i" },
+        { "name": "clear_pending_o", "direction": "output", "width": "1", "clock_domain": "clk_i" },
+        { "name": "clear_req", "direction": "output", "width": "1", "clock_domain": "clk_i" },
+        { "name": "clear_ack", "direction": "input", "width": "1", "clock_domain": "clk_i" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [],
+      "behavior": [
+        "Generates a clear request signal based on the clear_i input.",
+        "Generates a clear pending signal that remains high until the clear operation is acknowledged.",
+        "Respects the reset signal to ensure proper operation after reset."
+      ]
+    },
+    {
+      "Top_module_name": "clear_handshake",
+      "function": "Coordinate clear requests between source and destination.",
+      "parameters": [],
+      "ports": [
+        { "name": "src_clk_i", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_rst_ni", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_clear_req", "direction": "input", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "src_clear_ack", "direction": "output", "width": "1", "clock_domain": "src_clk_i" },
+        { "name": "dst_clk_i", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_rst_ni", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_clear_req", "direction": "input", "width": "1", "clock_domain": "dst_clk_i" },
+        { "name": "dst_clear_ack", "direction": "output", "width": "1", "clock_domain": "dst_clk_i" }
+      ],
+      "instances": [],
+      "connections": [],
+      "internal_signals": [],
+      "behavior": [
+        "Coordinates clear requests between the source and destination by ensuring both sides are synchronized.",
+        "Handles the two-phase handshake to drop in-flight data and return both sides to idle.",
+        "Respects the reset signals to ensure proper operation after reset."
+      ]
+    }
+  ]
+}
+```

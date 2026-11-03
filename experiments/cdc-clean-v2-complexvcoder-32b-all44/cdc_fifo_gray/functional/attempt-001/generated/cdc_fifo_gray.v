@@ -1,0 +1,187 @@
+module cdc_fifo_gray #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 2
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    // Internal signals
+    reg [LOG_DEPTH:0]      gray_wr_ptr_src;
+    reg [LOG_DEPTH:0]      gray_rd_ptr_src;
+    reg [LOG_DEPTH:0]      gray_wr_ptr_dst;
+    reg [LOG_DEPTH:0]      gray_rd_ptr_dst;
+    reg [LOG_DEPTH:0]      sync_wr_ptr_src;
+    reg [LOG_DEPTH:0]      sync_rd_ptr_dst;
+    reg [WIDTH-1:0]        fifo_mem [0:(2**LOG_DEPTH)-1];
+
+    // Gray Code counter for source write pointer
+    gray_counter #(
+        .WIDTH(LOG_DEPTH+1)
+    ) gray_counter_src (
+        .clk_i(src_clk_i),
+        .rst_ni(src_rst_ni),
+        .inc_i(src_valid_i),
+        .dec_i(1'b0),
+        .gray_o(gray_wr_ptr_src),
+        .bin_o()
+    );
+
+    // Gray Code counter for destination read pointer
+    gray_counter #(
+        .WIDTH(LOG_DEPTH+1)
+    ) gray_counter_dst (
+        .clk_i(dst_clk_i),
+        .rst_ni(dst_rst_ni),
+        .inc_i(1'b0),
+        .dec_i(dst_ready_i),
+        .gray_o(gray_rd_ptr_dst),
+        .bin_o()
+    );
+
+    // Synchronize write pointer from source to destination
+    sync_gray #(
+        .WIDTH(LOG_DEPTH+1),
+        .STAGES(SYNC_STAGES)
+    ) sync_gray_wr_ptr (
+        .src_clk_i(src_clk_i),
+        .src_rst_ni(src_rst_ni),
+        .src_gray_i(gray_wr_ptr_src),
+        .dst_clk_i(dst_clk_i),
+        .dst_rst_ni(dst_rst_ni),
+        .dst_gray_o(sync_wr_ptr_src)
+    );
+
+    // Synchronize read pointer from destination to source
+    sync_gray #(
+        .WIDTH(LOG_DEPTH+1),
+        .STAGES(SYNC_STAGES)
+    ) sync_gray_rd_ptr (
+        .src_clk_i(dst_clk_i),
+        .src_rst_ni(dst_rst_ni),
+        .src_gray_i(gray_rd_ptr_dst),
+        .dst_clk_i(src_clk_i),
+        .dst_rst_ni(src_rst_ni),
+        .dst_gray_o(sync_rd_ptr_dst)
+    );
+
+    // Source domain ready signal
+    assign src_ready_o = (sync_rd_ptr_dst != gray_wr_ptr_src);
+
+    // Destination domain valid signal
+    assign dst_valid_o = (sync_wr_ptr_src != gray_rd_ptr_dst);
+
+    // Write data to FIFO when src_valid_i and src_ready_o are high
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            gray_wr_ptr_src <= 0;
+        end else if (src_valid_i && src_ready_o) begin
+            fifo_mem[gray2bin(gray_wr_ptr_src[LOG_DEPTH:0])] <= src_data_i;
+        end
+    end
+
+    // Read data from FIFO when dst_ready_i and dst_valid_o are high
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            gray_rd_ptr_dst <= 0;
+            dst_data_o <= 0;
+        end else if (dst_ready_i && dst_valid_o) begin
+            dst_data_o <= fifo_mem[gray2bin(gray_rd_ptr_dst[LOG_DEPTH:0])];
+        end
+    end
+
+    // Helper function to convert binary to Gray code
+    function [LOG_DEPTH:0] bin2gray;
+        input [LOG_DEPTH:0] bin;
+        bin2gray = bin ^ (bin >> 1);
+    endfunction
+
+    // Helper function to convert Gray code to binary
+    function [LOG_DEPTH:0] gray2bin;
+        input [LOG_DEPTH:0] gray;
+        integer i;
+        reg [LOG_DEPTH:0] bin;
+        bin = gray;
+        for (i = LOG_DEPTH-1; i >= 0; i = i - 1) begin
+            bin[i] = bin[i+1] ^ bin[i];
+        end
+        gray2bin = bin;
+    endfunction
+
+endmodule
+
+// Gray Code counter module
+module gray_counter #(
+    parameter WIDTH = 4
+)(
+    input                  clk_i,
+    input                  rst_ni,
+    input                  inc_i,
+    input                  dec_i,
+    output reg [WIDTH-1:0] gray_o,
+    output reg [WIDTH-1:0] bin_o
+);
+
+    reg [WIDTH-1:0] bin_next;
+
+    always @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            bin_o <= 0;
+            gray_o <= 0;
+        end else begin
+            bin_next = bin_o + inc_i - dec_i;
+            bin_o <= bin_next;
+            gray_o <= bin2gray(bin_next);
+        end
+    end
+
+    // Helper function to convert binary to Gray code
+    function [WIDTH-1:0] bin2gray;
+        input [WIDTH-1:0] bin;
+        bin2gray = bin ^ (bin >> 1);
+    endfunction
+
+endmodule
+
+// Gray Code synchronization module
+module sync_gray #(
+    parameter WIDTH = 4,
+    parameter STAGES = 2
+)(
+    input                  src_clk_i,
+    input                  src_rst_ni,
+    input  [WIDTH-1:0]     src_gray_i,
+    input                  dst_clk_i,
+    input                  dst_rst_ni,
+    output reg [WIDTH-1:0] dst_gray_o
+);
+
+    reg [WIDTH-1:0] sync_stages [0:STAGES-1];
+
+    // Synchronize the Gray code through multiple stages
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            sync_stages[0] <= 0;
+            dst_gray_o <= 0;
+            for (integer i = 1; i < STAGES; i = i + 1) begin
+                sync_stages[i] <= 0;
+            end
+        end else begin
+            sync_stages[0] <= src_gray_i;
+            for (integer i = 1; i < STAGES; i = i + 1) begin
+                sync_stages[i] <= sync_stages[i-1];
+            end
+            dst_gray_o <= sync_stages[STAGES-1];
+        end
+    end
+
+endmodule

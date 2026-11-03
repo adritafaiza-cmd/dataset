@@ -1,0 +1,198 @@
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam AW = LOG_DEPTH;
+
+    // Source-side state
+    reg src_state;
+    localparam SRC_IDLE = 1'b0;
+    localparam SRC_WAIT = 1'b1;
+
+    // Source-side FIFO (request)
+    reg [ADDR_WIDTH-1:0] req_addr [0:DEPTH-1];
+    reg [DATA_WIDTH-1:0] req_wdata [0:DEPTH-1];
+    reg [DATA_WIDTH/8-1:0] req_strb [0:DEPTH-1];
+    reg [2:0] req_prot [0:DEPTH-1];
+    reg req_write [0:DEPTH-1];
+    reg [AW-1:0] req_wr_ptr, req_rd_ptr;
+    reg [AW:0] req_count;
+
+    // Destination-side FIFO (response)
+    reg [DATA_WIDTH-1:0] rsp_rdata [0:DEPTH-1];
+    reg rsp_err [0:DEPTH-1];
+    reg [AW-1:0] rsp_wr_ptr, rsp_rd_ptr;
+    reg [AW:0] rsp_count;
+
+    // CDC synchronizers
+    reg [AW:0] req_count_sync1, req_count_sync2;
+    reg [AW:0] rsp_count_sync1, rsp_count_sync2;
+
+    // Destination-side state
+    reg dst_state;
+    localparam DST_IDLE = 1'b0;
+    localparam DST_SETUP = 1'b1;
+    localparam DST_ACCESS = 1'b2;
+
+    // Destination-side latched request
+    reg [ADDR_WIDTH-1:0] dst_addr;
+    reg [DATA_WIDTH-1:0] dst_wdata;
+    reg [DATA_WIDTH/8-1:0] dst_strb;
+    reg [2:0] dst_prot;
+    reg dst_write;
+
+    // Source-side latched response
+    reg [DATA_WIDTH-1:0] src_rdata;
+    reg src_err;
+
+    // Source-side outputs
+    assign src_pready_o = (src_state == SRC_IDLE) ? 1'b1 : 1'b0;
+    assign src_prdata_o = src_rdata;
+    assign src_pslverr_o = src_err;
+
+    // Destination-side outputs
+    assign dst_psel_o = (dst_state == DST_SETUP) || (dst_state == DST_ACCESS);
+    assign dst_penable_o = (dst_state == DST_ACCESS);
+    assign dst_pwrite_o = dst_write;
+    assign dst_paddr_o = dst_addr;
+    assign dst_pwdata_o = dst_wdata;
+    assign dst_pstrb_o = dst_strb;
+    assign dst_pprot_o = dst_prot;
+
+    // Source clock domain
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_state <= SRC_IDLE;
+            req_wr_ptr <= {AW{1'b0}};
+            req_rd_ptr <= {AW{1'b0}};
+            req_count <= {(AW+1){1'b0}};
+            rsp_wr_ptr <= {AW{1'b0}};
+            rsp_rd_ptr <= {AW{1'b0}};
+            rsp_count <= {(AW+1){1'b0}};
+            src_rdata <= {DATA_WIDTH{1'b0}};
+            src_err <= 1'b0;
+        end else begin
+            // Synchronize response count from destination
+            rsp_count_sync1 <= rsp_count;
+            rsp_count_sync2 <= rsp_count_sync1;
+
+            // Update source-side response FIFO count
+            rsp_count <= rsp_count_sync2;
+
+            // Source state machine
+            case (src_state)
+                SRC_IDLE: begin
+                    if (src_psel_i && src_penable_i) begin
+                        // Complete the access: write request to FIFO
+                        req_addr[req_wr_ptr] <= src_paddr_i;
+                        req_wdata[req_wr_ptr] <= src_pwdata_i;
+                        req_strb[req_wr_ptr] <= src_pstrb_i;
+                        req_prot[req_wr_ptr] <= src_pprot_i;
+                        req_write[req_wr_ptr] <= src_pwrite_i;
+                        req_wr_ptr <= req_wr_ptr + 1'b1;
+                        req_count <= req_count + 1'b1;
+                        src_state <= SRC_WAIT;
+                    end
+                end
+                SRC_WAIT: begin
+                    // Check if a response is available
+                    if (rsp_count > 0) begin
+                        // Read response from FIFO
+                        src_rdata <= rsp_rdata[rsp_rd_ptr];
+                        src_err <= rsp_err[rsp_rd_ptr];
+                        rsp_rd_ptr <= rsp_rd_ptr + 1'b1;
+                        rsp_count <= rsp_count - 1'b1;
+                        src_state <= SRC_IDLE;
+                    end
+                end
+                default: src_state <= SRC_IDLE;
+            endcase
+        end
+    end
+
+    // Destination clock domain
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_state <= DST_IDLE;
+            req_wr_ptr <= {AW{1'b0}};
+            req_rd_ptr <= {AW{1'b0}};
+            req_count <= {(AW+1){1'b0}};
+            rsp_wr_ptr <= {AW{1'b0}};
+            rsp_rd_ptr <= {AW{1'b0}};
+            rsp_count <= {(AW+1){1'b0}};
+            dst_addr <= {ADDR_WIDTH{1'b0}};
+            dst_wdata <= {DATA_WIDTH{1'b0}};
+            dst_strb <= {(DATA_WIDTH/8){1'b0}};
+            dst_prot <= 3'b0;
+            dst_write <= 1'b0;
+        end else begin
+            // Synchronize request count from source
+            req_count_sync1 <= req_count;
+            req_count_sync2 <= req_count_sync1;
+
+            // Update destination-side request FIFO count
+            req_count <= req_count_sync2;
+
+            // Destination state machine
+            case (dst_state)
+                DST_IDLE: begin
+                    if (req_count > 0) begin
+                        // Read request from FIFO
+                        dst_addr <= req_addr[req_rd_ptr];
+                        dst_wdata <= req_wdata[req_rd_ptr];
+                        dst_strb <= req_strb[req_rd_ptr];
+                        dst_prot <= req_prot[req_rd_ptr];
+                        dst_write <= req_write[req_rd_ptr];
+                        req_rd_ptr <= req_rd_ptr + 1'b1;
+                        req_count <= req_count - 1'b1;
+                        dst_state <= DST_SETUP;
+                    end
+                end
+                DST_SETUP: begin
+                    // Wait one cycle for setup phase
+                    dst_state <= DST_ACCESS;
+                end
+                DST_ACCESS: begin
+                    if (dst_pready_i) begin
+                        // Complete the access: write response to FIFO
+                        rsp_rdata[rsp_wr_ptr] <= dst_prdata_i;
+                        rsp_err[rsp_wr_ptr] <= dst_pslverr_i;
+                        rsp_wr_ptr <= rsp_wr_ptr + 1'b1;
+                        rsp_count <= rsp_count + 1'b1;
+                        dst_state <= DST_IDLE;
+                    end
+                end
+                default: dst_state <= DST_IDLE;
+            endcase
+        end
+    end
+
+endmodule
