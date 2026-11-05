@@ -1,0 +1,136 @@
+// =============================================================================
+// cdc_fifo_gray.v
+// =============================================================================
+// Asynchronous FIFO with Gray-coded pointer CDC.
+//
+// Architecture:
+//   - 2^LOG_DEPTH entries, WIDTH bits each.
+//   - Write pointer (src domain) and read pointer (dst domain) are
+//     LOG_DEPTH+1-bit binary counters.  The MSB is the wrap bit.
+//   - Each pointer is converted to Gray code before crossing to the other
+//     domain and synchronised through SYNC_STAGES flip-flops.
+//   - Full  : src_wr_ptr_gray == dst_rd_ptr_gray_synced
+//   - Empty : dst_rd_ptr_gray == src_wr_ptr_gray_synced
+//   - src_ready_o = !full   (src domain)
+//   - dst_valid_o = !empty  (dst domain)
+//
+// Reset:
+//   - src_rst_ni / dst_rst_ni are active-low, asynchronous assert,
+//     synchronous de-assert (standard CDC reset practice).
+//   - After reset both pointers are zero, so the FIFO is empty.
+// =============================================================================
+
+`include "cdc_fifo_gray.vh"
+
+module cdc_fifo_gray #(
+    parameter WIDTH     = 8,
+    parameter LOG_DEPTH = 3,
+    parameter SYNC_STAGES = 2
+) (
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_W = LOG_DEPTH + 1;
+
+    // ------------------------------------------------------------------
+    // Storage
+    // ------------------------------------------------------------------
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+
+    // ------------------------------------------------------------------
+    // Source (write) domain
+    // ------------------------------------------------------------------
+    reg [PTR_W-1:0] wr_ptr_bin;
+    reg [PTR_W-1:0] wr_ptr_gray;
+
+    wire [PTR_W-1:0] rd_ptr_gray_synced;  // read pointer in src domain
+
+    wire src_full = (wr_ptr_gray == rd_ptr_gray_synced);
+    assign src_ready_o = ~src_full;
+
+    wire src_wr_en = src_valid_i & src_ready_o;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            wr_ptr_bin  <= {PTR_W{1'b0}};
+            wr_ptr_gray <= {PTR_W{1'b0}};
+        end else if (src_wr_en) begin
+            wr_ptr_bin  <= wr_ptr_bin + 1'b1;
+            wr_ptr_gray <= (wr_ptr_bin + 1'b1) ^ (wr_ptr_bin + 1'b1) >> 1;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Destination (read) domain
+    // ------------------------------------------------------------------
+    reg [PTR_W-1:0] rd_ptr_bin;
+    reg [PTR_W-1:0] rd_ptr_gray;
+
+    wire [PTR_W-1:0] wr_ptr_gray_synced;  // write pointer in dst domain
+
+    wire dst_empty = (rd_ptr_gray == wr_ptr_gray_synced);
+    assign dst_valid_o = ~dst_empty;
+
+    wire dst_rd_en = dst_valid_o & dst_ready_i;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            rd_ptr_bin  <= {PTR_W{1'b0}};
+            rd_ptr_gray <= {PTR_W{1'b0}};
+        end else if (dst_rd_en) begin
+            rd_ptr_bin  <= rd_ptr_bin + 1'b1;
+            rd_ptr_gray <= (rd_ptr_bin + 1'b1) ^ (rd_ptr_bin + 1'b1) >> 1;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Data output (combinational read from memory)
+    // ------------------------------------------------------------------
+    assign dst_data_o = mem[rd_ptr_bin[LOG_DEPTH-1:0]];
+
+    // ------------------------------------------------------------------
+    // Memory write (src domain)
+    // ------------------------------------------------------------------
+    always @(posedge src_clk_i) begin
+        if (src_wr_en)
+            mem[wr_ptr_bin[LOG_DEPTH-1:0]] <= src_data_i;
+    end
+
+    // ------------------------------------------------------------------
+    // CDC: write pointer Gray -> dst domain
+    // ------------------------------------------------------------------
+    cdc_sync_gray #(
+        .WIDTH       (PTR_W),
+        .SYNC_STAGES (SYNC_STAGES)
+    ) u_sync_wr_ptr (
+        .rst_ni   (dst_rst_ni),
+        .clk_i    (dst_clk_i),
+        .data_i   (wr_ptr_gray),
+        .data_o   (wr_ptr_gray_synced)
+    );
+
+    // ------------------------------------------------------------------
+    // CDC: read pointer Gray -> src domain
+    // ------------------------------------------------------------------
+    cdc_sync_gray #(
+        .WIDTH       (PTR_W),
+        .SYNC_STAGES (SYNC_STAGES)
+    ) u_sync_rd_ptr (
+        .rst_ni   (src_rst_ni),
+        .clk_i    (src_clk_i),
+        .data_i   (rd_ptr_gray),
+        .data_o   (rd_ptr_gray_synced)
+    );
+
+endmodule

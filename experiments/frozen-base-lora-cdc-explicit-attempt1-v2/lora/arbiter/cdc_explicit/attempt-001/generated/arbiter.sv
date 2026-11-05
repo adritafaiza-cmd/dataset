@@ -1,0 +1,299 @@
+// =============================================================================
+// Multi-port request arbiter
+// =============================================================================
+//
+// Grant one of PORTS requestors.
+//
+// When ARB_TYPE_ROUND_ROBIN is set, rotate priority; otherwise use fixed
+// priority. ARB_LSB_HIGH_PRIORITY selects whether the LSB wins ties.
+//
+// When ARB_BLOCK is set, hold the grant until acknowledge (ARB_BLOCK_ACK
+// nonzero) or until request drops (ARB_BLOCK_ACK zero).
+//
+// grant_valid and grant_encoded must match grant.
+// =============================================================================
+
+`include "arbiter.vh"
+
+module arbiter #
+(
+    parameter PORTS = 4,
+    parameter ARB_TYPE_ROUND_ROBIN = 0,
+    parameter ARB_BLOCK = 0,
+    parameter ARB_BLOCK_ACK = 1,
+    parameter ARB_LSB_HIGH_PRIORITY = 0
+)
+(
+    input  wire                     clk,
+    input  wire                     rst,
+
+    input  wire [PORTS-1:0]         request,
+    input  wire [PORTS-1:0]         acknowledge,
+
+    output wire [PORTS-1:0]         grant,
+    output wire                     grant_valid,
+    output wire [$clog2(PORTS)-1:0] grant_encoded
+);
+
+    // -------------------------------------------------------------------------
+    // Fixed priority
+    // -------------------------------------------------------------------------
+    `ifdef ARB_FIXED_PRIORITY
+
+    // -------------------------------------------------------------------------
+    // Fixed priority, LSB high priority
+    // -------------------------------------------------------------------------
+    `ifdef ARB_LSB_HIGH_PRIORITY
+
+    // -------------------------------------------------------------------------
+    // Fixed priority, LSB high priority, no blocking
+    // -------------------------------------------------------------------------
+    `ifdef ARB_NO_BLOCK
+
+    assign grant = request;
+
+    `else
+
+    // -------------------------------------------------------------------------
+    // Fixed priority, LSB high priority, blocking
+    // -------------------------------------------------------------------------
+    `ifdef ARB_BLOCK_ACK
+
+    // -------------------------------------------------------------------------
+    // Fixed priority, LSB high priority, blocking, acknowledge
+    // -------------------------------------------------------------------------
+    (* ASYNC_REG = "TRUE" *)
+    reg [PORTS-1:0] grant_r;
+
+    always @(posedge clk, posedge rst)
+        if (rst)
+            grant_r <= {PORTS{1'b0}};
+        else if (grant_r == {PORTS{1'b0}})
+            grant_r <= request;
+        else if (acknowledge & grant_r)
+            grant_r <= request;
+
+    assign grant = grant_r;
+
+    `else
+
+    // -------------------------------------------------------------------------
+    // Fixed priority, LSB high priority, blocking, request
+    // -------------------------------------------------------------------------
+    (* ASYNC_REG = "TRUE" *)
+    reg [PORTS-1:0] grant_r;
+
+    always @(posedge clk, posedge rst)
+        if (rst)
+            grant_r <= {PORTS{1'b0}};
+        else if (grant_r == {PORTS{1'b0}})
+            grant_r <= request;
+        else if (grant_r & ~request)
+            grant_r <= request;
+
+    assign grant = grant_r;
+
+    `endif // ARB_BLOCK_ACK
+
+    `endif // ARB_NO_BLOCK
+
+    `else
+
+    // -------------------------------------------------------------------------
+    // Fixed priority, MSB high priority
+    // -------------------------------------------------------------------------
+    `ifdef ARB_NO_BLOCK
+
+    assign grant = request & ~({PORTS{1'b1}} - (request << 1));
+
+    `else
+
+    // -------------------------------------------------------------------------
+    // Fixed priority, MSB high priority, blocking
+    // -------------------------------------------------------------------------
+    `ifdef ARB_BLOCK_ACK
+
+    // -------------------------------------------------------------------------
+    // Fixed priority, MSB high priority, blocking, acknowledge
+    // -------------------------------------------------------------------------
+    (* ASYNC_REG = "TRUE" *)
+    reg [PORTS-1:0] grant_r;
+
+    always @(posedge clk, posedge rst)
+        if (rst)
+            grant_r <= {PORTS{1'b0}};
+        else if (grant_r == {PORTS{1'b0}})
+            grant_r <= request & ~({PORTS{1'b1}} - (request << 1));
+        else if (acknowledge & grant_r)
+            grant_r <= request & ~({PORTS{1'b1}} - (request << 1));
+
+    assign grant = grant_r;
+
+    `else
+
+    // -------------------------------------------------------------------------
+    // Fixed priority, MSB high priority, blocking, request
+    // -------------------------------------------------------------------------
+    (* ASYNC_REG = "TRUE" *)
+    reg [PORTS-1:0] grant_r;
+
+    always @(posedge clk, posedge rst)
+        if (rst)
+            grant_r <= {PORTS{1'b0}};
+        else if (grant_r == {PORTS{1'b0}})
+            grant_r <= request & ~({PORTS{1'b1}} - (request << 1));
+        else if (grant_r & ~request)
+            grant_r <= request & ~({PORTS{1'b1}} - (request << 1));
+
+    assign grant = grant_r;
+
+    `endif // ARB_BLOCK_ACK
+
+    `endif // ARB_NO_BLOCK
+
+    `endif // ARB_LSB_HIGH_PRIORITY
+
+    `endif // ARB_FIXED_PRIORITY
+
+    // -------------------------------------------------------------------------
+    // Round robin
+    // -------------------------------------------------------------------------
+    `ifdef ARB_ROUND_ROBIN
+
+    // -------------------------------------------------------------------------
+    // Round robin, LSB high priority
+    // -------------------------------------------------------------------------
+    `ifdef ARB_LSB_HIGH_PRIORITY
+
+    // -------------------------------------------------------------------------
+    // Round robin, LSB high priority, no blocking
+    // -------------------------------------------------------------------------
+    `ifdef ARB_NO_BLOCK
+
+    wire [PORTS-1:0] request_masked = request & ~({PORTS{1'b1}} - (request << 1));
+    wire [PORTS-1:0] request_rotated = {request_masked[0], request_masked[PORTS-1:1]};
+
+    assign grant = request_rotated & ~({PORTS{1'b1}} - (request_rotated << 1));
+
+    `else
+
+    // -------------------------------------------------------------------------
+    // Round robin, LSB high priority, blocking
+    // -------------------------------------------------------------------------
+    `ifdef ARB_BLOCK_ACK
+
+    // -------------------------------------------------------------------------
+    // Round robin, LSB high priority, blocking, acknowledge
+    // -------------------------------------------------------------------------
+    (* ASYNC_REG = "TRUE" *)
+    reg [PORTS-1:0] grant_r;
+
+    always @(posedge clk, posedge rst)
+        if (rst)
+            grant_r <= {PORTS{1'b0}};
+        else if (grant_r == {PORTS{1'b0}})
+            grant_r <= request & ~({PORTS{1'b1}} - (request << 1));
+        else if (acknowledge & grant_r)
+            grant_r <= request & ~({PORTS{1'b1}} - (request << 1));
+
+    assign grant = grant_r;
+
+    `else
+
+    // -------------------------------------------------------------------------
+    // Round robin, LSB high priority, blocking, request
+    // -------------------------------------------------------------------------
+    (* ASYNC_REG = "TRUE" *)
+    reg [PORTS-1:0] grant_r;
+
+    always @(posedge clk, posedge rst)
+        if (rst)
+            grant_r <= {PORTS{1'b0}};
+        else if (grant_r == {PORTS{1'b0}})
+            grant_r <= request & ~({PORTS{1'b1}} - (request << 1));
+        else if (grant_r & ~request)
+            grant_r <= request & ~({PORTS{1'b1}} - (request << 1));
+
+    assign grant = grant_r;
+
+    `endif // ARB_BLOCK_ACK
+
+    `endif // ARB_NO_BLOCK
+
+    `else
+
+    // -------------------------------------------------------------------------
+    // Round robin, MSB high priority
+    // -------------------------------------------------------------------------
+    `ifdef ARB_NO_BLOCK
+
+    wire [PORTS-1:0] request_masked = request & ~({PORTS{1'b1}} - (request << 1));
+    wire [PORTS-1:0] request_rotated = {request_masked[0], request_masked[PORTS-1:1]};
+
+    assign grant = request_rotated & ~({PORTS{1'b1}} - (request_rotated << 1));
+
+    `else
+
+    // -------------------------------------------------------------------------
+    // Round robin, MSB high priority, blocking
+    // -------------------------------------------------------------------------
+    `ifdef ARB_BLOCK_ACK
+
+    // -------------------------------------------------------------------------
+    // Round robin, MSB high priority, blocking, acknowledge
+    // -------------------------------------------------------------------------
+    (* ASYNC_REG = "TRUE" *)
+    reg [PORTS-1:0] grant_r;
+
+    always @(posedge clk, posedge rst)
+        if (rst)
+            grant_r <= {PORTS{1'b0}};
+        else if (grant_r == {PORTS{1'b0}})
+            grant_r <= request & ~({PORTS{1'b1}} - (request << 1));
+        else if (acknowledge & grant_r)
+            grant_r <= request & ~({PORTS{1'b1}} - (request << 1));
+
+    assign grant = grant_r;
+
+    `else
+
+    // -------------------------------------------------------------------------
+    // Round robin, MSB high priority, blocking, request
+    // -------------------------------------------------------------------------
+    (* ASYNC_REG = "TRUE" *)
+    reg [PORTS-1:0] grant_r;
+
+    always @(posedge clk, posedge rst)
+        if (rst)
+            grant_r <= {PORTS{1'b0}};
+        else if (grant_r == {PORTS{1'b0}})
+            grant_r <= request & ~({PORTS{1'b1}} - (request << 1));
+        else if (grant_r & ~request)
+            grant_r <= request & ~({PORTS{1'b1}} - (request << 1));
+
+    assign grant = grant_r;
+
+    `endif // ARB_BLOCK_ACK
+
+    `endif // ARB_NO_BLOCK
+
+    `endif // ARB_LSB_HIGH_PRIORITY
+
+    `endif // ARB_ROUND_ROBIN
+
+    // -------------------------------------------------------------------------
+    // Grant valid and encoded
+    // -------------------------------------------------------------------------
+    assign grant_valid = |grant;
+
+    `ifdef ARB_LSB_HIGH_PRIORITY
+
+    assign grant_encoded = ~({$clog2(PORTS){1'b1}} - (grant << 1));
+
+    `else
+
+    assign grant_encoded = ~({$clog2(PORTS){1'b1}} - (grant >> 1));
+
+    `endif // ARB_LSB_HIGH_PRIORITY
+
+endmodule

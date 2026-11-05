@@ -1,0 +1,163 @@
+module cdc_fifo_2phase #(
+    parameter WIDTH = 8,
+    parameter LOG_DEPTH = 3
+)(
+    input                  src_rst_ni,
+    input                  src_clk_i,
+    input  [WIDTH-1:0]     src_data_i,
+    input                  src_valid_i,
+    output                 src_ready_o,
+    input                  dst_rst_ni,
+    input                  dst_clk_i,
+    output [WIDTH-1:0]     dst_data_o,
+    output                 dst_valid_o,
+    input                  dst_ready_i
+);
+
+    localparam DEPTH = 1 << LOG_DEPTH;
+    localparam ADDR_WIDTH = LOG_DEPTH;
+    localparam CNT_WIDTH = LOG_DEPTH + 1;
+
+    // Source domain: write pointer and FIFO storage
+    reg [ADDR_WIDTH-1:0] wr_ptr;
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+
+    // Destination domain: read pointer
+    reg [ADDR_WIDTH-1:0] rd_ptr;
+
+    // Synchronization of write pointer to destination domain
+    reg [ADDR_WIDTH-1:0] wr_ptr_sync1, wr_ptr_sync2;
+
+    // Synchronization of read pointer to source domain
+    reg [ADDR_WIDTH-1:0] rd_ptr_sync1, rd_ptr_sync2;
+
+    // Destination domain: pipeline stages for data and valid
+    // Stage 1: raw read from memory
+    reg [WIDTH-1:0] stage1_data;
+    reg              stage1_valid;
+
+    // Stage 2: registered output
+    reg [WIDTH-1:0] stage2_data;
+    reg              stage2_valid;
+
+    // Compute full/empty in respective domains
+    wire [CNT_WIDTH-1:0] wr_ptr_ext = {1'b0, wr_ptr};
+    wire [CNT_WIDTH-1:0] rd_ptr_ext = {1'b0, rd_ptr};
+
+    // In source domain: compare wr_ptr with synchronized rd_ptr
+    wire [CNT_WIDTH-1:0] rd_ptr_src = {1'b0, rd_ptr_sync2};
+    wire [CNT_WIDTH-1:0] src_count = wr_ptr_ext - rd_ptr_src;
+    wire src_full = (src_count == DEPTH);
+    wire src_empty = (src_count == 0);
+
+    // In destination domain: compare synchronized wr_ptr with rd_ptr
+    wire [CNT_WIDTH-1:0] wr_ptr_dst = {1'b0, wr_ptr_sync2};
+    wire [CNT_WIDTH-1:0] dst_count = wr_ptr_dst - rd_ptr_ext;
+    wire dst_full = (dst_count == DEPTH);
+    wire dst_empty = (dst_count == 0);
+
+    // Source ready: can accept if not full
+    assign src_ready_o = ~src_full;
+
+    // Source write logic
+    wire src_write = src_valid_i & src_ready_o;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            wr_ptr <= {ADDR_WIDTH{1'b0}};
+        end else if (src_write) begin
+            mem[wr_ptr] <= src_data_i;
+            wr_ptr <= wr_ptr + 1'b1;
+        end
+    end
+
+    // Synchronize write pointer to destination domain
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            wr_ptr_sync1 <= {ADDR_WIDTH{1'b0}};
+            wr_ptr_sync2 <= {ADDR_WIDTH{1'b0}};
+        end else begin
+            wr_ptr_sync1 <= wr_ptr;
+            wr_ptr_sync2 <= wr_ptr_sync1;
+        end
+    end
+
+    // Synchronize read pointer to source domain
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            rd_ptr_sync1 <= {ADDR_WIDTH{1'b0}};
+            rd_ptr_sync2 <= {ADDR_WIDTH{1'b0}};
+        end else begin
+            rd_ptr_sync1 <= rd_ptr;
+            rd_ptr_sync2 <= rd_ptr_sync1;
+        end
+    end
+
+    // Destination domain: read from memory and pipeline
+    // We need to read from memory when there is data available and we are not in the middle of a transfer
+    // The contract says: "Payloads pass through two destination-clock stages before they are advertised as valid."
+    // "dst_valid_o may remain low for multiple destination clocks after an accepted beat even when another word is already stored."
+    // "There is no one-beat-per-clock guarantee."
+    
+    // Let's use a simple approach:
+    // - When dst_empty is false and stage2 is not being consumed, we can start a new read
+    // - Actually, let's think about this more carefully.
+    
+    // The FIFO has DEPTH entries. The read pointer advances when we consume a beat.
+    // We need to ensure that we don't read ahead too far.
+    
+    // Let's define:
+    // - dst_can_read: there is data in the FIFO and we are not currently in a pipeline stage that hasn't been consumed
+    // - Actually, the pipeline has 2 stages. Let's track whether stage1 and stage2 have valid data.
+    
+    // Let me reconsider. The standard approach for a 2-phase CDC FIFO with pipelined output:
+    // - Read from memory into stage1 when there's data and stage1 is empty
+    // - Move stage1 to stage2 when stage2 is empty (or being consumed)
+    // - dst_valid_o = stage2_valid
+    // - dst_data_o = stage2_data
+    // - When dst_valid_o & dst_ready_i, consume stage2 and advance rd_ptr
+    
+    // But we need to be careful: rd_ptr should only advance when we actually read from memory, not when we move through pipeline stages.
+    
+    // Let's define:
+    // - mem_read: read from memory into stage1
+    // - stage1_to_stage2: move stage1 to stage2
+    // - stage2_consume: stage2 is consumed by dst_ready_i
+    
+    // rd_ptr advances when mem_read happens.
+    
+    wire dst_mem_read = ~dst_empty & ~stage1_valid;
+    wire dst_stage1_to_stage2 = stage1_valid & ~stage2_valid;
+    wire dst_stage2_consume = stage2_valid & dst_ready_i;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            rd_ptr <= {ADDR_WIDTH{1'b0}};
+            stage1_data <= {WIDTH{1'b0}};
+            stage1_valid <= 1'b0;
+            stage2_data <= {WIDTH{1'b0}};
+            stage2_valid <= 1'b0;
+        end else begin
+            // Read from memory into stage1
+            if (dst_mem_read) begin
+                stage1_data <= mem[rd_ptr];
+                stage1_valid <= 1'b1;
+                rd_ptr <= rd_ptr + 1'b1;
+            end else if (dst_stage1_to_stage2) begin
+                stage1_valid <= 1'b0;
+            end
+
+            // Move stage1 to stage2
+            if (dst_stage1_to_stage2) begin
+                stage2_data <= stage1_data;
+                stage2_valid <= 1'b1;
+            end else if (dst_stage2_consume) begin
+                stage2_valid <= 1'b0;
+            end
+        end
+    end
+
+    assign dst_data_o = stage2_data;
+    assign dst_valid_o = stage2_valid;
+
+endmodule

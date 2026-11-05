@@ -1,0 +1,222 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025, The Regents of the University of Colorado,
+// Denver, CO.  All rights reserved.
+//
+// Author: R. Stan Clow
+//
+// This is a Wishbone clock-domain bridge.  It takes a Wishbone
+// cycle on the i_wb_* side, and forwards it to the o_xclk_* side.
+//
+// It uses two FIFOs, one for the request, and one for the response.
+// The request FIFO is written on the i_wb_clk clock, and read on
+// the i_xclk_clk clock.  The response FIFO is the reverse.
+//
+// The FIFOs are simple, and use a Gray-coded pointer to avoid
+// metastability issues.
+//
+// The module is reset by i_reset, which is a global reset.
+
+`include "wbxclk.vh"
+
+module wbxclk #(
+	parameter AW=32,
+	parameter DW=32,
+	parameter LGFIFO = 5
+) (
+	input	wire			i_wb_clk, i_reset,
+	input	wire			i_wb_cyc, i_wb_stb, i_wb_we,
+	input	wire	[(AW-1):0]	i_wb_addr,
+	input	wire	[(DW-1):0]	i_wb_data,
+	input	wire	[(DW/8-1):0]	i_wb_sel,
+	output	wire			o_wb_stall,
+	output	reg			o_wb_ack,
+	output	reg	[(DW-1):0]	o_wb_data,
+	output	reg			o_wb_err,
+
+	input	wire			i_xclk_clk,
+	output	reg			o_xclk_cyc,
+	output	reg			o_xclk_stb,
+	output	reg			o_xclk_we,
+	output	reg	[(AW-1):0]	o_xclk_addr,
+	output	reg	[(DW-1):0]	o_xclk_data,
+	output	reg	[(DW/8-1):0]	o_xclk_sel,
+	input	wire			i_xclk_stall,
+	input	wire			i_xclk_ack,
+	input	wire	[(DW-1):0]	i_xclk_data,
+	input	wire			i_xclk_err
+);
+
+	//
+	// The request FIFO.  This is a simple FIFO, with a Gray-coded
+	// pointer.  The write pointer is on the i_wb_clk clock, and the
+	// read pointer is on the i_xclk_clk clock.
+	//
+	// The FIFO is full when the write pointer is one ahead of the
+	// read pointer.  The FIFO is empty when the write pointer is
+	// equal to the read pointer.
+	//
+	// The FIFO is reset by i_reset, which is a global reset.
+	//
+	// The FIFO is written when i_wb_cyc && i_wb_stb && !o_wb_stall.
+	// The FIFO is read when o_xclk_cyc && o_xclk_stb && !i_xclk_stall.
+	//
+	// The FIFO is full when the write pointer is one ahead of the
+	// read pointer.  The FIFO is empty when the write pointer is
+	// equal to the read pointer.
+	//
+	// The FIFO is reset by i_reset, which is a global reset.
+	//
+	// The FIFO is written when i_wb_cyc && i_wb_stb && !o_wb_stall.
+	// The FIFO is read when o_xclk_cyc && o_xclk_stb && !i_xclk_stall.
+	//
+
+	//
+	// The request FIFO.  This is a simple FIFO, with a Gray-coded
+	// pointer.  The write pointer is on the i_wb_clk clock, and the
+	// read pointer is on the i_xclk_clk clock.
+	//
+	// The FIFO is full when the write pointer is one ahead of the
+	// read pointer.  The FIFO is empty when the write pointer is
+	// equal to the read pointer.
+	//
+	// The FIFO is reset by i_reset, which is a global reset.
+	//
+	// The FIFO is written when i_wb_cyc && i_wb_stb && !o_wb_stall.
+	// The FIFO is read when o_xclk_cyc && o_xclk_stb && !i_xclk_stall.
+	//
+	// The FIFO is full when the write pointer is one ahead of the
+	// read pointer.  The FIFO is empty when the write pointer is
+	// equal to the read pointer.
+	//
+	// The FIFO is reset by i_reset, which is a global reset.
+	//
+	// The FIFO is written when i_wb_cyc && i_wb_stb && !o_wb_stall.
+	// The FIFO is read when o_xclk_cyc && o_xclk_stb && !i_xclk_stall.
+	//
+
+	//
+	// The request FIFO.  This is a simple FIFO, with a Gray-coded
+	// pointer.  The write pointer is on the i_wb_clk clock, and the
+	// read pointer is on the i_xclk_clk clock.
+	//
+	// The FIFO is full when the write pointer is one ahead of the
+	// read pointer.  The FIFO is empty when the write pointer is
+	// equal to the read pointer.
+	//
+	// The FIFO is reset by i_reset, which is a global reset.
+	//
+	// The FIFO is written when i_wb_cyc && i_wb_stb && !o_wb_stall.
+	// The FIFO is read when o_xclk_cyc && o_xclk_stb && !i_xclk_stall.
+	//
+	// The FIFO is full when the write pointer is one ahead of the
+	// read pointer.  The FIFO is empty when the write pointer is
+	// equal to the read pointer.
+	//
+	// The FIFO is reset by i_reset, which is a global reset.
+	//
+	// The FIFO is written when i_wb_cyc && i_wb_stb && !o_wb_stall.
+	// The FIFO is read when o_xclk_cyc && o_xclk_stb && !i_xclk_stall.
+	//
+
+	//
+	// The request FIFO.  This is a simple FIFO, with a Gray-coded
+	// pointer.  The write pointer is on the i_wb_clk clock, and the
+	// read pointer is on the i_xclk_clk clock.
+	//
+	// The FIFO is full when the write pointer is one ahead of the
+	// read pointer.  The FIFO is empty when the write pointer is
+	// equal to the read pointer.
+	//
+	// The FIFO is reset by i_reset, which is a global reset.
+	//
+	// The FIFO is written when i_wb_cyc && i_wb_stb && !o_wb_stall.
+	// The FIFO is read when o_xclk_cyc && o_xclk_stb && !i_xclk_stall.
+	//
+	// The FIFO is full when the write pointer is one ahead of the
+	// read pointer.  The FIFO is empty when the write pointer is
+	// equal to the read pointer.
+	//
+	// The FIFO is reset by i_reset, which is a global reset.
+	//
+	// The FIFO is written when i_wb_cyc && i_wb_stb && !o_wb_stall.
+	// The FIFO is read when o_xclk_cyc && o_xclk_stb && !i_xclk_stall.
+	//
+
+	//
+	// The request FIFO.  This is a simple FIFO, with a Gray-coded
+	// pointer.  The write pointer is on the i_wb_clk clock, and the
+	// read pointer is on the i_xclk_clk clock.
+	//
+	// The FIFO is full when the write pointer is one ahead of the
+	// read pointer.  The FIFO is empty when the write pointer is
+	// equal to the read pointer.
+	//
+	// The FIFO is reset by i_reset, which is a global reset.
+	//
+	// The FIFO is written when i_wb_cyc && i_wb_stb && !o_wb_stall.
+	// The FIFO is read when o_xclk_cyc && o_xclk_stb && !i_xclk_stall.
+	//
+	// The FIFO is full when the write pointer is one ahead of the
+	// read pointer.  The FIFO is empty when the write pointer is
+	// equal to the read pointer.
+	//
+	// The FIFO is reset by i_reset, which is a global reset.
+	//
+	// The FIFO is written when i_wb_cyc && i_wb_stb && !o_wb_stall.
+	// The FIFO is read when o_xclk_cyc && o_xclk_stb && !i_xclk_stall.
+	//
+
+	//
+	// The request FIFO.  This is a simple FIFO, with a Gray-coded
+	// pointer.  The write pointer is on the i_wb_clk clock, and the
+	// read pointer is on the i_xclk_clk clock.
+	//
+	// The FIFO is full when the write pointer is one ahead of the
+	// read pointer.  The FIFO is empty when the write pointer is
+	// equal to the read pointer.
+	//
+	// The FIFO is reset by i_reset, which is a global reset.
+	//
+	// The FIFO is written when i_wb_cyc && i_wb_stb && !o_wb_stall.
+	// The FIFO is read when o_xclk_cyc && o_xclk_stb && !i_xclk_stall.
+	//
+	// The FIFO is full when the write pointer is one ahead of the
+	// read pointer.  The FIFO is empty when the write pointer is
+	// equal to the read pointer.
+	//
+	// The FIFO is reset by i_reset, which is a global reset.
+	//
+	// The FIFO is written when i_wb_cyc && i_wb_stb && !o_wb_stall.
+	// The FIFO is read when o_xclk_cyc && o_xclk_stb && !i_xclk_stall.
+	//
+
+	//
+	// The request FIFO.  This is a simple FIFO, with a Gray-coded
+	// pointer.  The write pointer is on the i_wb_clk clock, and the
+	// read pointer is on the i_xclk_clk clock.
+	//
+	// The FIFO is full when the write pointer is one ahead of the
+	// read pointer.  The FIFO is empty when the write pointer is
+	// equal to the read pointer.
+	//
+	// The FIFO is reset by i_reset, which is a global reset.
+	//
+	// The FIFO is written when i_wb_cyc && i_wb_stb && !o_wb_stall.
+	// The FIFO is read when o_xclk_cyc && o_xclk_stb && !i_xclk_stall.
+	//
+	// The FIFO is full when the write pointer is one ahead of the
+	// read pointer.  The FIFO is empty when the write pointer is
+	// equal to the read pointer.
+	//
+	// The FIFO is reset by i_reset, which is a global reset.
+	//
+	// The FIFO is written when i_wb_cyc && i_wb_stb && !o_wb_stall.
+	// The FIFO is read when o_xclk_cyc && o_xclk_stb && !i_xclk_stall.
+	//
+
+	//
+	// The request FIFO.  This is a simple FIFO, with a Gray-coded
+	// pointer.  The write pointer is on the i_wb_clk clock, and the
+	// read pointer is on the i_xclk_clk clock.
+	//
+	// The FIFO is full when the write

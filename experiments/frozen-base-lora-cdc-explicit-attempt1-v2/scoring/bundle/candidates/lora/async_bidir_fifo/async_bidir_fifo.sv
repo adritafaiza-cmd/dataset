@@ -1,0 +1,158 @@
+// =============================================================================
+// async_bidir_fifo.v
+// =============================================================================
+// Bidirectional asynchronous FIFO with two independent clock domains.
+//
+// Architecture:
+//   - Two independent unidirectional async FIFOs (A->B and B->A).
+//   - Each side selects its active direction via a_dir / b_dir.
+//   - When a side is in write mode (dir=1), its local write port feeds the
+//     FIFO that carries data to the opposite side.
+//   - When a side is in read mode (dir=0), its local read port drains the
+//     FIFO that receives data from the opposite side.
+//   - Full/empty flags are local to each side and reflect the FIFO that
+//     the side is currently using.
+//
+// CDC safety:
+//   - Each unidirectional FIFO uses Gray-coded pointers synchronized with
+//     two-stage synchronizers.
+//   - Data is written to the source clock domain and read from the
+//     destination clock domain (standard async FIFO pattern).
+// =============================================================================
+
+`include "async_bidir_fifo.vh"
+
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  // ===========================================================================
+  // FIFO A->B: writes from A side, reads from B side
+  // ===========================================================================
+  wire              ab_winc;
+  wire [DSIZE-1:0]  ab_wdata;
+  wire              ab_rinc;
+  wire [DSIZE-1:0]  ab_rdata;
+  wire              ab_full;
+  wire              ab_afull;
+  wire              ab_empty;
+  wire              ab_aempty;
+
+  // A side is writer for A->B FIFO when a_dir == 1
+  assign ab_winc  = a_winc & a_dir;
+  assign ab_wdata = a_wdata;
+
+  // B side is reader for A->B FIFO when b_dir == 0
+  assign ab_rinc  = b_rinc & ~b_dir;
+
+  async_fifo
+    #(
+      .DSIZE       (DSIZE),
+      .ASIZE       (ASIZE),
+      .FALLTHROUGH (FALLTHROUGH)
+      )
+  u_fifo_ab (
+    .wr_clk      (a_clk),
+    .wr_rst_n    (a_rst_n),
+    .wr_en       (ab_winc),
+    .wr_data     (ab_wdata),
+    .rd_clk      (b_clk),
+    .rd_rst_n    (b_rst_n),
+    .rd_en       (ab_rinc),
+    .rd_data     (ab_rdata),
+    .full        (ab_full),
+    .almost_full (ab_afull),
+    .empty       (ab_empty),
+    .almost_empty(ab_aempty)
+    );
+
+  // ===========================================================================
+  // FIFO B->A: writes from B side, reads from A side
+  // ===========================================================================
+  wire              ba_winc;
+  wire [DSIZE-1:0]  ba_wdata;
+  wire              ba_rinc;
+  wire [DSIZE-1:0]  ba_rdata;
+  wire              ba_full;
+  wire              ba_afull;
+  wire              ba_empty;
+  wire              ba_aempty;
+
+  // B side is writer for B->A FIFO when b_dir == 1
+  assign ba_winc  = b_winc & b_dir;
+  assign ba_wdata = b_wdata;
+
+  // A side is reader for B->A FIFO when a_dir == 0
+  assign ba_rinc  = a_rinc & ~a_dir;
+
+  async_fifo
+    #(
+      .DSIZE       (DSIZE),
+      .ASIZE       (ASIZE),
+      .FALLTHROUGH (FALLTHROUGH)
+      )
+  u_fifo_ba (
+    .wr_clk      (b_clk),
+    .wr_rst_n    (b_rst_n),
+    .wr_en       (ba_winc),
+    .wr_data     (ba_wdata),
+    .rd_clk      (a_clk),
+    .rd_rst_n    (a_rst_n),
+    .rd_en       (ba_rinc),
+    .rd_data     (ba_rdata),
+    .full        (ba_full),
+    .almost_full (ba_afull),
+    .empty       (ba_empty),
+    .almost_empty(ba_aempty)
+    );
+
+  // ===========================================================================
+  // Side A outputs: select based on a_dir
+  //   a_dir == 1: A is writer -> full/afull from A->B FIFO
+  //   a_dir == 0: A is reader -> empty/aempty from B->A FIFO, rdata from B->A
+  // ===========================================================================
+  assign a_rdata  = ba_rdata;
+  assign a_full   = ab_full;
+  assign a_afull  = ab_afull;
+  assign a_empty  = ba_empty;
+  assign a_aempty = ba_aempty;
+
+  // ===========================================================================
+  // Side B outputs: select based on b_dir
+  //   b_dir == 1: B is writer -> full/afull from B->A FIFO
+  //   b_dir == 0: B is reader -> empty/aempty from A->B FIFO, rdata from A->B
+  // ===========================================================================
+  assign b_rdata  = ab_rdata;
+  assign b_full   = ba_full;
+  assign b_afull  = ba_afull;
+  assign b_empty  = ab_empty;
+  assign b_aempty = ab_aempty;
+
+endmodule

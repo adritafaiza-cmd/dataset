@@ -1,0 +1,283 @@
+module async_bidir_fifo
+  #(
+    parameter DSIZE         = 8,
+    parameter ASIZE         = 4,
+    parameter FALLTHROUGH   = "TRUE"
+    ) (
+       input wire              a_clk,
+       input wire              a_rst_n,
+       input wire              a_winc,
+       input wire [DSIZE-1:0]  a_wdata,
+       input wire              a_rinc,
+       output wire [DSIZE-1:0] a_rdata,
+       output wire             a_full,
+       output wire             a_afull,
+       output wire             a_empty,
+       output wire             a_aempty,
+       input wire              a_dir,
+       input wire              b_clk,
+       input wire              b_rst_n,
+       input wire              b_winc,
+       input wire [DSIZE-1:0]  b_wdata,
+       input wire              b_rinc,
+       output wire [DSIZE-1:0] b_rdata,
+       output wire             b_full,
+       output wire             b_afull,
+       output wire             b_empty,
+       output wire             b_aempty,
+       input wire              b_dir
+       );
+
+  localparam DEPTH = 1 << ASIZE;
+  localparam AWIDTH = ASIZE + 1;
+  localparam AFULL_THRESH = DEPTH - 2;
+  localparam AEMPTY_THRESH = 1;
+
+  // Internal signals for A-to-B direction
+  wire [DSIZE-1:0] a2b_data;
+  wire             a2b_wreq;
+  wire             a2b_wack;
+  wire             a2b_rreq;
+  wire             a2b_rack;
+  wire [AWIDTH-1:0] a2b_wptr;
+  wire [AWIDTH-1:0] a2b_rptr;
+  wire [AWIDTH-1:0] a2b_wptr_sync;
+  wire [AWIDTH-1:0] a2b_rptr_sync;
+  wire [AWIDTH-1:0] a2b_wptr_b;
+  wire [AWIDTH-1:0] a2b_rptr_b;
+  wire [AWIDTH-1:0] a2b_wptr_a;
+  wire [AWIDTH-1:0] a2b_rptr_a;
+  wire [AWIDTH-1:0] a2b_diff;
+  wire [AWIDTH-1:0] a2b_diff_b;
+  wire [AWIDTH-1:0] a2b_diff_a;
+  wire             a2b_full;
+  wire             a2b_afull;
+  wire             a2b_empty;
+  wire             a2b_aempty;
+  wire [DSIZE-1:0] a2b_rdata;
+
+  // Internal signals for B-to-A direction
+  wire [DSIZE-1:0] b2a_data;
+  wire             b2a_wreq;
+  wire             b2a_wack;
+  wire             b2a_rreq;
+  wire             b2a_rack;
+  wire [AWIDTH-1:0] b2a_wptr;
+  wire [AWIDTH-1:0] b2a_rptr;
+  wire [AWIDTH-1:0] b2a_wptr_sync;
+  wire [AWIDTH-1:0] b2a_rptr_sync;
+  wire [AWIDTH-1:0] b2a_wptr_b;
+  wire [AWIDTH-1:0] b2a_rptr_b;
+  wire [AWIDTH-1:0] b2a_wptr_a;
+  wire [AWIDTH-1:0] b2a_rptr_a;
+  wire [AWIDTH-1:0] b2a_diff;
+  wire [AWIDTH-1:0] b2a_diff_b;
+  wire [AWIDTH-1:0] b2a_diff_a;
+  wire             b2a_full;
+  wire             b2a_afull;
+  wire             b2a_empty;
+  wire             b2a_aempty;
+  wire [DSIZE-1:0] b2a_rdata;
+
+  // A-to-B FIFO: A is writer, B is reader
+  // Write side (A clock domain)
+  reg [DSIZE-1:0] a2b_mem [0:DEPTH-1];
+  reg [AWIDTH-1:0] a2b_wptr_reg;
+  reg [AWIDTH-1:0] a2b_rptr_reg_a; // synchronized read pointer in A domain
+
+  // Read side (B clock domain)
+  reg [AWIDTH-1:0] a2b_rptr_reg_b;
+  reg [AWIDTH-1:0] a2b_wptr_reg_b; // synchronized write pointer in B domain
+
+  // Synchronization of write pointer from A to B
+  reg [AWIDTH-1:0] a2b_wptr_sync1;
+  reg [AWIDTH-1:0] a2b_wptr_sync2;
+
+  // Synchronization of read pointer from B to A
+  reg [AWIDTH-1:0] a2b_rptr_sync1;
+  reg [AWIDTH-1:0] a2b_rptr_sync2;
+
+  // A-to-B write logic (A clock)
+  assign a2b_wreq = a_dir & a_winc & ~a2b_full;
+  assign a2b_data = a_wdata;
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a2b_wptr_reg <= {AWIDTH{1'b0}};
+      a2b_rptr_reg_a <= {AWIDTH{1'b0}};
+    end else begin
+      if (a2b_wreq)
+        a2b_wptr_reg <= a2b_wptr_reg + 1'b1;
+      if (a2b_rack)
+        a2b_rptr_reg_a <= a2b_rptr_reg_a + 1'b1;
+    end
+  end
+
+  // A-to-B read logic (B clock)
+  assign a2b_rreq = ~b_dir & b_rinc & ~a2b_empty;
+  assign a2b_rdata = a2b_mem[a2b_rptr_reg_b[ASIZE-1:0]];
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a2b_rptr_reg_b <= {AWIDTH{1'b0}};
+      a2b_wptr_reg_b <= {AWIDTH{1'b0}};
+    end else begin
+      if (a2b_rreq)
+        a2b_rptr_reg_b <= a2b_rptr_reg_b + 1'b1;
+      if (a2b_wack)
+        a2b_wptr_reg_b <= a2b_wptr_reg_b + 1'b1;
+    end
+  end
+
+  // Synchronize write pointer A -> B
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      a2b_wptr_sync1 <= {AWIDTH{1'b0}};
+      a2b_wptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      a2b_wptr_sync1 <= a2b_wptr_reg;
+      a2b_wptr_sync2 <= a2b_wptr_sync1;
+    end
+  end
+  assign a2b_wptr_b = a2b_wptr_sync2;
+
+  // Synchronize read pointer B -> A
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      a2b_rptr_sync1 <= {AWIDTH{1'b0}};
+      a2b_rptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      a2b_rptr_sync1 <= a2b_rptr_reg_b;
+      a2b_rptr_sync2 <= a2b_rptr_sync1;
+    end
+  end
+  assign a2b_rptr_a = a2b_rptr_sync2;
+
+  // A-to-B status flags
+  assign a2b_diff_a = a2b_wptr_reg - a2b_rptr_a;
+  assign a2b_diff_b = a2b_wptr_b - a2b_rptr_reg_b;
+  assign a2b_full   = (a2b_diff_a == DEPTH);
+  assign a2b_afull  = (a2b_diff_a >= AFULL_THRESH);
+  assign a2b_empty  = (a2b_diff_b == 0);
+  assign a2b_aempty = (a2b_diff_b <= AEMPTY_THRESH);
+
+  // A-to-B write acknowledge (B clock)
+  assign a2b_wack = a2b_wreq & ~a2b_full;
+
+  // A-to-B read acknowledge (A clock)
+  assign a2b_rack = a2b_rreq & ~a2b_empty;
+
+  // Store data in memory on write
+  always @(posedge a_clk) begin
+    if (a2b_wreq)
+      a2b_mem[a2b_wptr_reg[ASIZE-1:0]] <= a2b_data;
+  end
+
+  // B-to-A FIFO: B is writer, A is reader
+  // Write side (B clock domain)
+  reg [DSIZE-1:0] b2a_mem [0:DEPTH-1];
+  reg [AWIDTH-1:0] b2a_wptr_reg;
+  reg [AWIDTH-1:0] b2a_rptr_reg_b; // synchronized read pointer in B domain
+
+  // Read side (A clock domain)
+  reg [AWIDTH-1:0] b2a_rptr_reg_a;
+  reg [AWIDTH-1:0] b2a_wptr_reg_a; // synchronized write pointer in A domain
+
+  // Synchronization of write pointer from B to A
+  reg [AWIDTH-1:0] b2a_wptr_sync1;
+  reg [AWIDTH-1:0] b2a_wptr_sync2;
+
+  // Synchronization of read pointer from A to B
+  reg [AWIDTH-1:0] b2a_rptr_sync1;
+  reg [AWIDTH-1:0] b2a_rptr_sync2;
+
+  // B-to-A write logic (B clock)
+  assign b2a_wreq = b_dir & b_winc & ~b2a_full;
+  assign b2a_data = b_wdata;
+
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b2a_wptr_reg <= {AWIDTH{1'b0}};
+      b2a_rptr_reg_b <= {AWIDTH{1'b0}};
+    end else begin
+      if (b2a_wreq)
+        b2a_wptr_reg <= b2a_wptr_reg + 1'b1;
+      if (b2a_rack)
+        b2a_rptr_reg_b <= b2a_rptr_reg_b + 1'b1;
+    end
+  end
+
+  // B-to-A read logic (A clock)
+  assign b2a_rreq = ~a_dir & a_rinc & ~b2a_empty;
+  assign b2a_rdata = b2a_mem[b2a_rptr_reg_a[ASIZE-1:0]];
+
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b2a_rptr_reg_a <= {AWIDTH{1'b0}};
+      b2a_wptr_reg_a <= {AWIDTH{1'b0}};
+    end else begin
+      if (b2a_rreq)
+        b2a_rptr_reg_a <= b2a_rptr_reg_a + 1'b1;
+      if (b2a_wack)
+        b2a_wptr_reg_a <= b2a_wptr_reg_a + 1'b1;
+    end
+  end
+
+  // Synchronize write pointer B -> A
+  always @(posedge a_clk or negedge a_rst_n) begin
+    if (!a_rst_n) begin
+      b2a_wptr_sync1 <= {AWIDTH{1'b0}};
+      b2a_wptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      b2a_wptr_sync1 <= b2a_wptr_reg;
+      b2a_wptr_sync2 <= b2a_wptr_sync1;
+    end
+  end
+  assign b2a_wptr_a = b2a_wptr_sync2;
+
+  // Synchronize read pointer A -> B
+  always @(posedge b_clk or negedge b_rst_n) begin
+    if (!b_rst_n) begin
+      b2a_rptr_sync1 <= {AWIDTH{1'b0}};
+      b2a_rptr_sync2 <= {AWIDTH{1'b0}};
+    end else begin
+      b2a_rptr_sync1 <= b2a_rptr_reg_a;
+      b2a_rptr_sync2 <= b2a_rptr_sync1;
+    end
+  end
+  assign b2a_rptr_b = b2a_rptr_sync2;
+
+  // B-to-A status flags
+  assign b2a_diff_b = b2a_wptr_reg - b2a_rptr_b;
+  assign b2a_diff_a = b2a_wptr_a - b2a_rptr_reg_a;
+  assign b2a_full   = (b2a_diff_b == DEPTH);
+  assign b2a_afull  = (b2a_diff_b >= AFULL_THRESH);
+  assign b2a_empty  = (b2a_diff_a == 0);
+  assign b2a_aempty = (b2a_diff_a <= AEMPTY_THRESH);
+
+  // B-to-A write acknowledge (A clock)
+  assign b2a_wack = b2a_wreq & ~b2a_full;
+
+  // B-to-A read acknowledge (B clock)
+  assign b2a_rack = b2a_rreq & ~b2a_empty;
+
+  // Store data in memory on write
+  always @(posedge b_clk) begin
+    if (b2a_wreq)
+      b2a_mem[b2a_wptr_reg[ASIZE-1:0]] <= b2a_data;
+  end
+
+  // Output assignments
+  assign a_rdata  = a_dir ? {DSIZE{1'b0}} : b2a_rdata;
+  assign a_full   = a_dir ? a2b_full : b2a_full;
+  assign a_afull  = a_dir ? a2b_afull : b2a_afull;
+  assign a_empty  = a_dir ? a2b_empty : b2a_empty;
+  assign a_aempty = a_dir ? a2b_aempty : b2a_aempty;
+
+  assign b_rdata  = b_dir ? {DSIZE{1'b0}} : a2b_rdata;
+  assign b_full   = b_dir ? b2a_full : a2b_full;
+  assign b_afull  = b_dir ? b2a_afull : a2b_afull;
+  assign b_empty  = b_dir ? b2a_empty : a2b_empty;
+  assign b_aempty = b_dir ? b2a_aempty : a2b_aempty;
+
+endmodule

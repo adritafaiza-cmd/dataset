@@ -1,0 +1,155 @@
+// =============================================================================
+// Async FIFO with Gray-coded pointer CDC and two-stage payload transfer
+// =============================================================================
+
+`timescale 1ns / 1ps
+
+module async_fifo
+    #(
+        parameter DSIZE = 8,
+        parameter ASIZE = 4,
+        parameter FALLTHROUGH = "TRUE"
+    )(
+        input  wire             wclk,
+        input  wire             wrst_n,
+        input  wire             winc,
+        input  wire [DSIZE-1:0] wdata,
+
+        output wire             wfull,
+        output wire             awfull,
+
+        input  wire             rclk,
+        input  wire             rrst_n,
+        input  wire             rinc,
+
+        output wire [DSIZE-1:0] rdata,
+        output wire             rempty,
+        output wire             arempty
+    );
+
+    localparam DEPTH = 1 << ASIZE;
+    localparam AWFULL_THRESH = DEPTH - 4;
+    localparam AEMPTY_THRESH = 3;
+
+    // =========================================================================
+    // Write domain
+    // =========================================================================
+
+    reg [ASIZE:0] wptr_bin;
+    wire [ASIZE:0] wptr_gray;
+
+    reg [ASIZE:0] rptr_gray_w;
+    reg [ASIZE:0] rptr_gray_w_d1;
+    reg [ASIZE:0] rptr_gray_w_d2;
+
+    wire winc_eff = winc & ~wfull;
+
+    reg [DSIZE-1:0] wmem [0:DEPTH-1];
+    reg [ASIZE-1:0] wmem_addr;
+
+    reg [ASIZE:0] wcount;
+
+    // =========================================================================
+    // Read domain
+    // =========================================================================
+
+    reg [ASIZE:0] rptr_bin;
+    wire [ASIZE:0] rptr_gray;
+
+    reg [ASIZE:0] wptr_gray_r;
+    reg [ASIZE:0] wptr_gray_r_d1;
+    reg [ASIZE:0] wptr_gray_r_d2;
+
+    wire rinc_eff = rinc & ~rempty;
+
+    reg [DSIZE-1:0] rmem [0:DEPTH-1];
+    reg [ASIZE-1:0] rmem_addr;
+
+    reg [ASIZE:0] rcount;
+
+    // =========================================================================
+    // Gray-code conversion
+    // =========================================================================
+
+    assign wptr_gray = wptr_bin ^ {wptr_bin[ASIZE], wptr_bin[ASIZE-1:1]};
+    assign rptr_gray = rptr_bin ^ {rptr_bin[ASIZE], rptr_bin[ASIZE-1:1]};
+
+    // =========================================================================
+    // Write-domain logic
+    // =========================================================================
+
+    always @(posedge wclk or negedge wrst_n) begin
+        if (!wrst_n) begin
+            wptr_bin <= {1'b0, {ASIZE{1'b0}}};
+            rptr_gray_w <= {1'b0, {ASIZE{1'b0}}};
+            rptr_gray_w_d1 <= {1'b0, {ASIZE{1'b0}}};
+            rptr_gray_w_d2 <= {1'b0, {ASIZE{1'b0}}};
+            wmem_addr <= {ASIZE{1'b0}};
+            wcount <= {1'b0, {ASIZE{1'b0}}};
+        end else begin
+            if (winc_eff) begin
+                wmem[wmem_addr] <= wdata;
+                wmem_addr <= wmem_addr + 1'b1;
+                wptr_bin <= wptr_bin + 1'b1;
+            end
+
+            rptr_gray_w <= rptr_gray;
+            rptr_gray_w_d1 <= rptr_gray_w;
+            rptr_gray_w_d2 <= rptr_gray_w_d1;
+
+            if (winc_eff && !rinc_eff)
+                wcount <= wcount + 1'b1;
+            else if (!winc_eff && rinc_eff)
+                wcount <= wcount - 1'b1;
+        end
+    end
+
+    assign wfull = (wcount == DEPTH);
+    assign awfull = (wcount >= AWFULL_THRESH);
+
+    // =========================================================================
+    // Read-domain logic
+    // =========================================================================
+
+    always @(posedge rclk or negedge rrst_n) begin
+        if (!rrst_n) begin
+            rptr_bin <= {1'b0, {ASIZE{1'b0}}};
+            wptr_gray_r <= {1'b0, {ASIZE{1'b0}}};
+            wptr_gray_r_d1 <= {1'b0, {ASIZE{1'b0}}};
+            wptr_gray_r_d2 <= {1'b0, {ASIZE{1'b0}}};
+            rmem_addr <= {ASIZE{1'b0}};
+            rcount <= {1'b0, {ASIZE{1'b0}}};
+        end else begin
+            if (rinc_eff) begin
+                rmem[rmem_addr] <= wmem[rmem_addr];
+                rmem_addr <= rmem_addr + 1'b1;
+                rptr_bin <= rptr_bin + 1'b1;
+            end
+
+            wptr_gray_r <= wptr_gray;
+            wptr_gray_r_d1 <= wptr_gray_r;
+            wptr_gray_r_d2 <= wptr_gray_r_d1;
+
+            if (rinc_eff && !winc_eff)
+                rcount <= rcount - 1'b1;
+            else if (!rinc_eff && winc_eff)
+                rcount <= rcount + 1'b1;
+        end
+    end
+
+    assign rempty = (rcount == 0);
+    assign arempty = (rcount <= AEMPTY_THRESH);
+
+    // =========================================================================
+    // Output data
+    // =========================================================================
+
+    generate
+        if (FALLTHROUGH == "TRUE") begin : gen_fallthrough
+            assign rdata = rmem[rmem_addr];
+        end else begin : gen_no_fallthrough
+            assign rdata = rmem[(rmem_addr + 1'b1)];
+        end
+    endgenerate
+
+endmodule

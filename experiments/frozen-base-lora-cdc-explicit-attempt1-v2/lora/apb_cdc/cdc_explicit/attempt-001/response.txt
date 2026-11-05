@@ -1,0 +1,279 @@
+// =============================================================================
+// APB Clock Domain Crossing (CDC) Bridge
+// =============================================================================
+//
+// This module bridges APB transfers between two asynchronous clock domains.
+// It uses a FIFO-based approach with Gray-coded pointers for safe CDC.
+//
+// Architecture:
+//   - Source domain: Captures APB requests during access phase, writes to FIFO
+//   - Destination domain: Reads from FIFO, drives APB signals, waits for ready
+//   - Response path: Read data/error returned via FIFO or direct path
+//
+// FIFO Contents (per entry):
+//   - Write flag
+//   - Address
+//   - Write data
+//   - Write strobes
+//   - Protection bits
+//
+// =============================================================================
+
+module apb_cdc #(
+    parameter ADDR_WIDTH = 8,
+    parameter DATA_WIDTH = 32,
+    parameter LOG_DEPTH = 1
+)(
+    input                      src_pclk_i,
+    input                      src_preset_ni,
+    input                      src_psel_i,
+    input                      src_penable_i,
+    input                      src_pwrite_i,
+    input  [ADDR_WIDTH-1:0]    src_paddr_i,
+    input  [DATA_WIDTH-1:0]    src_pwdata_i,
+    input  [DATA_WIDTH/8-1:0]  src_pstrb_i,
+    input  [2:0]               src_pprot_i,
+    output                     src_pready_o,
+    output [DATA_WIDTH-1:0]    src_prdata_o,
+    output                     src_pslverr_o,
+
+    input                      dst_pclk_i,
+    input                      dst_preset_ni,
+    output                     dst_psel_o,
+    output                     dst_penable_o,
+    output                     dst_pwrite_o,
+    output [ADDR_WIDTH-1:0]    dst_paddr_o,
+    output [DATA_WIDTH-1:0]    dst_pwdata_o,
+    output [DATA_WIDTH/8-1:0]  dst_pstrb_o,
+    output [2:0]               dst_pprot_o,
+    input                      dst_pready_i,
+    input  [DATA_WIDTH-1:0]    dst_prdata_i,
+    input                      dst_pslverr_i
+);
+
+    localparam FIFO_DEPTH = 1 << LOG_DEPTH;
+    localparam PTR_WIDTH  = LOG_DEPTH + 1;
+
+    // ========================================================================
+    // FIFO Storage
+    // ========================================================================
+    reg [DATA_WIDTH-1:0] fifo_data [0:FIFO_DEPTH-1];
+    reg [ADDR_WIDTH-1:0] fifo_addr [0:FIFO_DEPTH-1];
+    reg [DATA_WIDTH/8-1:0] fifo_strb [0:FIFO_DEPTH-1];
+    reg [2:0]              fifo_prot [0:FIFO_DEPTH-1];
+    reg                    fifo_write [0:FIFO_DEPTH-1];
+
+    // ========================================================================
+    // FIFO Pointers (Gray-coded for CDC)
+    // ========================================================================
+    reg [PTR_WIDTH-1:0] wr_ptr_bin;
+    reg [PTR_WIDTH-1:0] wr_ptr_gray;
+    reg [PTR_WIDTH-1:0] rd_ptr_bin;
+    reg [PTR_WIDTH-1:0] rd_ptr_gray;
+
+    // Synchronized pointers
+    reg [PTR_WIDTH-1:0] wr_ptr_gray_dst;
+    reg [PTR_WIDTH-1:0] rd_ptr_gray_src;
+
+    // ========================================================================
+    // Source Domain State Machine
+    // ========================================================================
+    localparam SRC_IDLE    = 2'd0;
+    localparam SRC_SETUP   = 2'd1;
+    localparam SRC_ACCESS  = 2'd2;
+
+    reg [1:0] src_state;
+
+    // ========================================================================
+    // Destination Domain State Machine
+    // ========================================================================
+    localparam DST_IDLE    = 2'd0;
+    localparam DST_SETUP   = 2'd1;
+    localparam DST_ACCESS  = 2'd2;
+
+    reg [1:0] dst_state;
+
+    // ========================================================================
+    // Response FIFO (for read data/error)
+    // ========================================================================
+    reg [DATA_WIDTH-1:0] rsp_data [0:FIFO_DEPTH-1];
+    reg                    rsp_err  [0:FIFO_DEPTH-1];
+
+    reg [PTR_WIDTH-1:0] rsp_wr_ptr_bin;
+    reg [PTR_WIDTH-1:0] rsp_wr_ptr_gray;
+    reg [PTR_WIDTH-1:0] rsp_rd_ptr_bin;
+    reg [PTR_WIDTH-1:0] rsp_rd_ptr_gray;
+
+    reg [PTR_WIDTH-1:0] rsp_wr_ptr_gray_src;
+    reg [PTR_WIDTH-1:0] rsp_rd_ptr_gray_dst;
+
+    // ========================================================================
+    // Helper Functions
+    // ========================================================================
+    function [PTR_WIDTH-1:0] bin2gray;
+        input [PTR_WIDTH-1:0] bin;
+        begin
+            bin2gray = bin ^ (bin >> 1);
+        end
+    endfunction
+
+    // ========================================================================
+    // Source Domain Logic
+    // ========================================================================
+
+    // Synchronize destination read pointer to source domain
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            rd_ptr_gray_src <= {PTR_WIDTH{1'b0}};
+        else
+            rd_ptr_gray_src <= rd_ptr_gray;
+    end
+
+    // Synchronize response write pointer to source domain
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni)
+            rsp_wr_ptr_gray_src <= {PTR_WIDTH{1'b0}};
+        else
+            rsp_wr_ptr_gray_src <= rsp_wr_ptr_gray;
+    end
+
+    // FIFO full check (source domain)
+    wire fifo_full = (wr_ptr_gray == rd_ptr_gray_src) &&
+                     (wr_ptr_bin[PTR_WIDTH-1] != rd_ptr_gray_src[PTR_WIDTH-1]);
+
+    // Response FIFO full check (source domain)
+    wire rsp_fifo_full = (rsp_wr_ptr_gray == rsp_rd_ptr_gray_src) &&
+                         (rsp_wr_ptr_bin[PTR_WIDTH-1] != rsp_rd_ptr_gray_src[PTR_WIDTH-1]);
+
+    // Source APB outputs
+    assign src_pready_o  = (src_state == SRC_IDLE) && !fifo_full;
+    assign src_prdata_o  = rsp_data[rsp_rd_ptr_bin[LOG_DEPTH-1:0]];
+    assign src_pslverr_o = rsp_err[rsp_rd_ptr_bin[LOG_DEPTH-1:0]];
+
+    // Source state machine
+    always @(posedge src_pclk_i or negedge src_preset_ni) begin
+        if (!src_preset_ni) begin
+            src_state    <= SRC_IDLE;
+            wr_ptr_bin   <= {PTR_WIDTH{1'b0}};
+            wr_ptr_gray  <= {PTR_WIDTH{1'b0}};
+            rsp_rd_ptr_bin <= {PTR_WIDTH{1'b0}};
+            rsp_rd_ptr_gray <= {PTR_WIDTH{1'b0}};
+        end else begin
+            case (src_state)
+                SRC_IDLE: begin
+                    if (src_psel_i && !fifo_full) begin
+                        src_state <= SRC_SETUP;
+                    end
+                end
+
+                SRC_SETUP: begin
+                    if (src_psel_i && src_penable_i) begin
+                        // Write request to FIFO
+                        fifo_write[wr_ptr_bin[LOG_DEPTH-1:0]] <= src_pwrite_i;
+                        fifo_addr[wr_ptr_bin[LOG_DEPTH-1:0]]  <= src_paddr_i;
+                        fifo_data[wr_ptr_bin[LOG_DEPTH-1:0]]  <= src_pwdata_i;
+                        fifo_strb[wr_ptr_bin[LOG_DEPTH-1:0]]  <= src_pstrb_i;
+                        fifo_prot[wr_ptr_bin[LOG_DEPTH-1:0]]  <= src_pprot_i;
+
+                        wr_ptr_bin  <= wr_ptr_bin + 1'b1;
+                        wr_ptr_gray <= bin2gray(wr_ptr_bin + 1'b1);
+
+                        src_state <= SRC_ACCESS;
+                    end
+                end
+
+                SRC_ACCESS: begin
+                    // Wait for response
+                    if (!rsp_fifo_full) begin
+                        // Read response from FIFO
+                        rsp_rd_ptr_bin  <= rsp_rd_ptr_bin + 1'b1;
+                        rsp_rd_ptr_gray <= bin2gray(rsp_rd_ptr_bin + 1'b1);
+                        src_state <= SRC_IDLE;
+                    end
+                end
+
+                default: src_state <= SRC_IDLE;
+            endcase
+        end
+    end
+
+    // ========================================================================
+    // Destination Domain Logic
+    // ========================================================================
+
+    // Synchronize source write pointer to destination domain
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni)
+            wr_ptr_gray_dst <= {PTR_WIDTH{1'b0}};
+        else
+            wr_ptr_gray_dst <= wr_ptr_gray;
+    end
+
+    // Synchronize response read pointer to destination domain
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni)
+            rsp_rd_ptr_gray_dst <= {PTR_WIDTH{1'b0}};
+        else
+            rsp_rd_ptr_gray_dst <= rsp_rd_ptr_gray;
+    end
+
+    // FIFO empty check (destination domain)
+    wire fifo_empty = (rd_ptr_gray == wr_ptr_gray_dst);
+
+    // Response FIFO empty check (destination domain)
+    wire rsp_fifo_empty = (rsp_rd_ptr_gray == rsp_wr_ptr_gray_dst) &&
+                          (rsp_rd_ptr_bin[PTR_WIDTH-1] == rsp_wr_ptr_gray_dst[PTR_WIDTH-1]);
+
+    // Destination APB outputs
+    assign dst_psel_o   = (dst_state != DST_IDLE);
+    assign dst_penable_o = (dst_state == DST_ACCESS);
+    assign dst_pwrite_o = fifo_write[rd_ptr_bin[LOG_DEPTH-1:0]];
+    assign dst_paddr_o  = fifo_addr[rd_ptr_bin[LOG_DEPTH-1:0]];
+    assign dst_pwdata_o = fifo_data[rd_ptr_bin[LOG_DEPTH-1:0]];
+    assign dst_pstrb_o  = fifo_strb[rd_ptr_bin[LOG_DEPTH-1:0]];
+    assign dst_pprot_o  = fifo_prot[rd_ptr_bin[LOG_DEPTH-1:0]];
+
+    // Destination state machine
+    always @(posedge dst_pclk_i or negedge dst_preset_ni) begin
+        if (!dst_preset_ni) begin
+            dst_state     <= DST_IDLE;
+            rd_ptr_bin    <= {PTR_WIDTH{1'b0}};
+            rd_ptr_gray   <= {PTR_WIDTH{1'b0}};
+            rsp_wr_ptr_bin  <= {PTR_WIDTH{1'b0}};
+            rsp_wr_ptr_gray <= {PTR_WIDTH{1'b0}};
+        end else begin
+            case (dst_state)
+                DST_IDLE: begin
+                    if (!fifo_empty) begin
+                        dst_state <= DST_SETUP;
+                    end
+                end
+
+                DST_SETUP: begin
+                    dst_state <= DST_ACCESS;
+                end
+
+                DST_ACCESS: begin
+                    if (dst_pready_i) begin
+                        // Write response to FIFO if read
+                        if (!fifo_write[rd_ptr_bin[LOG_DEPTH-1:0]]) begin
+                            rsp_data[rsp_wr_ptr_bin[LOG_DEPTH-1:0]] <= dst_prdata_i;
+                            rsp_err[rsp_wr_ptr_bin[LOG_DEPTH-1:0]]  <= dst_pslverr_i;
+                            rsp_wr_ptr_bin  <= rsp_wr_ptr_bin + 1'b1;
+                            rsp_wr_ptr_gray <= bin2gray(rsp_wr_ptr_bin + 1'b1);
+                        end
+
+                        // Advance read pointer
+                        rd_ptr_bin  <= rd_ptr_bin + 1'b1;
+                        rd_ptr_gray <= bin2gray(rd_ptr_bin + 1'b1);
+
+                        dst_state <= DST_IDLE;
+                    end
+                end
+
+                default: dst_state <= DST_IDLE;
+            endcase
+        end
+    end
+
+endmodule<|im_end|>

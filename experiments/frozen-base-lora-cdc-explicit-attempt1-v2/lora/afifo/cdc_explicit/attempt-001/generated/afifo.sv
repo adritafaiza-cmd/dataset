@@ -1,0 +1,177 @@
+// =============================================================================
+// afifo.v
+// =============================================================================
+//
+// Asynchronous FIFO with acknowledged single-bit control.
+//
+// The write side registers each accepted word and launches a request. The
+// read side acknowledges after the payload has settled through the
+// destination-clock stages. Full/empty are derived from the acknowledged
+// control bits, never from bit-by-bit synchronized pointers.
+//
+// =============================================================================
+
+`timescale 1ns / 1ps
+
+module afifo #(
+		parameter	LGFIFO = 3,
+		parameter	WIDTH  = 16,
+		parameter	NFF    = 2,
+		parameter [0:0]	WRITE_ON_POSEDGE = 1'b1,
+		parameter [0:0]	OPT_REGISTER_READS = 1'b1
+	) (
+		input	wire			i_wclk, i_wr_reset_n, i_wr,
+		input	wire	[WIDTH-1:0]	i_wr_data,
+		output	reg			o_wr_full,
+		input	wire			i_rclk, i_rd_reset_n, i_rd,
+		output	reg	[WIDTH-1:0]	o_rd_data,
+		output	reg			o_rd_empty
+	);
+
+	// ------------------------------------------------------------------
+	// Write domain
+	// ------------------------------------------------------------------
+
+	reg	[WIDTH-1:0]	wr_data_reg;
+	reg				wr_data_valid;
+	reg				wr_req;
+	reg				wr_ack;
+
+	reg				wr_full;
+
+	wire				wr_can_write = i_wr && !wr_full;
+
+	always @(posedge i_wclk, negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n) begin
+			wr_data_reg   <= {WIDTH{1'b0}};
+			wr_data_valid <= 1'b0;
+			wr_req        <= 1'b0;
+			wr_ack        <= 1'b0;
+			wr_full       <= 1'b0;
+		end else begin
+			if (wr_can_write) begin
+				wr_data_reg   <= i_wr_data;
+				wr_data_valid <= 1'b1;
+			end else if (wr_ack) begin
+				wr_data_valid <= 1'b0;
+			end
+
+			if (wr_data_valid && !wr_ack)
+				wr_req <= 1'b1;
+			else if (wr_ack)
+				wr_req <= 1'b0;
+
+			if (wr_ack)
+				wr_ack <= 1'b0;
+			else if (wr_req)
+				wr_ack <= 1'b1;
+
+			wr_full <= wr_data_valid && !wr_ack;
+		end
+	end
+
+	assign o_wr_full = wr_full;
+
+	// ------------------------------------------------------------------
+	// Read domain
+	// ------------------------------------------------------------------
+
+	reg	[WIDTH-1:0]	rd_data_reg;
+	reg				rd_data_valid;
+	reg				rd_req;
+	reg				rd_ack;
+
+	reg				rd_empty;
+
+	wire				rd_can_read = i_rd && !rd_empty;
+
+	always @(posedge i_rclk, negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n) begin
+			rd_data_reg   <= {WIDTH{1'b0}};
+			rd_data_valid <= 1'b0;
+			rd_req        <= 1'b0;
+			rd_ack        <= 1'b0;
+			rd_empty      <= 1'b1;
+		end else begin
+			if (rd_can_read) begin
+				rd_data_reg   <= rd_data_reg;
+				rd_data_valid <= 1'b0;
+			end else if (rd_ack) begin
+				rd_data_reg   <= wr_data_reg;
+				rd_data_valid <= 1'b1;
+			end
+
+			if (rd_data_valid && !rd_ack)
+				rd_req <= 1'b1;
+			else if (rd_ack)
+				rd_req <= 1'b0;
+
+			if (rd_ack)
+				rd_ack <= 1'b0;
+			else if (rd_req)
+				rd_ack <= 1'b1;
+
+			rd_empty <= !rd_data_valid || rd_ack;
+		end
+	end
+
+	assign o_rd_data  = rd_data_reg;
+	assign o_rd_empty = rd_empty;
+
+	// ------------------------------------------------------------------
+	// Synchronizers
+	// ------------------------------------------------------------------
+
+	(* ASYNC_REG = "TRUE" *)
+	reg	[NFF-1:0]	sync_wr_req;
+
+	always @(posedge i_rclk, negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			sync_wr_req <= {NFF{1'b0}};
+		else
+			sync_wr_req <= {sync_wr_req[NFF-2:0], wr_req};
+	end
+
+	(* ASYNC_REG = "TRUE" *)
+	reg	[NFF-1:0]	sync_rd_ack;
+
+	always @(posedge i_wclk, negedge i_wr_reset_n) begin
+		if (!i_wr_reset_n)
+			sync_rd_ack <= {NFF{1'b0}};
+		else
+			sync_rd_ack <= {sync_rd_ack[NFF-2:0], rd_ack};
+	end
+
+	// ------------------------------------------------------------------
+	// Payload synchronization
+	// ------------------------------------------------------------------
+
+	(* ASYNC_REG = "TRUE" *)
+	reg	[WIDTH-1:0]	sync_wr_data;
+
+	always @(posedge i_rclk, negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			sync_wr_data <= {WIDTH{1'b0}};
+		else
+			sync_wr_data <= wr_data_reg;
+	end
+
+	// ------------------------------------------------------------------
+	// Output
+	// ------------------------------------------------------------------
+
+	(* ASYNC_REG = "TRUE" *)
+	reg	[WIDTH-1:0]	o_rd_data;
+
+	always @(posedge i_rclk, negedge i_rd_reset_n) begin
+		if (!i_rd_reset_n)
+			o_rd_data <= {WIDTH{1'b0}};
+		else if (OPT_REGISTER_READS)
+			o_rd_data <= rd_data_reg;
+		else
+			o_rd_data <= sync_wr_data;
+	end
+
+	assign o_rd_empty = rd_empty;
+
+endmodule

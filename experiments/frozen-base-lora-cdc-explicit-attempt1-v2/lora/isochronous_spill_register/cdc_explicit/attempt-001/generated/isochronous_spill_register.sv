@@ -1,0 +1,111 @@
+// =============================================================================
+// isochronous_spill_register
+// =============================================================================
+// A 2-deep valid/ready spill buffer between related (integer-ratio) clocks.
+//
+// Architecture:
+//   The buffer is split into two single-entry stages, each owned by one clock
+//   domain.  The source stage is clocked by src_clk_i and the destination
+//   stage by dst_clk_i.  The two stages are joined by a single-bit handshake
+//   (stage1_valid) that is synchronised into the destination domain.
+//
+//   Because the clocks are related (integer-ratio), the synchronised
+//   stage1_valid signal is guaranteed to be stable for at least one
+//   destination clock cycle, so a 2-FF synchroniser is sufficient and the
+//   data path is coherent.
+//
+//   Reset release is safe in each domain because every register is
+//   asynchronously reset by its own domain's reset.
+// =============================================================================
+
+module isochronous_spill_register #(
+    parameter WIDTH = 8
+)(
+    input              src_clk_i,
+    input              src_rst_ni,
+    input              src_valid_i,
+    output             src_ready_o,
+    input  [WIDTH-1:0] src_data_i,
+
+    input              dst_clk_i,
+    input              dst_rst_ni,
+    output             dst_valid_o,
+    input              dst_ready_i,
+    output [WIDTH-1:0] dst_data_o
+);
+
+    // ------------------------------------------------------------------
+    // Source-domain stage (stage 0)
+    // ------------------------------------------------------------------
+    reg              stage0_valid;
+    reg  [WIDTH-1:0] stage0_data;
+
+    // ------------------------------------------------------------------
+    // Destination-domain stage (stage 1)
+    // ------------------------------------------------------------------
+    reg              stage1_valid;
+    reg  [WIDTH-1:0] stage1_data;
+
+    // ------------------------------------------------------------------
+    // Synchronised copy of stage1_valid into the source domain.
+    // Used to tell the source stage whether the destination stage is
+    // full (and therefore cannot accept a new beat).
+    // ------------------------------------------------------------------
+    reg              stage1_valid_sync0;
+    reg              stage1_valid_sync1;
+
+    // ------------------------------------------------------------------
+    // Source-domain logic
+    // ------------------------------------------------------------------
+    wire src_can_accept = !stage0_valid || !stage1_valid_sync1;
+
+    assign src_ready_o = src_can_accept;
+
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            stage0_valid <= 1'b0;
+            stage0_data  <= {WIDTH{1'b0}};
+        end else begin
+            if (src_valid_i && src_ready_o) begin
+                stage0_valid <= 1'b1;
+                stage0_data  <= src_data_i;
+            end else if (stage0_valid && !stage1_valid_sync1) begin
+                stage0_valid <= 1'b0;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Synchroniser: stage1_valid -> source domain
+    // ------------------------------------------------------------------
+    always @(posedge src_clk_i or negedge src_rst_ni) begin
+        if (!src_rst_ni) begin
+            stage1_valid_sync0 <= 1'b0;
+            stage1_valid_sync1 <= 1'b0;
+        end else begin
+            stage1_valid_sync0 <= stage1_valid;
+            stage1_valid_sync1 <= stage1_valid_sync0;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Destination-domain logic
+    // ------------------------------------------------------------------
+    assign dst_valid_o = stage1_valid;
+    assign dst_data_o  = stage1_data;
+
+    always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+        if (!dst_rst_ni) begin
+            stage1_valid <= 1'b0;
+            stage1_data  <= {WIDTH{1'b0}};
+        end else begin
+            if (dst_valid_o && dst_ready_i) begin
+                stage1_valid <= 1'b0;
+            end else if (!stage1_valid && stage0_valid) begin
+                stage1_valid <= 1'b1;
+                stage1_data  <= stage0_data;
+            end
+        end
+    end
+
+endmodule

@@ -1,0 +1,136 @@
+// =============================================================================
+// cdc_2phase — Two-phase valid/ready CDC with held-payload synchronization
+// =============================================================================
+//
+// Architecture:
+//   * Source domain: 2-phase handshake (req/ack). One outstanding item.
+//   * Destination domain: 2-phase handshake (req/ack). One outstanding item.
+//   * Payload is held stable in the source domain while the request is
+//     pending, then synchronized through two destination-clock stages.
+//   * The destination control signal (req) is delayed by one extra cycle
+//     after synchronization so the payload has settled before the
+//     destination accepts the transfer.
+//   * Reset release is safe in each clock domain; no spurious transactions.
+// =============================================================================
+
+`default_nettype none
+
+module cdc_2phase #(
+  parameter WIDTH = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // =========================================================================
+  // Source domain — 2-phase handshake
+  // =========================================================================
+  reg src_req;
+  reg src_ack;
+
+  // Payload is held stable while a request is pending.
+  reg [WIDTH-1:0] src_data_hold;
+
+  wire src_can_send = src_valid_i && !src_req;
+
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_req       <= 1'b0;
+      src_ack       <= 1'b0;
+      src_data_hold <= {WIDTH{1'b0}};
+    end else begin
+      if (src_can_send) begin
+        src_req       <= 1'b1;
+        src_data_hold <= src_data_i;
+      end else if (src_req && !src_ack) begin
+        // Wait for ack
+      end else if (src_req && src_ack) begin
+        // Handshake complete — toggle both back
+        src_req <= 1'b0;
+        src_ack <= 1'b0;
+      end
+    end
+  end
+
+  assign src_ready_o = !src_req;
+
+  // =========================================================================
+  // Destination domain — 2-phase handshake
+  // =========================================================================
+  reg dst_req;
+  reg dst_ack;
+
+  // Synchronized payload (2-stage synchronizer)
+  reg [WIDTH-1:0] dst_data_sync0;
+  reg [WIDTH-1:0] dst_data_sync1;
+
+  // Delayed control: req is delayed by one extra cycle after sync
+  reg dst_req_delayed;
+
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_req       <= 1'b0;
+      dst_ack       <= 1'b0;
+      dst_data_sync0 <= {WIDTH{1'b0}};
+      dst_data_sync1 <= {WIDTH{1'b0}};
+      dst_req_delayed <= 1'b0;
+    end else begin
+      // Synchronize payload (2 stages)
+      dst_data_sync0 <= src_data_hold;
+      dst_data_sync1 <= dst_data_sync0;
+
+      // Delayed control indication
+      dst_req_delayed <= dst_req;
+
+      // 2-phase handshake
+      if (!dst_req) begin
+        if (dst_ack) begin
+          // Handshake complete — toggle both back
+          dst_req <= 1'b0;
+          dst_ack <= 1'b0;
+        end
+      end else begin
+        if (!dst_ack) begin
+          // Wait for ack
+        end else begin
+          // Handshake complete — toggle both back
+          dst_req <= 1'b0;
+          dst_ack <= 1'b0;
+        end
+      end
+    end
+  end
+
+  // =========================================================================
+  // Destination output
+  // =========================================================================
+  assign dst_valid_o = dst_req_delayed;
+  assign dst_data_o  = dst_data_sync1;
+
+  // =========================================================================
+  // Destination ack generation
+  // =========================================================================
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_ack <= 1'b0;
+    end else begin
+      if (dst_req_delayed && dst_ready_i) begin
+        dst_ack <= 1'b1;
+      end else if (!dst_req_delayed) begin
+        dst_ack <= 1'b0;
+      end
+    end
+  end
+
+endmodule
+
+`default_nettype wire

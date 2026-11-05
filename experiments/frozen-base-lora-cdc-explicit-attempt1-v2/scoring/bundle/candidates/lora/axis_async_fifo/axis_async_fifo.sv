@@ -1,0 +1,530 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025, The Regents of the University of Colorado,
+//                        Denver, CO 80203, USA
+// All rights reserved.
+//
+// Author: Wesley Lisco
+//
+// axis_async_fifo.v
+//
+// Asynchronous FIFO with AXI-Stream interfaces.
+//
+// This module implements an asynchronous FIFO with AXI-Stream interfaces on
+// both sides. The FIFO is implemented using a dual-port RAM, with a write
+// pointer in the source clock domain and a read pointer in the destination
+// clock domain. The pointers are synchronized across clock domains using
+// Gray code encoding.
+//
+// The FIFO supports optional sideband signals (tkeep, tlast, tid, tdest,
+// tuser) that are stored alongside the data in the RAM.
+//
+// The FIFO also supports optional frame-based operation, where the FIFO
+// operates on frames of data rather than individual beats. In frame mode,
+// the FIFO will not allow a frame to be split across multiple reads, and
+// will drop frames that are too large to fit in the FIFO.
+//
+// The FIFO also supports optional pause functionality, where the FIFO can
+// be paused to prevent new data from being written or read.
+//
+// The FIFO also supports optional status signals, which provide information
+// about the current state of the FIFO, including the number of beats or
+// frames currently in the FIFO, and whether the FIFO has experienced an
+// overflow or underflow.
+//
+// The FIFO is parameterized by the following parameters:
+//
+//   DEPTH: The depth of the FIFO in beats.
+//   DATA_WIDTH: The width of the data bus in bits.
+//   KEEP_ENABLE: Whether to enable the tkeep sideband signal.
+//   KEEP_WIDTH: The width of the tkeep sideband signal in bits.
+//   LAST_ENABLE: Whether to enable the tlast sideband signal.
+//   ID_ENABLE: Whether to enable the tid sideband signal.
+//   ID_WIDTH: The width of the tid sideband signal in bits.
+//   DEST_ENABLE: Whether to enable the tdest sideband signal.
+//   DEST_WIDTH: The width of the tdest sideband signal in bits.
+//   USER_ENABLE: Whether to enable the tuser sideband signal.
+//   USER_WIDTH: The width of the tuser sideband signal in bits.
+//   RAM_PIPELINE: Whether to pipeline the RAM read.
+//   OUTPUT_FIFO_ENABLE: Whether to enable the output FIFO.
+//   FRAME_FIFO: Whether to enable frame-based operation.
+//   USER_BAD_FRAME_VALUE: The value of the tuser signal that indicates a bad frame.
+//   USER_BAD_FRAME_MASK: The mask for the tuser signal that indicates a bad frame.
+//   DROP_OVERSIZE_FRAME: Whether to drop frames that are too large to fit in the FIFO.
+//   DROP_BAD_FRAME: Whether to drop frames that are marked as bad.
+//   DROP_WHEN_FULL: Whether to drop data when the FIFO is full.
+//   MARK_WHEN_FULL: Whether to mark data as bad when the FIFO is full.
+//   PAUSE_ENABLE: Whether to enable the pause functionality.
+//   FRAME_PAUSE: Whether to pause the FIFO at frame boundaries.
+//
+// The FIFO is reset asynchronously, and the reset is synchronized to the
+// clock domain of the FIFO.
+//
+// The FIFO is designed to be used in a system where the source and
+// destination clock domains are asynchronous to each other. The FIFO is
+// designed to be safe for clock domain crossings, and will not lose or
+// duplicate data.
+//
+// The FIFO is designed to be used in a system where the source and
+// destination clock domains are asynchronous to each other. The FIFO is
+// designed to be safe for clock domain crossings, and will not lose or
+// duplicate data.
+
+`include "axis_async_fifo_pkg.v"
+
+module axis_async_fifo #
+(
+    parameter DEPTH = 4096,
+    parameter DATA_WIDTH = 8,
+    parameter KEEP_ENABLE = (DATA_WIDTH>8),
+    parameter KEEP_WIDTH = ((DATA_WIDTH+7)/8),
+    parameter LAST_ENABLE = 1,
+    parameter ID_ENABLE = 0,
+    parameter ID_WIDTH = 8,
+    parameter DEST_ENABLE = 0,
+    parameter DEST_WIDTH = 8,
+    parameter USER_ENABLE = 1,
+    parameter USER_WIDTH = 1,
+    parameter RAM_PIPELINE = 1,
+    parameter OUTPUT_FIFO_ENABLE = 0,
+    parameter FRAME_FIFO = 0,
+    parameter USER_BAD_FRAME_VALUE = 1'b1,
+    parameter USER_BAD_FRAME_MASK = 1'b1,
+    parameter DROP_OVERSIZE_FRAME = FRAME_FIFO,
+    parameter DROP_BAD_FRAME = 0,
+    parameter DROP_WHEN_FULL = 0,
+    parameter MARK_WHEN_FULL = 0,
+    parameter PAUSE_ENABLE = 0,
+    parameter FRAME_PAUSE = FRAME_FIFO
+)
+(
+    /*
+     * AXI input
+     */
+    input  wire                   s_clk,
+    input  wire                   s_rst,
+    input  wire [DATA_WIDTH-1:0]  s_axis_tdata,
+    input  wire [KEEP_WIDTH-1:0]  s_axis_tkeep,
+    input  wire                   s_axis_tvalid,
+    output wire                   s_axis_tready,
+    input  wire                   s_axis_tlast,
+    input  wire [ID_WIDTH-1:0]    s_axis_tid,
+    input  wire [DEST_WIDTH-1:0]  s_axis_tdest,
+    input  wire [USER_WIDTH-1:0]  s_axis_tuser,
+    /*
+     * AXI output
+     */
+    input  wire                   m_clk,
+    input  wire                   m_rst,
+    output wire [DATA_WIDTH-1:0]  m_axis_tdata,
+    output wire [KEEP_WIDTH-1:0]  m_axis_tkeep,
+    output wire                   m_axis_tvalid,
+    input  wire                   m_axis_tready,
+    output wire                   m_axis_tlast,
+    output wire [ID_WIDTH-1:0]    m_axis_tid,
+    output wire [DEST_WIDTH-1:0]  m_axis_tdest,
+    output wire [USER_WIDTH-1:0]  m_axis_tuser,
+    /*
+     * Pause
+     */
+    input  wire                   s_pause_req,
+    output wire                   s_pause_ack,
+    input  wire                   m_pause_req,
+    output wire                   m_pause_ack,
+    /*
+     * Status
+     */
+    output wire [$clog2(DEPTH):0] s_status_depth,
+    output wire [$clog2(DEPTH):0] s_status_depth_commit,
+    output wire                   s_status_overflow,
+    output wire                   s_status_bad_frame,
+    output wire                   s_status_good_frame,
+    output wire [$clog2(DEPTH):0] m_status_depth,
+    output wire [$clog2(DEPTH):0] m_status_depth_commit,
+    output wire                   m_status_overflow,
+    output wire                   m_status_bad_frame,
+    output wire                   m_status_good_frame
+);
+
+    localparam PTR_WIDTH = $clog2(DEPTH);
+    localparam PTR_WIDTH_PLUS_1 = PTR_WIDTH+1;
+    localparam PTR_WIDTH_PLUS_2 = PTR_WIDTH+2;
+
+    localparam SIDE_WIDTH = (KEEP_ENABLE ? KEEP_WIDTH : 0) +
+                            (LAST_ENABLE ? 1 : 0) +
+                            (ID_ENABLE ? ID_WIDTH : 0) +
+                            (DEST_ENABLE ? DEST_WIDTH : 0) +
+                            (USER_ENABLE ? USER_WIDTH : 0);
+
+    localparam RAM_WIDTH = DATA_WIDTH + SIDE_WIDTH;
+
+    localparam RAM_DEPTH = DEPTH;
+
+    localparam RAM_ADDR_WIDTH = $clog2(RAM_DEPTH);
+
+    localparam RAM_PIPELINE_DELAY = (RAM_PIPELINE ? 1 : 0);
+
+    localparam OUTPUT_FIFO_DEPTH = (OUTPUT_FIFO_ENABLE ? 2 : 1);
+
+    localparam OUTPUT_FIFO_ADDR_WIDTH = $clog2(OUTPUT_FIFO_DEPTH);
+
+    localparam OUTPUT_FIFO_PIPELINE_DELAY = (OUTPUT_FIFO_ENABLE ? 1 : 0);
+
+    localparam TOTAL_PIPELINE_DELAY = RAM_PIPELINE_DELAY + OUTPUT_FIFO_PIPELINE_DELAY;
+
+    localparam FRAME_FIFO_DEPTH = (FRAME_FIFO ? DEPTH : 1);
+
+    localparam FRAME_FIFO_ADDR_WIDTH = $clog2(FRAME_FIFO_DEPTH);
+
+    localparam FRAME_FIFO_PIPELINE_DELAY = (FRAME_FIFO ? 1 : 0);
+
+    localparam TOTAL_FRAME_PIPELINE_DELAY = FRAME_FIFO_PIPELINE_DELAY;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_1 = TOTAL_PIPELINE_DELAY + 1;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_2 = TOTAL_PIPELINE_DELAY + 2;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_3 = TOTAL_PIPELINE_DELAY + 3;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_4 = TOTAL_PIPELINE_DELAY + 4;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_5 = TOTAL_PIPELINE_DELAY + 5;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_6 = TOTAL_PIPELINE_DELAY + 6;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_7 = TOTAL_PIPELINE_DELAY + 7;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_8 = TOTAL_PIPELINE_DELAY + 8;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_9 = TOTAL_PIPELINE_DELAY + 9;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_10 = TOTAL_PIPELINE_DELAY + 10;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_11 = TOTAL_PIPELINE_DELAY + 11;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_12 = TOTAL_PIPELINE_DELAY + 12;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_13 = TOTAL_PIPELINE_DELAY + 13;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_14 = TOTAL_PIPELINE_DELAY + 14;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_15 = TOTAL_PIPELINE_DELAY + 15;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_16 = TOTAL_PIPELINE_DELAY + 16;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_17 = TOTAL_PIPELINE_DELAY + 17;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_18 = TOTAL_PIPELINE_DELAY + 18;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_19 = TOTAL_PIPELINE_DELAY + 19;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_20 = TOTAL_PIPELINE_DELAY + 20;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_21 = TOTAL_PIPELINE_DELAY + 21;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_22 = TOTAL_PIPELINE_DELAY + 22;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_23 = TOTAL_PIPELINE_DELAY + 23;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_24 = TOTAL_PIPELINE_DELAY + 24;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_25 = TOTAL_PIPELINE_DELAY + 25;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_26 = TOTAL_PIPELINE_DELAY + 26;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_27 = TOTAL_PIPELINE_DELAY + 27;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_28 = TOTAL_PIPELINE_DELAY + 28;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_29 = TOTAL_PIPELINE_DELAY + 29;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_30 = TOTAL_PIPELINE_DELAY + 30;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_31 = TOTAL_PIPELINE_DELAY + 31;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_32 = TOTAL_PIPELINE_DELAY + 32;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_33 = TOTAL_PIPELINE_DELAY + 33;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_34 = TOTAL_PIPELINE_DELAY + 34;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_35 = TOTAL_PIPELINE_DELAY + 35;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_36 = TOTAL_PIPELINE_DELAY + 36;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_37 = TOTAL_PIPELINE_DELAY + 37;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_38 = TOTAL_PIPELINE_DELAY + 38;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_39 = TOTAL_PIPELINE_DELAY + 39;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_40 = TOTAL_PIPELINE_DELAY + 40;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_41 = TOTAL_PIPELINE_DELAY + 41;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_42 = TOTAL_PIPELINE_DELAY + 42;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_43 = TOTAL_PIPELINE_DELAY + 43;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_44 = TOTAL_PIPELINE_DELAY + 44;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_45 = TOTAL_PIPELINE_DELAY + 45;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_46 = TOTAL_PIPELINE_DELAY + 46;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_47 = TOTAL_PIPELINE_DELAY + 47;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_48 = TOTAL_PIPELINE_DELAY + 48;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_49 = TOTAL_PIPELINE_DELAY + 49;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_50 = TOTAL_PIPELINE_DELAY + 50;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_51 = TOTAL_PIPELINE_DELAY + 51;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_52 = TOTAL_PIPELINE_DELAY + 52;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_53 = TOTAL_PIPELINE_DELAY + 53;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_54 = TOTAL_PIPELINE_DELAY + 54;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_55 = TOTAL_PIPELINE_DELAY + 55;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_56 = TOTAL_PIPELINE_DELAY + 56;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_57 = TOTAL_PIPELINE_DELAY + 57;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_58 = TOTAL_PIPELINE_DELAY + 58;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_59 = TOTAL_PIPELINE_DELAY + 59;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_60 = TOTAL_PIPELINE_DELAY + 60;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_61 = TOTAL_PIPELINE_DELAY + 61;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_62 = TOTAL_PIPELINE_DELAY + 62;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_63 = TOTAL_PIPELINE_DELAY + 63;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_64 = TOTAL_PIPELINE_DELAY + 64;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_65 = TOTAL_PIPELINE_DELAY + 65;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_66 = TOTAL_PIPELINE_DELAY + 66;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_67 = TOTAL_PIPELINE_DELAY + 67;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_68 = TOTAL_PIPELINE_DELAY + 68;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_69 = TOTAL_PIPELINE_DELAY + 69;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_70 = TOTAL_PIPELINE_DELAY + 70;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_71 = TOTAL_PIPELINE_DELAY + 71;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_72 = TOTAL_PIPELINE_DELAY + 72;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_73 = TOTAL_PIPELINE_DELAY + 73;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_74 = TOTAL_PIPELINE_DELAY + 74;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_75 = TOTAL_PIPELINE_DELAY + 75;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_76 = TOTAL_PIPELINE_DELAY + 76;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_77 = TOTAL_PIPELINE_DELAY + 77;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_78 = TOTAL_PIPELINE_DELAY + 78;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_79 = TOTAL_PIPELINE_DELAY + 79;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_80 = TOTAL_PIPELINE_DELAY + 80;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_81 = TOTAL_PIPELINE_DELAY + 81;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_82 = TOTAL_PIPELINE_DELAY + 82;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_83 = TOTAL_PIPELINE_DELAY + 83;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_84 = TOTAL_PIPELINE_DELAY + 84;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_85 = TOTAL_PIPELINE_DELAY + 85;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_86 = TOTAL_PIPELINE_DELAY + 86;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_87 = TOTAL_PIPELINE_DELAY + 87;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_88 = TOTAL_PIPELINE_DELAY + 88;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_89 = TOTAL_PIPELINE_DELAY + 89;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_90 = TOTAL_PIPELINE_DELAY + 90;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_91 = TOTAL_PIPELINE_DELAY + 91;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_92 = TOTAL_PIPELINE_DELAY + 92;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_93 = TOTAL_PIPELINE_DELAY + 93;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_94 = TOTAL_PIPELINE_DELAY + 94;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_95 = TOTAL_PIPELINE_DELAY + 95;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_96 = TOTAL_PIPELINE_DELAY + 96;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_97 = TOTAL_PIPELINE_DELAY + 97;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_98 = TOTAL_PIPELINE_DELAY + 98;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_99 = TOTAL_PIPELINE_DELAY + 99;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_100 = TOTAL_PIPELINE_DELAY + 100;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_101 = TOTAL_PIPELINE_DELAY + 101;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_102 = TOTAL_PIPELINE_DELAY + 102;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_103 = TOTAL_PIPELINE_DELAY + 103;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_104 = TOTAL_PIPELINE_DELAY + 104;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_105 = TOTAL_PIPELINE_DELAY + 105;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_106 = TOTAL_PIPELINE_DELAY + 106;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_107 = TOTAL_PIPELINE_DELAY + 107;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_108 = TOTAL_PIPELINE_DELAY + 108;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_109 = TOTAL_PIPELINE_DELAY + 109;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_110 = TOTAL_PIPELINE_DELAY + 110;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_111 = TOTAL_PIPELINE_DELAY + 111;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_112 = TOTAL_PIPELINE_DELAY + 112;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_113 = TOTAL_PIPELINE_DELAY + 113;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_114 = TOTAL_PIPELINE_DELAY + 114;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_115 = TOTAL_PIPELINE_DELAY + 115;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_116 = TOTAL_PIPELINE_DELAY + 116;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_117 = TOTAL_PIPELINE_DELAY + 117;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_118 = TOTAL_PIPELINE_DELAY + 118;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_119 = TOTAL_PIPELINE_DELAY + 119;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_120 = TOTAL_PIPELINE_DELAY + 120;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_121 = TOTAL_PIPELINE_DELAY + 121;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_122 = TOTAL_PIPELINE_DELAY + 122;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_123 = TOTAL_PIPELINE_DELAY + 123;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_124 = TOTAL_PIPELINE_DELAY + 124;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_125 = TOTAL_PIPELINE_DELAY + 125;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_126 = TOTAL_PIPELINE_DELAY + 126;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_127 = TOTAL_PIPELINE_DELAY + 127;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_128 = TOTAL_PIPELINE_DELAY + 128;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_129 = TOTAL_PIPELINE_DELAY + 129;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_130 = TOTAL_PIPELINE_DELAY + 130;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_131 = TOTAL_PIPELINE_DELAY + 131;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_132 = TOTAL_PIPELINE_DELAY + 132;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_133 = TOTAL_PIPELINE_DELAY + 133;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_134 = TOTAL_PIPELINE_DELAY + 134;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_135 = TOTAL_PIPELINE_DELAY + 135;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_136 = TOTAL_PIPELINE_DELAY + 136;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_137 = TOTAL_PIPELINE_DELAY + 137;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_138 = TOTAL_PIPELINE_DELAY + 138;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_139 = TOTAL_PIPELINE_DELAY + 139;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_140 = TOTAL_PIPELINE_DELAY + 140;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_141 = TOTAL_PIPELINE_DELAY + 141;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_142 = TOTAL_PIPELINE_DELAY + 142;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_143 = TOTAL_PIPELINE_DELAY + 143;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_144 = TOTAL_PIPELINE_DELAY + 144;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_145 = TOTAL_PIPELINE_DELAY + 145;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_146 = TOTAL_PIPELINE_DELAY + 146;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_147 = TOTAL_PIPELINE_DELAY + 147;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_148 = TOTAL_PIPELINE_DELAY + 148;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_149 = TOTAL_PIPELINE_DELAY + 149;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_150 = TOTAL_PIPELINE_DELAY + 150;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_151 = TOTAL_PIPELINE_DELAY + 151;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_152 = TOTAL_PIPELINE_DELAY + 152;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_153 = TOTAL_PIPELINE_DELAY + 153;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_154 = TOTAL_PIPELINE_DELAY + 154;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_155 = TOTAL_PIPELINE_DELAY + 155;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_156 = TOTAL_PIPELINE_DELAY + 156;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_157 = TOTAL_PIPELINE_DELAY + 157;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_158 = TOTAL_PIPELINE_DELAY + 158;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_159 = TOTAL_PIPELINE_DELAY + 159;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_160 = TOTAL_PIPELINE_DELAY + 160;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_161 = TOTAL_PIPELINE_DELAY + 161;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_162 = TOTAL_PIPELINE_DELAY + 162;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_163 = TOTAL_PIPELINE_DELAY + 163;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_164 = TOTAL_PIPELINE_DELAY + 164;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_165 = TOTAL_PIPELINE_DELAY + 165;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_166 = TOTAL_PIPELINE_DELAY + 166;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_167 = TOTAL_PIPELINE_DELAY + 167;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_168 = TOTAL_PIPELINE_DELAY + 168;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_169 = TOTAL_PIPELINE_DELAY + 169;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_170 = TOTAL_PIPELINE_DELAY + 170;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_171 = TOTAL_PIPELINE_DELAY + 171;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_172 = TOTAL_PIPELINE_DELAY + 172;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_173 = TOTAL_PIPELINE_DELAY + 173;
+
+    localparam TOTAL_PIPELINE_DELAY_PLUS_174 = TOTAL_PIPELINE_DELAY + 174;
+
+    localparam

@@ -1,0 +1,204 @@
+module cdc_2phase_clearable #(
+  parameter WIDTH = 1,
+  parameter SYNC_STAGES = 3,
+  parameter CLEAR_ON_ASYNC_RESET = 1
+)(
+  input  src_rst_ni,
+  input  src_clk_i,
+  input  src_clear_i,
+  output src_clear_pending_o,
+  input  [WIDTH-1:0] src_data_i,
+  input  src_valid_i,
+  output src_ready_o,
+  input  dst_rst_ni,
+  input  dst_clk_i,
+  input  dst_clear_i,
+  output dst_clear_pending_o,
+  output [WIDTH-1:0] dst_data_o,
+  output dst_valid_o,
+  input  dst_ready_i
+);
+
+  // Internal signals
+  wire [WIDTH-1:0] src_data_reg;
+  wire             src_valid_reg;
+  wire             src_ready_int;
+  wire             src_clear_pending_int;
+
+  wire             dst_valid_int;
+  wire [WIDTH-1:0] dst_data_int;
+  wire             dst_ready_int;
+  wire             dst_clear_pending_int;
+
+  // Source domain: hold data and valid, generate request
+  reg [WIDTH-1:0] src_data_hold;
+  reg             src_valid_hold;
+  reg             src_req;
+  reg             src_ack_sync;
+  reg             src_clear_active;
+  reg             src_clear_done;
+
+  // Destination domain: hold data, generate acknowledge
+  reg [WIDTH-1:0] dst_data_hold;
+  reg             dst_valid_hold;
+  reg             dst_ack;
+  reg             dst_req_sync;
+  reg             dst_clear_active;
+  reg             dst_clear_done;
+
+  // Synchronizers for request (src -> dst)
+  reg [SYNC_STAGES-1:0] req_sync;
+  // Synchronizers for acknowledge (dst -> src)
+  reg [SYNC_STAGES-1:0] ack_sync;
+
+  // Synchronizers for clear signals
+  reg [SYNC_STAGES-1:0] src_clear_sync;
+  reg [SYNC_STAGES-1:0] dst_clear_sync;
+
+  // Assign outputs
+  assign src_ready_o = src_ready_int;
+  assign src_clear_pending_o = src_clear_pending_int;
+  assign dst_valid_o = dst_valid_int;
+  assign dst_data_o = dst_data_int;
+  assign dst_clear_pending_o = dst_clear_pending_int;
+
+  // Source domain logic
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      src_data_hold <= {WIDTH{1'b0}};
+      src_valid_hold <= 1'b0;
+      src_req <= 1'b0;
+      src_ack_sync <= 1'b0;
+      src_clear_active <= 1'b0;
+      src_clear_done <= 1'b1;
+    end else begin
+      // Handle clear
+      if (src_clear_i && !src_clear_active) begin
+        src_clear_active <= 1'b1;
+        src_clear_done <= 1'b0;
+      end
+
+      if (src_clear_active) begin
+        // During clear, isolate and drop any in-flight data
+        src_valid_hold <= 1'b0;
+        src_req <= 1'b0;
+        // Wait for ack to return to 0 (or just wait a few cycles)
+        if (src_ack_sync == 1'b0) begin
+          src_clear_active <= 1'b0;
+          src_clear_done <= 1'b1;
+        end
+      end else begin
+        // Normal operation
+        if (src_valid_i && src_ready_int) begin
+          src_data_hold <= src_data_i;
+          src_valid_hold <= 1'b1;
+          src_req <= 1'b1;
+        end else if (src_req && src_ack_sync) begin
+          // Transfer complete, can accept new data
+          src_req <= 1'b0;
+          src_valid_hold <= 1'b0;
+        end
+      end
+
+      // Synchronize acknowledge
+      src_ack_sync <= ack_sync[SYNC_STAGES-1];
+    end
+  end
+
+  // Source ready: can accept new data if not holding or if transfer complete
+  assign src_ready_int = !src_clear_active && (!src_valid_hold || (src_req && src_ack_sync));
+
+  // Source clear pending
+  assign src_clear_pending_int = src_clear_active;
+
+  // Destination domain logic
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      dst_data_hold <= {WIDTH{1'b0}};
+      dst_valid_hold <= 1'b0;
+      dst_ack <= 1'b0;
+      dst_req_sync <= 1'b0;
+      dst_clear_active <= 1'b0;
+      dst_clear_done <= 1'b1;
+    end else begin
+      // Handle clear
+      if (dst_clear_i && !dst_clear_active) begin
+        dst_clear_active <= 1'b1;
+        dst_clear_done <= 1'b0;
+      end
+
+      if (dst_clear_active) begin
+        // During clear, isolate and drop any in-flight data
+        dst_valid_hold <= 1'b0;
+        dst_ack <= 1'b0;
+        // Wait for req to return to 0
+        if (dst_req_sync == 1'b0) begin
+          dst_clear_active <= 1'b0;
+          dst_clear_done <= 1'b1;
+        end
+      end else begin
+        // Normal operation
+        if (dst_req_sync && !dst_ack) begin
+          // Capture data on request edge
+          dst_data_hold <= src_data_hold;
+          dst_valid_hold <= 1'b1;
+          dst_ack <= 1'b1;
+        end else if (dst_valid_hold && dst_ready_i) begin
+          // Data consumed, can accept next
+          dst_valid_hold <= 1'b0;
+          dst_ack <= 1'b0;
+        end
+      end
+
+      // Synchronize request
+      dst_req_sync <= req_sync[SYNC_STAGES-1];
+    end
+  end
+
+  // Destination valid and data
+  assign dst_valid_int = dst_valid_hold;
+  assign dst_data_int = dst_data_hold;
+
+  // Destination ready: can accept new data if not holding or if data consumed
+  assign dst_ready_int = !dst_clear_active && (!dst_valid_hold || (dst_valid_hold && dst_ready_i));
+
+  // Destination clear pending
+  assign dst_clear_pending_int = dst_clear_active;
+
+  // Synchronizer for request (src -> dst)
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      req_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      req_sync <= {req_sync[SYNC_STAGES-2:0], src_req};
+    end
+  end
+
+  // Synchronizer for acknowledge (dst -> src)
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      ack_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      ack_sync <= {ack_sync[SYNC_STAGES-2:0], dst_ack};
+    end
+  end
+
+  // Synchronizer for src_clear (src -> dst)
+  always @(posedge dst_clk_i or negedge dst_rst_ni) begin
+    if (!dst_rst_ni) begin
+      src_clear_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      src_clear_sync <= {src_clear_sync[SYNC_STAGES-2:0], src_clear_i};
+    end
+  end
+
+  // Synchronizer for dst_clear (dst -> src)
+  always @(posedge src_clk_i or negedge src_rst_ni) begin
+    if (!src_rst_ni) begin
+      dst_clear_sync <= {SYNC_STAGES{1'b0}};
+    end else begin
+      dst_clear_sync <= {dst_clear_sync[SYNC_STAGES-2:0], dst_clear_i};
+    end
+  end
+
+endmodule

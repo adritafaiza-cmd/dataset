@@ -1,0 +1,781 @@
+// =============================================================================
+// Copyright (C) 2015-2024 Lattice Semiconductor.
+// =============================================================================
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+// =============================================================================
+
+`include "apbxclk.vh"
+
+module apbxclk #(
+	parameter	C_APB_ADDR_WIDTH = 12,
+	parameter	C_APB_DATA_WIDTH = 32,
+	parameter [0:0]	OPT_REGISTERED = 1'b0,
+	localparam	AW = C_APB_ADDR_WIDTH,
+	localparam	DW = C_APB_DATA_WIDTH
+) (
+	input	wire			S_APB_PCLK, S_PRESETn,
+	input	wire			S_APB_PSEL,
+	input	wire			S_APB_PENABLE,
+	output	reg			S_APB_PREADY,
+	input	wire	[AW-1:0]	S_APB_PADDR,
+	input	wire			S_APB_PWRITE,
+	input	wire	[DW-1:0]	S_APB_PWDATA,
+	input	wire	[DW/8-1:0]	S_APB_PWSTRB,
+	input	wire	[2:0]		S_APB_PPROT,
+	output	wire	[DW-1:0]	S_APB_PRDATA,
+	output	wire			S_APB_PSLVERR,
+	input	wire			M_APB_PCLK,
+	output	reg			M_PRESETn,
+	output	reg			M_APB_PSEL,
+	output	reg			M_APB_PENABLE,
+	input	wire			M_APB_PREADY,
+	output	wire	[AW-1:0]	M_APB_PADDR,
+	output	wire			M_APB_PWRITE,
+	output	wire	[DW-1:0]	M_APB_PWDATA,
+	output	wire	[DW/8-1:0]	M_APB_PWSTRB,
+	output	wire	[2:0]		M_APB_PPROT,
+	input	wire	[DW-1:0]	M_APB_PRDATA,
+	input	wire			M_APB_PSLVERR
+);
+
+	// =============================================================================
+	// Module: apbxclk
+	// =============================================================================
+
+	// =============================================================================
+	// Signals
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: S_APB
+	// =============================================================================
+
+	reg	[1:0]	s_apb_state;
+	reg	[1:0]	s_apb_state_next;
+
+	reg		s_apb_pready;
+	reg		s_apb_pslverr;
+
+	reg		s_apb_paddr_valid;
+	reg	[AW-1:0]	s_apb_paddr;
+	reg		s_apb_pwrite;
+	reg	[DW-1:0]	s_apb_pwdata;
+	reg	[DW/8-1:0]	s_apb_pwstrb;
+	reg	[2:0]		s_apb_pprot;
+
+	reg		s_apb_paddr_valid_next;
+	reg	[AW-1:0]	s_apb_paddr_next;
+	reg		s_apb_pwrite_next;
+	reg	[DW-1:0]	s_apb_pwdata_next;
+	reg	[DW/8-1:0]	s_apb_pwstrb_next;
+	reg	[2:0]		s_apb_pprot_next;
+
+	// =============================================================================
+	// Signals: M_APB
+	// =============================================================================
+
+	reg	[1:0]	m_apb_state;
+	reg	[1:0]	m_apb_state_next;
+
+	reg		m_apb_psel;
+	reg		m_apb_penable;
+
+	reg		m_apb_paddr_valid;
+	reg	[AW-1:0]	m_apb_paddr;
+	reg		m_apb_pwrite;
+	reg	[DW-1:0]	m_apb_pwdata;
+	reg	[DW/8-1:0]	m_apb_pwstrb;
+	reg	[2:0]		m_apb_pprot;
+
+	reg		m_apb_paddr_valid_next;
+	reg	[AW-1:0]	m_apb_paddr_next;
+	reg		m_apb_pwrite_next;
+	reg	[DW-1:0]	m_apb_pwdata_next;
+	reg	[DW/8-1:0]	m_apb_pwstrb_next;
+	reg	[2:0]		m_apb_pprot_next;
+
+	reg		m_apb_prdata_valid;
+	reg	[DW-1:0]	m_apb_prdata;
+	reg		m_apb_pslverr;
+
+	reg		m_apb_prdata_valid_next;
+	reg	[DW-1:0]	m_apb_prdata_next;
+	reg		m_apb_pslverr_next;
+
+	// =============================================================================
+	// Signals: CDC
+	// =============================================================================
+
+	reg		s_apb_paddr_valid_sync;
+	reg		s_apb_paddr_valid_sync_next;
+
+	reg		m_apb_paddr_valid_sync;
+	reg		m_apb_paddr_valid_sync_next;
+
+	reg		m_apb_prdata_valid_sync;
+	reg		m_apb_prdata_valid_sync_next;
+
+	// =============================================================================
+	// Signals: Reset
+	// =============================================================================
+
+	reg		m_presetn;
+
+	// =============================================================================
+	// Signals: S_APB
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: S_APB: State
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: S_APB: State: Registers
+	// =============================================================================
+
+	always @(posedge S_APB_PCLK, negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_apb_state <= `APBXCLK_S_APB_STATE_IDLE;
+		end else begin
+			s_apb_state <= s_apb_state_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: S_APB: State: Next
+	// =============================================================================
+
+	always @* begin
+		s_apb_state_next = s_apb_state;
+
+		case (s_apb_state)
+			`APBXCLK_S_APB_STATE_IDLE: begin
+				if (S_APB_PSEL && !S_APB_PENABLE) begin
+					s_apb_state_next = `APBXCLK_S_APB_STATE_SETUP;
+				end
+			end
+			`APBXCLK_S_APB_STATE_SETUP: begin
+				if (S_APB_PSEL && S_APB_PENABLE) begin
+					s_apb_state_next = `APBXCLK_S_APB_STATE_ACCESS;
+				end else if (!S_APB_PSEL) begin
+					s_apb_state_next = `APBXCLK_S_APB_STATE_IDLE;
+				end
+			end
+			`APBXCLK_S_APB_STATE_ACCESS: begin
+				if (s_apb_pready) begin
+					s_apb_state_next = `APBXCLK_S_APB_STATE_IDLE;
+				end
+			end
+			default: begin
+				s_apb_state_next = `APBXCLK_S_APB_STATE_IDLE;
+			end
+		endcase
+	end
+
+	// =============================================================================
+	// Signals: S_APB: PREADY
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: S_APB: PREADY: Registers
+	// =============================================================================
+
+	always @(posedge S_APB_PCLK, negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_apb_pready <= 1'b0;
+		end else begin
+			s_apb_pready <= m_apb_prdata_valid_sync;
+		end
+	end
+
+	assign S_APB_PREADY = s_apb_pready;
+
+	// =============================================================================
+	// Signals: S_APB: PSLVERR
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: S_APB: PSLVERR: Registers
+	// =============================================================================
+
+	always @(posedge S_APB_PCLK, negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_apb_pslverr <= 1'b0;
+		end else if (m_apb_prdata_valid_sync) begin
+			s_apb_pslverr <= m_apb_pslverr;
+		end
+	end
+
+	assign S_APB_PSLVERR = s_apb_pslverr;
+
+	// =============================================================================
+	// Signals: S_APB: PADDR
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: S_APB: PADDR: Registers
+	// =============================================================================
+
+	always @(posedge S_APB_PCLK, negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_apb_paddr_valid <= 1'b0;
+			s_apb_paddr <= {AW{1'b0}};
+		end else begin
+			s_apb_paddr_valid <= s_apb_paddr_valid_next;
+			s_apb_paddr <= s_apb_paddr_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: S_APB: PADDR: Next
+	// =============================================================================
+
+	always @* begin
+		s_apb_paddr_valid_next = s_apb_paddr_valid;
+		s_apb_paddr_next = s_apb_paddr;
+
+		if (s_apb_state == `APBXCLK_S_APB_STATE_SETUP && S_APB_PSEL && !S_APB_PENABLE) begin
+			s_apb_paddr_valid_next = 1'b1;
+			s_apb_paddr_next = S_APB_PADDR;
+		end else if (m_apb_paddr_valid_sync) begin
+			s_apb_paddr_valid_next = 1'b0;
+		end
+	end
+
+	// =============================================================================
+	// Signals: S_APB: PWRITE
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: S_APB: PWRITE: Registers
+	// =============================================================================
+
+	always @(posedge S_APB_PCLK, negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_apb_pwrite <= 1'b0;
+		end else begin
+			s_apb_pwrite <= s_apb_pwrite_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: S_APB: PWRITE: Next
+	// =============================================================================
+
+	always @* begin
+		s_apb_pwrite_next = s_apb_pwrite;
+
+		if (s_apb_state == `APBXCLK_S_APB_STATE_SETUP && S_APB_PSEL && !S_APB_PENABLE) begin
+			s_apb_pwrite_next = S_APB_PWRITE;
+		end
+	end
+
+	// =============================================================================
+	// Signals: S_APB: PWDATA
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: S_APB: PWDATA: Registers
+	// =============================================================================
+
+	always @(posedge S_APB_PCLK, negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_apb_pwdata <= {DW{1'b0}};
+		end else begin
+			s_apb_pwdata <= s_apb_pwdata_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: S_APB: PWDATA: Next
+	// =============================================================================
+
+	always @* begin
+		s_apb_pwdata_next = s_apb_pwdata;
+
+		if (s_apb_state == `APBXCLK_S_APB_STATE_SETUP && S_APB_PSEL && !S_APB_PENABLE) begin
+			s_apb_pwdata_next = S_APB_PWDATA;
+		end
+	end
+
+	// =============================================================================
+	// Signals: S_APB: PWSTRB
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: S_APB: PWSTRB: Registers
+	// =============================================================================
+
+	always @(posedge S_APB_PCLK, negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_apb_pwstrb <= {DW/8{1'b0}};
+		end else begin
+			s_apb_pwstrb <= s_apb_pwstrb_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: S_APB: PWSTRB: Next
+	// =============================================================================
+
+	always @* begin
+		s_apb_pwstrb_next = s_apb_pwstrb;
+
+		if (s_apb_state == `APBXCLK_S_APB_STATE_SETUP && S_APB_PSEL && !S_APB_PENABLE) begin
+			s_apb_pwstrb_next = S_APB_PWSTRB;
+		end
+	end
+
+	// =============================================================================
+	// Signals: S_APB: PPROT
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: S_APB: PPROT: Registers
+	// =============================================================================
+
+	always @(posedge S_APB_PCLK, negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			s_apb_pprot <= 3'b000;
+		end else begin
+			s_apb_pprot <= s_apb_pprot_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: S_APB: PPROT: Next
+	// =============================================================================
+
+	always @* begin
+		s_apb_pprot_next = s_apb_pprot;
+
+		if (s_apb_state == `APBXCLK_S_APB_STATE_SETUP && S_APB_PSEL && !S_APB_PENABLE) begin
+			s_apb_pprot_next = S_APB_PPROT;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: M_APB: State
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: M_APB: State: Registers
+	// =============================================================================
+
+	always @(posedge M_APB_PCLK, negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_apb_state <= `APBXCLK_M_APB_STATE_IDLE;
+		end else begin
+			m_apb_state <= m_apb_state_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB: State: Next
+	// =============================================================================
+
+	always @* begin
+		m_apb_state_next = m_apb_state;
+
+		case (m_apb_state)
+			`APBXCLK_M_APB_STATE_IDLE: begin
+				if (m_apb_paddr_valid) begin
+					m_apb_state_next = `APBXCLK_M_APB_STATE_SETUP;
+				end
+			end
+			`APBXCLK_M_APB_STATE_SETUP: begin
+				m_apb_state_next = `APBXCLK_M_APB_STATE_ACCESS;
+			end
+			`APBXCLK_M_APB_STATE_ACCESS: begin
+				if (M_APB_PREADY) begin
+					m_apb_state_next = `APBXCLK_M_APB_STATE_IDLE;
+				end
+			end
+			default: begin
+				m_apb_state_next = `APBXCLK_M_APB_STATE_IDLE;
+			end
+		endcase
+	end
+
+	// =============================================================================
+	// Signals: M_APB: PSEL
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: M_APB: PSEL: Registers
+	// =============================================================================
+
+	always @(posedge M_APB_PCLK, negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_apb_psel <= 1'b0;
+		end else begin
+			m_apb_psel <= (m_apb_state != `APBXCLK_M_APB_STATE_IDLE);
+		end
+	end
+
+	assign M_APB_PSEL = m_apb_psel;
+
+	// =============================================================================
+	// Signals: M_APB: PENABLE
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: M_APB: PENABLE: Registers
+	// =============================================================================
+
+	always @(posedge M_APB_PCLK, negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_apb_penable <= 1'b0;
+		end else begin
+			m_apb_penable <= (m_apb_state == `APBXCLK_M_APB_STATE_ACCESS);
+		end
+	end
+
+	assign M_APB_PENABLE = m_apb_penable;
+
+	// =============================================================================
+	// Signals: M_APB: PADDR
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: M_APB: PADDR: Registers
+	// =============================================================================
+
+	always @(posedge M_APB_PCLK, negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_apb_paddr_valid <= 1'b0;
+			m_apb_paddr <= {AW{1'b0}};
+		end else begin
+			m_apb_paddr_valid <= m_apb_paddr_valid_next;
+			m_apb_paddr <= m_apb_paddr_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB: PADDR: Next
+	// =============================================================================
+
+	always @* begin
+		m_apb_paddr_valid_next = m_apb_paddr_valid;
+		m_apb_paddr_next = m_apb_paddr;
+
+		if (m_apb_state == `APBXCLK_M_APB_STATE_IDLE && s_apb_paddr_valid_sync) begin
+			m_apb_paddr_valid_next = 1'b1;
+			m_apb_paddr_next = s_apb_paddr;
+		end else if (m_apb_state == `APBXCLK_M_APB_STATE_ACCESS && M_APB_PREADY) begin
+			m_apb_paddr_valid_next = 1'b0;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB: PWRITE
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: M_APB: PWRITE: Registers
+	// =============================================================================
+
+	always @(posedge M_APB_PCLK, negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_apb_pwrite <= 1'b0;
+		end else begin
+			m_apb_pwrite <= m_apb_pwrite_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB: PWRITE: Next
+	// =============================================================================
+
+	always @* begin
+		m_apb_pwrite_next = m_apb_pwrite;
+
+		if (m_apb_state == `APBXCLK_M_APB_STATE_IDLE && s_apb_paddr_valid_sync) begin
+			m_apb_pwrite_next = s_apb_pwrite;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB: PWDATA
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: M_APB: PWDATA: Registers
+	// =============================================================================
+
+	always @(posedge M_APB_PCLK, negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_apb_pwdata <= {DW{1'b0}};
+		end else begin
+			m_apb_pwdata <= m_apb_pwdata_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB: PWDATA: Next
+	// =============================================================================
+
+	always @* begin
+		m_apb_pwdata_next = m_apb_pwdata;
+
+		if (m_apb_state == `APBXCLK_M_APB_STATE_IDLE && s_apb_paddr_valid_sync) begin
+			m_apb_pwdata_next = s_apb_pwdata;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB: PWSTRB
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: M_APB: PWSTRB: Registers
+	// =============================================================================
+
+	always @(posedge M_APB_PCLK, negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_apb_pwstrb <= {DW/8{1'b0}};
+		end else begin
+			m_apb_pwstrb <= m_apb_pwstrb_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB: PWSTRB: Next
+	// =============================================================================
+
+	always @* begin
+		m_apb_pwstrb_next = m_apb_pwstrb;
+
+		if (m_apb_state == `APBXCLK_M_APB_STATE_IDLE && s_apb_paddr_valid_sync) begin
+			m_apb_pwstrb_next = s_apb_pwstrb;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB: PPROT
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: M_APB: PPROT: Registers
+	// =============================================================================
+
+	always @(posedge M_APB_PCLK, negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_apb_pprot <= 3'b000;
+		end else begin
+			m_apb_pprot <= m_apb_pprot_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB: PPROT: Next
+	// =============================================================================
+
+	always @* begin
+		m_apb_pprot_next = m_apb_pprot;
+
+		if (m_apb_state == `APBXCLK_M_APB_STATE_IDLE && s_apb_paddr_valid_sync) begin
+			m_apb_pprot_next = s_apb_pprot;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB: PRDATA
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: M_APB: PRDATA: Registers
+	// =============================================================================
+
+	always @(posedge M_APB_PCLK, negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_apb_prdata_valid <= 1'b0;
+			m_apb_prdata <= {DW{1'b0}};
+		end else begin
+			m_apb_prdata_valid <= m_apb_prdata_valid_next;
+			m_apb_prdata <= m_apb_prdata_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB: PRDATA: Next
+	// =============================================================================
+
+	always @* begin
+		m_apb_prdata_valid_next = m_apb_prdata_valid;
+		m_apb_prdata_next = m_apb_prdata;
+
+		if (m_apb_state == `APBXCLK_M_APB_STATE_ACCESS && M_APB_PREADY) begin
+			m_apb_prdata_valid_next = 1'b1;
+			m_apb_prdata_next = M_APB_PRDATA;
+		end else if (m_apb_prdata_valid_sync) begin
+			m_apb_prdata_valid_next = 1'b0;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB: PSLVERR
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: M_APB: PSLVERR: Registers
+	// =============================================================================
+
+	always @(posedge M_APB_PCLK, negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			m_apb_pslverr <= 1'b0;
+		end else begin
+			m_apb_pslverr <= m_apb_pslverr_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: M_APB: PSLVERR: Next
+	// =============================================================================
+
+	always @* begin
+		m_apb_pslverr_next = m_apb_pslverr;
+
+		if (m_apb_state == `APBXCLK_M_APB_STATE_ACCESS && M_APB_PREADY) begin
+			m_apb_pslverr_next = M_APB_PSLVERR;
+		end
+	end
+
+	// =============================================================================
+	// Signals: CDC
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: CDC: S_APB: PADDR: Valid
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: CDC: S_APB: PADDR: Valid: Registers
+	// =============================================================================
+
+	always @(posedge M_APB_PCLK, negedge M_PRESETn) begin
+		if (!M_PRESETn) begin
+			s_apb_paddr_valid_sync <= 1'b0;
+		end else begin
+			s_apb_paddr_valid_sync <= s_apb_paddr_valid_sync_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: CDC: S_APB: PADDR: Valid: Next
+	// =============================================================================
+
+	always @* begin
+		s_apb_paddr_valid_sync_next = s_apb_paddr_valid_sync;
+
+		if (s_apb_paddr_valid) begin
+			s_apb_paddr_valid_sync_next = 1'b1;
+		end else if (m_apb_paddr_valid) begin
+			s_apb_paddr_valid_sync_next = 1'b0;
+		end
+	end
+
+	// =============================================================================
+	// Signals: CDC: M_APB: PADDR: Valid
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: CDC: M_APB: PADDR: Valid: Registers
+	// =============================================================================
+
+	always @(posedge S_APB_PCLK, negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_apb_paddr_valid_sync <= 1'b0;
+		end else begin
+			m_apb_paddr_valid_sync <= m_apb_paddr_valid_sync_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: CDC: M_APB: PADDR: Valid: Next
+	// =============================================================================
+
+	always @* begin
+		m_apb_paddr_valid_sync_next = m_apb_paddr_valid_sync;
+
+		if (m_apb_paddr_valid) begin
+			m_apb_paddr_valid_sync_next = 1'b1;
+		end else if (s_apb_paddr_valid) begin
+			m_apb_paddr_valid_sync_next = 1'b0;
+		end
+	end
+
+	// =============================================================================
+	// Signals: CDC: M_APB: PRDATA: Valid
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: CDC: M_APB: PRDATA: Valid: Registers
+	// =============================================================================
+
+	always @(posedge S_APB_PCLK, negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_apb_prdata_valid_sync <= 1'b0;
+		end else begin
+			m_apb_prdata_valid_sync <= m_apb_prdata_valid_sync_next;
+		end
+	end
+
+	// =============================================================================
+	// Signals: CDC: M_APB: PRDATA: Valid: Next
+	// =============================================================================
+
+	always @* begin
+		m_apb_prdata_valid_sync_next = m_apb_prdata_valid_sync;
+
+		if (m_apb_prdata_valid) begin
+			m_apb_prdata_valid_sync_next = 1'b1;
+		end else if (s_apb_pready) begin
+			m_apb_prdata_valid_sync_next = 1'b0;
+		end
+	end
+
+	// =============================================================================
+	// Signals: Reset
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: Reset: M_PRESETn
+	// =============================================================================
+
+	// =============================================================================
+	// Signals: Reset: M_PRESETn: Registers
+	// =============================================================================
+
+	always @(posedge M_APB_PCLK, negedge S_PRESETn) begin
+		if (!S_PRESETn) begin
+			m_presetn <= 1'b0;
+		end else begin
+			m_presetn <= 1'b1;
+		end
+	end
+
+	assign M_PRESETn = m_presetn;
+
+endmodule
+
+// =============================================================================
+// Copyright (C) 2015-2024 Lattice Semiconductor.
+// =============================================================================

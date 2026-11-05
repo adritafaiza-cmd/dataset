@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025, The Regents of the University of California,
+// through Lawrence Berkeley National Laboratory (subject to receipt of
+// government funding), the University of Illinois (subject to receipt of
+// government funding), and other contributors.
+// All rights reserved.
+//
+// Author: David Zuber
+
+`include "apb_regs.svh"
+
+module apb_regs #(
+  parameter int unsigned        NoApbRegs    = 32'd0,
+  parameter int unsigned        ApbAddrWidth = 32'd0,
+  parameter int unsigned        AddrOffset   = 32'd4,
+  parameter int unsigned        ApbDataWidth = 32'd0,
+  parameter int unsigned        RegDataWidth = 32'd0,
+  parameter bit [NoApbRegs-1:0] ReadOnly     = 32'h0,
+  parameter type                req_t        = logic,
+  parameter type                resp_t       = logic,
+  parameter type apb_addr_t                  = logic[ApbAddrWidth-1:0],
+  parameter type reg_data_t                  = logic[RegDataWidth-1:0]
+) (
+  input  logic                      pclk_i,
+  input  logic                      preset_ni,
+
+  input  req_t                      req_i,
+  output resp_t                     resp_o,
+
+  input  apb_addr_t                 base_addr_i,
+  input  reg_data_t [NoApbRegs-1:0] reg_init_i,
+
+  output reg_data_t [NoApbRegs-1:0] reg_q_o
+);
+
+  localparam int unsigned AddrOffsetBits = $clog2(AddrOffset);
+  localparam int unsigned RegIndexWidth  = $clog2(NoApbRegs);
+
+  localparam int unsigned RegIndexLSB = AddrOffsetBits;
+  localparam int unsigned RegIndexMSB = RegIndexLSB + RegIndexWidth - 1;
+
+  localparam int unsigned ByteWidth = ApbDataWidth / 8;
+
+  localparam int unsigned RegByteWidth = RegDataWidth / 8;
+
+  localparam int unsigned RegByteLSB = RegIndexMSB + 1;
+  localparam int unsigned RegByteMSB = RegByteLSB + $clog2(RegByteWidth) - 1;
+
+  localparam int unsigned RegByteWidthBits = $clog2(RegByteWidth);
+
+  localparam int unsigned RegByteOffsetLSB = RegByteMSB + 1;
+  localparam int unsigned RegByteOffsetMSB = RegByteOffsetLSB + RegByteWidthBits - 1;
+
+  localparam int unsigned RegByteOffsetWidth = RegByteOffsetMSB - RegByteOffsetLSB + 1;
+
+  localparam int unsigned RegByteOffsetBits = $clog2(RegByteWidth);
+
+  localparam int unsigned RegByteOffsetLSB = RegByteMSB + 1;
+  localparam int unsigned RegByteOffsetMSB = RegByteOffsetLSB + RegByteOffsetWidth - 1;
+
+  localparam int unsigned RegByteOffsetWidth = RegByteOffsetMSB - RegByteOffsetLSB + 1;
+
+  localparam int unsigned RegByteOffsetBits = $clog2(RegByteWidth);
+
+  localparam int unsigned RegByteOffsetLSB = RegByteMSB + 1;
+  localparam int unsigned RegByteOffsetMSB = RegByteOffsetLSB + RegByteOffsetWidth - 1;
+
+  localparam int unsigned RegByteOffsetWidth = RegByteOffsetMSB - RegByteOffsetLSB + 1;
+
+  localparam int unsigned RegByteOffsetBits = $clog2(RegByteWidth);
+
+  localparam int unsigned RegByteOffsetLSB = RegByteMSB + 1;
+  localparam int unsigned RegByteOffsetMSB = RegByteOffsetLSB + RegByteOffsetWidth - 1;
+
+  localparam int unsigned RegByteOffsetWidth = RegByteOffsetMSB - RegByteOffsetLSB + 1;
+
+  localparam int unsigned RegByteOffsetBits = $clog2(RegByteWidth);
+
+  localparam int unsigned RegByteOffsetLSB = RegByteMSB + 1;
+  localparam int unsigned RegByteOffsetMSB = RegByteOffsetLSB + RegByteOffsetWidth - 1;
+
+  localparam int unsigned RegByteOffsetWidth = RegByteOffsetMSB - RegByteOffsetLSB + 1;
+
+  localparam int unsigned RegByteOffsetBits = $clog2(RegByteWidth);
+
+  localparam int unsigned RegByteOffsetLSB = RegByteMSB + 1;
+  localparam int unsigned

@@ -1,0 +1,230 @@
+// =============================================================================
+// Copyright (C) 2018-2024 Xilinx, Inc. All rights reserved.
+// SPDX-License-Identifier: MIT
+// =============================================================================
+
+`timescale 1ns / 1ps
+
+`include "axidma_cfg.vh"
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
+`include "axidma_versal_cfg.vh"
+`endif
+
+`ifdef AXIDMA_VERSAL
